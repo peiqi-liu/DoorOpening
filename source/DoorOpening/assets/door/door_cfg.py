@@ -1,0 +1,47 @@
+# Copyright (c) 2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# 
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+# its affiliates is strictly prohibited.
+
+"""
+Defines the door configuration for simulation with Isaac Sim.
+"""
+
+import os
+
+import isaaclab.sim as sim_utils
+from isaaclab.actuators.actuator_cfg import ImplicitActuatorCfg
+from isaaclab.assets.articulation import ArticulationCfg
+
+module_path = os.path.dirname(__file__)
+root_path = os.path.dirname(module_path)
+door_urdf_path = os.path.join(root_path, "door/PartNet/8867/mobility.urdf")
+
+DOOR_CONFIG = ArticulationCfg(
+    spawn=sim_utils.UrdfFileCfg(
+        fix_base=True,
+        merge_fixed_joints=False,
+        make_instanceable=False,
+        asset_path=door_urdf_path,
+        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+            enabled_self_collisions=False, solver_position_iteration_count=4, solver_velocity_iteration_count=0
+        ),
+        joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
+            gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
+        ),
+    ),
+    init_state=ArticulationCfg.InitialStateCfg(
+        pos=(0.0, 0.0, 0.8),
+    ),
+    actuators={
+        "body": ImplicitActuatorCfg(
+            joint_names_expr=[".*"],
+            stiffness=20.0,
+            damping=20.0,
+        ),
+    },
+)

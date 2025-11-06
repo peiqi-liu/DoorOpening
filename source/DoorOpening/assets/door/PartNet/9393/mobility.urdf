@@ -1,0 +1,280 @@
+<?xml version="1.0" ?>
+<robot name="partnet_ebfe85d74479603df515fb35ed21462d">
+	<link name="base"/>
+	<link name="link_0">
+		<visual name="outside_frame-1">
+			<origin xyz="0 0 0"/>
+			<geometry>
+				<mesh filename="textured_objs/original_2.obj"/>
+			</geometry>
+		</visual>
+		<collision>
+			<origin xyz="0 0 0"/>
+			<geometry>
+				<mesh filename="textured_objs/original_2.obj"/>
+			</geometry>
+		</collision>
+	</link>
+	<joint name="joint_0" type="fixed">
+		<origin rpy="1.570796326794897 0 -1.570796326794897" xyz="0 0 0"/>
+		<child link="link_0"/>
+		<parent link="base"/>
+	</joint>
+	<link name="link_1">
+		<visual name="hinge-11">
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_11.obj"/>
+			</geometry>
+		</visual>
+		<visual name="hinge-11">
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_15.obj"/>
+			</geometry>
+		</visual>
+		<visual name="hinge-11">
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_12.obj"/>
+			</geometry>
+		</visual>
+		<visual name="hinge-11">
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_13.obj"/>
+			</geometry>
+		</visual>
+		<visual name="hinge-11">
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_14.obj"/>
+			</geometry>
+		</visual>
+		<visual name="hinge-12">
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_20.obj"/>
+			</geometry>
+		</visual>
+		<visual name="hinge-12">
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_19.obj"/>
+			</geometry>
+		</visual>
+		<visual name="hinge-12">
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_18.obj"/>
+			</geometry>
+		</visual>
+		<visual name="hinge-12">
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_21.obj"/>
+			</geometry>
+		</visual>
+		<visual name="hinge-12">
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_17.obj"/>
+			</geometry>
+		</visual>
+		<visual name="hinge-13">
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_9.obj"/>
+			</geometry>
+		</visual>
+		<visual name="hinge-13">
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_8.obj"/>
+			</geometry>
+		</visual>
+		<visual name="hinge-13">
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_5.obj"/>
+			</geometry>
+		</visual>
+		<visual name="hinge-13">
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_6.obj"/>
+			</geometry>
+		</visual>
+		<visual name="hinge-13">
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_7.obj"/>
+			</geometry>
+		</visual>
+		<visual name="surface_board-10">
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_1.obj"/>
+			</geometry>
+		</visual>
+		<visual name="fixed_part-8">
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/new_2.obj"/>
+			</geometry>
+		</visual>
+		<visual name="fixed_part-6">
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/new_1.obj"/>
+			</geometry>
+		</visual>
+		<collision>
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_11.obj"/>
+			</geometry>
+		</collision>
+		<collision>
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_15.obj"/>
+			</geometry>
+		</collision>
+		<collision>
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_12.obj"/>
+			</geometry>
+		</collision>
+		<collision>
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_13.obj"/>
+			</geometry>
+		</collision>
+		<collision>
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_14.obj"/>
+			</geometry>
+		</collision>
+		<collision>
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_20.obj"/>
+			</geometry>
+		</collision>
+		<collision>
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_19.obj"/>
+			</geometry>
+		</collision>
+		<collision>
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_18.obj"/>
+			</geometry>
+		</collision>
+		<collision>
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_21.obj"/>
+			</geometry>
+		</collision>
+		<collision>
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_17.obj"/>
+			</geometry>
+		</collision>
+		<collision>
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_9.obj"/>
+			</geometry>
+		</collision>
+		<collision>
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_8.obj"/>
+			</geometry>
+		</collision>
+		<collision>
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_5.obj"/>
+			</geometry>
+		</collision>
+		<collision>
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_6.obj"/>
+			</geometry>
+		</collision>
+		<collision>
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_7.obj"/>
+			</geometry>
+		</collision>
+		<collision>
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/original_1.obj"/>
+			</geometry>
+		</collision>
+		<collision>
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/new_2.obj"/>
+			</geometry>
+		</collision>
+		<collision>
+			<origin xyz="-0.33729292807687594 -0.8018409999999996 0.0008997619944244306"/>
+			<geometry>
+				<mesh filename="textured_objs/new_1.obj"/>
+			</geometry>
+		</collision>
+	</link>
+	<joint name="joint_1" type="revolute">
+		<origin xyz="0.33729292807687594 0.8018409999999996 -0.0008997619944244306"/>
+		<axis xyz="0 1 0"/>
+		<child link="link_1"/>
+		<parent link="link_0"/>
+		<limit lower="0.0" upper="1.5707963267948966"/>
+	</joint>
+	<link name="link_2">
+		<visual name="movable_part-9">
+			<origin xyz="0.2765785 0.0091725 0"/>
+			<geometry>
+				<mesh filename="textured_objs/new_3.obj"/>
+			</geometry>
+		</visual>
+		<visual name="movable_part-7">
+			<origin xyz="0.2765785 0.0091725 0"/>
+			<geometry>
+				<mesh filename="textured_objs/new_0.obj"/>
+			</geometry>
+		</visual>
+		<collision>
+			<origin xyz="0.2765785 0.0091725 0"/>
+			<geometry>
+				<mesh filename="textured_objs/new_3.obj"/>
+			</geometry>
+		</collision>
+		<collision>
+			<origin xyz="0.2765785 0.0091725 0"/>
+			<geometry>
+				<mesh filename="textured_objs/new_0.obj"/>
+			</geometry>
+		</collision>
+	</link>
+	<joint name="joint_2" type="continuous">
+		<origin xyz="-0.613871428076876 -0.8110134999999996 0.0008997619944244306"/>
+		<axis xyz="0 0 -1"/>
+		<child link="link_2"/>
+		<parent link="link_1"/>
+	</joint>
+</robot>

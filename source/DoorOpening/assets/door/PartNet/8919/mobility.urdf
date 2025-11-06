@@ -1,0 +1,77 @@
+<?xml version="1.0" ?>
+<robot name="partnet_892eab75d8c54ecccaef18b2fd3fb17c">
+	<link name="base"/>
+	<link name="link_0">
+		<visual name="outside_frame-1">
+			<origin xyz="0 0 0"/>
+			<geometry>
+				<mesh filename="textured_objs/original_3.obj"/>
+			</geometry>
+		</visual>
+		<visual name="outside_frame-1">
+			<origin xyz="0 0 0"/>
+			<geometry>
+				<mesh filename="textured_objs/original_2.obj"/>
+			</geometry>
+		</visual>
+		<collision>
+			<origin xyz="0 0 0"/>
+			<geometry>
+				<mesh filename="textured_objs/original_3.obj"/>
+			</geometry>
+		</collision>
+		<collision>
+			<origin xyz="0 0 0"/>
+			<geometry>
+				<mesh filename="textured_objs/original_2.obj"/>
+			</geometry>
+		</collision>
+	</link>
+	<joint name="joint_0" type="fixed">
+		<origin rpy="1.570796326794897 0 -1.570796326794897" xyz="0 0 0"/>
+		<child link="link_0"/>
+		<parent link="base"/>
+	</joint>
+	<link name="link_1">
+		<visual name="surface_board-7">
+			<origin xyz="0.6531962155887407 -0.7751179999999998 -0.015062613810474357"/>
+			<geometry>
+				<mesh filename="textured_objs/original_4.obj"/>
+			</geometry>
+		</visual>
+		<collision>
+			<origin xyz="0.6531962155887407 -0.7751179999999998 -0.015062613810474357"/>
+			<geometry>
+				<mesh filename="textured_objs/original_4.obj"/>
+			</geometry>
+		</collision>
+	</link>
+	<joint name="joint_1" type="revolute">
+		<origin xyz="-0.6531962155887407 0.7751179999999998 0.015062613810474357"/>
+		<axis xyz="0 -1 0"/>
+		<child link="link_1"/>
+		<parent link="link_0"/>
+		<limit lower="0.0" upper="1.5707963267948966"/>
+	</joint>
+	<link name="link_2">
+		<visual name="surface_board-8">
+			<origin xyz="-0.6310310644084259 -0.775118 -0.05262104481959495"/>
+			<geometry>
+				<mesh filename="textured_objs/original_1.obj"/>
+			</geometry>
+		</visual>
+		<collision>
+			<origin xyz="-0.6310310644084259 -0.775118 -0.05262104481959495"/>
+			<geometry>
+				<mesh filename="textured_objs/original_1.obj"/>
+			</geometry>
+		</collision>
+	</link>
+	<joint name="joint_2" type="revolute">
+		<origin xyz="0.6310310644084259 0.775118 0.05262104481959495"/>
+		<axis xyz="0 1 0"/>
+		<child link="link_2"/>
+		<parent link="link_0"/>
+		<limit lower="-0.0" upper="1.5707963267948966"/>
+	</joint>
+</robot>

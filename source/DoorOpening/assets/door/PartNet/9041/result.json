@@ -1,0 +1,1 @@
+[{"text": "Door Set", "children": [{"text": "Door", "children": [{"text": "Door Body", "children": [{"text": "Surface board", "objs": ["original-2"], "id": 3, "name": "surface_board"}], "id": 2, "name": "door_body"}], "id": 1, "name": "door"}, {"text": "Outside Frame", "objs": ["original-1"], "id": 4, "name": "outside_frame"}], "id": 0, "name": "door_set"}]
