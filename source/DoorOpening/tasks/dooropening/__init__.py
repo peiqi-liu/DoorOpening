@@ -13,7 +13,7 @@ from . import agents
 
 
 gym.register(
-    id="Dooropening-v0",
+    id="Dooropening",
     entry_point=f"{__name__}.dooropening_env:DooropeningEnv",
     disable_env_checker=True,
     kwargs={

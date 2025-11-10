@@ -61,35 +61,37 @@ class DooropeningEnv(DirectRLEnv):
             ),
             dim=-1,
         )
+        print("joint_pos shape: ", self.joint_pos.shape)
+        print("joint_vel shape: ", self.joint_vel.shape)
+        print("robot_dof_idx shape: ", self._robot_dof_idx)
         observations = {"policy": obs}
+        print("obs shape: ", obs.shape)
         return observations
 
-    def _get_rewards(self) -> torch.Tensor:
+    def compute_intermediate_reward_values(self):
         self.hand_pos = self.robot.data.body_pos_w[:, self._hand_body_idx]
         self.hand_pos -= self.scene.env_origins.repeat((1, 1
             )).reshape(self.num_envs, 1, 3)
-        total_reward = compute_rewards(
-            self.cfg.rew_scale_alive,
-            self.cfg.rew_scale_terminated,
-            self.cfg.rew_scale_pole_pos,
-            self.cfg.rew_scale_cart_vel,
-            self.cfg.rew_scale_pole_vel,
-            self.joint_pos[:, self._pole_dof_idx[0]],
-            self.joint_vel[:, self._pole_dof_idx[0]],
-            self.joint_pos[:, self._cart_dof_idx[0]],
-            self.joint_vel[:, self._cart_dof_idx[0]],
-            self.reset_terminated,
-        )
-        return total_reward
+        self.handle_pos = self.door.data.body_pos_w[:, self.door.data.body_names.index(self.cfg.door_handle_body_name)].reshape(self.num_envs, 1, 3)
+        
+        self.handle_pos_error = torch.norm(self.hand_pos - self.handle_pos, dim=-1, p=2)
+
+    def _get_rewards(self) -> torch.Tensor:
+        self.compute_intermediate_reward_values()
+        return compute_rewards(self.cfg.handle_pos_error_scale, self.handle_pos_error)
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        self.joint_pos = self.robot.data.joint_pos
-        self.joint_vel = self.robot.data.joint_vel
+        # self.compute_intermediate_reward_values()
+        # self.joint_pos = self.robot.data.joint_pos
+        # self.joint_vel = self.robot.data.joint_vel
+        print("episode_length_buf: ", self.episode_length_buf)
+        print("max_episode_length: ", self.max_episode_length)
 
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        out_of_bounds = torch.any(torch.abs(self.joint_pos[:, self._cart_dof_idx]) > self.cfg.max_cart_pos, dim=1)
-        out_of_bounds = out_of_bounds | torch.any(torch.abs(self.joint_pos[:, self._pole_dof_idx]) > math.pi / 2, dim=1)
-        return out_of_bounds, time_out
+        # out_of_bounds = torch.any(torch.abs(self.joint_pos[:, self._cart_dof_idx]) > self.cfg.max_cart_pos, dim=1)
+        # out_of_bounds = out_of_bounds | torch.any(torch.abs(self.joint_pos[:, self._pole_dof_idx]) > math.pi / 2, dim=1)
+        # return out_of_bounds, time_out
+        return False, time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
@@ -97,12 +99,12 @@ class DooropeningEnv(DirectRLEnv):
         super()._reset_idx(env_ids)
 
         joint_pos = self.robot.data.default_joint_pos[env_ids]
-        joint_pos[:, self._pole_dof_idx] += sample_uniform(
-            self.cfg.initial_pole_angle_range[0] * math.pi,
-            self.cfg.initial_pole_angle_range[1] * math.pi,
-            joint_pos[:, self._pole_dof_idx].shape,
-            joint_pos.device,
-        )
+        # joint_pos[:, self._pole_dof_idx] += sample_uniform(
+        #     self.cfg.initial_pole_angle_range[0] * math.pi,
+        #     self.cfg.initial_pole_angle_range[1] * math.pi,
+        #     joint_pos[:, self._pole_dof_idx].shape,
+        #     joint_pos.device,
+        # )
         joint_vel = self.robot.data.default_joint_vel[env_ids]
 
         default_root_state = self.robot.data.default_root_state[env_ids]
@@ -118,21 +120,7 @@ class DooropeningEnv(DirectRLEnv):
 
 @torch.jit.script
 def compute_rewards(
-    rew_scale_alive: float,
-    rew_scale_terminated: float,
-    rew_scale_pole_pos: float,
-    rew_scale_cart_vel: float,
-    rew_scale_pole_vel: float,
-    pole_pos: torch.Tensor,
-    pole_vel: torch.Tensor,
-    cart_pos: torch.Tensor,
-    cart_vel: torch.Tensor,
-    reset_terminated: torch.Tensor,
+    handle_pos_error_scale: float,
+    handle_pos_error: torch.Tensor,
 ):
-    rew_alive = rew_scale_alive * (1.0 - reset_terminated.float())
-    rew_termination = rew_scale_terminated * reset_terminated.float()
-    rew_pole_pos = rew_scale_pole_pos * torch.sum(torch.square(pole_pos).unsqueeze(dim=1), dim=-1)
-    rew_cart_vel = rew_scale_cart_vel * torch.sum(torch.abs(cart_vel).unsqueeze(dim=1), dim=-1)
-    rew_pole_vel = rew_scale_pole_vel * torch.sum(torch.abs(pole_vel).unsqueeze(dim=1), dim=-1)
-    total_reward = rew_alive + rew_termination + rew_pole_pos + rew_cart_vel + rew_pole_vel
-    return total_reward
+    return - handle_pos_error_scale * handle_pos_error

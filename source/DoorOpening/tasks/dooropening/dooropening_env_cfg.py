@@ -156,6 +156,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # door(s)
     door_cfg: ArticulationCfg = DOOR_CONFIG.replace(prim_path="/World/envs/env_.*/Door")
 
+    door_handle_body_name = "link_1"
+
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=True)
 
@@ -164,11 +166,4 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # - action scale
     action_scale = 100.0  # [N]
     # - reward scales
-    rew_scale_alive = 1.0
-    rew_scale_terminated = -2.0
-    rew_scale_pole_pos = -1.0
-    rew_scale_cart_vel = -0.01
-    rew_scale_pole_vel = -0.005
-    # - reset states/conditions
-    initial_pole_angle_range = [-0.25, 0.25]  # pole angle sample range on reset [rad]
-    max_cart_pos = 3.0  # reset if cart exceeds this position [m]
+    handle_pos_error_scale = 1.0
