@@ -18,75 +18,6 @@ from isaaclab.managers import SceneEntityCfg
 import isaaclab.envs.mdp as mdp
 
 @configclass
-class EventCfg:
-    """Configuration for randomization."""
-
-    # NOTE: the below ranges form the initial ranges for the parameters
-
-    # -- robot
-    robot_physics_material = EventTerm(
-        func=mdp.randomize_rigid_body_material,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-            "static_friction_range": (1.0, 1.0),
-            "dynamic_friction_range": (1.0, 1.0),
-            "restitution_range": (1.0, 1.0),
-            "num_buckets": 250,
-        },
-    )
-
-    robot_joint_stiffness_and_damping = EventTerm(
-        func=mdp.randomize_actuator_gains,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
-            "stiffness_distribution_params": (1., 1.),
-            "damping_distribution_params": (1., 1.),
-            "operation": "scale",
-            "distribution": "uniform",
-        },
-    )
-
-    robot_joint_friction = EventTerm(
-        func=mdp.randomize_joint_parameters,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
-            "friction_distribution_params": (0. , 0.),
-             # NOTE: I don't really care about this one
-#            "lower_limit_distribution_params": (0.00, 0.01),
-#            "upper_limit_distribution_params": (0.00, 0.01),
-            "operation": "scale",
-            "distribution": "uniform",
-        },
-    )
-
-    # -- object
-    object_physics_material = EventTerm(
-        func=mdp.randomize_rigid_body_material,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("object", body_names=".*"),
-            "static_friction_range": (1.0, 1.0),
-            "dynamic_friction_range": (1.0, 1.0),
-            "restitution_range": (1.0, 1.0),
-            "num_buckets": 250,
-        },
-    )
-    object_scale_mass = EventTerm(
-        func=mdp.randomize_rigid_body_mass,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("object"),
-            "mass_distribution_params": (1., 1.),
-            "operation": "scale",
-            "distribution": "uniform",
-        },
-    )
-
-
-@configclass
 class DooropeningEnvCfg(DirectRLEnvCfg):
     sim_dt = 1/120.
     decimation = 2 # 60 Hz
@@ -94,8 +25,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     fabric_decimation = 2 # number of fabric steps per physics step
     num_sim_steps_to_render=2
     # - spaces definition
-    action_space = 1
-    observation_space = 4
+    action_space = 26
+    observation_space = 26 + 3
     state_space = 0
 
     # simulation
@@ -112,10 +43,23 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         ),
     )
 
-    actuated_joints = [
+    base_joints = [
         'base_rotation_joint',
         'base_x_joint',
         'base_y_joint',
+    ]
+
+    arm_joints = [
+        'panda_joint1',
+        'panda_joint2',
+        'panda_joint3',
+        'panda_joint4',
+        'panda_joint5',
+        'panda_joint6',
+        'panda_joint7',
+    ]
+
+    finger_joints = [
         'finger_joint_0',
         'finger_joint_1',
         'finger_joint_2',
@@ -132,14 +76,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         'finger_joint_13',
         'finger_joint_14',
         'finger_joint_15',
-        'panda_joint1',
-        'panda_joint2',
-        'panda_joint3',
-        'panda_joint4',
-        'panda_joint5',
-        'panda_joint6',
-        'panda_joint7',
     ]
+
+    actuated_joints = base_joints + arm_joints + finger_joints
 
     hand_body_name = "palm_lower"
 

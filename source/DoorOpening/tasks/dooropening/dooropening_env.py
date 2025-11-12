@@ -25,7 +25,8 @@ class DooropeningEnv(DirectRLEnv):
         super().__init__(cfg, render_mode, **kwargs)
 
         self._robot_dof_idx, _ = self.robot.find_joints(self.cfg.actuated_joints)
-        self._hand_body_idx = self.robot.find_bodies(self.cfg.hand_body_name)
+        self._hand_body_idx, self.body_names = self.robot.find_bodies(self.cfg.hand_body_name)
+        self._handle_body_idx, _ = self.door.find_bodies(self.cfg.door_handle_body_name)
 
         self.joint_pos = self.robot.data.joint_pos
         self.joint_vel = self.robot.data.joint_vel
@@ -51,42 +52,36 @@ class DooropeningEnv(DirectRLEnv):
         self.actions = actions.clone()
 
     def _apply_action(self) -> None:
-        self.robot.set_joint_effort_target(self.actions * self.cfg.action_scale, joint_ids=self._robot_dof_idx)
+        self.robot.set_joint_position_target(self.actions * self.cfg.action_scale, joint_ids=self._robot_dof_idx)
 
     def _get_observations(self) -> dict:
+        self.compute_intermediate_reward_values()
         obs = torch.cat(
             (
-                self.joint_pos[:, self._robot_dof_idx].unsqueeze(dim=1),
-                self.joint_vel[:, self._robot_dof_idx].unsqueeze(dim=1),
+                self.joint_pos[:, self._robot_dof_idx].unsqueeze(dim = 1),
+                # self.joint_vel[:, self._robot_dof_idx].unsqueeze(dim = 1),
+                self.handle_pos
             ),
             dim=-1,
         )
-        print("joint_pos shape: ", self.joint_pos.shape)
-        print("joint_vel shape: ", self.joint_vel.shape)
-        print("robot_dof_idx shape: ", self._robot_dof_idx)
-        observations = {"policy": obs}
-        print("obs shape: ", obs.shape)
+        observations = {"policy": obs.squeeze()}
         return observations
 
     def compute_intermediate_reward_values(self):
         self.hand_pos = self.robot.data.body_pos_w[:, self._hand_body_idx]
         self.hand_pos -= self.scene.env_origins.repeat((1, 1
             )).reshape(self.num_envs, 1, 3)
-        self.handle_pos = self.door.data.body_pos_w[:, self.door.data.body_names.index(self.cfg.door_handle_body_name)].reshape(self.num_envs, 1, 3)
+        self.handle_pos = self.door.data.body_pos_w[:, self._handle_body_idx]
+        self.handle_pos -= self.scene.env_origins.repeat((1, 1
+            )).reshape(self.num_envs, 1, 3)
         
-        self.handle_pos_error = torch.norm(self.hand_pos - self.handle_pos, dim=-1, p=2)
+        self.handle_pos_error = torch.norm(self.hand_pos - self.handle_pos, dim=-1, p=2).squeeze()
 
     def _get_rewards(self) -> torch.Tensor:
         self.compute_intermediate_reward_values()
         return compute_rewards(self.cfg.handle_pos_error_scale, self.handle_pos_error)
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        # self.compute_intermediate_reward_values()
-        # self.joint_pos = self.robot.data.joint_pos
-        # self.joint_vel = self.robot.data.joint_vel
-        print("episode_length_buf: ", self.episode_length_buf)
-        print("max_episode_length: ", self.max_episode_length)
-
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         # out_of_bounds = torch.any(torch.abs(self.joint_pos[:, self._cart_dof_idx]) > self.cfg.max_cart_pos, dim=1)
         # out_of_bounds = out_of_bounds | torch.any(torch.abs(self.joint_pos[:, self._pole_dof_idx]) > math.pi / 2, dim=1)
