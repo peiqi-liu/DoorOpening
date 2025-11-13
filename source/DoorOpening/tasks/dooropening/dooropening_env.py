@@ -24,7 +24,9 @@ class DooropeningEnv(DirectRLEnv):
     def __init__(self, cfg: DooropeningEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
-        self._robot_dof_idx, _ = self.robot.find_joints(self.cfg.actuated_joints)
+        actuated_joints = self.cfg.base_joints + self.cfg.arm_joints
+
+        self._robot_dof_idx, _ = self.robot.find_joints(actuated_joints)
         self._hand_body_idx, self.body_names = self.robot.find_bodies(self.cfg.hand_body_name)
         self._handle_body_idx, _ = self.door.find_bodies(self.cfg.door_handle_body_name)
 
@@ -82,11 +84,10 @@ class DooropeningEnv(DirectRLEnv):
         return compute_rewards(self.cfg.handle_pos_error_scale, self.handle_pos_error)
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        self.compute_intermediate_reward_values()
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        # out_of_bounds = torch.any(torch.abs(self.joint_pos[:, self._cart_dof_idx]) > self.cfg.max_cart_pos, dim=1)
-        # out_of_bounds = out_of_bounds | torch.any(torch.abs(self.joint_pos[:, self._pole_dof_idx]) > math.pi / 2, dim=1)
-        # return out_of_bounds, time_out
-        return False, time_out
+        terminated = self.handle_pos_error < 0.01
+        return terminated, time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:

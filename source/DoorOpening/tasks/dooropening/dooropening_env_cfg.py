@@ -25,8 +25,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     fabric_decimation = 2 # number of fabric steps per physics step
     num_sim_steps_to_render=2
     # - spaces definition
-    action_space = 26
-    observation_space = 26 + 3
     state_space = 0
 
     # simulation
@@ -79,6 +77,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     ]
 
     actuated_joints = base_joints + arm_joints + finger_joints
+
+    action_space = len(arm_joints) + len(base_joints)
+    observation_space = action_space + 3
 
     hand_body_name = "palm_lower"
 
