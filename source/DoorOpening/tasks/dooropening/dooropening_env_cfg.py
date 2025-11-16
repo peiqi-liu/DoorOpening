@@ -19,9 +19,9 @@ import isaaclab.envs.mdp as mdp
 
 @configclass
 class DooropeningEnvCfg(DirectRLEnvCfg):
-    sim_dt = 1/120.
-    decimation = 2 # 60 Hz
-    episode_length_s = 10. #10.0
+    sim_dt = 1/60.
+    decimation = 2
+    episode_length_s = 6. #10.0
     fabric_decimation = 2 # number of fabric steps per physics step
     num_sim_steps_to_render=2
     # - spaces definition
@@ -40,6 +40,12 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             gpu_max_rigid_patch_count=4 * 5 * 2**15
         ),
     )
+
+    base_link_names = [
+        "base_x_link",
+        "base_y_link",
+        "base_rotation_link",
+    ]
 
     base_joints = [
         'base_rotation_joint',
@@ -79,7 +85,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     actuated_joints = base_joints + arm_joints + finger_joints
 
     action_space = len(arm_joints) + len(base_joints)
-    observation_space = action_space + 3
+    observation_space = action_space * 2 + 3
 
     hand_body_name = "palm_lower"
 
@@ -104,6 +110,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # custom parameters/scales
     # - controllable joint
     # - action scale
-    action_scale = 100.0  # [N]
+    action_scale = 7.5  # [N]
     # - reward scales
     handle_pos_error_scale = 1.0
+    base_link_pos_error_scale = 0.5
+    base_rotation_error_scale = 1.0
+    # action_penalty_scale = 2.0
