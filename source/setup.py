@@ -20,6 +20,9 @@ INSTALL_REQUIRES = [
     # NOTE: Add dependencies
     "psutil",
     "urdf_parser_py",
+    "urchin",
+    "open3d",
+    "geometrout",
 ]
 
 # Installation operation
