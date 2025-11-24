@@ -981,8 +981,9 @@ def resolve_mesh_path(urdf_path: str, mesh_filename: str):
         return urdf_dir / mesh_filename
 
 class FrankaLeapSampler:
-    def __init__(self, urdf_path, device, num_points=4096):
+    def __init__(self, urdf_path, device = "cuda", num_points=8192):
         self.device = device
+        self.urdf_path = urdf_path
         self.robot = TorchURDF.load(urdf_path, lazy_load_meshes=True, device=device)
         # Load meshes for all links with visuals
         self.links = [l for l in self.robot.links if len(l.visuals) and (l.visuals[0].geometry.mesh is not None)]
@@ -1033,6 +1034,14 @@ class FrankaLeapSampler:
         idx = np.random.choice(pc.shape[1], num_points, replace=False)
         return pc[:, idx, :]
 
+sampler = None
+
+def sample_pointcloud(urdf_path, joint_angles, device = "cuda"):
+    global sampler
+    if sampler is None or sampler.urdf_path != urdf_path:
+        sampler = FrankaLeapSampler(urdf_path, device)
+    pcd = sampler.sample(joint_angles)
+    return pcd
 
 if __name__ == "__main__":
     urdf_path = "/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/door/PartNet/8867/mobility.urdf"

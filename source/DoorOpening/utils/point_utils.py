@@ -1,4 +1,7 @@
 import open3d as o3d
+import torch
+import numpy as np
+
 def tensor_to_ply(tensor: torch.Tensor, filename: str):
     """
     Save a (N, 3) torch tensor as a .ply point cloud.
