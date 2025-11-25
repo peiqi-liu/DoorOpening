@@ -85,26 +85,18 @@ class SensorsSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
             joint_pos=CAMERA_JOINT_DEFAULT_VALUES,
-            pos=(1.5, 0.0, 0.0),
-            rot=(0.0, 0.0, 0.0, 1.0)
+            pos=(-1.5, 0, 0.0),
+            rot=[0.707, 0, 0, 0.707]
         ),
     )
 
     door: ArticulationCfg = DOOR_CONFIG.replace(
-        prim_path="{ENV_REGEX_NS}/Door"
+        prim_path="{ENV_REGEX_NS}/Door",
+        init_state=ArticulationCfg.InitialStateCfg(
+            pos=(1.0, 0.0, 0.75),
+            # rot=[0.707, 0, 0, 0.707]
+        )
     )
-    
-    # point_camera = CameraCfg(
-    #     prim_path="{ENV_REGEX_NS}/Robot/base_link/cam",
-    #     update_period=0.1,
-    #     height=480,
-    #     width=640,
-    #     data_types=["rgb", "distance_to_image_plane"],
-    #     spawn=sim_utils.PinholeCameraCfg(
-    #         focal_length=24.0 / 2, focus_distance=400.0, horizontal_aperture=20.955 * 2, clipping_range=(0.3, 1.0e5)
-    #     ),
-    #     offset=CameraCfg.OffsetCfg(pos=(0.25, 0.0, 1.05), convention="world"),
-    # )
 
 def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     """Run the simulator."""
@@ -127,6 +119,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             # if this is not done, then the robots will be spawned at the (0, 0, 0) of the simulation world
             root_state = scene["robot"].data.default_root_state.clone()
             root_state[:, :3] += scene.env_origins
+            print("root state: ", root_state)
             scene["robot"].write_root_pose_to_sim(root_state[:, :7])
             scene["robot"].write_root_velocity_to_sim(root_state[:, 7:])
             # set joint positions with some noise
@@ -141,8 +134,13 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         # -- generate actions/commands
         
         # print(scene["door"].traverse_instance_prims())
-        actions = motion_generator.compute_action()
-        # scene["robot"].set_joint_position_target(actions)
+        actions = motion_generator.compute_approach_target()
+        joint_pos = scene["robot"].data.joint_pos.clone()
+        if count % 20 == 0:
+            print("robot pos: ", motion_generator.get_robot_base_pos()[0])
+            print("door pos: ", motion_generator.get_door_knob_pos()[0])
+        joint_pos[..., :3] = actions
+        scene["robot"].set_joint_position_target(joint_pos)
         # -- write data to sim
         scene.write_data_to_sim()
         # perform step
@@ -161,7 +159,7 @@ def main():
     sim_cfg = sim_utils.SimulationCfg(dt=0.005, device=args_cli.device)
     sim = sim_utils.SimulationContext(sim_cfg)
     # Set main camera
-    sim.set_camera_view(eye=[4.0, -4.0, 3.5], target=[0.0, 0.0, 0.0])
+    sim.set_camera_view(eye=[-4.0, 4.0, 3.5], target=[0.0, 0.0, 0.0])
     # Design scene
     scene_cfg = SensorsSceneCfg(num_envs=args_cli.num_envs, env_spacing=2.0)
     scene = InteractiveScene(scene_cfg)

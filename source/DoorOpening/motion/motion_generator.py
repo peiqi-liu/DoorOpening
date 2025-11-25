@@ -19,11 +19,11 @@ class MotionGenerator:
     """
     Handles perception (finding door normal) and motion generation (base + arm).
     """
-    def __init__(self, scene: InteractiveScene, device="cuda"):
+    def __init__(self, scene: InteractiveScene, device="cuda", handle_body_name = "link_1"):
         self.scene = scene
         self.device = device
         self.num_envs = scene.num_envs
-        
+        self.handle_body_name = handle_body_name
         # --- IK Controller Setup ---
         # Adjust 'command_type' based on your robot (position or velocity control)
         # Adjust 'target_link' to be your end-effector name
@@ -39,7 +39,73 @@ class MotionGenerator:
         # State machine: 0 = Move Base, 1 = Move Arm, 2 = Done
         self.state = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
 
-    def get_door_normal_and_knob(self, verbose = False):
+    def get_door_approach_pose(self, door_normal, door_handle_pos, robot_pos, offset=0.5):
+        """
+        Calculate target (x, y, theta) for robot to approach door from correct side
+        
+        Args:
+            door_normal: [x, y, z] - Normal vector orthogonal to door plane
+            door_handle_pos: [x, y, z] - Position of door handle
+            robot_pos: [x, y, z] - Current robot position
+            offset: Distance to stand from door handle (default 0.5m)
+        
+        Returns:
+            x, y, theta: Target base position and orientation in radians
+        """
+        # Work in 2D (XY plane) for base navigation
+        n = door_normal[..., :2]
+        handle = door_handle_pos[..., :2]
+        robot = robot_pos[..., :2]
+        
+        # Normalize door normal in XY plane
+        n_norm = torch.norm(n)
+        if n_norm < 1e-6:
+            n = torch.tensor([0.0, 1.0], device=door_normal.device)  # Default normal if invalid
+        else:
+            n = n / n_norm
+        
+        # Determine which side of the door the robot is on
+        vec_handle_to_robot = robot - handle
+        side = (vec_handle_to_robot * n).sum(dim=-1)
+        
+        # Target position: offset from handle on the correct side
+        approach_side = torch.sign(side)
+        # print("n, handle, approach_side: ", n, handle, approach_side)
+        target_pos = handle + approach_side * n * offset
+        
+        # TODO: Remove this once we can parellelize the computation
+        target_pos = target_pos.squeeze()
+        handle = handle.squeeze()
+        
+        # Target orientation: face along the door plane toward the handle
+        # Door plane direction is perpendicular to normal
+        door_dir = handle - target_pos   # Perpendicular vector
+        
+        # Calculate theta from direction vector
+        theta = torch.atan2(door_dir[1], door_dir[0])
+
+        return target_pos[0], target_pos[1], theta
+    
+    
+    def get_door_knob_pos(self):
+        door = self.scene["door"]
+        # handle_body_name = self.scene.cfg.door.handle_body_name
+        handle_body_name = self.handle_body_name
+        handle_body_idx, _ = door.find_bodies(handle_body_name)
+        handle_body_id = handle_body_idx[0]
+        handle_pos = door.data.body_pos_w[:, handle_body_id]
+        return handle_pos
+
+    def get_robot_base_pos(self):
+        robot = self.scene["robot"]
+        robot_base_name = "base_x_link"
+        robot_base_idx, _ = robot.find_bodies(robot_base_name)
+        robot_base_id = robot_base_idx[0]
+        robot_pos = robot.data.body_pos_w[:, robot_base_id]
+        return robot_pos
+        
+
+    def get_door_normal(self, verbose = False):
         """
         Perception Step: 
         1. Sample Point Cloud.
@@ -57,21 +123,12 @@ class MotionGenerator:
         # door_pointcloud = sample_pointcloud(self.scene["robot"].cfg.spawn.asset_path, joint_angles, device=self.device)
         # door_pointcloud = quat_rotate(self.scene["robot"].data.body_quat_w[:, 0], door_pointcloud) + self.scene["robot"].data.body_pos_w[:, 0]
         if verbose:
-            print("door_pointcloud: ", door_pointcloud.shape)
             from DoorOpening.utils.point_utils import tensor_to_ply
             tensor_to_ply(door_pointcloud[0], "pointcloud.ply")
-        # print("door_pos: ", self.scene["door"].data.body_pos_w[:, 0])
-        # print("door_quat: ", self.scene["door"].data.body_quat_w[:, 0])
-        # print("robot_pos: ", self.scene["robot"].data.body_pos_w[:, 0])
-        # print("robot_quat: ", self.scene["robot"].data.body_quat_w[:, 0])
         normals, centroids = fit_plane_batch_torch(door_pointcloud)
-        normal = normals[0]
-        centroid = centroids[0]
-        print("normal: ", normal)
-        print("centroid: ", centroid)
-        return normal
+        return normals
 
-    def compute_action(self):
+    def compute_approach_target(self):
         # Get current robot state
         ee_idx = self.scene["robot"].find_bodies("palm_lower")[0][0] # REPLACE with actual EE name
         # print("ee_idx: ", ee_idx)
@@ -85,10 +142,14 @@ class MotionGenerator:
         # print("robot_base_pos: ", robot_base_pos)
         
         # Perception Step
-        door_normal = self.get_door_normal_and_knob()
-
-        # num_dof = self.scene["robot"].num_joints
-        # actions = torch.zeros((self.num_envs, num_dof), device=self.device)
+        door_normal = self.get_door_normal()
+        door_knob_pos = self.get_door_knob_pos()
+        robot_pos = self.get_robot_base_pos()
+        x, y, theta = self.get_door_approach_pose(door_normal, door_knob_pos, robot_pos)
+        # print("door_knob_pos: ", door_knob_pos)
+        # print("robot_pos: ", robot_pos)
+        # print("xytheta: ", xytheta)
+        return torch.stack([x, y, theta], dim=-1)
         
         # # --- Phase 1: Base Navigation (Stop 0.6m away) ---
         # target_stand_pos = door_knob_pos[0] + (door_normal * 0.6) # Target is 0.6m out along normal

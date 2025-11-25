@@ -549,7 +549,6 @@ class TorchURDF(URDF):
             A map from links to a (n,4,4) vector of homogenous transform matrices that
             position the links relative to the base link's frame
         """
-        print(cfgs)
         joint_cfgs, n_cfgs = self._process_cfgs(cfgs)
 
         # Process link set
@@ -1016,8 +1015,6 @@ class FrankaLeapSampler:
 
         if joint_mapping_list is not None:
             joint_angles = joint_angles[:, joint_mapping_list]
-
-        print(joint_angles.shape)
 
         fk = self.robot.visual_geometry_fk_batch(joint_angles)  # dict[geom] -> (B,4,4)
         pcs = []
