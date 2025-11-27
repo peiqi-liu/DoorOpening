@@ -15,6 +15,47 @@ from DoorOpening.utils.point_utils import fit_plane_batch_torch
 
 from DoorOpening.utils.extract_pointcloud_from_articulation import sample_pointcloud
 
+
+FRANKA_JOINT_NAMES = [
+        'panda_joint1',
+        'panda_joint2',
+        'panda_joint3',
+        'panda_joint4',
+        'panda_joint5',
+        'panda_joint6',
+        'panda_joint7',
+    ]
+
+from isaaclab.utils.math import euler_xyz_from_quat, yaw_quat
+
+def normalize_angle(angle: torch.Tensor) -> torch.Tensor:
+    # keep angle in (-pi, pi]
+    return (angle + torch.pi) % (2 * torch.pi) - torch.pi
+
+def rebase_goal(
+    target_x: torch.Tensor,
+    target_y: torch.Tensor,
+    target_theta: torch.Tensor,
+    base_pos: torch.Tensor,
+    base_quat: torch.Tensor,
+):
+    base_pos = base_pos.squeeze()[:2]
+    _, _, yaw = euler_xyz_from_quat(base_quat)
+    base_theta = yaw
+
+    dx = target_x - base_pos[0]
+    dy = target_y - base_pos[1]
+
+    cos_t = torch.cos(base_theta)
+    sin_t = torch.sin(base_theta)
+
+    # rotate by -base_theta (frame change)
+    local_x =  dx * cos_t + dy * sin_t
+    local_y = -dx * sin_t + dy * cos_t
+
+    local_theta = normalize_angle(target_theta - base_theta)
+    return local_x, local_y, local_theta
+
 class MotionGenerator:
     """
     Handles perception (finding door normal) and motion generation (base + arm).
@@ -29,17 +70,20 @@ class MotionGenerator:
         # Adjust 'target_link' to be your end-effector name
         ik_cfg = DifferentialIKControllerCfg(
             command_type="position", 
-            use_relative_mode=False,
+            use_relative_mode=True,
             ik_method="dls",
         )
         self.ik_controller = DifferentialIKController(
             ik_cfg, num_envs=self.num_envs, device=self.device
         )
+        self.ik_controller.reset()
+        # hand_idx = self.scene["robot"].find_bodies("palm_lower")[0][0]
+        # initial_ee_quat = self.scene["robot"].data.body_quat_w[:, hand_idx]
+        # self.ik_controller.set_command(command=torch.zeros(self.num_envs, 3, device=self.device), ee_quat=initial_ee_quat)
         
-        # State machine: 0 = Move Base, 1 = Move Arm, 2 = Done
-        self.state = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
+        self.prev_angles = self.scene["robot"].data.joint_pos
 
-    def get_door_approach_pose(self, door_normal, door_handle_pos, robot_pos, offset=0.5):
+    def get_door_approach_pose(self, door_normal, door_handle_pos, robot_pos, offset=0.7):
         """
         Calculate target (x, y, theta) for robot to approach door from correct side
         
@@ -102,19 +146,11 @@ class MotionGenerator:
         robot_base_idx, _ = robot.find_bodies(robot_base_name)
         robot_base_id = robot_base_idx[0]
         robot_pos = robot.data.body_pos_w[:, robot_base_id]
-        return robot_pos
+        robot_quat = robot.data.body_quat_w[:, robot_base_id]
+        return robot_pos, robot_quat
         
 
     def get_door_normal(self, verbose = False):
-        """
-        Perception Step: 
-        1. Sample Point Cloud.
-        2. Find Door Normal.
-        3. Find Knob Position.
-        """
-        # --- A. Sample Point Cloud from Camera ---
-        # camera_data shape: (num_envs, H, W, 3)
-        # camera = self.scene["point_camera"]
 
         joint_angles = self.scene["door"].data.joint_pos
         door_pointcloud = sample_pointcloud(self.scene["door"].cfg.spawn.asset_path, joint_angles, device=self.device)
@@ -129,70 +165,51 @@ class MotionGenerator:
         return normals
 
     def compute_approach_target(self):
-        # Get current robot state
-        ee_idx = self.scene["robot"].find_bodies("palm_lower")[0][0] # REPLACE with actual EE name
-        # print("ee_idx: ", ee_idx)
-        ee_jac = self.scene["robot"].root_physx_view.get_jacobians()[:, ee_idx, :, :]
-        # print("ee_jac: ", ee_jac.shape)
-        ee_pos = self.scene["robot"].data.body_pos_w[:, ee_idx, :]
-        # print("ee_pos: ", ee_pos)
-        ee_quat = self.scene["robot"].data.body_quat_w[:, ee_idx, :]
-        # print("ee_quat: ", ee_quat)
-        robot_base_pos = self.scene["robot"].data.root_pos_w[:, :3]
-        # print("robot_base_pos: ", robot_base_pos)
-        
         # Perception Step
         door_normal = self.get_door_normal()
         door_knob_pos = self.get_door_knob_pos()
-        robot_pos = self.get_robot_base_pos()
+        robot_pos, robot_base_quat = self.get_robot_base_pos()
         x, y, theta = self.get_door_approach_pose(door_normal, door_knob_pos, robot_pos)
+        x, y, theta = rebase_goal(x, y, theta, robot_pos, robot_base_quat)
         # print("door_knob_pos: ", door_knob_pos)
         # print("robot_pos: ", robot_pos)
         # print("xytheta: ", xytheta)
         return torch.stack([x, y, theta], dim=-1)
         
-        # # --- Phase 1: Base Navigation (Stop 0.6m away) ---
-        # target_stand_pos = door_knob_pos[0] + (door_normal * 0.6) # Target is 0.6m out along normal
-        # target_stand_pos[2] = 0.0 # Keep target on ground
+    def compute_arm_target(self):
+        # Get current robot state
+        ee_id = self.scene["robot"].find_bodies("palm_center")[0][0]
+        # print("ee_idx: ", ee_idx)
+        ee_quat_w = self.scene["robot"].data.body_quat_w[:, ee_id]
+        ee_pos = self.scene["robot"].data.body_pos_w[:, ee_id]
+        ee_quat = self.scene["robot"].data.body_quat_w[:, ee_id]
         
-        # dist_to_target = torch.norm(robot_base_pos[0] - target_stand_pos)
+        hand_idx = self.scene["robot"].find_joints(FRANKA_JOINT_NAMES)[0]
+        hand_jac = self.scene["robot"].root_physx_view.get_jacobians()[:, ee_id, :, hand_idx]
+        current_joint_pos = self.scene["robot"].data.joint_pos[:, hand_idx]
+        robot_base_pos = self.scene["robot"].data.root_pos_w[:, :3]
+        door_knob_pos = self.get_door_knob_pos()
+        # print("door_base_pos: ", self.scene["door"].data.body_pos_w[:, 0])
+        door_knob_pos = door_knob_pos - ee_pos 
+        # print("door_knob_pos: ", door_knob_pos)
+        # print("ee_pos: ", ee_pos)
         
-        # if self.state[0] == 0:
-        #     print(f"Approaching... Dist: {dist_to_target:.3f}")
-            
-        #     # Simple P-Controller for Base
-        #     # Vector to target
-        #     direction = target_stand_pos - robot_base_pos[0]
-        #     direction[2] = 0 # Flatten
-        #     direction = direction / torch.norm(direction)
-            
-        #     # Velocity command
-        #     vel_cmd = direction * 1.0 # 1.0 m/s speed
-            
-        #     # This is pseudo-code mapping. You must map vel_cmd to your specific robot's wheel joints.
-        #     # Example: If joints 0,1 are wheels:
-        #     actions[:, 0] = vel_cmd[0] 
-        #     actions[:, 1] = vel_cmd[1]
-            
-        #     # Transition condition
-        #     if dist_to_target < 0.05:
-        #         self.state[0] = 1 # Move to Arm Phase
-                
-        # # --- Phase 2: Arm Inverse Kinematics ---
-        # elif self.state[0] == 1:
-        #     print("Reaching for Knob...")
-            
-        #     # Set IK Target
-        #     ik_commands = self.ik_controller.compute(
-        #         ee_pos,
-        #         ee_quat,
-        #         ee_jac,
-        #         door_knob_pos, # Target position
-        #         torch.tensor([0, 0, 0, 1.0], device=self.device).repeat(self.num_envs, 1), # Target Rot (Identity for now)
-        #     )
-            
-        #     # Apply to Arm Joints (assuming arm starts at index 2)
-        #     # You need to map the IK result to the specific joint indices of your robot
-        #     actions[:, 2:] = ik_commands[:, :] 
+        # self.ik_controller.reset()
+        self.ik_controller.set_command(command=door_knob_pos, ee_pos=ee_pos, ee_quat=ee_quat)
+        joint_pos_des = self.ik_controller.compute(
+            ee_pos,
+            ee_quat,
+            hand_jac,
+            current_joint_pos,
+        )
 
-        # return actions
+        joint_pos = self.scene["robot"].data.joint_pos
+        print("joint_pos: ", current_joint_pos)
+        joint_pos[:, hand_idx] = joint_pos_des
+        # print("joint_pos_des: ", joint_pos_des)
+        # return joint_pos, ee_pos, self.get_door_knob_pos()
+        return joint_pos
+
+
+    def door_opening_motion(self):
+        door_joint_pos = self.scene["door"].data.joint_pos

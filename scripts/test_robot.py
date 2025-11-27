@@ -58,14 +58,14 @@ from isaaclab.utils import configclass
 
 from isaaclab.assets import ArticulationCfg
 
-from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, CAMERA_JOINT_DEFAULT_VALUES
+from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, DEFAULT_JOINT_POS
 from DoorOpening.assets.door.door_cfg import DOOR_CONFIG
 
 from DoorOpening.motion.motion_generator import MotionGenerator
 
 from isaaclab.utils.math import quat_from_euler_xyz
 
-euler_angles = torch.tensor([0.0, np.pi / 2, 0.0])  # (roll, pitch, yaw) in radians
+euler_angles = torch.tensor([0.0, 0.0, np.pi * 4 / 5])  # (roll, pitch, yaw) in radians
 quat = quat_from_euler_xyz(euler_angles[0], euler_angles[1], euler_angles[2]) 
 
 @configclass
@@ -84,16 +84,17 @@ class SensorsSceneCfg(InteractiveSceneCfg):
     robot: ArticulationCfg = GLORBOT_CONFIG.replace(
         prim_path="{ENV_REGEX_NS}/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
-            joint_pos=CAMERA_JOINT_DEFAULT_VALUES,
-            pos=(-1.5, 0, 0.0),
-            rot=[0.707, 0, 0, 0.707]
+            joint_pos=DEFAULT_JOINT_POS,
+            pos=(1.0, 0, 0.0),
+            # rot=[0.707, 0, 0, 0.707]
+            rot = quat
         ),
     )
 
     door: ArticulationCfg = DOOR_CONFIG.replace(
         prim_path="{ENV_REGEX_NS}/Door",
         init_state=ArticulationCfg.InitialStateCfg(
-            pos=(1.0, 0.0, 0.75),
+            pos=(-1.0, 0.0, 0.75),
             # rot=[0.707, 0, 0, 0.707]
         )
     )
@@ -110,7 +111,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     # Simulate physics
     while simulation_app.is_running():
         # Reset
-        if count % 500 == 0:
+        if count % 700 == 0:
             # reset counter
             count = 0
             # reset the scene entities
@@ -128,19 +129,54 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
                 scene["robot"].data.default_joint_vel.clone(),
             )
             scene["robot"].write_joint_state_to_sim(joint_pos, joint_vel)
+
+            # root_state_door = scene["door"].data.default_root_state.clone()
+            # root_state_door[:, :3] += scene.env_origins
+            # print("root state door: ", root_state_door)
+            # scene["door"].write_root_pose_to_sim(root_state_door[:, :7])
+            # scene["door"].write_root_velocity_to_sim(root_state_door[:, 7:])
+            # door_pos = scene["door"].data.soft_joint_pos_limits[..., 0] - 0.1
+            # scene["door"].write_joint_position_to_sim(door_pos)
+
             scene.reset()
             print("[INFO]: Resetting robot state...")
         # Apply default actions to the robot
         # -- generate actions/commands
+
+        if count < 250:
+            actions = motion_generator.compute_approach_target()
+            joint_pos = scene["robot"].data.joint_pos.clone()
+            # print("joint_pos: ", joint_pos[..., :3])
+            joint_pos[..., :3] = actions
+            # print("actions: ", actions)
+            scene["robot"].set_joint_position_target(joint_pos)
         
-        # print(scene["door"].traverse_instance_prims())
-        actions = motion_generator.compute_approach_target()
-        joint_pos = scene["robot"].data.joint_pos.clone()
-        if count % 20 == 0:
-            print("robot pos: ", motion_generator.get_robot_base_pos()[0])
-            print("door pos: ", motion_generator.get_door_knob_pos()[0])
-        joint_pos[..., :3] = actions
-        scene["robot"].set_joint_position_target(joint_pos)
+        # elif count % 50 == 0:
+        #     joint_pos, ee_pos, door_knob_pos = motion_generator.compute_arm_target()
+        #     # scene["robot"].set_joint_position_target(joint_pos)
+        #     _, joint_vel = (
+        #         scene["robot"].data.default_joint_pos.clone(),
+        #         scene["robot"].data.default_joint_vel.clone(),
+        #     )
+        #     scene["robot"].write_joint_state_to_sim(joint_pos, joint_vel)
+
+        else:
+            ik_joint_pos = motion_generator.compute_arm_target()
+            if count % 50 == 0:
+                motion_generator.compute_arm_target()
+                FRANKA_JOINT_NAMES = [
+                    'panda_joint1',
+                    'panda_joint2',
+                    'panda_joint3',
+                    'panda_joint4',
+                    'panda_joint5',
+                    'panda_joint6',
+                    'panda_joint7',
+                ]
+                hand_idx = scene["robot"].find_joints(FRANKA_JOINT_NAMES)[0]
+                print("ik_joint_pos: ", ik_joint_pos[:, hand_idx])
+            scene["robot"].set_joint_position_target(ik_joint_pos)
+
         # -- write data to sim
         scene.write_data_to_sim()
         # perform step
@@ -159,7 +195,7 @@ def main():
     sim_cfg = sim_utils.SimulationCfg(dt=0.005, device=args_cli.device)
     sim = sim_utils.SimulationContext(sim_cfg)
     # Set main camera
-    sim.set_camera_view(eye=[-4.0, 4.0, 3.5], target=[0.0, 0.0, 0.0])
+    sim.set_camera_view(eye=[1.5, -2.5, 2.0], target=[0.0, 0.0, 0.7])
     # Design scene
     scene_cfg = SensorsSceneCfg(num_envs=args_cli.num_envs, env_spacing=2.0)
     scene = InteractiveScene(scene_cfg)

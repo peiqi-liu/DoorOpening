@@ -21,6 +21,8 @@ module_path = os.path.dirname(__file__)
 root_path = os.path.dirname(module_path)
 glorbot_urdf_path = os.path.join(root_path, "glorbot/glorbot.urdf")
 
+import numpy as np
+
 # default camera pose for the camera to look front
 CAMERA_JOINT_DEFAULT_VALUES = {
     "x5_joint1": 0.0, 
@@ -29,6 +31,32 @@ CAMERA_JOINT_DEFAULT_VALUES = {
     "x5_joint4": 0.0, 
     "x5_joint5": 0.0, 
     "x5_joint6": 0.0,
+}
+
+FRANKA_DEFAULT_JOINT_POS = {
+    "panda_joint1": 0.0,
+    "panda_joint2": -0.25 * np.pi,
+    "panda_joint3": 0.0,
+    "panda_joint4": -0.75 * np.pi,
+    "panda_joint5": 0.0,
+    "panda_joint6": 0.5 * np.pi,
+    "panda_joint7": 0.0,
+}
+
+DEFAULT_JOINT_POS = {
+    "x5_joint1": 0.0, 
+    "x5_joint2": 0.785, 
+    "x5_joint3": 0.785, 
+    "x5_joint4": 0.0, 
+    "x5_joint5": 0.0, 
+    "x5_joint6": 0.0,
+    "panda_joint1": 0.0,
+    "panda_joint2": -0.25 * np.pi,
+    "panda_joint3": 0.0,
+    "panda_joint4": -0.75 * np.pi,
+    "panda_joint5": 0.0,
+    "panda_joint6": 0.5 * np.pi,
+    "panda_joint7": 0.0,
 }
 
 GLORBOT_CONFIG = ArticulationCfg(
@@ -45,33 +73,27 @@ GLORBOT_CONFIG = ArticulationCfg(
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        joint_pos=CAMERA_JOINT_DEFAULT_VALUES,
+        joint_pos=DEFAULT_JOINT_POS,
         pos=(0.0, 0.0, 0.0),
         rot=(1.0, 0.0, 0.0, 0.0)
     ),
     actuators={
         "body": ImplicitActuatorCfg(
             joint_names_expr=[".*"],
-            stiffness=1000.0,
-            damping=200.0,
+            stiffness=4000.0,
+            damping=2000.0,
         ),
         # "base": ImplicitActuatorCfg(
         #     joint_names_expr=["base_.*"],
-        #     effort_limit_sim=1000.0,
+        #     effort_limit_sim=2000.0,
         #     stiffness=0.0,
         #     damping=1e5,
         # ),
         # "panda_shoulder": ImplicitActuatorCfg(
-        #     joint_names_expr=["panda_joint[1-4]"],
-        #     effort_limit_sim=500.0,
-        #     stiffness=800.0,
-        #     damping=40.0,
-        # ),
-        # "panda_forearm": ImplicitActuatorCfg(
-        #     joint_names_expr=["panda_joint[5-7]"],
-        #     effort_limit_sim=72.0,
-        #     stiffness=800.0,
-        #     damping=40.0,
+        #     joint_names_expr=["panda_joint[1-7]"],
+        #     effort_limit_sim=2000.0,
+        #     stiffness=8000.0,
+        #     damping=500.0,
         # ),
         # "x5_arm": ImplicitActuatorCfg(
         #     joint_names_expr=["x5_joint[1-6]"],
@@ -81,7 +103,7 @@ GLORBOT_CONFIG = ArticulationCfg(
         # ),
         # "finger": ImplicitActuatorCfg(
         #     joint_names_expr=["finger_joint_.*"],
-        #     effort_limit_sim=50.0,
+        #     effort_limit_sim=200.0,
         #     stiffness=20,
         #     damping=10,
         # ),

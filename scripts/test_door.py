@@ -84,7 +84,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     # Simulate physics
     while simulation_app.is_running():
         # Reset
-        if count % 50 == 0:
+        if count % 200 == 0:
             # reset counter
             count = 0
             # reset the scene entities
@@ -102,8 +102,11 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             # print("door_pos_limits_upper: ", scene["door"].data.soft_joint_pos_limits[..., 1])
             # print("joint_names: ", scene["door"].data.joint_names)
 
-            print("door_pos: ", scene["door"].data.body_pos_w)
-            print("door body names: ", scene["door"].data.body_names)
+        door_target_pos = scene["door"].data.soft_joint_pos_limits[..., 1] + 0.1
+        scene["door"].set_joint_position_target(door_target_pos)
+        scene.write_data_to_sim()
+
+
         # perform step
         sim.step()
         # update sim-time
