@@ -107,7 +107,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     count = 0
 
     motion_generator = MotionGenerator(scene, device=args_cli.device)
-
+    motion_generator.reset()
     # Simulate physics
     while simulation_app.is_running():
         # Reset

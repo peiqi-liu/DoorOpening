@@ -59,6 +59,8 @@ from isaaclab.assets import ArticulationCfg
 
 from DoorOpening.assets.door.door_cfg import DOOR_CONFIG
 
+torch.set_printoptions(precision=4, sci_mode=False)
+
 @configclass
 class SensorsSceneCfg(InteractiveSceneCfg):
     """Design the scene with sensors on the robot."""
@@ -84,7 +86,8 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     # Simulate physics
     while simulation_app.is_running():
         # Reset
-        if count % 200 == 0:
+        if count % 500 == 0:
+            print("Resetting door state...")
             # reset counter
             count = 0
             # reset the scene entities
@@ -93,17 +96,19 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             root_state[:, :3] += scene.env_origins
             scene["door"].write_root_pose_to_sim(root_state[:, :7])
             scene["door"].write_root_velocity_to_sim(root_state[:, 7:])
-            door_pos = scene["door"].data.soft_joint_pos_limits[..., 0] - 0.1
+            door_pos = scene["door"].data.joint_pos_limits[..., 0]
             scene["door"].write_joint_position_to_sim(door_pos)
             # clear internal buffers
             scene.reset()
-            # print("door_pos: ", door_pos)
-            # print("door_pos_limits_lower: ", scene["door"].data.soft_joint_pos_limits[..., 0])
-            # print("door_pos_limits_upper: ", scene["door"].data.soft_joint_pos_limits[..., 1])
-            # print("joint_names: ", scene["door"].data.joint_names)
+            # print("joint_pos: ", scene["door"].data.joint_pos)
 
-        door_target_pos = scene["door"].data.soft_joint_pos_limits[..., 1] + 0.1
+        door_target_pos = scene["door"].data.joint_pos_limits[..., 1]
         scene["door"].set_joint_position_target(door_target_pos)
+        # scene["door"].set_joint_velocity_target(torch.tensor([1, 1]))
+        if count % 100 == 0:
+            print("joint_pos: ", scene["door"].data.joint_pos)
+            print("joint_pos: ", scene["door"].data.joint_pos_target)
+            print("joint_pos_target: ", door_target_pos)
         scene.write_data_to_sim()
 
 
@@ -123,7 +128,7 @@ def main():
     sim_cfg = sim_utils.SimulationCfg(dt=0.005, device=args_cli.device)
     sim = sim_utils.SimulationContext(sim_cfg)
     # Set main camera
-    sim.set_camera_view(eye=[4.5, 0.0, 3.5], target=[0.0, 0.0, 0.0])
+    sim.set_camera_view(eye=[-3.0, 0.0, 3.0], target=[0.0, 0.0, 0.5])
     # Design scene
     scene_cfg = SensorsSceneCfg(num_envs=args_cli.num_envs, env_spacing=2.0)
     scene = InteractiveScene(scene_cfg)

@@ -26,6 +26,12 @@ FRANKA_JOINT_NAMES = [
         'panda_joint7',
     ]
 
+BASE_JOINT_NAMES = [
+        'base_rotation_joint',
+        'base_x_joint',
+        'base_y_joint',
+    ]
+
 from isaaclab.utils.math import euler_xyz_from_quat, yaw_quat
 
 def normalize_angle(angle: torch.Tensor) -> torch.Tensor:
@@ -81,9 +87,13 @@ class MotionGenerator:
         # initial_ee_quat = self.scene["robot"].data.body_quat_w[:, hand_idx]
         # self.ik_controller.set_command(command=torch.zeros(self.num_envs, 3, device=self.device), ee_quat=initial_ee_quat)
         
+        self.reset()
+
+    def reset(self):
+        self.base_pose = None
         self.prev_angles = self.scene["robot"].data.joint_pos
 
-    def get_door_approach_pose(self, door_normal, door_handle_pos, robot_pos, offset=0.7):
+    def get_door_approach_pose(self, door_normal, door_handle_pos, robot_pos, offset=0.4):
         """
         Calculate target (x, y, theta) for robot to approach door from correct side
         
@@ -131,8 +141,10 @@ class MotionGenerator:
         return target_pos[0], target_pos[1], theta
     
     
-    def get_door_knob_pos(self):
+    def get_door_knob_pos(self, use_handle_body_name = True):
         door = self.scene["door"]
+        if not use_handle_body_name:
+            return door.data.body_pos_w[:, 0]
         # handle_body_name = self.scene.cfg.door.handle_body_name
         handle_body_name = self.handle_body_name
         handle_body_idx, _ = door.find_bodies(handle_body_name)
@@ -167,13 +179,14 @@ class MotionGenerator:
     def compute_approach_target(self):
         # Perception Step
         door_normal = self.get_door_normal()
-        door_knob_pos = self.get_door_knob_pos()
+        door_knob_pos = self.get_door_knob_pos(use_handle_body_name = False)
         robot_pos, robot_base_quat = self.get_robot_base_pos()
         x, y, theta = self.get_door_approach_pose(door_normal, door_knob_pos, robot_pos)
         x, y, theta = rebase_goal(x, y, theta, robot_pos, robot_base_quat)
         # print("door_knob_pos: ", door_knob_pos)
         # print("robot_pos: ", robot_pos)
         # print("xytheta: ", xytheta)
+        self.base_pose = torch.stack([x, y, theta], dim=-1)
         return torch.stack([x, y, theta], dim=-1)
         
     def compute_arm_target(self):
@@ -204,8 +217,14 @@ class MotionGenerator:
         )
 
         joint_pos = self.scene["robot"].data.joint_pos
-        print("joint_pos: ", current_joint_pos)
+        # print("joint_pos: ", current_joint_pos)
         joint_pos[:, hand_idx] = joint_pos_des
+
+        if self.base_pose is not None:
+            base_idx = self.scene["robot"].find_joints(BASE_JOINT_NAMES)[0]
+            joint_pos[:, base_idx] = self.base_pose
+            print("actual pose: ", joint_pos[:, base_idx])
+            print("base_pose: ", self.base_pose)
         # print("joint_pos_des: ", joint_pos_des)
         # return joint_pos, ee_pos, self.get_door_knob_pos()
         return joint_pos

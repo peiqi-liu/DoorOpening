@@ -9,6 +9,8 @@ def tensor_to_ply(tensor: torch.Tensor, filename: str):
     Args:
         tensor: (N, 3) tensor of xyz coordinates (float32/float64)
         filename: output .ply file path (e.g., "points.ply")
+
+    TODO: Support (B, N, 3) tensor.
     """
     assert tensor.ndim == 2 and tensor.shape[1] == 3, "Input must be (N, 3)"
     

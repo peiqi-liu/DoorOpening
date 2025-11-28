@@ -42,8 +42,8 @@ def create_door_cfg(urdf_path: str) -> ArticulationCfg:
         actuators={
             "body": ImplicitActuatorCfg(
                 joint_names_expr=[".*"],
-                stiffness=20.0,
-                damping=20.0,
+                stiffness=1e6,
+                damping=10,
             ),
         },
     )

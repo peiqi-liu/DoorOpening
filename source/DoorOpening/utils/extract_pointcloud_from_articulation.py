@@ -18,6 +18,8 @@ import os
 import torch
 import numpy as np
 
+from DoorOpening.utils.point_utils import tensor_to_ply
+
 JointLimit._ATTRIBS['effort'] = (float, False)
 JointLimit._ATTRIBS['velocity'] = (float, False)
 
@@ -1033,11 +1035,15 @@ class FrankaLeapSampler:
 
 sampler = None
 
-def sample_pointcloud(urdf_path, joint_angles, device = "cuda"):
+def sample_pointcloud(urdf_path, joint_angles, device = "cuda", verbose = False):
     global sampler
     if sampler is None or sampler.urdf_path != urdf_path:
         sampler = FrankaLeapSampler(urdf_path, device)
     pcd = sampler.sample(joint_angles)
+
+    if verbose:
+        tensor_to_ply(pcd[0], "pointcloud.ply")
+        print(f"Saved {pcd[0].shape[0]} points to pointcloud.ply")
     return pcd
 
 if __name__ == "__main__":
