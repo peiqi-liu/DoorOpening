@@ -86,8 +86,8 @@ GLORBOT_CONFIG = ArticulationCfg(
         "base": ImplicitActuatorCfg(
             joint_names_expr=["base_.*"],
             effort_limit_sim=400.0,
-            stiffness=100,
-            damping=5000,
+            stiffness=1000,
+            damping=500,
         ),
         "panda_shoulder": ImplicitActuatorCfg(
             joint_names_expr=["panda_joint[1-4]"],

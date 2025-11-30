@@ -249,19 +249,13 @@ class MotionGenerator:
         )
         joint_pos_target = np.concatenate((base_pos_target_world_frame, arm_pos_target))
         joint_vel_target = np.concatenate((base_vel_target_world_frame, arm_vel_target))
-        # pos, quat = self.get_base_pos_and_quat(self.scene["robot"], base_name="palm_lower")
-        # print("pos, target", pos, ee_target_position)
-        # print("quat, target", quat, ee_target_orientation)
         joint_pos = self.scene["robot"].data.joint_pos
-        # print("joint_pos: ", joint_pos[..., :3 + 7])
-        # print("joint_pos_target: ", joint_pos_target[..., :3 + 7])
-        # print("joint_vel_target", joint_vel_target)
         joint_pos_target, joint_vel_target = torch.from_numpy(joint_pos_target).to(self.device), torch.from_numpy(joint_vel_target).to(self.device)
 
-        print("base_pos: ", base_pos_target_world_frame, robot_pos)
+        # print("base_pos: ", base_pos_target_world_frame, robot_pos)
         joint_pos_target[..., :3] = unbase_goal(joint_pos_target[..., :3], robot_pos, robot_quat, velocity = False)
         joint_pos_target[..., :3] = unbase_goal(joint_pos_target[..., :3], torch.zeros_like(robot_pos), robot_quat, velocity = True)
-        print("base target: ", joint_pos_target[:3])
+        # print("base target: ", joint_pos_target[:3])
 
         # Normalize the angle to [-pi, pi]
         joint_pos_target[..., 2] = (joint_pos_target[..., 2] + torch.pi) % (2 * torch.pi) - torch.pi

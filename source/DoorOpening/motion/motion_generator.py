@@ -191,19 +191,19 @@ class MotionGenerator:
         
     def compute_arm_target(self):
         # Get current robot state
-        ee_id = self.scene["robot"].find_bodies("palm_center")[0][0]
+        ee_id = self.scene["robot"].find_bodies("palm_lower")[0][0]
         # print("ee_idx: ", ee_idx)
         ee_quat_w = self.scene["robot"].data.body_quat_w[:, ee_id]
         ee_pos = self.scene["robot"].data.body_pos_w[:, ee_id]
         ee_quat = self.scene["robot"].data.body_quat_w[:, ee_id]
         
-        hand_idx = self.scene["robot"].find_joints(FRANKA_JOINT_NAMES)[0]
+        hand_idx = self.scene["robot"].find_joints(FRANKA_JOINT_NAMES + BASE_JOINT_NAMES)[0]
         hand_jac = self.scene["robot"].root_physx_view.get_jacobians()[:, ee_id, :, hand_idx]
         current_joint_pos = self.scene["robot"].data.joint_pos[:, hand_idx]
         robot_base_pos = self.scene["robot"].data.root_pos_w[:, :3]
         door_knob_pos = self.get_door_knob_pos()
         # print("door_base_pos: ", self.scene["door"].data.body_pos_w[:, 0])
-        door_knob_pos = (torch.linalg.norm(door_knob_pos - ee_pos, dim=-1) - 0.05) * (door_knob_pos - ee_pos) / torch.linalg.norm(door_knob_pos - ee_pos, dim=-1)
+        door_knob_pos = (torch.linalg.norm(door_knob_pos - ee_pos, dim=-1) - 0.1) * (door_knob_pos - ee_pos) / torch.linalg.norm(door_knob_pos - ee_pos, dim=-1)
         # print("door_knob_pos: ", door_knob_pos)
         # print("ee_pos: ", ee_pos)
         
@@ -220,13 +220,9 @@ class MotionGenerator:
         # print("joint_pos: ", current_joint_pos)
         joint_pos[:, hand_idx] = joint_pos_des
 
-        if self.base_pose is not None:
-            base_idx = self.scene["robot"].find_joints(BASE_JOINT_NAMES)[0]
-            joint_pos[:, base_idx] = self.base_pose
-            # print("actual pose: ", joint_pos[:, base_idx])
-            # print("base_pose: ", self.base_pose)
-        # print("joint_pos_des: ", joint_pos_des)
-        # return joint_pos, ee_pos, self.get_door_knob_pos()
+        # if self.base_pose is not None:
+        #     base_idx = self.scene["robot"].find_joints(BASE_JOINT_NAMES)[0]
+        #     joint_pos[:, base_idx] = self.base_pose
         return joint_pos
 
 
