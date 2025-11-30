@@ -82,7 +82,7 @@ class SensorsSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
             joint_pos=DEFAULT_JOINT_POS,
-            pos=(1.5, 0.0, 0.0),
+            pos=(2.5, 1.5, 0.0),
             rot=(0.0, 0.0, 0.0, 1.0)
         ),
     )
@@ -120,11 +120,11 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         # Apply default actions to the robot
         # -- generate actions/commands
         
-        joint_pos, joint_vel = scene["robot"].data.joint_pos.clone(), scene["robot"].data.joint_vel.clone()
-        joint_pos_target, joint_vel_target = motion_generator.reach_door_knob(q = joint_pos, qd = joint_vel)
+        # joint_pos, joint_vel = scene["robot"].data.joint_pos.clone(), scene["robot"].data.joint_vel.clone()
+        joint_pos_target, joint_vel_target = motion_generator.reach_door_knob()
 
+        # scene["robot"].write_joint_state_to_sim(joint_pos_target, joint_vel_target)
         scene["robot"].set_joint_position_target(joint_pos_target)
-        # scene["robot"].set_joint_velocity_target(joint_vel_target)
         # -- write data to sim
         scene.write_data_to_sim()
         # perform step
@@ -143,7 +143,7 @@ def main():
     sim_cfg = sim_utils.SimulationCfg(dt=0.005, device=args_cli.device)
     sim = sim_utils.SimulationContext(sim_cfg)
     # Set main camera
-    sim.set_camera_view(eye=[4.0, -4.0, 3.5], target=[0.0, 0.0, 0.0])
+    sim.set_camera_view(eye=[1.0, -4.0, 3.5], target=[0.2, 0.0, 0.0])
     # Design scene
     scene_cfg = SensorsSceneCfg(num_envs=args_cli.num_envs, env_spacing=2.0)
     scene = InteractiveScene(scene_cfg)

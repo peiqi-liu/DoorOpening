@@ -14,8 +14,6 @@ from isaaclab.utils import configclass
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 
 from isaaclab.managers import EventTermCfg as EventTerm
-from isaaclab.managers import SceneEntityCfg
-import isaaclab.envs.mdp as mdp
 
 @configclass
 class DooropeningEnvCfg(DirectRLEnvCfg):

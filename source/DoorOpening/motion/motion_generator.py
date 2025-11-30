@@ -93,7 +93,7 @@ class MotionGenerator:
         self.base_pose = None
         self.prev_angles = self.scene["robot"].data.joint_pos
 
-    def get_door_approach_pose(self, door_normal, door_handle_pos, robot_pos, offset=0.4):
+    def get_door_approach_pose(self, door_normal, door_handle_pos, robot_pos, offset=0.3):
         """
         Calculate target (x, y, theta) for robot to approach door from correct side
         
@@ -174,14 +174,14 @@ class MotionGenerator:
             from DoorOpening.utils.point_utils import tensor_to_ply
             tensor_to_ply(door_pointcloud[0], "pointcloud.ply")
         normals, centroids = fit_plane_batch_torch(door_pointcloud)
-        return normals
+        return normals, centroids
 
     def compute_approach_target(self):
         # Perception Step
-        door_normal = self.get_door_normal()
-        door_knob_pos = self.get_door_knob_pos(use_handle_body_name = False)
+        door_normal, centroids = self.get_door_normal()
+        # door_knob_pos = self.get_door_knob_pos(use_handle_body_name = False)
         robot_pos, robot_base_quat = self.get_robot_base_pos()
-        x, y, theta = self.get_door_approach_pose(door_normal, door_knob_pos, robot_pos)
+        x, y, theta = self.get_door_approach_pose(door_normal, centroids, robot_pos)
         x, y, theta = rebase_goal(x, y, theta, robot_pos, robot_base_quat)
         # print("door_knob_pos: ", door_knob_pos)
         # print("robot_pos: ", robot_pos)
@@ -203,7 +203,7 @@ class MotionGenerator:
         robot_base_pos = self.scene["robot"].data.root_pos_w[:, :3]
         door_knob_pos = self.get_door_knob_pos()
         # print("door_base_pos: ", self.scene["door"].data.body_pos_w[:, 0])
-        door_knob_pos = door_knob_pos - ee_pos 
+        door_knob_pos = (torch.linalg.norm(door_knob_pos - ee_pos, dim=-1) - 0.05) * (door_knob_pos - ee_pos) / torch.linalg.norm(door_knob_pos - ee_pos, dim=-1)
         # print("door_knob_pos: ", door_knob_pos)
         # print("ee_pos: ", ee_pos)
         
@@ -223,8 +223,8 @@ class MotionGenerator:
         if self.base_pose is not None:
             base_idx = self.scene["robot"].find_joints(BASE_JOINT_NAMES)[0]
             joint_pos[:, base_idx] = self.base_pose
-            print("actual pose: ", joint_pos[:, base_idx])
-            print("base_pose: ", self.base_pose)
+            # print("actual pose: ", joint_pos[:, base_idx])
+            # print("base_pose: ", self.base_pose)
         # print("joint_pos_des: ", joint_pos_des)
         # return joint_pos, ee_pos, self.get_door_knob_pos()
         return joint_pos

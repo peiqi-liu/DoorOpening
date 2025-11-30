@@ -982,7 +982,7 @@ def resolve_mesh_path(urdf_path: str, mesh_filename: str):
         return urdf_dir / mesh_filename
 
 class FrankaLeapSampler:
-    def __init__(self, urdf_path, device = "cuda", num_points=8192):
+    def __init__(self, urdf_path, device = "cuda", num_points=4096):
         self.device = device
         self.urdf_path = urdf_path
         self.robot = TorchURDF.load(urdf_path, lazy_load_meshes=True, device=device)
@@ -990,10 +990,21 @@ class FrankaLeapSampler:
         self.links = [l for l in self.robot.links if len(l.visuals) and (l.visuals[0].geometry.mesh is not None)]
         self.hand_links = [l for l in self.links if ("panda" not in l.name) and l.visuals[0].geometry.mesh is not None]
 
-        meshes = [
-            trimesh.load(resolve_mesh_path(urdf_path, l.visuals[0].geometry.mesh.filename), force="mesh")
-            for l in self.links
-        ]
+        # meshes = [
+        #     trimesh.load(resolve_mesh_path(urdf_path, l.visuals[0].geometry.mesh.filename), force="mesh")
+        #     for l in self.links
+        # ]
+
+        meshes = []
+        for l in self.links:
+            mesh = None
+            for v in l.visuals:
+                if mesh is None:
+                    mesh = trimesh.load(resolve_mesh_path(urdf_path, v.geometry.mesh.filename), force="mesh")
+                else:
+                    mesh += trimesh.load(resolve_mesh_path(urdf_path, v.geometry.mesh.filename), force="mesh")
+            meshes.append(mesh)
+
         areas = np.array([m.bounding_box_oriented.area for m in meshes])
         n_pts = np.round(num_points * areas / areas.sum()).astype(int)
         n_pts[0] += num_points - n_pts.sum()  # fix rounding
@@ -1047,7 +1058,7 @@ def sample_pointcloud(urdf_path, joint_angles, device = "cuda", verbose = False)
     return pcd
 
 if __name__ == "__main__":
-    urdf_path = "/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/door/PartNet/8867/mobility.urdf"
+    urdf_path = "/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/door/PartNet/8893/mobility.urdf"
     # urdf_path = "/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/glorbot/glorbot.urdf"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     sampler = FrankaLeapSampler(urdf_path, device)

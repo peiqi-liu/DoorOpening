@@ -111,7 +111,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     # Simulate physics
     while simulation_app.is_running():
         # Reset
-        if count % 700 == 0:
+        if count % 1500 == 0:
             # reset counter
             count = 0
             # reset the scene entities
@@ -143,7 +143,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         # Apply default actions to the robot
         # -- generate actions/commands
 
-        if count < 250:
+        if count < 700:
             actions = motion_generator.compute_approach_target()
             joint_pos = scene["robot"].data.joint_pos.clone()
             # print("joint_pos: ", joint_pos[..., :3])

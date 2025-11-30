@@ -107,7 +107,14 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         # scene["door"].set_joint_velocity_target(torch.tensor([1, 1]))
         if count % 100 == 0:
             print("joint_pos: ", scene["door"].data.joint_pos)
-            print("joint_pos: ", scene["door"].data.joint_pos_target)
+            print("stiffness: ", scene["door"].data.joint_stiffness)
+            print("damping: ", scene["door"].data.joint_damping)
+            # print("effort_limit_sim: ", scene["door"].data.effort_limit_sim)
+            # print("velocity_limit_sim: ", scene["door"].data.velocity_limit_sim)
+            # print("position_limit_sim: ", scene["door"].data.position_limit_sim)
+            # print("velocity_limit_sim: ", scene["door"].data.velocity_limit_sim)
+            # print("velocity_limit_sim: ", scene["door"].data.velocity_limit_sim)
+            # print("joint_pos: ", scene["door"].data.joint_pos_target)
             print("joint_pos_target: ", door_target_pos)
         scene.write_data_to_sim()
 
@@ -125,7 +132,7 @@ def main():
     """Main function."""
 
     # Initialize the simulation context
-    sim_cfg = sim_utils.SimulationCfg(dt=0.005, device=args_cli.device)
+    sim_cfg = sim_utils.SimulationCfg(dt=0.005, device="cpu")
     sim = sim_utils.SimulationContext(sim_cfg)
     # Set main camera
     sim.set_camera_view(eye=[-3.0, 0.0, 3.0], target=[0.0, 0.0, 0.5])
