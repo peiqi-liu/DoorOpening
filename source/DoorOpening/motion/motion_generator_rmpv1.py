@@ -106,6 +106,8 @@ def unbase_goal(abs_pos, orig_pos, orig_quat, velocity=False):
     rel_x = dx *  cos_yaw + dy * sin_yaw
     rel_y = -dx * sin_yaw + dy * cos_yaw
 
+    print("dx, dy, rel_x, rel_y: ", dx, dy, rel_x, rel_y)
+
     # ------------------------------
     # Invert orientation
     # ------------------------------
@@ -129,43 +131,36 @@ class MotionGenerator:
         
         # --- RMP Controller Setup ---
         self.glorbot_controller = GlorbotController()
-        self.rmp_joint_order = self.glorbot_controller.rmpflow.robot_world.joint_names_in_order
-
+        q = self.get_joint_positions()
+        self.glorbot_controller.initialize(q=q.squeeze().cpu().numpy())
         torch.set_printoptions(precision=3, sci_mode=False)
 
-    def initialize(self):
-        robot_pos, robot_quat = self.get_base_pos_and_quat(self.scene["robot"])
-
-        # --- Initialize RMP Controller ---
+    def get_joint_positions(self):
+        joint_names = self.glorbot_controller.rmp_configs.tidybot2_franka_joint_names.tolist()
+        joint_ids, _ = self.scene["robot"].find_joints(joint_names)
+        # print("joint_ids: ", joint_ids, len(joint_ids))
         q = self.scene["robot"].data.joint_pos
-        q = self.remap_joints_to_rmp_ordering(q, self.rmp_joint_order)
-        self.glorbot_controller.initialize(q=q.squeeze().cpu().numpy())
-
-        qd = self.scene["robot"].data.joint_vel
-        qd = self.remap_joints_to_rmp_ordering(qd, self.rmp_joint_order)
-
-        q[..., :3] = rebase_goal(q[..., :3], robot_pos, robot_quat, velocity = False)
-        qd[..., :3] = rebase_goal(qd[..., :3], torch.zeros_like(robot_pos), robot_quat, velocity = True)
-        # Normalize the angle to [-pi, pi]
-        q[..., 2] = (q[..., 2] + torch.pi) % (2 * torch.pi) - torch.pi
-        qd[..., 2] = (qd[..., 2] + torch.pi) % (2 * torch.pi) - torch.pi
-        self.prev_q = q.squeeze().cpu().numpy()
-        self.prev_qd = qd.squeeze().cpu().numpy()
-
-    def remap_joints_to_rmp_ordering(self, q, joint_order):
-        joint_ids, _ = self.scene["robot"].find_joints(joint_order)
         q = q[..., joint_ids].float()
+        # q = q.cpu().numpy()
         return q
 
+    def get_joint_velocities(self):
+        joint_names = self.glorbot_controller.rmp_configs.tidybot2_franka_joint_names.tolist()
+        joint_ids, _ = self.scene["robot"].find_joints(joint_names)
+        qd = self.scene["robot"].data.joint_vel
+        qd = qd[..., joint_ids].float()
+        # qd = qd.cpu().numpy()
+        return qd
+
     def map_joint_positions_to_isaaclab_ordering(self, q):
-        joint_names = self.rmp_joint_order
+        joint_names = self.glorbot_controller.rmp_configs.tidybot2_franka_joint_names.tolist()
         joint_ids, _ = self.scene["robot"].find_joints(joint_names)
         joint_pos = self.scene["robot"].data.default_joint_pos
         joint_pos[..., joint_ids] = q.float()
         return joint_pos
 
     def map_joint_velocities_to_isaaclab_ordering(self, qd):
-        joint_names = self.rmp_joint_order
+        joint_names = self.glorbot_controller.rmp_configs.tidybot2_franka_joint_names.tolist()
         joint_ids, _ = self.scene["robot"].find_joints(joint_names)
         joint_vel = self.scene["robot"].data.default_joint_vel
         joint_vel[..., joint_ids] = qd.float()
@@ -192,29 +187,31 @@ class MotionGenerator:
     def reach_door_knob(self):
         robot_pos, robot_quat = self.get_base_pos_and_quat(self.scene["robot"])
 
-        q = self.prev_q
-        qd = self.prev_qd
+        q = self.get_joint_positions()
+        qd = self.get_joint_velocities()
 
-        base_pose = q[0:3]
-        base_velocity = qd[0:3]
-        # base_pose = torch.Tensor(list(rebase_goal(base_pose, robot_pos, robot_quat, velocity = False)))
-        # base_velocity = torch.Tensor(list(rebase_goal(base_velocity, torch.zeros(3), robot_quat, velocity = True)))
+        base_pose = q[...,0:3]
+        base_velocity = qd[...,0:3]
+        base_pose = torch.Tensor(list(rebase_goal(base_pose, robot_pos, robot_quat, velocity = False)))
+        base_velocity = torch.Tensor(list(rebase_goal(base_velocity, torch.zeros(3), robot_quat, velocity = True)))
+        # base_pose = quat_apply(robot_quat, base_pose) + robot_pos
+        # base_velocity = quat_apply(robot_quat, base_velocity)
 
-        # if isinstance(q, torch.Tensor):
-        #     q = q.squeeze()
-        #     q = q.cpu().numpy()
+        if isinstance(q, torch.Tensor):
+            q = q.squeeze()
+            q = q.cpu().numpy()
         
-        # if isinstance(qd, torch.Tensor):
-        #     qd = qd.squeeze()
-        #     qd = qd.cpu().numpy()
+        if isinstance(qd, torch.Tensor):
+            qd = qd.squeeze()
+            qd = qd.cpu().numpy()
 
-        # if isinstance(base_pose, torch.Tensor):
-        #     base_pose = base_pose.squeeze()
-        #     base_pose = base_pose.cpu().numpy()
+        if isinstance(base_pose, torch.Tensor):
+            base_pose = base_pose.squeeze()
+            base_pose = base_pose.cpu().numpy()
 
-        # if isinstance(base_velocity, torch.Tensor):
-        #     base_velocity = base_velocity.squeeze()
-        #     base_velocity = base_velocity.cpu().numpy()
+        if isinstance(base_velocity, torch.Tensor):
+            base_velocity = base_velocity.squeeze()
+            base_velocity = base_velocity.cpu().numpy()
 
         ee_target_position = self.get_door_knob_pos().squeeze()
 
@@ -224,13 +221,21 @@ class MotionGenerator:
         ee_target_orientation = robot_quat.squeeze().cpu().numpy()
         ee_target_pose = np.concatenate((ee_target_position, ee_target_orientation))
 
+        print("ee_target_pose: ", ee_target_pose)
+
         joint_angles = self.scene["door"].data.joint_pos
         door_pointcloud = sample_pointcloud(self.scene["door"].cfg.spawn.asset_path, joint_angles, device=self.device)
         door_pointcloud = quat_apply(self.scene["door"].data.body_quat_w[:, 0], door_pointcloud) + self.scene["door"].data.body_pos_w[:, 0]
         door_pointcloud = door_pointcloud.squeeze()
 
+        # print("ee_target_position: ", ee_target_position)
+
+        # tensor_to_ply(door_pointcloud, "pointcloud.ply")
+
         if isinstance(door_pointcloud, torch.Tensor):
             door_pointcloud = door_pointcloud.cpu().numpy()
+
+        print("original base_pose: ", base_pose)
 
         # TODO: self.prev_q
         arm_pos_target, arm_vel_target, base_pos_target_world_frame, base_vel_target_world_frame, base_se2_plan, _ = self.glorbot_controller.get_action(
@@ -244,14 +249,13 @@ class MotionGenerator:
         )
         joint_pos_target = np.concatenate((base_pos_target_world_frame, arm_pos_target))
         joint_vel_target = np.concatenate((base_vel_target_world_frame, arm_vel_target))
-
-        self.prev_q = joint_pos_target
-        self.prev_qd = joint_vel_target
-        
+        joint_pos = self.scene["robot"].data.joint_pos
         joint_pos_target, joint_vel_target = torch.from_numpy(joint_pos_target).to(self.device), torch.from_numpy(joint_vel_target).to(self.device)
 
+        # print("base_pos: ", base_pos_target_world_frame, robot_pos)
         joint_pos_target[..., :3] = unbase_goal(joint_pos_target[..., :3], robot_pos, robot_quat, velocity = False)
         joint_pos_target[..., :3] = unbase_goal(joint_pos_target[..., :3], torch.zeros_like(robot_pos), robot_quat, velocity = True)
+        # print("base target: ", joint_pos_target[:3])
 
         # Normalize the angle to [-pi, pi]
         joint_pos_target[..., 2] = (joint_pos_target[..., 2] + torch.pi) % (2 * torch.pi) - torch.pi
