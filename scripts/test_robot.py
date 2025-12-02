@@ -66,7 +66,9 @@ from DoorOpening.motion.motion_generator import MotionGenerator
 from isaaclab.utils.math import quat_from_euler_xyz
 
 euler_angles = torch.tensor([0.0, 0.0, np.pi * 4 / 5])  # (roll, pitch, yaw) in radians
-quat = quat_from_euler_xyz(euler_angles[0], euler_angles[1], euler_angles[2]) 
+quat = quat_from_euler_xyz(euler_angles[0], euler_angles[1], euler_angles[2])
+
+torch.set_printoptions(precision=3, sci_mode=False)
 
 @configclass
 class SensorsSceneCfg(InteractiveSceneCfg):
@@ -165,8 +167,11 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
                     'panda_joint6',
                     'panda_joint7',
                 ]
-                hand_idx = scene["robot"].find_joints(FRANKA_JOINT_NAMES)[0]
-                print("ik_joint_pos: ", ik_joint_pos[:, hand_idx])
+                # hand_idx = scene["robot"].find_joints(FRANKA_JOINT_NAMES)[0]
+                # print("ik_joint_pos: ", ik_joint_pos[:, hand_idx])
+                print("base pose: ", motion_generator.base_pose)
+                print("ik_joint_pos: ", ik_joint_pos[:, :10])
+                print("joint_pos: ", scene["robot"].data.joint_pos[:, :10])
             scene["robot"].set_joint_position_target(ik_joint_pos)
 
         # -- write data to sim
@@ -187,7 +192,7 @@ def main():
     sim_cfg = sim_utils.SimulationCfg(dt=0.005, device=args_cli.device)
     sim = sim_utils.SimulationContext(sim_cfg)
     # Set main camera
-    sim.set_camera_view(eye=[0.0, 0.0, 2.0], target=[0.0, 0.0, 0.7])
+    sim.set_camera_view(eye=[2.0, 2.0, 2.5], target=[0.0, 0.0, 0.7])
     # Design scene
     scene_cfg = SensorsSceneCfg(num_envs=args_cli.num_envs, env_spacing=2.0)
     scene = InteractiveScene(scene_cfg)

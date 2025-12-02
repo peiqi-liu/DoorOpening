@@ -191,7 +191,7 @@ class MotionGenerator:
         
     def compute_arm_target(self):
         # Get current robot state
-        ee_id = self.scene["robot"].find_bodies("palm_lower")[0][0]
+        ee_id = self.scene["robot"].find_bodies("fingertip_1")[0][0]
         # print("ee_idx: ", ee_idx)
         ee_quat_w = self.scene["robot"].data.body_quat_w[:, ee_id]
         ee_pos = self.scene["robot"].data.body_pos_w[:, ee_id]

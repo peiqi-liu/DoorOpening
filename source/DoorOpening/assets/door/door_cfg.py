@@ -38,12 +38,13 @@ def create_door_cfg(urdf_path: str) -> ArticulationCfg:
         ),
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.8),
+            # rot=(0, -0.7071, 0, 0.7071)
         ),
         actuators={
             "body": ImplicitActuatorCfg(
                 joint_names_expr=[".*"],
-                stiffness=1e6,
-                damping=10,
+                stiffness=1e7,
+                damping=1e5,
             ),
         },
     )
