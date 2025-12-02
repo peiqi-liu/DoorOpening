@@ -130,6 +130,10 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
 
     camera_index = 0
 
+
+    targets = scene["robot"].data.default_joint_pos.clone()
+    targets[..., :2] += 0.5
+
     # Simulate physics
     while simulation_app.is_running():
         # Reset
@@ -158,8 +162,6 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         # -- generate actions/commands
 
         joint_names_list = scene["robot"].joint_names
-        
-        targets = scene["robot"].data.default_joint_pos
         # print(scene["robot"].data.soft_joint_pos_limits)
         # print(scene["robot"].data.joint_names)
         # print(len(scene["robot"].data.joint_names))
@@ -169,14 +171,14 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         # print(scene["robot"].data.body_names)
         # print(len(scene["robot"].data.body_names))
 
-        print("body_pos_w: ", scene["door"].data.body_pos_w)
-        print("body_names: ", scene["door"].data.body_names)
-        print("joint_names: ", scene["door"].data.joint_names)
-        print("joint_pos: ", scene["door"].data.joint_pos)
-        print("lower limit: ", scene["door"].data.soft_joint_pos_limits[..., 0])
-        print("upper limit: ", scene["door"].data.soft_joint_pos_limits[..., 1])
-        # print(scene["robot"].data.joint_pos)
-        # print(len(scene["robot"].data.joint_pos[0]))
+        # print("body_pos_w: ", scene["door"].data.body_pos_w)
+        # print("body_names: ", scene["door"].data.body_names)
+        # print("joint_names: ", scene["door"].data.joint_names)
+        # print("joint_pos: ", scene["door"].data.joint_pos)
+        # print("lower limit: ", scene["door"].data.soft_joint_pos_limits[..., 0])
+        # print("upper limit: ", scene["door"].data.soft_joint_pos_limits[..., 1])
+        if count % 100 == 0:
+            print("joint_pos: ", scene["robot"].data.joint_pos)
         # if count % 100 == 0:
         #     print("--------------------------------")
         #     print(count)
@@ -185,6 +187,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         #     print((scene["robot"].data.default_joint_pos * 1000).int())
         #     print((scene["robot"].data.joint_pos - scene["robot"].data.default_joint_pos * 1000).int())
         # -- apply action to the robot
+            print("targets: ", targets)
         scene["robot"].set_joint_position_target(targets)
         # -- write data to sim
         scene.write_data_to_sim()

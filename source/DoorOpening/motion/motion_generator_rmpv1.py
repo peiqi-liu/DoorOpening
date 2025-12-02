@@ -19,6 +19,28 @@ from isaaclab.utils.math import euler_xyz_from_quat, yaw_quat
 
 import torch
 
+def world_to_local(points, pos, quat):
+    """
+    Convert world-frame (N,3) points into local frame defined by pos+quat.
+    quat: (w,x,y,z) rotation of frame in world
+    """
+
+    if quat.ndim != 1:
+        quat = quat.squeeze()
+    if pos.ndim != 1:
+        pos = pos.squeeze()
+
+    # Convert quaternion to rotation matrix
+    w, x, y, z = quat
+    R = torch.tensor([
+        [1 - 2*(y**2 + z**2),     2*(x*y - z*w),         2*(x*z + y*w)],
+        [    2*(x*y + z*w),   1 - 2*(x**2 + z**2),       2*(y*z - x*w)],
+        [    2*(x*z - y*w),       2*(y*z + x*w),     1 - 2*(x**2 + y**2)]
+    ], dtype=points.dtype, device=points.device)
+
+    # Translate then rotate by inverse (R^T)
+    return (points - pos) @ R
+
 def rebase_goal(rel_pos, orig_pos, orig_quat, velocity = False):
     """
     Transforms a relative pose (x, y, theta) to an absolute pose (x, y, theta) based on an
@@ -106,8 +128,6 @@ def unbase_goal(abs_pos, orig_pos, orig_quat, velocity=False):
     rel_x = dx *  cos_yaw + dy * sin_yaw
     rel_y = -dx * sin_yaw + dy * cos_yaw
 
-    print("dx, dy, rel_x, rel_y: ", dx, dy, rel_x, rel_y)
-
     # ------------------------------
     # Invert orientation
     # ------------------------------
@@ -192,10 +212,8 @@ class MotionGenerator:
 
         base_pose = q[...,0:3]
         base_velocity = qd[...,0:3]
-        base_pose = torch.Tensor(list(rebase_goal(base_pose, robot_pos, robot_quat, velocity = False)))
-        base_velocity = torch.Tensor(list(rebase_goal(base_velocity, torch.zeros(3), robot_quat, velocity = True)))
-        # base_pose = quat_apply(robot_quat, base_pose) + robot_pos
-        # base_velocity = quat_apply(robot_quat, base_velocity)
+        # base_pose = torch.Tensor(list(rebase_goal(base_pose, robot_pos, robot_quat, velocity = False)))
+        # base_velocity = torch.Tensor(list(rebase_goal(base_velocity, torch.zeros(3), robot_quat, velocity = True)))
 
         if isinstance(q, torch.Tensor):
             q = q.squeeze()
@@ -214,6 +232,7 @@ class MotionGenerator:
             base_velocity = base_velocity.cpu().numpy()
 
         ee_target_position = self.get_door_knob_pos().squeeze()
+        ee_target_position = world_to_local(ee_target_position, robot_pos, robot_quat)
 
         if isinstance(ee_target_position, torch.Tensor):
             ee_target_position = ee_target_position.cpu().numpy()
@@ -221,21 +240,23 @@ class MotionGenerator:
         ee_target_orientation = robot_quat.squeeze().cpu().numpy()
         ee_target_pose = np.concatenate((ee_target_position, ee_target_orientation))
 
-        print("ee_target_pose: ", ee_target_pose)
+        # print("ee_target_pose: ", ee_target_pose)
 
         joint_angles = self.scene["door"].data.joint_pos
         door_pointcloud = sample_pointcloud(self.scene["door"].cfg.spawn.asset_path, joint_angles, device=self.device)
         door_pointcloud = quat_apply(self.scene["door"].data.body_quat_w[:, 0], door_pointcloud) + self.scene["door"].data.body_pos_w[:, 0]
         door_pointcloud = door_pointcloud.squeeze()
 
-        # print("ee_target_position: ", ee_target_position)
+        door_pointcloud = world_to_local(door_pointcloud, robot_pos, robot_quat)
+
+        print("ee_target_position: ", ee_target_position)
 
         # tensor_to_ply(door_pointcloud, "pointcloud.ply")
 
         if isinstance(door_pointcloud, torch.Tensor):
             door_pointcloud = door_pointcloud.cpu().numpy()
 
-        print("original base_pose: ", base_pose)
+        # print("original base_pose: ", base_pose)
 
         # TODO: self.prev_q
         arm_pos_target, arm_vel_target, base_pos_target_world_frame, base_vel_target_world_frame, base_se2_plan, _ = self.glorbot_controller.get_action(
@@ -253,15 +274,15 @@ class MotionGenerator:
         joint_pos_target, joint_vel_target = torch.from_numpy(joint_pos_target).to(self.device), torch.from_numpy(joint_vel_target).to(self.device)
 
         # print("base_pos: ", base_pos_target_world_frame, robot_pos)
-        joint_pos_target[..., :3] = unbase_goal(joint_pos_target[..., :3], robot_pos, robot_quat, velocity = False)
-        joint_pos_target[..., :3] = unbase_goal(joint_pos_target[..., :3], torch.zeros_like(robot_pos), robot_quat, velocity = True)
+        # joint_pos_target[..., :3] = unbase_goal(joint_pos_target[..., :3], robot_pos, robot_quat, velocity = False)
+        # joint_pos_target[..., :3] = unbase_goal(joint_pos_target[..., :3], torch.zeros_like(robot_pos), robot_quat, velocity = True)
         # print("base target: ", joint_pos_target[:3])
 
         # Normalize the angle to [-pi, pi]
         joint_pos_target[..., 2] = (joint_pos_target[..., 2] + torch.pi) % (2 * torch.pi) - torch.pi
         joint_vel_target[..., 2] = (joint_vel_target[..., 2] + torch.pi) % (2 * torch.pi) - torch.pi
 
-        joint_pos_target = self.map_joint_positions_to_isaaclab_ordering(joint_pos_target)
-        joint_vel_target = self.map_joint_velocities_to_isaaclab_ordering(joint_vel_target)
+        # joint_pos_target = self.map_joint_positions_to_isaaclab_ordering(joint_pos_target)
+        # joint_vel_target = self.map_joint_velocities_to_isaaclab_ordering(joint_vel_target)
         return joint_pos_target, joint_vel_target
         

@@ -107,8 +107,6 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         # scene["door"].set_joint_velocity_target(torch.tensor([1, 1]))
         if count % 100 == 0:
             print("joint_pos: ", scene["door"].data.joint_pos)
-            print("stiffness: ", scene["door"].data.joint_stiffness)
-            print("damping: ", scene["door"].data.joint_damping)
             # print("effort_limit_sim: ", scene["door"].data.effort_limit_sim)
             # print("velocity_limit_sim: ", scene["door"].data.velocity_limit_sim)
             # print("position_limit_sim: ", scene["door"].data.position_limit_sim)

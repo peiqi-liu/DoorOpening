@@ -100,7 +100,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     count = 0
 
     motion_generator = MotionGenerator(scene, device=args_cli.device)
-    motion_generator.initialize()
+    # motion_generator.initialize()
     # Simulate physics
     while simulation_app.is_running():
         # Reset
@@ -124,12 +124,15 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         # joint_pos, joint_vel = scene["robot"].data.joint_pos.clone(), scene["robot"].data.joint_vel.clone()
         joint_pos_target, joint_vel_target = motion_generator.reach_door_knob()
 
-        if count % 100 == 0:
+        if count % 10 == 0:
             print("joint_pos_target: ", joint_pos_target)
             # print("joint_vel_target: ", joint_vel_target)
+            print("joint_pos: ", scene["robot"].data.joint_pos)
+            # print("door_pos: ", scene["door"].data.body_pos_w[:, 0])
 
         # scene["robot"].write_joint_state_to_sim(joint_pos_target, joint_vel_target)
         scene["robot"].set_joint_position_target(joint_pos_target)
+        # scene["robot"].set_joint_velocity_target(joint_vel_target)
         # -- write data to sim
         scene.write_data_to_sim()
         # perform step
