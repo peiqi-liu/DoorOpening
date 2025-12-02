@@ -61,8 +61,8 @@ from isaaclab.assets import ArticulationCfg
 from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, DEFAULT_JOINT_POS
 from DoorOpening.assets.door.door_cfg import DOOR_CONFIG
 
-from DoorOpening.motion.motion_generator_rmp import MotionGenerator
-# from DoorOpening.motion.motion_generator_rmpv1 import MotionGenerator
+# from DoorOpening.motion.motion_generator_rmp import MotionGenerator
+from DoorOpening.motion.motion_generator_rmpv1 import MotionGenerator
 
 torch.set_printoptions(precision=3, sci_mode=False)
 
@@ -121,8 +121,9 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         # Apply default actions to the robot
         # -- generate actions/commands
         
-        # joint_pos, joint_vel = scene["robot"].data.joint_pos.clone(), scene["robot"].data.joint_vel.clone()
-        joint_pos_target, joint_vel_target = motion_generator.reach_door_knob()
+        joint_pos_target, joint_vel_target = scene["robot"].data.joint_pos.clone(), scene["robot"].data.joint_vel.clone()
+        for _ in range(10):
+            joint_pos_target, joint_vel_target = motion_generator.reach_door_knob(joint_pos_target, joint_vel_target)
 
         if count % 10 == 0:
             print("joint_pos_target: ", joint_pos_target)

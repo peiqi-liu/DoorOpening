@@ -204,11 +204,11 @@ class MotionGenerator:
         base_quat = articulation.data.body_quat_w[:, base_id]
         return base_pos, base_quat
 
-    def reach_door_knob(self):
+    def reach_door_knob(self, q, qd):
         robot_pos, robot_quat = self.get_base_pos_and_quat(self.scene["robot"])
 
-        q = self.get_joint_positions()
-        qd = self.get_joint_velocities()
+        # q = self.get_joint_positions()
+        # qd = self.get_joint_velocities()
 
         base_pose = q[...,0:3]
         base_velocity = qd[...,0:3]
