@@ -249,7 +249,7 @@ class MotionGenerator:
 
         door_pointcloud = world_to_local(door_pointcloud, robot_pos, robot_quat)
 
-        print("ee_target_position: ", ee_target_position)
+        # print("ee_target_position: ", ee_target_position)
 
         # tensor_to_ply(door_pointcloud, "pointcloud.ply")
 

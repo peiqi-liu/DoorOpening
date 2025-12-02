@@ -125,7 +125,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         for _ in range(10):
             joint_pos_target, joint_vel_target = motion_generator.reach_door_knob(joint_pos_target, joint_vel_target)
 
-        if count % 10 == 0:
+        if count % 20 == 0:
             print("joint_pos_target: ", joint_pos_target)
             # print("joint_vel_target: ", joint_vel_target)
             print("joint_pos: ", scene["robot"].data.joint_pos)
@@ -152,7 +152,7 @@ def main():
     sim_cfg = sim_utils.SimulationCfg(dt=0.005, device=args_cli.device)
     sim = sim_utils.SimulationContext(sim_cfg)
     # Set main camera
-    sim.set_camera_view(eye=[1.0, -4.0, 3.5], target=[0.2, 0.0, 0.0])
+    sim.set_camera_view(eye=[1.0, -3.0, 3.5], target=[0.2, 0.0, 0.0])
     # Design scene
     scene_cfg = SensorsSceneCfg(num_envs=args_cli.num_envs, env_spacing=2.0)
     scene = InteractiveScene(scene_cfg)
