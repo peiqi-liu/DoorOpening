@@ -87,7 +87,7 @@ class SensorsSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
             joint_pos=DEFAULT_JOINT_POS,
-            pos=(1.0, 0, 0.0),
+            pos=(0.5, 0, 0.0),
             # rot=[0.707, 0, 0, 0.707]
             rot = quat
         ),
@@ -113,7 +113,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     # Simulate physics
     while simulation_app.is_running():
         # Reset
-        if count % 1500 == 0:
+        if count % 1300 == 0:
             # reset counter
             count = 0
             # reset the scene entities
@@ -146,7 +146,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         # Apply default actions to the robot
         # -- generate actions/commands
 
-        if count < 500:
+        if count < 200:
             actions = motion_generator.compute_approach_target()
             joint_pos = scene["robot"].data.default_joint_pos.clone()
             # print("joint_pos: ", joint_pos[..., :3])
@@ -154,24 +154,20 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             # print("actions: ", actions)
             scene["robot"].set_joint_position_target(joint_pos)
 
-        else:
+        elif count < 500:
             ik_joint_pos = motion_generator.compute_arm_target()
             if count % 50 == 0:
                 motion_generator.compute_arm_target()
-                FRANKA_JOINT_NAMES = [
-                    'panda_joint1',
-                    'panda_joint2',
-                    'panda_joint3',
-                    'panda_joint4',
-                    'panda_joint5',
-                    'panda_joint6',
-                    'panda_joint7',
-                ]
-                # hand_idx = scene["robot"].find_joints(FRANKA_JOINT_NAMES)[0]
-                # print("ik_joint_pos: ", ik_joint_pos[:, hand_idx])
-                print("base pose: ", motion_generator.base_pose)
-                print("ik_joint_pos: ", ik_joint_pos[:, :10])
+                # print("ik_joint_pos: ", ik_joint_pos[:, :10])
+                # print("joint_pos: ", scene["robot"].data.joint_pos[:, :10])
+            scene["robot"].set_joint_position_target(ik_joint_pos)
+
+        else:
+            ik_joint_pos = motion_generator.door_opening_motion(step = (count - 590) * 0.05)
+            if count % 50 == 0:
                 print("joint_pos: ", scene["robot"].data.joint_pos[:, :10])
+                print("door pos: ", scene["door"].data.joint_pos)
+                print("ik_joint_pos: ", ik_joint_pos[:, :10])
             scene["robot"].set_joint_position_target(ik_joint_pos)
 
         # -- write data to sim

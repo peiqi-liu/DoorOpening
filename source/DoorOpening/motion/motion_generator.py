@@ -93,7 +93,7 @@ class MotionGenerator:
         self.base_pose = None
         self.prev_angles = self.scene["robot"].data.joint_pos
 
-    def get_door_approach_pose(self, door_normal, door_handle_pos, robot_pos, offset=0.3):
+    def get_door_approach_pose(self, door_normal, door_handle_pos, robot_pos, offset=0.5):
         """
         Calculate target (x, y, theta) for robot to approach door from correct side
         
@@ -226,5 +226,36 @@ class MotionGenerator:
         return joint_pos
 
 
-    def door_opening_motion(self):
-        door_joint_pos = self.scene["door"].data.joint_pos
+    def door_opening_motion(self, step):
+        if step > 50:
+            step = 50
+        step_size = (self.scene["door"].data.soft_joint_pos_limits[..., 1] - \
+             self.scene["door"].data.soft_joint_pos_limits[..., 0]) * int(step) / 50
+
+        target_door_pos = self.scene["door"].data.soft_joint_pos_limits[..., 0] + step_size
+        print("target_door_pos: ", target_door_pos)
+        self.scene["door"].write_joint_position_to_sim(target_door_pos)
+
+        ee_id = self.scene["robot"].find_bodies("palm_center")[0][0]
+        ee_pos = self.scene["robot"].data.body_pos_w[:, ee_id]
+        ee_quat = self.scene["robot"].data.body_quat_w[:, ee_id]
+
+        door_knob_pos = self.get_door_knob_pos()
+        door_knob_pos = door_knob_pos - ee_pos
+
+        hand_idx = self.scene["robot"].find_joints(FRANKA_JOINT_NAMES + BASE_JOINT_NAMES)[0]
+        hand_jac = self.scene["robot"].root_physx_view.get_jacobians()[:, ee_id, :, hand_idx]
+        current_joint_pos = self.scene["robot"].data.joint_pos[:, hand_idx]
+
+        self.ik_controller.set_command(command=door_knob_pos, ee_pos=ee_pos, ee_quat=ee_quat)
+        joint_pos_des = self.ik_controller.compute(
+            ee_pos,
+            ee_quat,
+            hand_jac,
+            current_joint_pos,
+        )
+
+        joint_pos = self.scene["robot"].data.joint_pos
+        joint_pos[:, hand_idx] = joint_pos_des
+
+        return joint_pos
