@@ -122,14 +122,11 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         # -- generate actions/commands
         
         joint_pos_target, joint_vel_target = scene["robot"].data.joint_pos.clone(), scene["robot"].data.joint_vel.clone()
-        for _ in range(10):
-            joint_pos_target, joint_vel_target = motion_generator.reach_door_knob(joint_pos_target, joint_vel_target)
+        joint_pos_target, joint_vel_target = motion_generator.reach_door_knob(joint_pos_target, joint_vel_target)
 
-        if count % 20 == 0:
-            print("joint_pos_target: ", joint_pos_target)
-            # print("joint_vel_target: ", joint_vel_target)
-            print("joint_pos: ", scene["robot"].data.joint_pos)
-            # print("door_pos: ", scene["door"].data.body_pos_w[:, 0])
+        # if count % 20 == 0:
+        #     print("joint_pos_target: ", joint_pos_target)
+        #     print("joint_pos: ", scene["robot"].data.joint_pos)
 
         # scene["robot"].write_joint_state_to_sim(joint_pos_target, joint_vel_target)
         scene["robot"].set_joint_position_target(joint_pos_target)

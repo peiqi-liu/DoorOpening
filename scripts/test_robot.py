@@ -53,7 +53,6 @@ import torch
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
-from isaaclab.sensors import CameraCfg, ContactSensorCfg, RayCasterCfg, patterns
 from isaaclab.utils import configclass
 
 from isaaclab.assets import ArticulationCfg
@@ -109,7 +108,6 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     count = 0
 
     motion_generator = MotionGenerator(scene, device=args_cli.device)
-    motion_generator.reset()
     # Simulate physics
     while simulation_app.is_running():
         # Reset
@@ -146,29 +144,28 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         # Apply default actions to the robot
         # -- generate actions/commands
 
-        if count < 200:
-            actions = motion_generator.compute_approach_target()
-            joint_pos = scene["robot"].data.default_joint_pos.clone()
-            # print("joint_pos: ", joint_pos[..., :3])
-            joint_pos[..., :3] = actions
+        if count < 150:
+            joint_pos = motion_generator.compute_approach_target()
             # print("actions: ", actions)
             scene["robot"].set_joint_position_target(joint_pos)
 
-        elif count < 500:
-            ik_joint_pos = motion_generator.compute_arm_target()
-            if count % 50 == 0:
-                motion_generator.compute_arm_target()
-                # print("ik_joint_pos: ", ik_joint_pos[:, :10])
-                # print("joint_pos: ", scene["robot"].data.joint_pos[:, :10])
-            scene["robot"].set_joint_position_target(ik_joint_pos)
+        # elif count < 300:
+        #     ik_joint_pos = motion_generator.compute_arm_target()
+        #     scene["robot"].set_joint_position_target(ik_joint_pos)
+        #     motion_generator.check_ee_pos()
 
         else:
-            ik_joint_pos = motion_generator.door_opening_motion(step = (count - 590) * 0.05)
-            if count % 50 == 0:
+            ik_joint_pos = motion_generator.door_opening_motion()
+            if ik_joint_pos is not None:
+                scene["robot"].set_joint_position_target(ik_joint_pos)
+            if count % 20 == 21:
                 print("joint_pos: ", scene["robot"].data.joint_pos[:, :10])
                 print("door pos: ", scene["door"].data.joint_pos)
-                print("ik_joint_pos: ", ik_joint_pos[:, :10])
-            scene["robot"].set_joint_position_target(ik_joint_pos)
+                if ik_joint_pos is not None:
+                    print("ik_joint_pos: ", ik_joint_pos[:, :10])
+                else:
+                    print("ik_joint_pos: None")
+            # scene["robot"].set_joint_position_target(ik_joint_pos)
 
         # -- write data to sim
         scene.write_data_to_sim()
@@ -188,7 +185,7 @@ def main():
     sim_cfg = sim_utils.SimulationCfg(dt=0.005, device=args_cli.device)
     sim = sim_utils.SimulationContext(sim_cfg)
     # Set main camera
-    sim.set_camera_view(eye=[2.0, 2.0, 2.5], target=[0.0, 0.0, 0.7])
+    sim.set_camera_view(eye=[1.0, -1.5, 1.8], target=[0.0, 0.0, 0.7])
     # Design scene
     scene_cfg = SensorsSceneCfg(num_envs=args_cli.num_envs, env_spacing=2.0)
     scene = InteractiveScene(scene_cfg)

@@ -41,103 +41,6 @@ def world_to_local(points, pos, quat):
     # Translate then rotate by inverse (R^T)
     return (points - pos) @ R
 
-def rebase_goal(rel_pos, orig_pos, orig_quat, velocity = False):
-    """
-    Transforms a relative pose (x, y, theta) to an absolute pose (x, y, theta) based on an
-    original position (x, y, z) and orientation quaternion (w, x, y, z).
-
-    Args:
-        rel_pos (tensor-like): The relative pose as (x, y, theta).
-        orig_pos (tensor-like): The original absolute position as (x, y, z).
-        orig_quat (tensor-like): The original absolute orientation as (w, x, y, z) quaternion.
-        velocity (bool): Whether to this function is used to rebase vel.
-
-    Returns:
-        torch.Tensor: The absolute pose as (x, y, theta).
-    """
-
-    rel_x, rel_y, rel_theta = rel_pos.unbind(dim = -1)
-    orig_x, orig_y, orig_z = orig_pos.unbind(dim = -1)
-
-    # --- Calculate absolute position (x, y) ---
-    # Calculate the yaw angle from the original quaternion
-    _, _, orig_yaw = euler_xyz_from_quat(orig_quat)
-
-    cos_yaw_val = torch.cos(orig_yaw)
-    sin_yaw_val = torch.sin(orig_yaw)
-
-    # Rotate the relative x, y components by the original yaw
-    rotated_rel_x = rel_x * cos_yaw_val - rel_y * sin_yaw_val
-    rotated_rel_y = rel_x * sin_yaw_val + rel_y * cos_yaw_val
-
-    # Calculate absolute x, y
-    if not velocity:
-        abs_x = orig_x + rotated_rel_x
-        abs_y = orig_y + rotated_rel_y
-    else:
-        abs_x = rotated_rel_x
-        abs_y = rotated_rel_y
-
-    # --- Calculate absolute orientation theta ---
-    # The absolute theta is the sum of the original theta and the relative theta
-    abs_theta = orig_yaw + rel_theta
-
-    # Optional: Normalize the angle to [-pi, pi]
-    # abs_theta = torch.atan2(torch.sin(abs_theta), torch.cos(abs_theta))
-
-    return torch.hstack([abs_x, abs_y, abs_theta]).to(rel_pos.device)
-
-
-def unbase_goal(abs_pos, orig_pos, orig_quat, velocity=False):
-    """
-    Inverse of rebase_goal().
-    Converts an absolute world-frame pose (x, y, theta) to
-    a robot-relative pose (x, y, theta).
-    
-    Args:
-        abs_pos:  (x, y, theta) in world frame
-        orig_pos: robot base (x, y, z)
-        orig_quat: robot base (w, x, y, z)
-        velocity: whether this is for velocities (no translation offset)
-
-    Returns:
-        torch.Tensor: (x_rel, y_rel, theta_rel)
-    """
-    abs_x, abs_y, abs_theta = abs_pos.unbind(dim=-1)
-    orig_x, orig_y, orig_z = orig_pos.unbind(dim=-1)
-
-    # Get original yaw
-    _, _, orig_yaw = euler_xyz_from_quat(orig_quat)
-
-    cos_yaw = torch.cos(orig_yaw)
-    sin_yaw = torch.sin(orig_yaw)
-
-    # ------------------------------
-    # Invert translation
-    # ------------------------------
-    if not velocity:
-        dx = abs_x - orig_x
-        dy = abs_y - orig_y
-    else:
-        dx = abs_x
-        dy = abs_y
-
-    # ------------------------------
-    # Invert rotation: R(-yaw)
-    # ------------------------------
-    rel_x = dx *  cos_yaw + dy * sin_yaw
-    rel_y = -dx * sin_yaw + dy * cos_yaw
-
-    # ------------------------------
-    # Invert orientation
-    # ------------------------------
-    rel_theta = abs_theta - orig_yaw
-
-    # Optionally wrap to [-pi, pi]
-    # rel_theta = torch.atan2(torch.sin(rel_theta), torch.cos(rel_theta))
-
-    return torch.hstack([rel_x, rel_y, rel_theta]).to(abs_pos.device)
-
 
 class MotionGenerator:
     """
@@ -150,14 +53,14 @@ class MotionGenerator:
         self.handle_body_name = handle_body_name
         
         # --- RMP Controller Setup ---
-        self.glorbot_controller = GlorbotController()
+        self.glorbot_controller = GlorbotController(scene["robot"].cfg.spawn.asset_path)
+        self.joint_order = self.glorbot_controller.rmpflow.robot_world.joint_names_in_order
         q = self.get_joint_positions()
         self.glorbot_controller.initialize(q=q.squeeze().cpu().numpy())
-        torch.set_printoptions(precision=3, sci_mode=False)
+        torch.set_printoptions(precision=5, sci_mode=False)
 
     def get_joint_positions(self):
-        joint_names = self.glorbot_controller.rmp_configs.tidybot2_franka_joint_names.tolist()
-        joint_ids, _ = self.scene["robot"].find_joints(joint_names)
+        joint_ids, _ = self.scene["robot"].find_joints(self.joint_order)
         # print("joint_ids: ", joint_ids, len(joint_ids))
         q = self.scene["robot"].data.joint_pos
         q = q[..., joint_ids].float()
@@ -165,23 +68,20 @@ class MotionGenerator:
         return q
 
     def get_joint_velocities(self):
-        joint_names = self.glorbot_controller.rmp_configs.tidybot2_franka_joint_names.tolist()
-        joint_ids, _ = self.scene["robot"].find_joints(joint_names)
+        joint_ids, _ = self.scene["robot"].find_joints(self.joint_order)
         qd = self.scene["robot"].data.joint_vel
         qd = qd[..., joint_ids].float()
         # qd = qd.cpu().numpy()
         return qd
 
     def map_joint_positions_to_isaaclab_ordering(self, q):
-        joint_names = self.glorbot_controller.rmp_configs.tidybot2_franka_joint_names.tolist()
-        joint_ids, _ = self.scene["robot"].find_joints(joint_names)
+        joint_ids, _ = self.scene["robot"].find_joints(self.joint_order)
         joint_pos = self.scene["robot"].data.default_joint_pos
         joint_pos[..., joint_ids] = q.float()
         return joint_pos
 
     def map_joint_velocities_to_isaaclab_ordering(self, qd):
-        joint_names = self.glorbot_controller.rmp_configs.tidybot2_franka_joint_names.tolist()
-        joint_ids, _ = self.scene["robot"].find_joints(joint_names)
+        joint_ids, _ = self.scene["robot"].find_joints(self.joint_order)
         joint_vel = self.scene["robot"].data.default_joint_vel
         joint_vel[..., joint_ids] = qd.float()
         return joint_vel
@@ -205,15 +105,12 @@ class MotionGenerator:
         return base_pos, base_quat
 
     def reach_door_knob(self, q, qd):
+        q = self.get_joint_positions()
+        qd = self.get_joint_velocities()
         robot_pos, robot_quat = self.get_base_pos_and_quat(self.scene["robot"])
-
-        # q = self.get_joint_positions()
-        # qd = self.get_joint_velocities()
 
         base_pose = q[...,0:3]
         base_velocity = qd[...,0:3]
-        # base_pose = torch.Tensor(list(rebase_goal(base_pose, robot_pos, robot_quat, velocity = False)))
-        # base_velocity = torch.Tensor(list(rebase_goal(base_velocity, torch.zeros(3), robot_quat, velocity = True)))
 
         if isinstance(q, torch.Tensor):
             q = q.squeeze()
@@ -247,18 +144,17 @@ class MotionGenerator:
         door_pointcloud = quat_apply(self.scene["door"].data.body_quat_w[:, 0], door_pointcloud) + self.scene["door"].data.body_pos_w[:, 0]
         door_pointcloud = door_pointcloud.squeeze()
 
+        # body_idx, _ = self.scene["robot"].find_bodies(["mcp_joint1"])
+        # body_id = body_idx[0]
+        # print(world_to_local(self.scene["robot"].data.body_pos_w[:, body_id], robot_pos, robot_quat))
+
         door_pointcloud = world_to_local(door_pointcloud, robot_pos, robot_quat)
 
-        # print("ee_target_position: ", ee_target_position)
-
-        # tensor_to_ply(door_pointcloud, "pointcloud.ply")
+        # tensor_to_ply(door_pointcloud, "door_pointcloud.ply")
 
         if isinstance(door_pointcloud, torch.Tensor):
             door_pointcloud = door_pointcloud.cpu().numpy()
-
-        # print("original base_pose: ", base_pose)
-
-        # TODO: self.prev_q
+        
         arm_pos_target, arm_vel_target, base_pos_target_world_frame, base_vel_target_world_frame, base_se2_plan, _ = self.glorbot_controller.get_action(
             base_pose=base_pose, base_velocity=base_velocity, 
             franka_joint_positions=q[3:3+7], franka_joint_velocities=qd[3:3+7],
@@ -271,6 +167,8 @@ class MotionGenerator:
         joint_pos_target = np.concatenate((base_pos_target_world_frame, arm_pos_target))
         joint_vel_target = np.concatenate((base_vel_target_world_frame, arm_vel_target))
         joint_pos = self.scene["robot"].data.joint_pos
+        print("body_link_vel_w: ", self.scene["robot"].data.body_link_vel_w[0, 3:7])
+        print("body_link_lin_vel_w: ", self.scene["robot"].data.body_link_lin_vel_w[0, 3:7])
         joint_pos_target, joint_vel_target = torch.from_numpy(joint_pos_target).to(self.device), torch.from_numpy(joint_vel_target).to(self.device)
 
         # print("base_pos: ", base_pos_target_world_frame, robot_pos)
