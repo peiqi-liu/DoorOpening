@@ -158,21 +158,22 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             if ik_joint_pos is not None and count % 3 == 0:
                 scene["robot"].write_joint_position_to_sim(ik_joint_pos)
 
-            # if count % 20 == 1:
-            #     print("joint_pos: ", scene["robot"].data.joint_pos[:, :10])
-            #     print("door pos: ", scene["door"].data.joint_pos)
-            #     if ik_joint_pos is not None:
-            #         print("ik_joint_pos: ", ik_joint_pos[:, :10])
-            #     else:
-            #         print("ik_joint_pos: None")
             if ik_joint_pos is None:
                 ik_count += 1
+
+            if count % 20 == 1:
+                # print("joint_pos: ", scene["robot"].data.joint_pos[:, :10])
+                print("door pos: ", scene["door"].data.joint_pos)
+                # if ik_joint_pos is not None:
+                #     print("ik_joint_pos: ", ik_joint_pos[:, :10])
+                # else:
+                #     print("ik_joint_pos: None")
 
         elif move_away_count < 5:
             ik_joint_pos = motion_generator.move_away_from_door()
             scene["robot"].write_joint_position_to_sim(ik_joint_pos)
             move_away_count += 1
-            print("ik_joint_pos: ", ik_joint_pos)
+            # print("ik_joint_pos: ", ik_joint_pos)
         
         else:
             break

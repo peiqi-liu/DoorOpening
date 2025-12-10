@@ -51,7 +51,7 @@ class MotionGenerator:
             command_type="position", 
             use_relative_mode=True,
             ik_method="dls",
-            ik_params={"lambda_val": 0.5}
+            ik_params={"lambda_val": 0.2}
         )
         self.ik_controller = DifferentialIKController(
             ik_cfg, num_envs=self.num_envs, device=self.device
@@ -254,26 +254,31 @@ class MotionGenerator:
             return joint_pos_target
 
     def move_away_from_door(self):
-        # robot_xy = self.scene["robot"].data.joint_pos[..., :2]
-        # door_vec = (robot_xy * self.door_normal[..., :2]).sum(dim = -1) * self.door_normal[..., :2]
-        # door_vec /= torch.linalg.norm(door_vec, dim = -1)
-        # joint_pos = self.scene["robot"].data.joint_pos.clone()
-        # joint_pos[..., :2] += door_vec
-        # return joint_pos
+        # Assume:
+        # - self.door_normal: (..., 3) — outward normal (from room A to room B) → points in traversal direction
+        # - self.door_side: "left" or "right" — which side the hinges are on (from robot's approach view)
+        door_normal_xy = self.door_normal[..., :2]  # direction through doorway
+        door_normal_xy = door_normal_xy / torch.linalg.norm(door_normal_xy, dim=-1, keepdim=True).clamp_min(1e-8)
+        # Perpendicular to door_normal (i.e., along door width)
+        # e.g., for door_normal = [1, 0] (facing +X), perp = [0, 1] or [0, -1]
+        perp = torch.stack([-door_normal_xy[..., 1], door_normal_xy[..., 0]], dim=-1)  # 90° CCW
 
-        robot_xy = self.scene["robot"].data.joint_pos[..., :2]
-        robot_xy = robot_xy - self.joint_pos_des[..., :2]
-        robot_xy /= torch.linalg.norm(robot_xy, dim = -1)
+        # Determine safe lateral offset direction:
+        # If hinges on RIGHT (common case), door swings LEFT → robot should step LEFT (i.e., +perp if perp is leftward)
+        # But sign depends on coordinate convention! Let’s define:
+        #   self.door_hinge_side = +1 for right-hinged (door swings CCW), -1 for left-hinged (CW)
+        # Then: safe_offset_dir = door_normal_xy + hinge_side_factor * perp
+        hinge_side_factor = 0.5  # e.g., +0.5 for right-hinged (bias left), -0.5 for left-hinged
+
+        # Desired direction: mostly forward, slightly sideways to clear door
+        move_dir = door_normal_xy + hinge_side_factor * perp
+        move_dir = move_dir / torch.linalg.norm(move_dir, dim=-1, keepdim=True).clamp_min(1e-8)
+
+        # Step forward ~0.3–0.5m in that direction
         joint_pos = self.scene["robot"].data.joint_pos.clone()
-        joint_pos[..., :2] += robot_xy * 0.3
-        return joint_pos
+        joint_pos[..., :2] += move_dir * 0.4  # tunable step size
 
-        # joint_pos = self.scene["robot"].data.joint_pos.clone()
-        # n = self.door_normal[..., :2]
-        # diff_vec = (torch.sum(joint_pos[..., :2] * n, dim=-1, keepdim=True) / torch.sum(n * n, dim=-1, keepdim=True).clamp_min(1e-8)) * n
-        # diff_vec /= torch.linalg.norm(diff_vec, dim = -1)
-        # joint_pos[..., :2] += diff_vec
-        # return joint_pos
+        return joint_pos
 
     # def door_opening_motion(self):
     #     pose_reached, far = self.check_ee_pos()
