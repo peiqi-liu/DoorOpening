@@ -18,29 +18,7 @@ from DoorOpening.utils.point_utils import tensor_to_ply
 from isaaclab.utils.math import euler_xyz_from_quat, yaw_quat
 
 import torch
-
-def world_to_local(points, pos, quat):
-    """
-    Convert world-frame (N,3) points into local frame defined by pos+quat.
-    quat: (w,x,y,z) rotation of frame in world
-    """
-
-    if quat.ndim != 1:
-        quat = quat.squeeze()
-    if pos.ndim != 1:
-        pos = pos.squeeze()
-
-    # Convert quaternion to rotation matrix
-    w, x, y, z = quat
-    R = torch.tensor([
-        [1 - 2*(y**2 + z**2),     2*(x*y - z*w),         2*(x*z + y*w)],
-        [    2*(x*y + z*w),   1 - 2*(x**2 + z**2),       2*(y*z - x*w)],
-        [    2*(x*z - y*w),       2*(y*z + x*w),     1 - 2*(x**2 + y**2)]
-    ], dtype=points.dtype, device=points.device)
-
-    # Translate then rotate by inverse (R^T)
-    return (points - pos) @ R
-
+from DoorOpening.utils.pose_utils import  world_to_local
 
 class MotionGenerator:
     """
@@ -53,9 +31,10 @@ class MotionGenerator:
         self.handle_body_name = handle_body_name
         
         # --- RMP Controller Setup ---
-        self.glorbot_controller = GlorbotController(scene["robot"].cfg.spawn.asset_path)
-        self.joint_order = self.glorbot_controller.rmpflow.robot_world.joint_names_in_order
+        self.glorbot_controller = GlorbotController(scene["robot"].cfg.spawn.asset_path, self.scene["robot"])
+        self.joint_order = self.glorbot_controller.rmp_configs.tidybot2_franka_joint_names.tolist()
         q = self.get_joint_positions()
+        # q = self.scene["robot"].data.joint_pos
         self.glorbot_controller.initialize(q=q.squeeze().cpu().numpy())
         torch.set_printoptions(precision=5, sci_mode=False)
 
@@ -167,8 +146,6 @@ class MotionGenerator:
         joint_pos_target = np.concatenate((base_pos_target_world_frame, arm_pos_target))
         joint_vel_target = np.concatenate((base_vel_target_world_frame, arm_vel_target))
         joint_pos = self.scene["robot"].data.joint_pos
-        print("body_link_vel_w: ", self.scene["robot"].data.body_link_vel_w[0, 3:7])
-        print("body_link_lin_vel_w: ", self.scene["robot"].data.body_link_lin_vel_w[0, 3:7])
         joint_pos_target, joint_vel_target = torch.from_numpy(joint_pos_target).to(self.device), torch.from_numpy(joint_vel_target).to(self.device)
 
         # print("base_pos: ", base_pos_target_world_frame, robot_pos)
@@ -179,6 +156,9 @@ class MotionGenerator:
         # Normalize the angle to [-pi, pi]
         joint_pos_target[..., 2] = (joint_pos_target[..., 2] + torch.pi) % (2 * torch.pi) - torch.pi
         joint_vel_target[..., 2] = (joint_vel_target[..., 2] + torch.pi) % (2 * torch.pi) - torch.pi
+
+        print(joint_pos_target[..., :10])
+        print(self.scene["robot"].data.joint_pos[..., :10])
 
         # joint_pos_target = self.map_joint_positions_to_isaaclab_ordering(joint_pos_target)
         # joint_vel_target = self.map_joint_velocities_to_isaaclab_ordering(joint_vel_target)

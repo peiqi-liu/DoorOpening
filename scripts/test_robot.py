@@ -148,24 +148,34 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             joint_pos = motion_generator.compute_approach_target()
             # print("actions: ", actions)
             scene["robot"].set_joint_position_target(joint_pos)
+            ik_count = 0
+            move_away_count = 0
 
-        # elif count < 300:
-        #     ik_joint_pos = motion_generator.compute_arm_target()
-        #     scene["robot"].set_joint_position_target(ik_joint_pos)
-        #     motion_generator.check_ee_pos()
-
-        else:
+        elif ik_count < 25:
             ik_joint_pos = motion_generator.door_opening_motion()
-            if ik_joint_pos is not None:
-                scene["robot"].set_joint_position_target(ik_joint_pos)
-            if count % 20 == 21:
-                print("joint_pos: ", scene["robot"].data.joint_pos[:, :10])
-                print("door pos: ", scene["door"].data.joint_pos)
-                if ik_joint_pos is not None:
-                    print("ik_joint_pos: ", ik_joint_pos[:, :10])
-                else:
-                    print("ik_joint_pos: None")
-            # scene["robot"].set_joint_position_target(ik_joint_pos)
+            # if ik_joint_pos is not None:
+            #     scene["robot"].set_joint_position_target(ik_joint_pos)
+            if ik_joint_pos is not None and count % 3 == 0:
+                scene["robot"].write_joint_position_to_sim(ik_joint_pos)
+
+            # if count % 20 == 1:
+            #     print("joint_pos: ", scene["robot"].data.joint_pos[:, :10])
+            #     print("door pos: ", scene["door"].data.joint_pos)
+            #     if ik_joint_pos is not None:
+            #         print("ik_joint_pos: ", ik_joint_pos[:, :10])
+            #     else:
+            #         print("ik_joint_pos: None")
+            if ik_joint_pos is None:
+                ik_count += 1
+
+        elif move_away_count < 5:
+            ik_joint_pos = motion_generator.move_away_from_door()
+            scene["robot"].write_joint_position_to_sim(ik_joint_pos)
+            move_away_count += 1
+            print("ik_joint_pos: ", ik_joint_pos)
+        
+        else:
+            break
 
         # -- write data to sim
         scene.write_data_to_sim()
@@ -185,7 +195,7 @@ def main():
     sim_cfg = sim_utils.SimulationCfg(dt=0.005, device=args_cli.device)
     sim = sim_utils.SimulationContext(sim_cfg)
     # Set main camera
-    sim.set_camera_view(eye=[1.0, -1.5, 1.8], target=[0.0, 0.0, 0.7])
+    sim.set_camera_view(eye=[2.0, -2.5, 3.2], target=[0.0, 0.0, 0.7])
     # Design scene
     scene_cfg = SensorsSceneCfg(num_envs=args_cli.num_envs, env_spacing=2.0)
     scene = InteractiveScene(scene_cfg)

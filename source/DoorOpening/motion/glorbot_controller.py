@@ -21,11 +21,12 @@ def arc_length_xy(base_se2_plan: np.ndarray) -> float:
 
 
 class GlorbotRMPController:
-    def __init__(self, urdf):
+    def __init__(self, urdf, articulation = None):
         self.rmp_configs = GlorbotRMPConfigs()
         # self.rmp_configs.speed_scalar = 1
         # self.rmp_configs.num_integration_steps = 3 #3 #4
         # creates combined RMP object
+        # self.rmpflow = RMPFlow(robot_urdf=urdf, articulation=articulation)
         self.rmpflow = RMPFlow(robot_urdf=urdf)
         # apply acceleration constraints
         self.rmpflow.add_acceleration_constraints(self.rmp_configs.acceleration_constraints)

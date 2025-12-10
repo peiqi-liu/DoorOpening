@@ -33,34 +33,7 @@ BASE_JOINT_NAMES = [
     ]
 
 from isaaclab.utils.math import euler_xyz_from_quat, yaw_quat
-
-def normalize_angle(angle: torch.Tensor) -> torch.Tensor:
-    # keep angle in (-pi, pi]
-    return (angle + torch.pi) % (2 * torch.pi) - torch.pi
-
-def rebase_goal(
-    target_x: torch.Tensor,
-    target_y: torch.Tensor,
-    target_theta: torch.Tensor,
-    base_pos: torch.Tensor,
-    base_quat: torch.Tensor,
-):
-    base_pos = base_pos.squeeze()[:2]
-    _, _, yaw = euler_xyz_from_quat(base_quat)
-    base_theta = yaw
-
-    dx = target_x - base_pos[0]
-    dy = target_y - base_pos[1]
-
-    cos_t = torch.cos(base_theta)
-    sin_t = torch.sin(base_theta)
-
-    # rotate by -base_theta (frame change)
-    local_x =  dx * cos_t + dy * sin_t
-    local_y = -dx * sin_t + dy * cos_t
-
-    local_theta = normalize_angle(target_theta - base_theta)
-    return local_x, local_y, local_theta
+from DoorOpening.utils.pose_utils import unbase_goal, world_to_local
 
 class MotionGenerator:
     """
@@ -78,14 +51,15 @@ class MotionGenerator:
             command_type="position", 
             use_relative_mode=True,
             ik_method="dls",
+            ik_params={"lambda_val": 0.5}
         )
         self.ik_controller = DifferentialIKController(
             ik_cfg, num_envs=self.num_envs, device=self.device
         )
         self.ik_controller.reset()
-        # hand_idx = self.scene["robot"].find_bodies("palm_lower")[0][0]
-        # initial_ee_quat = self.scene["robot"].data.body_quat_w[:, hand_idx]
-        # self.ik_controller.set_command(command=torch.zeros(self.num_envs, 3, device=self.device), ee_quat=initial_ee_quat)
+        
+        # Perception Step
+        self.door_normal, self.centroids = self.get_door_normal()
         
         self.count = 0
         self.prev_ee_pos = []
@@ -164,9 +138,6 @@ class MotionGenerator:
         joint_angles = self.scene["door"].data.joint_pos
         door_pointcloud = sample_pointcloud(self.scene["door"].cfg.spawn.asset_path, joint_angles, device=self.device)
         door_pointcloud = quat_apply(self.scene["door"].data.body_quat_w[:, 0], door_pointcloud) + self.scene["door"].data.body_pos_w[:, 0]
-        # joint_angles = self.scene["robot"].data.joint_pos
-        # door_pointcloud = sample_pointcloud(self.scene["robot"].cfg.spawn.asset_path, joint_angles, device=self.device)
-        # door_pointcloud = quat_rotate(self.scene["robot"].data.body_quat_w[:, 0], door_pointcloud) + self.scene["robot"].data.body_pos_w[:, 0]
         if verbose:
             from DoorOpening.utils.point_utils import tensor_to_ply
             tensor_to_ply(door_pointcloud[0], "pointcloud.ply")
@@ -175,18 +146,13 @@ class MotionGenerator:
 
     def compute_approach_target(self):
         # Perception Step
-        door_normal, centroids = self.get_door_normal()
         door_pos = self.scene["door"].data.body_pos_w[:, 0]
-        # door_knob_pos = self.get_door_knob_pos(use_handle_body_name = False)
         robot_pos, robot_base_quat = self.get_robot_base_pos()
-        x, y, theta = self.get_door_approach_pose(door_normal, door_pos, robot_pos)
-        x, y, theta = rebase_goal(x, y, theta, robot_pos, robot_base_quat)
-        # print("door_knob_pos: ", door_knob_pos)
-        # print("robot_pos: ", robot_pos)
-        # print("xytheta: ", xytheta)
-        # self.base_pose = torch.stack([x, y, theta], dim=-1)
+        x, y, theta = self.get_door_approach_pose(self.door_normal, door_pos, robot_pos)
+        x, y, theta = unbase_goal(torch.stack([x, y, theta], dim=-1), robot_pos, robot_base_quat).unbind(dim=-1)
         joint_pos_des =self.scene["robot"].data.default_joint_pos.clone()
         joint_pos_des[..., :3] = torch.stack([x, y, theta], dim=-1)
+        self.joint_pos_des = joint_pos_des
         return joint_pos_des
         
     def compute_arm_target(self, compute_base = True):
@@ -229,12 +195,12 @@ class MotionGenerator:
 
     def open_door(self):
         step_size = (self.scene["door"].data.soft_joint_pos_limits[..., 1] - \
-             self.scene["door"].data.soft_joint_pos_limits[..., 0]) * 0.3
+             self.scene["door"].data.soft_joint_pos_limits[..., 0]) * 0.1
         target_door_pos = self.scene["door"].data.joint_pos + step_size
         self.scene["door"].write_joint_position_to_sim(target_door_pos)
     
     def follow_door(self):
-        ee_id = self.scene["robot"].find_bodies("fingertip_1")[0][0]
+        ee_id = self.scene["robot"].find_bodies("fingertip_3")[0][0]
         ee_pos = self.scene["robot"].data.body_pos_w[:, ee_id]
         ee_quat = self.scene["robot"].data.body_quat_w[:, ee_id]
 
@@ -258,7 +224,7 @@ class MotionGenerator:
         return joint_pos
 
     def check_ee_pos(self):
-        ee_id = self.scene["robot"].find_bodies("fingertip_1")[0][0]
+        ee_id = self.scene["robot"].find_bodies("fingertip_3")[0][0]
         ee_pos = self.scene["robot"].data.body_pos_w[:, ee_id]
         door_knob_pos = self.get_door_knob_pos(door_handle_body_name = "link_1")
         door_knob_pos = door_knob_pos - ee_pos
@@ -273,37 +239,41 @@ class MotionGenerator:
 
         return (torch.linalg.norm(door_knob_pos, dim=-1) < 0.17).item(), (torch.linalg.norm(door_knob_pos, dim=-1) > 0.6).item()
 
-    def jitter_robot(self):
-        _, centroids = self.get_door_normal()
-        xs, ys, zs = centroids.unbind(dim = -1)
-        robot_pos, robot_base_quat = self.get_robot_base_pos()
-        xs, ys, _ = rebase_goal(xs, ys, zs, robot_pos, robot_base_quat)
-        centroids = torch.stack([xs, ys, zs], dim = -1)
-
-        joint_pos = self.scene["robot"].data.joint_pos.clone()
-        robot_xy = joint_pos[..., :2]
-        # push the robot away from the centroid of the door
-        robot_xy[..., 1] = robot_xy[..., 1] - (centroids[..., 1] - robot_xy[..., 1])  / torch.norm(centroids[..., 1] - robot_xy[..., 1], dim = -1)
-        robot_xy[..., 0] = robot_xy[..., 0] + (centroids[..., 0] - robot_xy[..., 0]) / torch.norm(centroids[..., 0] - robot_xy[..., 0], dim = -1)
-        joint_pos[..., :2] = robot_xy
-        joint_pos[..., 3:10] = joint_pos[..., 3:10] + torch.randn_like(joint_pos[..., 3:10]) * 0.02
-        return joint_pos
-
     def door_opening_motion(self):
         pose_reached, far = self.check_ee_pos()
         if pose_reached:
             self.open_door()
             return None
-        elif far:
-            # self.count = 0
-            print("jittering robot")
-            # return self.jitter_robot()
-            return self.compute_approach_target()
+        # elif far:
+        #     print("jittering robot")
+        #     return self.compute_approach_target()
         else:
-            joint_pos_target = self.compute_arm_target(compute_base = False)
+            joint_pos_target = self.compute_arm_target(compute_base = True)
             # print("joint_pos_target: ", joint_pos_target[..., :10])
             # print("joint_pos: ", self.scene["robot"].data.joint_pos[..., :10])
             return joint_pos_target
+
+    def move_away_from_door(self):
+        # robot_xy = self.scene["robot"].data.joint_pos[..., :2]
+        # door_vec = (robot_xy * self.door_normal[..., :2]).sum(dim = -1) * self.door_normal[..., :2]
+        # door_vec /= torch.linalg.norm(door_vec, dim = -1)
+        # joint_pos = self.scene["robot"].data.joint_pos.clone()
+        # joint_pos[..., :2] += door_vec
+        # return joint_pos
+
+        robot_xy = self.scene["robot"].data.joint_pos[..., :2]
+        robot_xy = robot_xy - self.joint_pos_des[..., :2]
+        robot_xy /= torch.linalg.norm(robot_xy, dim = -1)
+        joint_pos = self.scene["robot"].data.joint_pos.clone()
+        joint_pos[..., :2] += robot_xy * 0.3
+        return joint_pos
+
+        # joint_pos = self.scene["robot"].data.joint_pos.clone()
+        # n = self.door_normal[..., :2]
+        # diff_vec = (torch.sum(joint_pos[..., :2] * n, dim=-1, keepdim=True) / torch.sum(n * n, dim=-1, keepdim=True).clamp_min(1e-8)) * n
+        # diff_vec /= torch.linalg.norm(diff_vec, dim = -1)
+        # joint_pos[..., :2] += diff_vec
+        # return joint_pos
 
     # def door_opening_motion(self):
     #     pose_reached, far = self.check_ee_pos()
