@@ -144,6 +144,8 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         # Apply default actions to the robot
         # -- generate actions/commands
 
+        trajs = []
+
         if count < 150:
             joint_pos = motion_generator.compute_approach_target()
             # print("actions: ", actions)
@@ -162,12 +164,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
                 ik_count += 1
 
             if count % 20 == 1:
-                # print("joint_pos: ", scene["robot"].data.joint_pos[:, :10])
                 print("door pos: ", scene["door"].data.joint_pos)
-                # if ik_joint_pos is not None:
-                #     print("ik_joint_pos: ", ik_joint_pos[:, :10])
-                # else:
-                #     print("ik_joint_pos: None")
 
         elif move_away_count < 5:
             ik_joint_pos = motion_generator.move_away_from_door()
