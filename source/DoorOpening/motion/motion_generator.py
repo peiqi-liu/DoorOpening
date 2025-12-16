@@ -1,13 +1,6 @@
 import torch
 from isaaclab.scene import InteractiveScene
 from isaaclab.controllers import DifferentialIKController, DifferentialIKControllerCfg
-from isaaclab.utils.math import quat_rotate
-
-from isaaclab.utils import convert_dict_to_backend
-
-import omni
-from pxr import Usd, UsdGeom
-import numpy as np
 import torch
 from isaaclab.utils.math import quat_apply
 
@@ -32,8 +25,8 @@ BASE_JOINT_NAMES = [
         'base_y_joint',
     ]
 
-from isaaclab.utils.math import euler_xyz_from_quat, yaw_quat
-from DoorOpening.utils.pose_utils import unbase_goal, world_to_local
+from isaaclab.utils.math import quat_from_matrix
+from DoorOpening.utils.pose_utils import unbase_goal
 
 class MotionGenerator:
     """
@@ -154,6 +147,33 @@ class MotionGenerator:
         joint_pos_des[..., :3] = torch.stack([x, y, theta], dim=-1)
         self.joint_pos_des = joint_pos_des
         return joint_pos_des
+
+    def compute_door_opening_quat(self, ee_pos, door_knob_pos, device):
+        # Vector from EE to door knob (palm faces this)
+        forward = door_knob_pos - ee_pos
+        forward = forward / torch.norm(forward, dim=-1, keepdim=True)
+
+        # World down direction
+        world_down = torch.tensor([0.0, 0.0, -1.0], device=device).expand_as(forward)
+
+        # Right = down × forward
+        right = torch.cross(world_down, forward, dim=-1)
+        right = right / torch.norm(right, dim=-1, keepdim=True)
+
+        # Recompute down to ensure orthogonality
+        down = torch.cross(forward, right, dim=-1)
+
+        # Rotation matrix columns = EE frame axes in world frame
+        # Assuming EE:
+        #   X = forward (palm normal)
+        #   Y = right
+        #   Z = down
+        rot_mat = torch.stack([forward, right, down], dim=-1)
+
+        # Convert to quaternion (w, x, y, z)
+        quat = quat_from_matrix(rot_mat)
+
+        return quat
         
     def compute_arm_target(self, compute_base = True):
         if compute_base:
@@ -161,16 +181,22 @@ class MotionGenerator:
         else:
             target_joint_names = FRANKA_JOINT_NAMES
         # Get current robot state
-        ee_id = self.scene["robot"].find_bodies("fingertip_1")[0][0]
+        ee_id = self.scene["robot"].find_bodies("palm_center")[0][0]
         # print("ee_idx: ", ee_idx)
-        ee_quat_w = self.scene["robot"].data.body_quat_w[:, ee_id]
         ee_pos = self.scene["robot"].data.body_pos_w[:, ee_id]
-        ee_quat = self.scene["robot"].data.body_quat_w[:, ee_id]
+        # ee_quat = self.scene["robot"].data.body_quat_w[:, ee_id]
+
+        door_knob_pos = self.get_door_knob_pos(door_handle_body_name="link_1")
+
+        ee_quat = self.compute_door_opening_quat(
+            ee_pos,
+            door_knob_pos,
+            device=ee_pos.device,
+        )
         
         hand_idx = self.scene["robot"].find_joints(target_joint_names)[0]
         hand_jac = self.scene["robot"].root_physx_view.get_jacobians()[:, ee_id, :, hand_idx]
         current_joint_pos = self.scene["robot"].data.joint_pos[:, hand_idx].clone()
-        door_knob_pos = self.get_door_knob_pos()
         # print("door_base_pos: ", self.scene["door"].data.body_pos_w[:, 0])
         door_knob_pos = door_knob_pos - ee_pos
         # print("ee_pos: ", ee_pos)
@@ -200,7 +226,7 @@ class MotionGenerator:
         self.scene["door"].write_joint_position_to_sim(target_door_pos)
     
     def follow_door(self):
-        ee_id = self.scene["robot"].find_bodies("fingertip_3")[0][0]
+        ee_id = self.scene["robot"].find_bodies("palm_center")[0][0]
         ee_pos = self.scene["robot"].data.body_pos_w[:, ee_id]
         ee_quat = self.scene["robot"].data.body_quat_w[:, ee_id]
 
@@ -224,7 +250,7 @@ class MotionGenerator:
         return joint_pos
 
     def check_ee_pos(self):
-        ee_id = self.scene["robot"].find_bodies("fingertip_3")[0][0]
+        ee_id = self.scene["robot"].find_bodies("palm_center")[0][0]
         ee_pos = self.scene["robot"].data.body_pos_w[:, ee_id]
         door_knob_pos = self.get_door_knob_pos(door_handle_body_name = "link_1")
         door_knob_pos = door_knob_pos - ee_pos
@@ -244,9 +270,6 @@ class MotionGenerator:
         if pose_reached:
             self.open_door()
             return None
-        # elif far:
-        #     print("jittering robot")
-        #     return self.compute_approach_target()
         else:
             joint_pos_target = self.compute_arm_target(compute_base = True)
             # print("joint_pos_target: ", joint_pos_target[..., :10])
@@ -279,74 +302,3 @@ class MotionGenerator:
         joint_pos[..., :2] += move_dir * 0.4  # tunable step size
 
         return joint_pos
-
-    # def door_opening_motion(self):
-    #     pose_reached, far = self.check_ee_pos()
-    #     # print("count: ", self.count)
-    #     # print("pose_reached: ", pose_reached)   
-    #     # print("far: ", far)
-    #     if pose_reached:
-    #         self.count = 0
-    #         self.open_door()
-    #         return None
-    #     elif self.count > 40:
-    #         self.count = 0
-    #         print("jittering robot")
-    #         # return self.jitter_robot()
-    #         return self.compute_approach_target()
-    #     else:
-    #         joint_pos_target = self.compute_arm_target(compute_base = far)
-    #         # print("joint_pos_target: ", joint_pos_target[..., :10])
-    #         # print("joint_pos: ", self.scene["robot"].data.joint_pos[..., :10])
-    #         return joint_pos_target
-
-    # def door_opening_motion(self, step):
-    #     if step > 100:
-    #         step = 100
-    #     step_size = (self.scene["door"].data.soft_joint_pos_limits[..., 1] - \
-    #          self.scene["door"].data.soft_joint_pos_limits[..., 0]) * int(step) / 100
-
-    #     # step_size = (self.scene["door"].data.soft_joint_pos_limits[..., 1] - \
-    #     #      self.scene["door"].data.soft_joint_pos_limits[..., 0]) * 0.02
-
-    #     target_door_pos = self.scene["door"].data.soft_joint_pos_limits[..., 0] + step_size
-    #     # target_door_pos = self.scene["door"].data.joint_pos + step_size
-    #     print("target_door_pos: ", self.scene["door"].data.joint_pos)
-    #     self.scene["door"].write_joint_position_to_sim(target_door_pos)
-    #     print("door_pos: ", self.scene["door"].data.joint_pos)
-
-    #     _, centroids = self.get_door_normal()
-    #     joint_pos = self.scene["robot"].data.joint_pos.clone()
-    #     robot_xy = joint_pos[..., :2]
-    #     # push the robot away from the centroid of the door
-    #     robot_xy[..., 1] = robot_xy[..., 1] + (centroids[..., 1] - robot_xy[..., 1]) * 0.003 / torch.norm(centroids[..., 1] - robot_xy[..., 1], dim = -1)
-    #     robot_xy[..., 0] = robot_xy[..., 0] - (centroids[..., 0] - robot_xy[..., 0]) * 0.003 / torch.norm(centroids[..., 0] - robot_xy[..., 0], dim = -1)
-    #     joint_pos[..., :2] = robot_xy
-    #     self.scene["robot"].write_joint_position_to_sim(joint_pos)
-
-    #     ee_id = self.scene["robot"].find_bodies("fingertip_1")[0][0]
-    #     ee_pos = self.scene["robot"].data.body_pos_w[:, ee_id]
-    #     ee_quat = self.scene["robot"].data.body_quat_w[:, ee_id]
-
-    #     door_knob_pos = self.get_door_knob_pos(door_handle_body_name = "link_1")
-    #     door_knob_pos = door_knob_pos - ee_pos
-
-    #     hand_idx = self.scene["robot"].find_joints(FRANKA_JOINT_NAMES + BASE_JOINT_NAMES)[0]
-    #     hand_jac = self.scene["robot"].root_physx_view.get_jacobians()[:, ee_id, :, hand_idx]
-    #     current_joint_pos = self.scene["robot"].data.joint_pos[:, hand_idx]
-
-    #     self.ik_controller.set_command(command=door_knob_pos, ee_pos=ee_pos, ee_quat=ee_quat)
-    #     joint_pos_des = self.ik_controller.compute(
-    #         ee_pos,
-    #         ee_quat,
-    #         hand_jac,
-    #         current_joint_pos,
-    #     )
-
-    #     # print("ee_pos: ", ee_pos)
-    #     # print("door_knob_pos: ", door_knob_pos)
-
-    #     joint_pos = self.scene["robot"].data.joint_pos
-    #     joint_pos[:, hand_idx] = joint_pos_des
-
-    #     return joint_pos

@@ -21,8 +21,7 @@ We add the following sensors on the quadruped robot, ANYmal-C (ANYbotics):
 
 """Launch Isaac Sim Simulator first."""
 
-from operator import truediv
-import os
+import pickle as pkl
 import argparse
 
 from isaaclab.app import AppLauncher
@@ -64,7 +63,7 @@ from DoorOpening.motion.motion_generator import MotionGenerator
 
 from isaaclab.utils.math import quat_from_euler_xyz
 
-euler_angles = torch.tensor([0.0, 0.0, np.pi * 4 / 5])  # (roll, pitch, yaw) in radians
+euler_angles = torch.tensor([0.0, 0.0, np.pi])  # (roll, pitch, yaw) in radians
 quat = quat_from_euler_xyz(euler_angles[0], euler_angles[1], euler_angles[2])
 
 torch.set_printoptions(precision=3, sci_mode=False)
@@ -86,18 +85,17 @@ class SensorsSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
             joint_pos=DEFAULT_JOINT_POS,
-            pos=(0.5, 0, 0.0),
-            # rot=[0.707, 0, 0, 0.707]
-            rot = quat
+            pos=(1.5, 0.0, 0.0),
+            rot=(0.0, 0.0, 0.0, 1.0)
         ),
     )
 
     door: ArticulationCfg = DOOR_CONFIG.replace(
         prim_path="{ENV_REGEX_NS}/Door",
-        init_state=ArticulationCfg.InitialStateCfg(
-            pos=(-1.0, 0.0, 0.75),
-            rot=[1.0, 0.0, 0.0, 0.0]
-        )
+        # init_state=ArticulationCfg.InitialStateCfg(
+        #     pos=(-1.0, 0.0, 0.75),
+        #     rot=[1.0, 0.0, 0.0, 0.0]
+        # )
     )
 
 def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
@@ -109,9 +107,10 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
 
     motion_generator = MotionGenerator(scene, device=args_cli.device)
     # Simulate physics
+    trajs = [torch.cat([scene["robot"].data.joint_pos.squeeze()[:10].cpu(), scene["door"].data.joint_pos.squeeze().cpu()], dim = 0)]
     while simulation_app.is_running():
         # Reset
-        if count % 1300 == 0:
+        if count % 700 == 0:
             # reset counter
             count = 0
             # reset the scene entities
@@ -144,35 +143,55 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         # Apply default actions to the robot
         # -- generate actions/commands
 
-        trajs = []
-
         if count < 150:
             joint_pos = motion_generator.compute_approach_target()
             # print("actions: ", actions)
             scene["robot"].set_joint_position_target(joint_pos)
             ik_count = 0
             move_away_count = 0
+            trajs.append(torch.cat([scene["robot"].data.joint_pos.squeeze()[:10].cpu(), scene["door"].data.joint_pos.squeeze().cpu()], dim = 0))
 
         elif ik_count < 25:
             ik_joint_pos = motion_generator.door_opening_motion()
-            # if ik_joint_pos is not None:
-            #     scene["robot"].set_joint_position_target(ik_joint_pos)
-            if ik_joint_pos is not None and count % 3 == 0:
+            if ik_joint_pos is not None:
                 scene["robot"].write_joint_position_to_sim(ik_joint_pos)
+                
+                record_pos = ik_joint_pos.squeeze()[:10].cpu()
+                for i in range(1, 15 + 1):
+                    new_waypoint = trajs[len(trajs)-1][:10] + (record_pos - trajs[len(trajs)-1][:10]) / 15
+                    trajs.append(torch.cat([new_waypoint.cpu(), scene["door"].data.joint_pos.squeeze().cpu()], dim = 0))
 
             if ik_joint_pos is None:
                 ik_count += 1
 
-            if count % 20 == 1:
-                print("door pos: ", scene["door"].data.joint_pos)
+            print("door pos: ", scene["door"].data.joint_pos)
 
         elif move_away_count < 5:
             ik_joint_pos = motion_generator.move_away_from_door()
             scene["robot"].write_joint_position_to_sim(ik_joint_pos)
+            record_pos = ik_joint_pos.squeeze()[:10].cpu()
+            for i in range(1, 30 + 1):
+                new_waypoint = trajs[len(trajs)-1][:10] + (record_pos - trajs[len(trajs)-1][:10]) / 30
+                trajs.append(torch.cat([new_waypoint.cpu(), scene["door"].data.joint_pos.squeeze().cpu()], dim = 0))
             move_away_count += 1
-            # print("ik_joint_pos: ", ik_joint_pos)
         
         else:
+            trajs = torch.stack(trajs, dim = 0)
+            for point in trajs:
+                joint_pos = scene["robot"].data.joint_pos.clone()
+                joint_pos[..., :10] = point[:10]
+                scene["robot"].write_joint_position_to_sim(joint_pos)
+                joint_pos = scene["door"].data.joint_pos.clone()
+                joint_pos[..., :2] = point[10:]
+                scene["door"].write_joint_position_to_sim(joint_pos)
+                scene.write_data_to_sim()
+                sim.step()
+                sim_time += sim_dt
+                scene.update(sim_dt)
+            print(trajs.shape)
+            with open("traj.pkl", "wb") as f:
+                torch.save(trajs, f)
+            print(trajs)
             break
 
         # -- write data to sim
