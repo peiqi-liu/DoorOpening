@@ -42,9 +42,6 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_dof_lower_limits = self.robot.data.soft_joint_pos_limits[0, self._robot_dof_idx, 0].to(device=self.device)
         self.robot_dof_upper_limits = self.robot.data.soft_joint_pos_limits[0, self._robot_dof_idx, 1].to(device=self.device)
 
-        # self.robot_dof_speed_scales = torch.ones_like(self.robot_dof_lower_limits)
-        # self.robot_dof_speed_scales[self.robot.find_joints("base_rotation_joint")[0]] = 0.1
-
         self.robot_dof_targets = torch.zeros((self.num_envs, len(self._robot_dof_idx)), device=self.device)
 
     def _setup_scene(self):

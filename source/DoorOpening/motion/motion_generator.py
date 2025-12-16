@@ -8,22 +8,7 @@ from DoorOpening.utils.point_utils import fit_plane_batch_torch
 
 from DoorOpening.utils.extract_pointcloud_from_articulation import sample_pointcloud
 
-
-FRANKA_JOINT_NAMES = [
-        'panda_joint1',
-        'panda_joint2',
-        'panda_joint3',
-        'panda_joint4',
-        'panda_joint5',
-        'panda_joint6',
-        'panda_joint7',
-    ]
-
-BASE_JOINT_NAMES = [
-        'base_rotation_joint',
-        'base_x_joint',
-        'base_y_joint',
-    ]
+from DoorOpening.assets.glorbot.glorbot_cfg import FRANKA_JOINT_NAMES, BASE_JOINT_NAMES
 
 from isaaclab.utils.math import quat_from_matrix
 from DoorOpening.utils.pose_utils import unbase_goal
