@@ -79,6 +79,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     ]
 
     door_body_names = ["link_1", "link_2"]
+    door_handle_body_name = "link_1"
 
     # robot(s)
     robot_cfg: ArticulationCfg = GLORBOT_CONFIG.replace(
@@ -98,19 +99,24 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     observation_space = actuated_joints_num * 2 + len(door_body_names) * 3
 
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=6.0, replicate_physics=True)
 
-    action_scale = 7.5
+    action_scale = 1.0
 
     # Deep Mimic Reward Parameters
     robot_body_quat_w = 0.5
-    robot_body_pos_w = 0.15
-    door_joint_pos_w = 0.1
+    robot_base_pos_w = 0.75
+    robot_arm_pos_w = 0.4
+    door_joint_pos_w = 0.4
+    robot_base_joint_pos_w = 0.7
+    robot_arm_joint_pos_w = 0.7
 
     robot_body_quat_scale = 0.25
-    robot_body_pos_scale = 10.0
-    door_joint_pos_scale = 0.01
-
+    robot_base_pos_scale = 20.0
+    robot_arm_pos_scale = 15.0
+    robot_base_joint_pos_scale = 0.5
+    robot_arm_joint_pos_scale = 2.0
+    door_joint_pos_scale = 1.0
 
     # Change this to where you store your motions
     motion_file = "traj.pkl"
