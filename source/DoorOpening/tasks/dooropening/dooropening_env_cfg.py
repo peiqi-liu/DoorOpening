@@ -19,7 +19,7 @@ from isaaclab.managers import EventTermCfg as EventTerm
 class DooropeningEnvCfg(DirectRLEnvCfg):
     sim_dt = 1/60.
     decimation = 2
-    episode_length_s = 6. #10.0
+    episode_length_s = 3.
     fabric_decimation = 2 # number of fabric steps per physics step
     num_sim_steps_to_render=2
     # - spaces definition
@@ -93,20 +93,23 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # door(s)
     door_cfg: ArticulationCfg = DOOR_CONFIG.replace(prim_path="/World/envs/env_.*/Door")
 
-    action_space = len(arm_joints) + len(base_joints) + len(finger_joints)
-    observation_space = action_space * 2 + len(door_body_names) * 2
+    actuated_joints_num = len(arm_joints) + len(base_joints) + len(finger_joints)
+    action_space = actuated_joints_num * 1
+    observation_space = actuated_joints_num * 2 + len(door_body_names) * 3
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=True)
 
-    # Deep Mimic Reward Parameters
-    reward_pose_w = 0.5
-    reward_key_pos_w = 0.15
-    reward_door_pos_w = 0.1
+    action_scale = 7.5
 
-    reward_pose_scale = 0.25
-    reward_key_pos_scale = 10.0
-    reward_door_pos_w = 0.01
+    # Deep Mimic Reward Parameters
+    robot_body_quat_w = 0.5
+    robot_body_pos_w = 0.15
+    door_joint_pos_w = 0.1
+
+    robot_body_quat_scale = 0.25
+    robot_body_pos_scale = 10.0
+    door_joint_pos_scale = 0.01
 
 
     # Change this to where you store your motions

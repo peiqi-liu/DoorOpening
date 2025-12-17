@@ -57,10 +57,10 @@ class DooropeningEnv(DirectRLEnv):
         self.door_joint_pos_scale = self.cfg.door_joint_pos_scale
         self.robot_body_pos_w = self.cfg.robot_body_pos_w
         self.robot_body_quat_w = self.cfg.robot_body_quat_w
-        self.door_joint_w = self.cfg.door_joint_w
+        self.door_joint_pos_w = self.cfg.door_joint_pos_w
 
         self._ref_motion_lib = ReferenceMotionManager(self.cfg.motion_file, self.num_envs, self.device)
-        self.max_episode_length = self._ref_motion_lib.num_frames
+        self.max_trial_steps = self._ref_motion_lib.num_frames + 50 # Add 50 steps to the motion length to allow more time for the robot to reach the target
 
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
@@ -100,7 +100,7 @@ class DooropeningEnv(DirectRLEnv):
         door_link_pos -= self.scene.env_origins.repeat((1, 1
             )).reshape(self.num_envs, 1, 3)
         
-        to_target = door_link_pos - base_link_pos.reshape(self.num_envs, 1, -1)
+        to_target = (door_link_pos - base_link_pos).reshape(self.num_envs, 1, -1)
 
         obs = torch.cat(
             (
@@ -116,7 +116,7 @@ class DooropeningEnv(DirectRLEnv):
     def _get_rewards(self) -> torch.Tensor:
         robot_body_pos = self.robot.data.body_pos_w[:, self._robot_deep_mimic_dof_idx]
         robot_body_quat = self.robot.data.body_quat_w[:, self._robot_deep_mimic_dof_idx]
-        door_joint_pos = self.door.data.joint_pos[:, self._door_joint_idx]
+        door_joint_pos = self.door.data.joint_pos
         ref_robot_body_pos = self._ref_motion_lib.get_robot_body_pos()
         ref_robot_body_quat = self._ref_motion_lib.get_robot_body_quat()
         ref_door_joint_pos = self._ref_motion_lib.get_door_joint_pos()
@@ -132,10 +132,10 @@ class DooropeningEnv(DirectRLEnv):
             door_joint_pos_scale = self.door_joint_pos_scale,
             robot_body_pos_w = self.robot_body_pos_w, 
             robot_body_quat_w = self.robot_body_quat_w, 
-            door_joint_w = self.door_joint_w)
+            door_joint_pos_w = self.door_joint_pos_w)
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        time_out = self.episode_length_buf >= self.max_episode_length - 1
+        time_out = self.episode_length_buf >= self.max_trial_steps - 1
         return False, time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
@@ -145,22 +145,23 @@ class DooropeningEnv(DirectRLEnv):
 
         self._ref_motion_lib.reset(env_ids)
 
-        joint_pos = self._ref_motion_lib.get_robot_joint_pos()
-        joint_vel = self.robot.data.default_joint_vel[env_ids]
+        deep_mimic_initial_joint_pos = self._ref_motion_lib.get_robot_joint_pos()
 
         default_root_state = self.robot.data.default_root_state[env_ids]
         default_root_state[:, :3] += self.scene.env_origins[env_ids]
 
-        self.joint_pos[env_ids] = joint_pos
-        self.joint_vel[env_ids] = joint_vel
+        self.joint_pos[env_ids] = self.robot.data.default_joint_pos[env_ids]
+        self.joint_vel[env_ids] = self.robot.data.default_joint_vel[env_ids]
+
+        self.joint_pos[env_ids][..., self._robot_deep_mimic_dof_idx] = deep_mimic_initial_joint_pos
 
         self.robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
-        self.robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+        self.robot.write_joint_state_to_sim(self.joint_pos[env_ids], self.joint_vel[env_ids], None, env_ids)
 
         door_joint_pos = self._ref_motion_lib.get_door_joint_pos()
 
-        self.door.write_joint_position_to_sim(door_joint_pos, env_ids)
+        self.door.write_joint_position_to_sim(door_joint_pos, None, env_ids)
 
 @torch.jit.script
 def compute_deep_mimic_rewards(
@@ -175,7 +176,7 @@ def compute_deep_mimic_rewards(
     door_joint_pos_scale: float,
     robot_body_pos_w: float,
     robot_body_quat_w: float,
-    door_joint_w: float,
+    door_joint_pos_w: float,
 ) -> torch.Tensor:
     # ----------------------------------
     # Robot body position error
@@ -183,20 +184,19 @@ def compute_deep_mimic_rewards(
     # [B, N, 3]
     body_pos_diff = ref_robot_body_pos - robot_body_pos
     body_pos_err = torch.sum(body_pos_diff * body_pos_diff, dim=-1)  # [B, N]
+    body_pos_err = torch.sum(body_pos_err, dim=-1)
 
     # ----------------------------------
     # Robot body orientation error
     # ----------------------------------
     # [B, N]
     body_quat_diff = quat_diff_angle(robot_body_quat, ref_robot_body_quat)
-    body_quat_err = torch.sum(body_quat_err * body_quat_diff, dim=-1)  # [B]
-
+    body_quat_err = torch.sum(body_quat_diff * body_quat_diff, dim=-1)  # [B]
     # ----------------------------------
     # Door joint error
     # ----------------------------------
     door_diff = ref_door_joint_pos - door_joint_pos
     door_err = torch.sum(door_diff * door_diff, dim=-1)  # [B]
-
     # ----------------------------------
     # Exponential rewards (DeepMimic style)
     # ----------------------------------
@@ -207,6 +207,6 @@ def compute_deep_mimic_rewards(
     # ----------------------------------
     # Final reward
     # ----------------------------------
-    reward = robot_body_pos_w * pose_r + robot_body_quat_w * quat_r + door_joint_w * door_r
+    reward = robot_body_pos_w * pose_r + robot_body_quat_w * quat_r + door_joint_pos_w * door_r
 
     return reward
