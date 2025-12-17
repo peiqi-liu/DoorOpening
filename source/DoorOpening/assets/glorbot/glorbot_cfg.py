@@ -60,20 +60,20 @@ DEFAULT_JOINT_POS = {
 }
 
 FRANKA_JOINT_NAMES = [
-        'panda_joint1',
-        'panda_joint2',
-        'panda_joint3',
-        'panda_joint4',
-        'panda_joint5',
-        'panda_joint6',
-        'panda_joint7',
-    ]
+    'panda_joint1',
+    'panda_joint2',
+    'panda_joint3',
+    'panda_joint4',
+    'panda_joint5',
+    'panda_joint6',
+    'panda_joint7',
+]
 
 BASE_JOINT_NAMES = [
-        'base_rotation_joint',
-        'base_x_joint',
-        'base_y_joint',
-    ]
+    'base_rotation_joint',
+    'base_x_joint',
+    'base_y_joint',
+]
 
 DM_JOINT_NAMES = BASE_JOINT_NAMES + FRANKA_JOINT_NAMES
 

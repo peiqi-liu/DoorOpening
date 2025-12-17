@@ -39,11 +39,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         ),
     )
 
-    base_link_names = [
-        "base_x_link",
-        "base_y_link",
-        "base_rotation_link",
-    ]
+    # Useful constants
+
+    base_link_name = "base_link"
 
     base_joints = [
         'base_rotation_joint',
@@ -80,12 +78,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         'finger_joint_15',
     ]
 
-    actuated_joints = base_joints + arm_joints + finger_joints
-
-    action_space = len(arm_joints) + len(base_joints)
-    observation_space = action_space * 2 + 3
-
-    hand_body_name = "palm_lower"
+    door_body_names = ["link_1", "link_2"]
 
     # robot(s)
     robot_cfg: ArticulationCfg = GLORBOT_CONFIG.replace(
@@ -100,17 +93,21 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # door(s)
     door_cfg: ArticulationCfg = DOOR_CONFIG.replace(prim_path="/World/envs/env_.*/Door")
 
-    door_handle_body_name = "link_1"
+    action_space = len(arm_joints) + len(base_joints) + len(finger_joints)
+    observation_space = action_space * 2 + len(door_body_names) * 2
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=True)
 
-    # custom parameters/scales
-    # - controllable joint
-    # - action scale
-    action_scale = 7.5  # [N]
-    # - reward scales
-    handle_pos_error_scale = 1.0
-    base_link_pos_error_scale = 0.5
-    base_rotation_error_scale = 1.0
-    # action_penalty_scale = 2.0
+    # Deep Mimic Reward Parameters
+    reward_pose_w = 0.5
+    reward_key_pos_w = 0.15
+    reward_door_pos_w = 0.1
+
+    reward_pose_scale = 0.25
+    reward_key_pos_scale = 10.0
+    reward_door_pos_w = 0.01
+
+
+    # Change this to where you store your motions
+    motion_file = "traj.pkl"

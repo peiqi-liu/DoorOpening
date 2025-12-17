@@ -134,30 +134,27 @@ class MotionGenerator:
         return joint_pos_des
 
     def compute_door_opening_quat(self, ee_pos, door_knob_pos, device):
-        # Vector from EE to door knob (palm faces this)
+        # X axis: palm normal → toward door knob
         forward = door_knob_pos - ee_pos
         forward = forward / torch.norm(forward, dim=-1, keepdim=True)
 
-        # World down direction
-        world_down = torch.tensor([0.0, 0.0, -1.0], device=device).expand_as(forward)
+        # World up (keeps gripper from rolling)
+        world_up = torch.tensor([0.0, 0.0, 1.0], device=device).expand_as(forward)
 
-        # Right = down × forward
-        right = torch.cross(world_down, forward, dim=-1)
+        # Y axis: right = up × forward
+        right = torch.cross(world_up, forward, dim=-1)
         right = right / torch.norm(right, dim=-1, keepdim=True)
 
-        # Recompute down to ensure orthogonality
-        down = torch.cross(forward, right, dim=-1)
+        # Z axis: up = forward × right
+        up = torch.cross(forward, right, dim=-1)
 
-        # Rotation matrix columns = EE frame axes in world frame
-        # Assuming EE:
-        #   X = forward (palm normal)
+        # EE frame:
+        #   X = forward (palm faces door)
         #   Y = right
-        #   Z = down
-        rot_mat = torch.stack([forward, right, down], dim=-1)
+        #   Z = up
+        rot_mat = torch.stack([forward, right, up], dim=-1)
 
-        # Convert to quaternion (w, x, y, z)
         quat = quat_from_matrix(rot_mat)
-
         return quat
         
     def compute_arm_target(self, compute_base = True):
