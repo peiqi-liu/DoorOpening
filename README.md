@@ -40,7 +40,16 @@ It allows you to develop in an isolated environment, outside of the core Isaac L
     - Running a task:
 
         ```bash
-        python scripts/rl_games/train.py --task=Dooropening
+        python scripts/rl_games/train.py 
+            --task Dooropening 
+            --num_envs 2048 agent.params.config.minibatch_size=8192 
+            --max_iterations 1000 
+            --headless 
+            --video 
+            --wandb-project-name dooropening 
+            --wandb-entity * 
+            --checkpoint *.pth 
+            --track
         ```
 
 ### Set up IDE (Optional)

@@ -141,7 +141,6 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             print("root state door: ", root_state_door)
             scene["door"].write_root_pose_to_sim(root_state_door[:, :7])
             scene["door"].write_root_velocity_to_sim(root_state_door[:, 7:])
-            # door_pos = scene["door"].data.soft_joint_pos_limits[..., 0]
             door_pos = torch.zeros_like(scene["door"].data.soft_joint_pos_limits[..., 0])
             scene["door"].write_joint_position_to_sim(door_pos)
 
@@ -161,8 +160,8 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             move_away_count = 0
 
             # Write data to buffers
-            robot_trajs.append(scene["robot"].data.joint_pos.squeeze()[joint_ids].cpu())
-            door_trajs.append(scene["door"].data.joint_pos.squeeze().cpu())
+            robot_trajs.append(scene["robot"].data.joint_pos.squeeze()[joint_ids].cpu().clone())
+            door_trajs.append(scene["door"].data.joint_pos.squeeze().cpu().clone())
 
         # Open the door
 
@@ -172,18 +171,18 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
                 scene["robot"].write_joint_position_to_sim(ik_joint_pos)
                 
                 # Write data to buffers
-                record_pos = scene["robot"].data.joint_pos.squeeze()[joint_ids].cpu()
-                record_door_pos = scene["door"].data.joint_pos.squeeze().cpu()
+                record_pos = scene["robot"].data.joint_pos.squeeze()[joint_ids].cpu().clone()
+                record_door_pos = scene["door"].data.joint_pos.squeeze().cpu().clone()
                 for i in range(1, 15 + 1):
                     new_waypoint = robot_trajs[len(robot_trajs)-1] + (record_pos - robot_trajs[len(robot_trajs)-1]) / 15
-                    robot_trajs.append(new_waypoint.cpu())
-                    new_door_waypoint = door_trajs[len(door_trajs)-1] + (record_door_pos - door_trajs[len(door_trajs)-1]) / 15
-                    door_trajs.append(new_door_waypoint.cpu())
+                    robot_trajs.append(new_waypoint.cpu().clone())
+                    # new_door_waypoint = door_trajs[len(door_trajs)-1] + (record_door_pos - door_trajs[len(door_trajs)-1]) / 15
+                    # door_trajs.append(new_door_waypoint.cpu().clone())
                 
             if ik_joint_pos is None:
                 ik_count += 1
 
-            print("door pos: ", scene["door"].data.joint_pos)
+            # print("door pos: ", scene["door"].data.joint_pos)
 
         # Move away from the door
 
@@ -197,12 +196,14 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             for i in range(1, 30 + 1):
                 new_waypoint = robot_trajs[len(robot_trajs)-1] + (record_pos - robot_trajs[len(robot_trajs)-1]) / 30
                 robot_trajs.append(new_waypoint.cpu())
-                new_door_waypoint = door_trajs[len(door_trajs)-1] + (record_door_pos - door_trajs[len(door_trajs)-1]) / 30
-                door_trajs.append(new_door_waypoint.cpu())
+                # new_door_waypoint = door_trajs[len(door_trajs)-1] + (record_door_pos - door_trajs[len(door_trajs)-1]) / 30
+                # door_trajs.append(new_door_waypoint.cpu())
 
             move_away_count += 1
         
         else:
+            while len(robot_trajs) > len(door_trajs):
+                door_trajs.append(scene["door"].data.joint_pos.squeeze().cpu().clone())
             robot_trajs = torch.stack(robot_trajs, dim = 0)
             door_trajs = torch.stack(door_trajs, dim = 0)
             robot_body_pos_traj = []

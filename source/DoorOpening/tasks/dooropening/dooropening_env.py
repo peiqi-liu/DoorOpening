@@ -149,6 +149,29 @@ class DooropeningEnv(DirectRLEnv):
         ref_robot_arm_body_pos = ref_robot_body_pos[:, self.num_base_joints:self.num_base_joints + self.num_arm_joints]
         ref_robot_body_quat = self._ref_motion_lib.get_robot_body_quat()
         ref_door_joint_pos = self._ref_motion_lib.get_door_joint_pos()
+
+        base_pos_err, arm_pos_err, body_quat_err, door_err, base_joint_pos_err, arm_joint_pos_err = compute_tracking_error(
+            robot_base_pos = robot_base_body_pos,
+            robot_arm_pos = robot_arm_body_pos,
+            robot_body_quat = robot_body_quat,
+            door_joint_pos = door_joint_pos,
+            robot_base_joint_pos = robot_base_joint_pos,
+            robot_arm_joint_pos = robot_arm_joint_pos,
+            ref_robot_base_pos = ref_robot_base_body_pos,
+            ref_robot_arm_pos = ref_robot_arm_body_pos,
+            ref_robot_body_quat = ref_robot_body_quat,
+            ref_door_joint_pos = ref_door_joint_pos,
+            ref_robot_base_joint_pos = ref_robot_base_joint_pos,
+            ref_robot_arm_joint_pos = ref_robot_arm_joint_pos,
+        )
+
+        self.extras["error/base_pos_err"] = base_pos_err.mean()
+        self.extras["error/arm_pos_err"] = arm_pos_err.mean()
+        self.extras["error/body_quat_err"] = body_quat_err.mean()
+        self.extras["error/door_err"] = door_err.mean()
+        self.extras["error/base_joint_pos_err"] = base_joint_pos_err.mean()
+        self.extras["error/arm_joint_pos_err"] = arm_joint_pos_err.mean()
+
         return compute_deep_mimic_rewards(
             robot_base_pos = robot_base_body_pos, 
             robot_arm_pos = robot_arm_body_pos, 
@@ -283,11 +306,46 @@ def compute_deep_mimic_rewards(
     return reward
 
 def compute_tracking_error(
-    robot_joint_pos: torch.Tensor,
-    ref_robot_joint_pos: torch.Tensor,
+    robot_base_pos: torch.Tensor,
+    robot_arm_pos: torch.Tensor,
+    robot_body_quat: torch.Tensor,
+    door_joint_pos: torch.Tensor,
+    robot_base_joint_pos: torch.Tensor,
+    robot_arm_joint_pos: torch.Tensor,
+    ref_robot_base_pos: torch.Tensor,
+    ref_robot_arm_pos: torch.Tensor,
+    ref_robot_body_quat: torch.Tensor,
+    ref_door_joint_pos: torch.Tensor,
+    ref_robot_base_joint_pos: torch.Tensor,
+    ref_robot_arm_joint_pos: torch.Tensor,
 ) -> torch.Tensor:
     # ----------------------------------
     # Robot body position error
     # ----------------------------------
-    joint_pos_diff = ref_robot_joint_pos - robot_joint_pos
-    return joint_pos_diff
+    # [B, N, 3]
+    base_pos_diff = ref_robot_base_pos - robot_base_pos
+    arm_pos_diff = ref_robot_arm_pos - robot_arm_pos
+    base_pos_err = torch.sum(base_pos_diff * base_pos_diff, dim=-1)  # [B, N]
+    arm_pos_err = torch.sum(arm_pos_diff * arm_pos_diff, dim=-1)  # [B, N]
+    base_pos_err = torch.sum(base_pos_err, dim=-1)
+    arm_pos_err = torch.sum(arm_pos_err, dim=-1)
+
+    # ----------------------------------
+    # Robot body orientation error
+    # ----------------------------------
+    # [B, N]
+    body_quat_diff = quat_diff_angle(robot_body_quat, ref_robot_body_quat)
+    body_quat_err = torch.sum(body_quat_diff * body_quat_diff, dim=-1)  # [B]
+    # ----------------------------------
+    # Door joint error
+    # ----------------------------------
+    door_diff = ref_door_joint_pos - door_joint_pos
+    door_err = torch.sum(door_diff * door_diff, dim=-1)  # [B]
+    # ----------------------------------
+    # Robot joint position error
+    # ----------------------------------
+    base_joint_pos_diff = ref_robot_base_joint_pos - robot_base_joint_pos
+    arm_joint_pos_diff = ref_robot_arm_joint_pos - robot_arm_joint_pos
+    base_joint_pos_err = torch.sum(base_joint_pos_diff * base_joint_pos_diff, dim=-1)  # [B]
+    arm_joint_pos_err = torch.sum(arm_joint_pos_diff * arm_joint_pos_diff, dim=-1)  # [B]
+    return (base_pos_err, arm_pos_err, body_quat_err, door_err, base_joint_pos_err, arm_joint_pos_err)
