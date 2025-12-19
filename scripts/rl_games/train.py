@@ -94,6 +94,9 @@ import DoorOpening.tasks # noqa: F401
 # import logger
 logger = logging.getLogger(__name__)
 
+import os
+os.environ["WANDB_DISABLE_GYM"] = "true"
+
 # PLACEHOLDER: Extension template (do not remove this comment)
 
 

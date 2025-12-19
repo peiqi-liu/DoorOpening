@@ -115,6 +115,8 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     robot_trajs = [scene["robot"].data.joint_pos.squeeze()[joint_ids].cpu()]
     door_trajs = [scene["door"].data.joint_pos.squeeze().cpu()]
 
+    key_body_ids, _ = scene["robot"].find_bodies(["base_x_link", "palm_center"])
+
     while simulation_app.is_running():
         # Reset
         if count % 700 == 0:
@@ -166,6 +168,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         # Open the door
 
         elif ik_count < 2:
+            print("ik_count: ", ik_count)
             ik_joint_pos = motion_generator.door_opening_motion()
             if ik_joint_pos is not None:
                 scene["robot"].write_joint_position_to_sim(ik_joint_pos)
@@ -173,13 +176,12 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
                 # Write data to buffers
                 record_pos = scene["robot"].data.joint_pos.squeeze()[joint_ids].cpu().clone()
                 record_door_pos = scene["door"].data.joint_pos.squeeze().cpu().clone()
-                for i in range(1, 15 + 1):
-                    new_waypoint = robot_trajs[len(robot_trajs)-1] + (record_pos - robot_trajs[len(robot_trajs)-1]) / 15
+                for i in range(1, 25 + 1):
+                    new_waypoint = robot_trajs[len(robot_trajs)-1] + (record_pos - robot_trajs[len(robot_trajs)-1]) / 25
                     robot_trajs.append(new_waypoint.cpu().clone())
                     # new_door_waypoint = door_trajs[len(door_trajs)-1] + (record_door_pos - door_trajs[len(door_trajs)-1]) / 15
                     # door_trajs.append(new_door_waypoint.cpu().clone())
                 
-            if ik_joint_pos is None:
                 ik_count += 1
 
         # Move away from the door
@@ -217,8 +219,10 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
                 sim_time += sim_dt
                 scene.update(sim_dt)
 
-                robot_body_pos_traj.append(scene["robot"].data.body_pos_w[:, joint_ids].cpu())
-                robot_body_quat_traj.append(scene["robot"].data.body_quat_w[:, joint_ids].cpu())
+                # robot_body_pos_traj.append(scene["robot"].data.body_pos_w[:, joint_ids].cpu())
+                # robot_body_quat_traj.append(scene["robot"].data.body_quat_w[:, joint_ids].cpu())
+                robot_body_pos_traj.append(scene["robot"].data.body_pos_w[:, key_body_ids].cpu())
+                robot_body_quat_traj.append(scene["robot"].data.body_quat_w[:, key_body_ids].cpu())
 
             robot_body_pos_traj = torch.stack(robot_body_pos_traj, dim = 0)
             robot_body_quat_traj = torch.stack(robot_body_quat_traj, dim = 0)
