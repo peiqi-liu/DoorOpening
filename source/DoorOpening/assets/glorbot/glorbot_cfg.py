@@ -77,6 +77,27 @@ BASE_JOINT_NAMES = [
 
 DM_JOINT_NAMES = BASE_JOINT_NAMES + FRANKA_JOINT_NAMES
 
+FINGER_JOINT_NAMES = [
+    'finger_joint_0',
+    'finger_joint_1',
+    'finger_joint_2',
+    'finger_joint_3',
+    'finger_joint_4',
+    'finger_joint_5',
+    'finger_joint_6',
+    'finger_joint_7',
+    'finger_joint_8',
+    'finger_joint_9',
+    'finger_joint_10',
+    'finger_joint_11',
+    'finger_joint_12',
+    'finger_joint_13',
+    'finger_joint_14',
+    'finger_joint_15',
+]
+
+FULL_JOINT_NAMES = BASE_JOINT_NAMES + FRANKA_JOINT_NAMES + FINGER_JOINT_NAMES
+
 GLORBOT_CONFIG = ArticulationCfg(
     spawn=sim_utils.UrdfFileCfg(
         fix_base=True,
@@ -89,6 +110,7 @@ GLORBOT_CONFIG = ArticulationCfg(
         joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
             gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
         ),
+        scale = (0.8, 0.8, 1.0),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
         joint_pos=DEFAULT_JOINT_POS,

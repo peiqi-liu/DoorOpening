@@ -34,7 +34,7 @@ def create_door_cfg(urdf_path: str) -> ArticulationCfg:
             joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
                 gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
             ),
-            scale = (1.5, 1.2, 1.0),
+            scale = (1.0, 1.2, 1.0),
             # Note: joint_drive is usually not needed for URDF; PD gains can be in actuators
         ),
         init_state=ArticulationCfg.InitialStateCfg(
