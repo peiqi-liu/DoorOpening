@@ -165,7 +165,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
 
         # Open the door
 
-        elif ik_count < 25:
+        elif ik_count < 2:
             ik_joint_pos = motion_generator.door_opening_motion()
             if ik_joint_pos is not None:
                 scene["robot"].write_joint_position_to_sim(ik_joint_pos)
@@ -182,24 +182,22 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             if ik_joint_pos is None:
                 ik_count += 1
 
-            # print("door pos: ", scene["door"].data.joint_pos)
-
         # Move away from the door
 
-        elif move_away_count < 5:
-            ik_joint_pos = motion_generator.move_away_from_door()
-            scene["robot"].write_joint_position_to_sim(ik_joint_pos)
+        # elif move_away_count < 5:
+        #     ik_joint_pos = motion_generator.move_away_from_door()
+        #     scene["robot"].write_joint_position_to_sim(ik_joint_pos)
 
-            # Write data to buffers
-            record_pos = scene["robot"].data.joint_pos.squeeze()[joint_ids].cpu()
-            record_door_pos = scene["door"].data.joint_pos.squeeze().cpu()
-            for i in range(1, 30 + 1):
-                new_waypoint = robot_trajs[len(robot_trajs)-1] + (record_pos - robot_trajs[len(robot_trajs)-1]) / 30
-                robot_trajs.append(new_waypoint.cpu())
-                # new_door_waypoint = door_trajs[len(door_trajs)-1] + (record_door_pos - door_trajs[len(door_trajs)-1]) / 30
-                # door_trajs.append(new_door_waypoint.cpu())
+        #     # Write data to buffers
+        #     record_pos = scene["robot"].data.joint_pos.squeeze()[joint_ids].cpu()
+        #     record_door_pos = scene["door"].data.joint_pos.squeeze().cpu()
+        #     for i in range(1, 30 + 1):
+        #         new_waypoint = robot_trajs[len(robot_trajs)-1] + (record_pos - robot_trajs[len(robot_trajs)-1]) / 30
+        #         robot_trajs.append(new_waypoint.cpu())
+        #         # new_door_waypoint = door_trajs[len(door_trajs)-1] + (record_door_pos - door_trajs[len(door_trajs)-1]) / 30
+        #         # door_trajs.append(new_door_waypoint.cpu())
 
-            move_away_count += 1
+        #     move_away_count += 1
         
         else:
             while len(robot_trajs) > len(door_trajs):

@@ -167,8 +167,8 @@ class DooropeningEnv(DirectRLEnv):
 
         self.extras["error/base_pos_err"] = base_pos_err.mean()
         self.extras["error/arm_pos_err"] = arm_pos_err.mean()
-        self.extras["error/body_quat_err"] = body_quat_err.mean()
-        self.extras["error/door_err"] = door_err.mean()
+        # self.extras["error/body_quat_err"] = body_quat_err.mean()
+        # self.extras["error/door_err"] = door_err.mean()
         self.extras["error/base_joint_pos_err"] = base_joint_pos_err.mean()
         self.extras["error/arm_joint_pos_err"] = arm_joint_pos_err.mean()
 
