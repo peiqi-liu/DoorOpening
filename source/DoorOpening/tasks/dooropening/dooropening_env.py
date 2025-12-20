@@ -257,22 +257,24 @@ def compute_deep_mimic_rewards(
     robot_arm_joint_pos_w: float,
 
     body_pos_delta: float = 0.02,
+    extra_penalty_w: float = 0.5,
+    extra_penalty_max: float = 0.2,
 ) -> torch.Tensor:
     # ----------------------------------
     # Robot body position error
     # ----------------------------------
     # [B, N, 3]
-    # key_body_pos_diff = ref_robot_key_body_pos - robot_key_body_pos
-    # key_body_pos_err = torch.sum(key_body_pos_diff * key_body_pos_diff, dim=-1)  # [B, N]
-    # key_body_pos_err = torch.sum(key_body_pos_err, dim=-1)
-
-    key_body_pos_err = torch.linalg.norm(ref_robot_key_body_pos - robot_key_body_pos, dim=-1)
-    key_body_pos_err = torch.where(
-        key_body_pos_err < body_pos_delta,
-        key_body_pos_err * key_body_pos_err / body_pos_delta,
-        key_body_pos_err
-    )
+    key_body_pos_diff = ref_robot_key_body_pos - robot_key_body_pos
+    key_body_pos_err = torch.sum(key_body_pos_diff * key_body_pos_diff, dim=-1)  # [B, N]
     key_body_pos_err = torch.sum(key_body_pos_err, dim=-1)
+
+    # key_body_pos_err = torch.linalg.norm(ref_robot_key_body_pos - robot_key_body_pos, dim=-1)
+    # key_body_pos_err = torch.where(
+    #     key_body_pos_err < body_pos_delta,
+    #     key_body_pos_err * key_body_pos_err / body_pos_delta,
+    #     key_body_pos_err
+    # )
+    # key_body_pos_err = torch.sum(key_body_pos_err, dim=-1)
 
     # ----------------------------------
     # Robot body orientation error
@@ -292,20 +294,6 @@ def compute_deep_mimic_rewards(
     arm_joint_pos_diff = ref_robot_arm_joint_pos - robot_arm_joint_pos
     base_joint_pos_err = torch.sum(base_joint_pos_diff * base_joint_pos_diff, dim=-1)  # [B]
     arm_joint_pos_err = torch.sum(arm_joint_pos_diff * arm_joint_pos_diff, dim=-1)  # [B]
-    # base_joint_pos_err = torch.linalg.norm(ref_robot_base_joint_pos - robot_base_joint_pos, dim=-1)
-    # arm_joint_pos_err = torch.linalg.norm(ref_robot_arm_joint_pos - robot_arm_joint_pos, dim=-1)
-    # base_joint_pos_err = torch.where(
-    #     base_joint_pos_err < joint_pos_delta,
-    #     base_joint_pos_err * base_joint_pos_err / joint_pos_delta,
-    #     base_joint_pos_err
-    # )
-    # base_joint_pos_err = torch.sum(base_joint_pos_err, dim=-1)
-    # arm_joint_pos_err = torch.where(
-    #     arm_joint_pos_err < joint_pos_delta,
-    #     arm_joint_pos_err * arm_joint_pos_err / joint_pos_delta,
-    #     arm_joint_pos_err
-    # )
-    # arm_joint_pos_err = torch.sum(arm_joint_pos_err, dim=-1)
 
     # ----------------------------------
     # Exponential rewards (DeepMimic style)
@@ -315,6 +303,9 @@ def compute_deep_mimic_rewards(
     door_r = torch.exp(-door_joint_pos_scale * door_err)
     base_joint_pos_r = torch.exp(-robot_base_joint_pos_scale * base_joint_pos_err)
     arm_joint_pos_r = torch.exp(-robot_arm_joint_pos_scale * arm_joint_pos_err)
+
+    extra_penalty = torch.linalg.norm(ref_robot_key_body_pos - robot_key_body_pos, dim=-1)
+    extra_penalty = torch.clamp(torch.sum(extra_penalty, dim=-1), 0, extra_penalty_max)
     # ----------------------------------
     # Final reward
     # ----------------------------------
@@ -322,7 +313,7 @@ def compute_deep_mimic_rewards(
          + robot_key_body_quat_w * key_body_quat_r\
          + door_joint_pos_w * door_r\
          + robot_base_joint_pos_w * base_joint_pos_r\
-         + robot_arm_joint_pos_w * arm_joint_pos_r
+         + robot_arm_joint_pos_w * arm_joint_pos_r - extra_penalty_w * extra_penalty
     return reward
 
 def compute_tracking_error(
