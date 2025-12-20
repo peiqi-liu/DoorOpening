@@ -100,6 +100,9 @@ class DooropeningEnv(DirectRLEnv):
     def _apply_action(self):
         self._ref_motion_lib.step()
         self.robot.set_joint_position_target(self.robot_dof_targets, joint_ids=self._robot_dof_idx)
+        # joint_pos = self.robot.data.joint_pos.clone()
+        # joint_pos[:, self._robot_deep_mimic_dof_idx] = self._ref_motion_lib.get_robot_joint_pos()
+        # self.robot.write_joint_position_to_sim(joint_pos)
 
     def _get_observations(self) -> dict:
         self.joint_pos = self.robot.data.joint_pos

@@ -94,9 +94,6 @@ import DoorOpening.tasks # noqa: F401
 # import logger
 logger = logging.getLogger(__name__)
 
-import os
-os.environ["WANDB_DISABLE_GYM"] = "true"
-
 # PLACEHOLDER: Extension template (do not remove this comment)
 
 
@@ -262,6 +259,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
 if __name__ == "__main__":
     # run the main function
+    import os
+    os.environ["WANDB_DISABLE_GYM"] = "true"
     main()
     # close sim app
     simulation_app.close()
