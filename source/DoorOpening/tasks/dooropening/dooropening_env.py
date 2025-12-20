@@ -256,9 +256,9 @@ def compute_deep_mimic_rewards(
     robot_base_joint_pos_w: float,
     robot_arm_joint_pos_w: float,
 
-    body_pos_delta: float = 0.02,
+    # body_pos_delta: float = 0.02,
     extra_penalty_w: float = 0.5,
-    extra_penalty_max: float = 0.2,
+    extra_penalty_max: float = 0.5,
 ) -> torch.Tensor:
     # ----------------------------------
     # Robot body position error
