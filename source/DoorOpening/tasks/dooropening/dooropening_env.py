@@ -62,12 +62,14 @@ class DooropeningEnv(DirectRLEnv):
         self.door_joint_pos_scale = self.cfg.door_joint_pos_scale
         self.robot_base_joint_pos_scale = self.cfg.robot_base_joint_pos_scale
         self.robot_arm_joint_pos_scale = self.cfg.robot_arm_joint_pos_scale
+        self.robot_finger_joint_pos_scale = self.cfg.robot_finger_joint_pos_scale
 
         self.robot_key_body_pos_w = self.cfg.robot_key_body_pos_w
         self.robot_body_quat_w = self.cfg.robot_body_quat_w
         self.door_joint_pos_w = self.cfg.door_joint_pos_w
         self.robot_base_joint_pos_w = self.cfg.robot_base_joint_pos_w
         self.robot_arm_joint_pos_w = self.cfg.robot_arm_joint_pos_w
+        self.robot_finger_joint_pos_w = self.cfg.robot_finger_joint_pos_w
 
         self._ref_motion_lib = ReferenceMotionManager(self.cfg.motion_file, self.num_envs, self.device)
         self.max_trial_steps = self._ref_motion_lib.num_frames + 50 # Add 50 steps to the motion length to allow more time for the robot to reach the target
@@ -134,47 +136,45 @@ class DooropeningEnv(DirectRLEnv):
         return observations
 
     def _get_rewards(self) -> torch.Tensor:
-        # robot_joint_pos = self.robot.data.joint_pos[:, self._robot_deep_mimic_dof_idx]
-        # ref_robot_joint_pos = self._ref_motion_lib.get_robot_joint_pos()
-        # tracking_error = compute_tracking_error(
-        #     robot_joint_pos = robot_joint_pos,
-        #     ref_robot_joint_pos = ref_robot_joint_pos,
-        # )
-        # print(f"Tracking error: {tracking_error}")
-
-        robot_joint_pos = self.robot.data.joint_pos[:, self._robot_deep_mimic_dof_idx]
         robot_key_body_pos = self.robot.data.body_pos_w[:, self._robot_key_body_idx]
         robot_key_body_quat = self.robot.data.body_quat_w[:, self._robot_key_body_idx]
-        robot_base_joint_pos = robot_joint_pos[:, :self.num_base_joints]
-        robot_arm_joint_pos = robot_joint_pos[:, self.num_base_joints:self.num_base_joints + self.num_arm_joints]
+        robot_base_joint_pos = self.robot.data.joint_pos[:, self._robot_base_dof_idx]
+        robot_arm_joint_pos = self.robot.data.joint_pos[:, self._robot_arm_dof_idx]
+        robot_finger_joint_pos = self.robot.data.joint_pos[:, self._robot_finger_dof_idx]
         door_joint_pos = self.door.data.joint_pos
+
+        ref_robot_key_body_pos = self._ref_motion_lib.get_robot_body_pos()[:, self._robot_key_body_idx]
+        ref_robot_key_body_quat = self._ref_motion_lib.get_robot_body_quat()[:, self._robot_key_body_idx]
         ref_robot_joint_pos = self._ref_motion_lib.get_robot_joint_pos()
-        ref_robot_base_joint_pos = ref_robot_joint_pos[:, :self.num_base_joints]
-        ref_robot_arm_joint_pos = ref_robot_joint_pos[:, self.num_base_joints:self.num_base_joints + self.num_arm_joints]
-        ref_robot_key_body_pos = self._ref_motion_lib.get_robot_body_pos()
-        ref_robot_key_body_quat = self._ref_motion_lib.get_robot_body_quat()
+        ref_robot_base_joint_pos = ref_robot_joint_pos[:, self._robot_base_dof_idx]
+        ref_robot_arm_joint_pos = ref_robot_joint_pos[:, self._robot_arm_dof_idx]
+        ref_robot_finger_joint_pos = ref_robot_joint_pos[:, self._robot_finger_dof_idx]
         ref_door_joint_pos = self._ref_motion_lib.get_door_joint_pos()
 
-        key_body_pos_err, key_body_quat_err, door_err, base_joint_pos_err, arm_joint_pos_err = compute_tracking_error(
+        key_body_pos_err, key_body_quat_err, door_err, base_joint_pos_err, arm_joint_pos_err, finger_joint_pos_err = compute_tracking_error(
             robot_key_body_pos = robot_key_body_pos,
             robot_key_body_quat = robot_key_body_quat,
             door_joint_pos = door_joint_pos,
             robot_base_joint_pos = robot_base_joint_pos,
             robot_arm_joint_pos = robot_arm_joint_pos,
+            robot_finger_joint_pos = robot_finger_joint_pos,
 
             ref_robot_key_body_pos = ref_robot_key_body_pos,
             ref_robot_key_body_quat = ref_robot_key_body_quat,
             ref_door_joint_pos = ref_door_joint_pos,
             ref_robot_base_joint_pos = ref_robot_base_joint_pos,
             ref_robot_arm_joint_pos = ref_robot_arm_joint_pos,
+            ref_robot_finger_joint_pos = ref_robot_finger_joint_pos,
         )
 
-        self.extras["error/key_base_pos_err"] = key_body_pos_err[..., 0].mean()
-        self.extras["error/key_arm_pos_err"] = key_body_pos_err[..., 1].mean()
+        # self.extras["error/key_base_pos_err"] = key_body_pos_err[..., 0].mean()
+        # self.extras["error/key_arm_pos_err"] = key_body_pos_err[..., 1].mean()
+        self.extras["error/key_body_pos_err"] = key_body_pos_err.mean()
         self.extras["error/key_body_quat_err"] = key_body_quat_err.mean()
         # self.extras["error/door_err"] = door_err.mean()
         self.extras["error/base_joint_pos_err"] = base_joint_pos_err.mean()
         self.extras["error/arm_joint_pos_err"] = arm_joint_pos_err.mean()
+        self.extras["error/finger_joint_pos_err"] = finger_joint_pos_err.mean()
 
         return compute_deep_mimic_rewards(
             robot_key_body_pos = robot_key_body_pos, 
@@ -182,24 +182,29 @@ class DooropeningEnv(DirectRLEnv):
             door_joint_pos = door_joint_pos,
             robot_base_joint_pos = robot_base_joint_pos,
             robot_arm_joint_pos = robot_arm_joint_pos, 
+            robot_finger_joint_pos = robot_finger_joint_pos,
 
             ref_robot_key_body_pos = ref_robot_key_body_pos, 
             ref_robot_key_body_quat = ref_robot_key_body_quat, 
             ref_door_joint_pos = ref_door_joint_pos,
             ref_robot_base_joint_pos = ref_robot_base_joint_pos,
             ref_robot_arm_joint_pos = ref_robot_arm_joint_pos,
+            ref_robot_finger_joint_pos = ref_robot_finger_joint_pos,
 
             robot_key_body_pos_scale = self.robot_key_body_pos_scale, 
             robot_key_body_quat_scale = self.robot_body_quat_scale,
             door_joint_pos_scale = self.door_joint_pos_scale,
             robot_base_joint_pos_scale = self.robot_base_joint_pos_scale,
             robot_arm_joint_pos_scale = self.robot_arm_joint_pos_scale,
+            robot_finger_joint_pos_scale = self.robot_finger_joint_pos_scale,
 
             robot_key_body_pos_w = self.robot_key_body_pos_w, 
             robot_key_body_quat_w = self.robot_body_quat_w,
             door_joint_pos_w = self.door_joint_pos_w,
             robot_base_joint_pos_w = self.robot_base_joint_pos_w,
-            robot_arm_joint_pos_w = self.robot_arm_joint_pos_w)
+            robot_arm_joint_pos_w = self.robot_arm_joint_pos_w,
+            robot_finger_joint_pos_w = self.robot_finger_joint_pos_w,
+        )
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_trial_steps - 1
@@ -220,7 +225,7 @@ class DooropeningEnv(DirectRLEnv):
         self.joint_pos[env_ids] = self.robot.data.default_joint_pos[env_ids]
         self.joint_vel[env_ids] = self.robot.data.default_joint_vel[env_ids]
 
-        self.joint_pos[env_ids][..., self._robot_deep_mimic_dof_idx] = deep_mimic_initial_joint_pos
+        self.joint_pos[env_ids][..., :] = deep_mimic_initial_joint_pos
 
         self.robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
@@ -237,24 +242,28 @@ def compute_deep_mimic_rewards(
     door_joint_pos: torch.Tensor,
     robot_base_joint_pos: torch.Tensor,
     robot_arm_joint_pos: torch.Tensor,
+    robot_finger_joint_pos: torch.Tensor,
 
     ref_robot_key_body_pos: torch.Tensor,
     ref_robot_key_body_quat: torch.Tensor,
     ref_door_joint_pos: torch.Tensor,
     ref_robot_base_joint_pos: torch.Tensor,
     ref_robot_arm_joint_pos: torch.Tensor,
-
+    ref_robot_finger_joint_pos: torch.Tensor,
+    
     robot_key_body_pos_scale: float,
     robot_key_body_quat_scale: float,
     door_joint_pos_scale: float,
     robot_base_joint_pos_scale: float,
     robot_arm_joint_pos_scale: float,
+    robot_finger_joint_pos_scale: float,
 
     robot_key_body_pos_w: float,
     robot_key_body_quat_w: float,
     door_joint_pos_w: float,
     robot_base_joint_pos_w: float,
     robot_arm_joint_pos_w: float,
+    robot_finger_joint_pos_w: float,
 
     # body_pos_delta: float = 0.02,
     extra_penalty_w: float = 0.5,
@@ -294,6 +303,8 @@ def compute_deep_mimic_rewards(
     arm_joint_pos_diff = ref_robot_arm_joint_pos - robot_arm_joint_pos
     base_joint_pos_err = torch.sum(base_joint_pos_diff * base_joint_pos_diff, dim=-1)  # [B]
     arm_joint_pos_err = torch.sum(arm_joint_pos_diff * arm_joint_pos_diff, dim=-1)  # [B]
+    finger_joint_pos_diff = ref_robot_finger_joint_pos - robot_finger_joint_pos
+    finger_joint_pos_err = torch.sum(finger_joint_pos_diff * finger_joint_pos_diff, dim=-1)  # [B]
 
     # ----------------------------------
     # Exponential rewards (DeepMimic style)
@@ -303,6 +314,7 @@ def compute_deep_mimic_rewards(
     door_r = torch.exp(-door_joint_pos_scale * door_err)
     base_joint_pos_r = torch.exp(-robot_base_joint_pos_scale * base_joint_pos_err)
     arm_joint_pos_r = torch.exp(-robot_arm_joint_pos_scale * arm_joint_pos_err)
+    finger_joint_pos_r = torch.exp(-robot_finger_joint_pos_scale * finger_joint_pos_err)
 
     extra_penalty = torch.linalg.norm(ref_robot_key_body_pos - robot_key_body_pos, dim=-1)
     extra_penalty = torch.clamp(torch.sum(extra_penalty, dim=-1), 0, extra_penalty_max)
@@ -313,7 +325,9 @@ def compute_deep_mimic_rewards(
          + robot_key_body_quat_w * key_body_quat_r\
          + door_joint_pos_w * door_r\
          + robot_base_joint_pos_w * base_joint_pos_r\
-         + robot_arm_joint_pos_w * arm_joint_pos_r - extra_penalty_w * extra_penalty
+         + robot_arm_joint_pos_w * arm_joint_pos_r\
+         + robot_finger_joint_pos_w * finger_joint_pos_r\
+         - extra_penalty_w * extra_penalty
     return reward
 
 def compute_tracking_error(
@@ -322,12 +336,14 @@ def compute_tracking_error(
     door_joint_pos: torch.Tensor,
     robot_base_joint_pos: torch.Tensor,
     robot_arm_joint_pos: torch.Tensor,
+    robot_finger_joint_pos: torch.Tensor,
 
     ref_robot_key_body_pos: torch.Tensor,
     ref_robot_key_body_quat: torch.Tensor,
     ref_door_joint_pos: torch.Tensor,
     ref_robot_base_joint_pos: torch.Tensor,
     ref_robot_arm_joint_pos: torch.Tensor,
+    ref_robot_finger_joint_pos: torch.Tensor,
 ) -> torch.Tensor:
     # ----------------------------------
     # Robot body position error
@@ -355,4 +371,6 @@ def compute_tracking_error(
     arm_joint_pos_diff = ref_robot_arm_joint_pos - robot_arm_joint_pos
     base_joint_pos_err = torch.sum(base_joint_pos_diff * base_joint_pos_diff, dim=-1)  # [B]
     arm_joint_pos_err = torch.sum(arm_joint_pos_diff * arm_joint_pos_diff, dim=-1)  # [B]
-    return (key_body_pos_err, key_body_quat_err, door_err, base_joint_pos_err, arm_joint_pos_err)
+    finger_joint_pos_diff = ref_robot_finger_joint_pos - robot_finger_joint_pos
+    finger_joint_pos_err = torch.sum(finger_joint_pos_diff * finger_joint_pos_diff, dim=-1)  # [B]
+    return (key_body_pos_err, key_body_quat_err, door_err, base_joint_pos_err, arm_joint_pos_err, finger_joint_pos_err)

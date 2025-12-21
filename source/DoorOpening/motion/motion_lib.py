@@ -26,17 +26,31 @@ class ReferenceMotionManager:
 
         required_keys = [
             "robot_joint_pos_traj",
-            "door_traj",
+            "door_joint_pos_traj",
             "robot_body_pos_traj",
             "robot_body_quat_traj",
         ]
         for k in required_keys:
             assert k in motions, f"{k} not found in motion file"
 
-        self.robot_joint_pos_traj = motions["robot_joint_pos_traj"].to(self.device).squeeze()
-        self.door_traj = motions["door_traj"].to(self.device).squeeze()
-        self.robot_body_pos_traj = motions["robot_body_pos_traj"].to(self.device).squeeze()
-        self.robot_body_quat_traj = motions["robot_body_quat_traj"].to(self.device).squeeze()
+        self.robot_joint_pos_traj = motions["robot_joint_pos_traj"]
+        self.door_traj = motions["door_joint_pos_traj"]
+        self.robot_body_pos_traj = motions["robot_body_pos_traj"]
+        self.robot_body_quat_traj = motions["robot_body_quat_traj"]
+
+        if isinstance(self.robot_joint_pos_traj, list):
+            self.robot_joint_pos_traj = torch.stack(self.robot_joint_pos_traj, dim = 0)
+        if isinstance(self.door_traj, list):
+            self.door_traj = torch.stack(self.door_traj, dim = 0)
+        if isinstance(self.robot_body_pos_traj, list):
+            self.robot_body_pos_traj = torch.stack(self.robot_body_pos_traj, dim = 0)
+        if isinstance(self.robot_body_quat_traj, list):
+            self.robot_body_quat_traj = torch.stack(self.robot_body_quat_traj, dim = 0)
+
+        self.robot_joint_pos_traj = self.robot_joint_pos_traj.to(self.device).squeeze()
+        self.door_traj = self.door_traj.to(self.device).squeeze()
+        self.robot_body_pos_traj = self.robot_body_pos_traj.to(self.device).squeeze()
+        self.robot_body_quat_traj = self.robot_body_quat_traj.to(self.device).squeeze()
 
         self.num_frames = self.robot_joint_pos_traj.shape[0]
 

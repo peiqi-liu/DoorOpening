@@ -59,8 +59,6 @@ from isaaclab.assets import ArticulationCfg
 from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, DEFAULT_JOINT_POS
 from DoorOpening.assets.door.door_cfg import DOOR_CONFIG
 
-from DoorOpening.motion.hard_code_tool import MotionGenerator
-
 from DoorOpening.assets.glorbot.glorbot_cfg import FULL_JOINT_NAMES
 
 from DoorOpening.motion.slider_controller import OmniJointController
@@ -99,8 +97,6 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     sim_dt = sim.get_physics_dt()
     sim_time = 0.0
     count = 0
-
-    motion_generator = MotionGenerator(scene, device=args_cli.device)
     # Simulate physics
 
     joint_ids, _ = scene["robot"].find_joints(FULL_JOINT_NAMES)
@@ -140,10 +136,25 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         slider_pos = controller.q_slider.clone()
         joint_pos = scene["robot"].data.default_joint_pos.clone()
         joint_pos[..., :] = slider_pos
-        print("slider_pos: ", slider_pos)
+        # print("slider_pos: ", slider_pos)
         scene["robot"].write_joint_position_to_sim(joint_pos)
 
         # -- write data to sim
+        if controller.playback:
+            q = controller.traj[controller.play_idx]
+            joint_pos = scene["robot"].data.default_joint_pos.clone()
+            joint_pos[..., :] = q
+            scene["robot"].write_joint_position_to_sim(joint_pos)
+            
+            controller.door_joint_pos_traj.append(scene["door"].data.joint_pos.squeeze().cpu().clone())
+            controller.robot_body_pos_traj.append(scene["robot"].data.body_pos_w.squeeze().cpu().clone())
+            controller.robot_body_quat_traj.append(scene["robot"].data.body_quat_w.squeeze().cpu().clone())
+
+            controller.play_idx += 1
+            if controller.play_idx >= len(controller.traj):
+                controller.playback = False
+                print("[PLAYBACK] Finished")
+        
         scene.write_data_to_sim()
         # perform step
         sim.step()
