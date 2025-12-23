@@ -14,6 +14,7 @@ from isaaclab.utils import configclass
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 
 from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.envs.common import ViewerCfg
 
 @configclass
 class DooropeningEnvCfg(DirectRLEnvCfg):
@@ -24,6 +25,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     num_sim_steps_to_render=2
     # - spaces definition
     state_space = 0
+
+    viewer: ViewerCfg = ViewerCfg(eye=(0.5, 2.0, 0.5), lookat=(0.5, 0.0, 0.6), origin_type="env")
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
@@ -82,7 +85,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     door_handle_body_name = "link_1"
 
     # robot_key_bodies = ["base_x_link", "panda_link1",  "panda_link2",  "panda_link3",  "panda_link4",  "panda_link5",  "panda_link6",  "panda_link7",  "palm_center"]
-    robot_key_bodies = ["base_x_link", "palm_center"]
+    robot_key_bodies = ["base_x_link",  "panda_link4", "palm_center", "fingertip_3"]
 
     # robot(s)
     robot_cfg: ArticulationCfg = GLORBOT_CONFIG.replace(
@@ -107,12 +110,12 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     action_scale = 10.0
 
     # Deep Mimic Reward Parameters
-    robot_body_quat_w = 0.0
+    robot_body_quat_w = 0.5
     robot_key_body_pos_w = 0.5
     door_joint_pos_w = 0.0
     robot_base_joint_pos_w = 1.0
     robot_arm_joint_pos_w = 2.0
-    robot_finger_joint_pos_w = 0.0
+    robot_finger_joint_pos_w = 2.0
 
     robot_body_quat_scale = 0.25
     robot_key_body_pos_scale = 0.3
@@ -120,6 +123,12 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_arm_joint_pos_scale = 0.5
     robot_finger_joint_pos_scale = 0.5
     door_joint_pos_scale = 20.0
+
+    extra_penalty_w = 0.5
+    extra_penalty_max = 0.5
+
+    reset_base_pos_delta = 0.1
+    reset_key_body_pos_delta = 0.2
 
     # Change this to where you store your motions
     motion_file = "trajectory.pkl"
