@@ -26,7 +26,7 @@ class ReferenceMotionManager:
 
         required_keys = [
             "robot_joint_pos_traj",
-            "door_joint_pos_traj",
+            "door_traj",
             "robot_body_pos_traj",
             "robot_body_quat_traj",
         ]
@@ -34,7 +34,7 @@ class ReferenceMotionManager:
             assert k in motions, f"{k} not found in motion file"
 
         self.robot_joint_pos_traj = motions["robot_joint_pos_traj"]
-        self.door_traj = motions["door_joint_pos_traj"]
+        self.door_traj = motions["door_traj"]
         self.robot_body_pos_traj = motions["robot_body_pos_traj"]
         self.robot_body_quat_traj = motions["robot_body_quat_traj"]
 

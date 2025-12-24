@@ -136,17 +136,26 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         slider_pos = controller.q_slider.clone()
         joint_pos = scene["robot"].data.default_joint_pos.clone()
         joint_pos[..., :] = slider_pos
-        # print("slider_pos: ", slider_pos)
-        scene["robot"].write_joint_position_to_sim(joint_pos)
 
+        door_pos = controller.door_q_slider.clone()
+        door_joint_pos = scene["door"].data.default_joint_pos.clone()
+        door_joint_pos[..., :] = door_pos
+        # print("door_joint_pos: ", door_joint_pos)
+        scene["robot"].write_joint_position_to_sim(joint_pos)
+        scene["door"].write_joint_position_to_sim(door_joint_pos)
         # -- write data to sim
         if controller.playback:
             q = controller.traj[controller.play_idx]
             joint_pos = scene["robot"].data.default_joint_pos.clone()
             joint_pos[..., :] = q
             scene["robot"].write_joint_position_to_sim(joint_pos)
-            
-            controller.door_joint_pos_traj.append(scene["door"].data.joint_pos.squeeze().cpu().clone())
+
+            door_q = controller.door_traj[controller.play_idx]
+            door_joint_pos = scene["door"].data.default_joint_pos.clone()
+            door_joint_pos[..., :] = door_q
+            scene["door"].write_joint_position_to_sim(door_joint_pos)
+
+            # controller.door_joint_pos_traj.append(scene["door"].data.joint_pos.squeeze().cpu().clone())
             controller.robot_body_pos_traj.append(scene["robot"].data.body_pos_w.squeeze().cpu().clone())
             controller.robot_body_quat_traj.append(scene["robot"].data.body_quat_w.squeeze().cpu().clone())
 

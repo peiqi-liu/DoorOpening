@@ -167,7 +167,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
 
         # Open the door
 
-        elif ik_count < 2:
+        elif ik_count < 25:
             print("ik_count: ", ik_count)
             ik_joint_pos = motion_generator.door_opening_motion()
             if ik_joint_pos is not None:

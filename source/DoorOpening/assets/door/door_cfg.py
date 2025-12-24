@@ -44,8 +44,8 @@ def create_door_cfg(urdf_path: str) -> ArticulationCfg:
         actuators={
             "body": ImplicitActuatorCfg(
                 joint_names_expr=[".*"],
-                stiffness=2.5e8,
-                damping=1e5,
+                stiffness=1.0,
+                damping=1e3,
             ),
         },
     )
@@ -56,7 +56,7 @@ urdf_folder = os.path.join(root_path, "door/PartNet")
 urdf_paths = sorted(glob.glob(os.path.join(urdf_folder, "**/mobility.urdf"), recursive=True))
 
 # An example of door urdf
-door_urdf_path = urdf_paths[2]
+door_urdf_path = urdf_paths[-1]
 
 print("door_urdf_path: ", door_urdf_path)
 

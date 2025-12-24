@@ -103,8 +103,8 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             # print("joint_pos: ", scene["door"].data.joint_pos)
 
         door_target_pos = scene["door"].data.joint_pos_limits[..., 1]
-        scene["door"].set_joint_position_target(door_target_pos)
-        # scene["door"].set_joint_velocity_target(torch.tensor([1, 1]))
+        # scene["door"].set_joint_position_target(door_target_pos)
+        scene["door"].write_joint_position_to_sim(door_target_pos)
         if count % 100 == 0:
             print("joint_pos: ", scene["door"].data.joint_pos)
             # print("door pos: ", scene["door"].data.body_pos_w)
