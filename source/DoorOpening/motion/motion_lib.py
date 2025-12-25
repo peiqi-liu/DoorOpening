@@ -8,11 +8,13 @@ class ReferenceMotionManager:
         motion_file: str,
         num_envs: int,
         device: torch.device,
-        reset_range=(0, 30),
+        reset_range=(60, 80),
+        velocity=0.6,
     ):
         self.device = device
         self.num_envs = num_envs
         self.reset_lo, self.reset_hi = reset_range
+        self.velocity = velocity
 
         self._load_motion_pkl(motion_file)
         self._init_env_buffers()
@@ -65,8 +67,7 @@ class ReferenceMotionManager:
         self.frame_idx = torch.zeros(
             self.num_envs,
             device=self.device,
-            dtype=torch.long,
-        )
+        ).float()
 
         # cached current-frame refs (avoid realloc every step)
         self.ref_robot_joint_pos = None
@@ -83,24 +84,31 @@ class ReferenceMotionManager:
             self.reset_hi + 1,
             (env_ids.shape[0],),
             device=self.device,
-        )
+        ).float()
         self._update_current()
 
     # --------------------------------------------------
     # Step reference motion
     # --------------------------------------------------
     def step(self):
-        self.frame_idx += 1
+        self.frame_idx += self.velocity
         self.frame_idx.clamp_(max=self.num_frames - 1)
         self._update_current()
 
+    def _lerp(self, a, b, w):
+        while w.dim() < a.dim():
+            w = w.unsqueeze(-1)
+        return a + w * (b - a)
+
     def _update_current(self):
-        
         idx = self.frame_idx
-        self.ref_robot_joint_pos = self.robot_joint_pos_traj[idx]
-        self.ref_door_joint_pos = self.door_traj[idx]
-        self.ref_robot_body_pos = self.robot_body_pos_traj[idx]
-        self.ref_robot_body_quat = self.robot_body_quat_traj[idx]
+        floor_idx = torch.floor(idx).int()
+        ceil_idx = torch.ceil(idx).int()
+        interp_ratio = (idx - floor_idx).unsqueeze(-1)
+        self.ref_robot_joint_pos = self._lerp(self.robot_joint_pos_traj[floor_idx], self.robot_joint_pos_traj[ceil_idx], interp_ratio)
+        self.ref_door_joint_pos = self._lerp(self.door_traj[floor_idx], self.door_traj[ceil_idx], interp_ratio)
+        self.ref_robot_body_pos = self._lerp(self.robot_body_pos_traj[floor_idx], self.robot_body_pos_traj[ceil_idx], interp_ratio)
+        self.ref_robot_body_quat = self._lerp(self.robot_body_quat_traj[floor_idx], self.robot_body_quat_traj[ceil_idx], interp_ratio)
 
     # --------------------------------------------------
     # Getters (explicit, readable)

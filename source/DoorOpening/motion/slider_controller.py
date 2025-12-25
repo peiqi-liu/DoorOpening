@@ -2,20 +2,29 @@ import torch
 import omni.ui as ui
 from functools import partial
 import pickle as pkl
-import isaaclab.sim as sim_utils
 from isaaclab.scene import InteractiveScene
+from isaaclab.controllers import DifferentialIKController, DifferentialIKControllerCfg
+from isaaclab.utils.math import euler_xyz_from_quat, quat_from_euler_xyz
 
 class OmniJointController:
     def __init__(self, scene: InteractiveScene, joint_names):
         self.scene = scene
+
         self.joint_names = joint_names
         self.joint_ids, self.joint_names = scene["robot"].find_joints(joint_names)
 
         self.door_joint_names = scene["door"].data.joint_names
         self.door_joint_ids, self.door_joint_names = scene["door"].find_joints(self.door_joint_names)
 
+        self.key_pose_idx, _ = scene["robot"].find_bodies("palm_center")
+        self.key_pose_idx = self.key_pose_idx[0]
+        self.pose_names = ['x', 'y', 'z', 'roll', 'pitch', 'yaw']
+
         self.q_slider = scene["robot"].data.default_joint_pos.clone()
         self.door_q_slider = scene["door"].data.default_joint_pos.clone()
+        self.xyz = scene["robot"].data.body_pos_w[:, self.key_pose_idx].clone()
+        quat = scene["robot"].data.body_quat_w[:, self.key_pose_idx].clone()
+        self.euler_angles = torch.stack(euler_xyz_from_quat(quat), dim = -1)
 
         # ===== Keyframe + playback state =====
         self.key_poses = [scene["robot"].data.default_joint_pos.clone()]          # list[Tensor (1, num_joints)]
@@ -23,13 +32,27 @@ class OmniJointController:
         self.traj = None             # Tensor (T, num_joints)
         self.playback = False
         self.play_idx = 0
-        self.steps_per_segments = []
 
+        self.steps_per_segments = []
         self.step_temp = 60
 
         self._initialize_trajectory()
 
+        self._build_ik_controller()
+
         self._build_ui()
+
+    def _build_ik_controller(self):
+        ik_cfg = DifferentialIKControllerCfg(
+            command_type="pose", 
+            use_relative_mode=False,
+            ik_method="dls",
+            ik_params={"lambda_val": 0.3}
+        )
+        self.ik_controller = DifferentialIKController(
+            ik_cfg, num_envs=self.scene.num_envs, device="cuda"
+        )
+        self.ik_controller.reset()
 
     def _build_ui(self):
         self.window = ui.Window(
@@ -42,6 +65,20 @@ class OmniJointController:
         with self.window.frame:
             with ui.VStack(spacing=6):
                 ui.Label("Joint Position Control (rad)", height=30)
+
+                for i, name in enumerate(self.pose_names):
+                    ui.Label(name)
+
+                    slider = ui.FloatSlider(
+                        min=-3.14,
+                        max=3.14,
+                        step=0.01,
+                        height=18,
+                    )
+
+                    slider.model.add_value_changed_fn(
+                        partial(self._on_pose_changed, i)
+                    )
 
                 for i, name in enumerate(self.joint_names):
                     ui.Label(name)
@@ -172,3 +209,37 @@ class OmniJointController:
         value = model.get_value_as_float()
 
         self.door_q_slider[0, joint_id] = value
+
+    def _on_pose_changed(self, idx, model):
+        self._initialize_trajectory()
+        value = model.get_value_as_float()
+
+        if idx <= 2:
+            self.xyz[..., idx] = value
+        else:
+            self.euler_angles[..., idx - 3] = value
+
+        roll, pitch, yaw = self.euler_angles.unbind(dim = -1)
+        quat = quat_from_euler_xyz(roll, pitch, yaw)
+        ee_pos = self.scene["robot"].data.body_pos_w[:, self.key_pose_idx]
+        ee_quat = self.scene["robot"].data.body_quat_w[:, self.key_pose_idx]
+        hand_jac = self.scene["robot"].root_physx_view.get_jacobians()[:, self.key_pose_idx, :, self.joint_ids[3:]]
+        current_joint_pos = self.scene["robot"].data.joint_pos[:, self.joint_ids[3:]]
+
+        self.ik_controller.reset()
+
+        self.ik_controller.set_command(command=torch.cat((self.xyz, quat), dim=-1), ee_pos=ee_pos, ee_quat=ee_quat)
+        joint_pos_des = self.ik_controller.compute(
+            ee_pos,
+            ee_quat,
+            hand_jac,
+            current_joint_pos,
+        )
+
+        if hasattr(self, "goal_marker"):
+            self.goal_marker.visualize(
+                translations=self.xyz,
+                orientations=quat,
+            )
+
+        self.q_slider[0, self.joint_ids[3:]] = joint_pos_des

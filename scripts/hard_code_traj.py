@@ -63,6 +63,10 @@ from DoorOpening.assets.glorbot.glorbot_cfg import FULL_JOINT_NAMES
 
 from DoorOpening.motion.slider_controller import OmniJointController
 
+from isaaclab.markers import VisualizationMarkers
+from isaaclab.markers.config import FRAME_MARKER_CFG
+from isaaclab.utils.math import quat_from_euler_xyz
+
 torch.set_printoptions(precision=3, sci_mode=False)
 
 @configclass
@@ -101,6 +105,22 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
 
     joint_ids, _ = scene["robot"].find_joints(FULL_JOINT_NAMES)
     controller = OmniJointController(scene, FULL_JOINT_NAMES)
+
+    cfg = FRAME_MARKER_CFG.replace(prim_path="/World/GoalFrame")
+    cfg.markers["frame"].scale = (0.03, 0.03, 0.03)
+    goal_marker = VisualizationMarkers(cfg)
+
+    # initialize marker at current EE pose
+    roll, pitch, yaw = controller.euler_angles.unbind(dim=-1)
+    goal_quat = quat_from_euler_xyz(roll, pitch, yaw)
+
+    goal_marker.visualize(
+        translations=controller.xyz,
+        orientations=goal_quat,
+    )
+
+    # give controller access to marker
+    controller.goal_marker = goal_marker
     
 
     while simulation_app.is_running():
@@ -178,7 +198,7 @@ def main():
     """Main function."""
 
     # Initialize the simulation context
-    sim_cfg = sim_utils.SimulationCfg(dt=0.005, device=args_cli.device)
+    sim_cfg = sim_utils.SimulationCfg(dt=0.01, device=args_cli.device)
     sim = sim_utils.SimulationContext(sim_cfg)
     # Set main camera
     sim.set_camera_view(eye=[2.0, -2.5, 3.2], target=[0.0, 0.0, 0.7])

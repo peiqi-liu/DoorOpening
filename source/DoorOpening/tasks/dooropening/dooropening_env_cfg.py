@@ -85,7 +85,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     door_handle_body_name = "link_1"
 
     # robot_key_bodies = ["base_x_link", "panda_link1",  "panda_link2",  "panda_link3",  "panda_link4",  "panda_link5",  "panda_link6",  "panda_link7",  "palm_center"]
-    robot_key_bodies = ["base_x_link",  "panda_link4", "palm_center", "fingertip_3"]
+    # robot_key_bodies = ["base_x_link",  "panda_link4", "palm_center", "fingertip_3"]
+    robot_key_bodies = ["base_x_link",  "palm_center"]
 
     # robot(s)
     robot_cfg: ArticulationCfg = GLORBOT_CONFIG.replace(
@@ -111,14 +112,14 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     # Deep Mimic Reward Parameters
     robot_body_quat_w = 1.0
-    robot_key_body_pos_w = 2.0
+    robot_key_body_pos_w = 3.0
     door_joint_pos_w = 3.0
     robot_base_joint_pos_w = 1.0
     robot_arm_joint_pos_w = 1.5
-    robot_finger_joint_pos_w = 1.5
+    robot_finger_joint_pos_w = 1.0
 
-    robot_body_quat_scale = 0.25
-    robot_key_body_pos_scale = 0.3
+    robot_body_quat_scale = 1.0
+    robot_key_body_pos_scale = 3.0
     robot_base_joint_pos_scale = 0.5
     robot_arm_joint_pos_scale = 0.5
     robot_finger_joint_pos_scale = 0.5
@@ -129,6 +130,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     reset_base_pos_delta = 0.1
     reset_key_body_pos_delta = 0.2
+    reset_door_pos_delta = 0.25
+
+    velocity = 0.6
 
     # Change this to where you store your motions
     motion_file = "trajectory.pkl"

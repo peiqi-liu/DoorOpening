@@ -76,8 +76,9 @@ class DooropeningEnv(DirectRLEnv):
 
         self.reset_base_pos_delta = (self.cfg.reset_base_pos_delta ** 2) * len(self.cfg.base_joints)
         self.reset_key_body_pos_delta = (self.cfg.reset_key_body_pos_delta ** 2) * len(self.cfg.robot_key_bodies)
+        self.reset_door_pos_delta = (self.cfg.reset_door_pos_delta ** 2) * len(self.cfg.door_body_names)
 
-        self._ref_motion_lib = ReferenceMotionManager(self.cfg.motion_file, self.num_envs, self.device)
+        self._ref_motion_lib = ReferenceMotionManager(self.cfg.motion_file, self.num_envs, self.device, velocity=self.cfg.velocity)
         self.max_trial_steps = self._ref_motion_lib.num_frames + 50 # Add 50 steps to the motion length to allow more time for the robot to reach the target
 
         torch.set_printoptions(precision=4, sci_mode=False)
@@ -179,7 +180,7 @@ class DooropeningEnv(DirectRLEnv):
 
         self.extras["error/key_body_pos_err"] = key_body_pos_err.mean()
         self.extras["error/key_body_quat_err"] = key_body_quat_err.mean()
-        # self.extras["error/door_err"] = door_err.mean()
+        self.extras["error/door_err"] = door_err.mean()
         self.extras["error/base_joint_pos_err"] = base_joint_pos_err.mean()
         self.extras["error/arm_joint_pos_err"] = arm_joint_pos_err.mean()
         self.extras["error/finger_joint_pos_err"] = finger_joint_pos_err.mean()
@@ -236,7 +237,7 @@ class DooropeningEnv(DirectRLEnv):
         )
         time_out = self.episode_length_buf >= self.max_trial_steps - 1
         # print(arm_joint_pos_err, finger_joint_pos_err, base_joint_pos_err)
-        return (base_joint_pos_err > self.reset_base_pos_delta) | (key_body_pos_err > self.reset_key_body_pos_delta), time_out
+        return (base_joint_pos_err > self.reset_base_pos_delta) | (key_body_pos_err > self.reset_key_body_pos_delta) | (door_err > self.reset_door_pos_delta), time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
