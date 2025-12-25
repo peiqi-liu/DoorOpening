@@ -35,7 +35,7 @@
 		</collision>
 	</link>
 	<joint name="joint_1" type="revolute">
-		<origin xyz="0.6663215063128132 -0.8974214251025738 -0.022139757071257815"/>
+		<origin xyz="0.6663215063128132 -0.8974214251025738 -0.042139757071257815"/>
 		<axis xyz="0 0 1"/>
 		<child link="link_1"/>
 		<parent link="link_2"/>

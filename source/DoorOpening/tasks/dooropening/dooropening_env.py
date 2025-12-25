@@ -128,14 +128,15 @@ class DooropeningEnv(DirectRLEnv):
 
         robot_key_body_pos = self.robot.data.body_pos_w[:, self._robot_key_body_idx]
         robot_key_body_pos -= self.scene.env_origins.repeat((1, 1)).reshape(self.num_envs, 1, 3)
-        rel_robot_key_body_pos = (robot_key_body_pos - base_link_pos).reshape(self.num_envs, 1, -1)
+        # rel_robot_key_body_pos = (robot_key_body_pos - base_link_pos).reshape(self.num_envs, 1, -1)
+        door_to_robot_key_body_pos = (door_link_pos[:, :, None, :] - robot_key_body_pos[:, None, :, :]).reshape(self.num_envs, 1, -1)
 
         obs = torch.cat(
             (
                 self.joint_pos[:, self._robot_dof_idx].unsqueeze(dim = 1),
                 self.joint_vel[:, self._robot_dof_idx].unsqueeze(dim = 1),
                 door_to_base_link_pos,
-                rel_robot_key_body_pos,
+                door_to_robot_key_body_pos,
             ),
             dim=-1,
         )

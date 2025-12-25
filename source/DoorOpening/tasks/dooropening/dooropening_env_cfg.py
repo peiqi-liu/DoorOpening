@@ -103,7 +103,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     actuated_joints_num = len(arm_joints) + len(base_joints) + len(finger_joints)
     action_space = actuated_joints_num * 1
-    observation_space = actuated_joints_num * 2 + len(door_body_names) * 3 + len(robot_key_bodies) * 3
+    observation_space = actuated_joints_num * 2 + len(door_body_names) * 3 + len(robot_key_bodies) * len(door_body_names) * 3
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=6.0, replicate_physics=True)
@@ -111,12 +111,12 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     action_scale = 10.0
 
     # Deep Mimic Reward Parameters
-    robot_body_quat_w = 1.0
+    robot_body_quat_w = 0.0
     robot_key_body_pos_w = 3.0
     door_joint_pos_w = 3.0
     robot_base_joint_pos_w = 1.0
-    robot_arm_joint_pos_w = 1.5
-    robot_finger_joint_pos_w = 1.0
+    robot_arm_joint_pos_w = 0.0
+    robot_finger_joint_pos_w = 0.0
 
     robot_body_quat_scale = 1.0
     robot_key_body_pos_scale = 3.0
@@ -129,7 +129,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     extra_penalty_max = 0.5
 
     reset_base_pos_delta = 0.1
-    reset_key_body_pos_delta = 0.2
+    reset_key_body_pos_delta = 0.5
     reset_door_pos_delta = 0.25
 
     velocity = 0.6
