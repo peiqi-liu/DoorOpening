@@ -39,6 +39,7 @@ def create_door_cfg(urdf_path: str) -> ArticulationCfg:
         ),
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.8),
+            # rot=(0, 0, 0, 1)
             # rot=(0, -0.7071, 0, 0.7071)
         ),
         actuators={
@@ -56,7 +57,7 @@ urdf_folder = os.path.join(root_path, "door/PartNet")
 urdf_paths = sorted(glob.glob(os.path.join(urdf_folder, "**/mobility.urdf"), recursive=True))
 
 # An example of door urdf
-door_urdf_path = urdf_paths[2]
+door_urdf_path = urdf_paths[0]
 
 print("door_urdf_path: ", door_urdf_path)
 

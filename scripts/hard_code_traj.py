@@ -161,8 +161,10 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         door_joint_pos = scene["door"].data.default_joint_pos.clone()
         door_joint_pos[..., :] = door_pos
         # print("door_joint_pos: ", door_joint_pos)
-        scene["robot"].write_joint_position_to_sim(joint_pos)
+        # scene["robot"].write_joint_position_to_sim(joint_pos)
         scene["door"].write_joint_position_to_sim(door_joint_pos)
+        scene["robot"].set_joint_position_target(joint_pos)
+        # scene["door"].set_joint_position_target(door_joint_pos)
         # -- write data to sim
         if controller.playback:
             q = controller.traj[controller.play_idx]
@@ -198,7 +200,7 @@ def main():
     """Main function."""
 
     # Initialize the simulation context
-    sim_cfg = sim_utils.SimulationCfg(dt=0.01, device=args_cli.device)
+    sim_cfg = sim_utils.SimulationCfg(dt=1 / 60, device=args_cli.device)
     sim = sim_utils.SimulationContext(sim_cfg)
     # Set main camera
     sim.set_camera_view(eye=[2.0, -2.5, 3.2], target=[0.0, 0.0, 0.7])

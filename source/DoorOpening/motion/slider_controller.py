@@ -13,8 +13,14 @@ class OmniJointController:
         self.joint_names = joint_names
         self.joint_ids, self.joint_names = scene["robot"].find_joints(joint_names)
 
+        self.robot_joint_pos_upper_limit = scene["robot"].data.joint_pos_limits[..., self.joint_ids, 1]
+        self.robot_joint_pos_lower_limit = scene["robot"].data.joint_pos_limits[..., self.joint_ids, 0]
+
         self.door_joint_names = scene["door"].data.joint_names
         self.door_joint_ids, self.door_joint_names = scene["door"].find_joints(self.door_joint_names)
+
+        self.door_joint_pos_upper_limit = scene["door"].data.joint_pos_limits[..., self.door_joint_ids, 1]
+        self.door_joint_pos_lower_limit = scene["door"].data.joint_pos_limits[..., self.door_joint_ids, 0]
 
         self.key_pose_idx, _ = scene["robot"].find_bodies("palm_center")
         self.key_pose_idx = self.key_pose_idx[0]
@@ -53,6 +59,7 @@ class OmniJointController:
             ik_cfg, num_envs=self.scene.num_envs, device="cuda"
         )
         self.ik_controller.reset()
+        self.joint_pos_des = None
 
     def _build_ui(self):
         self.window = ui.Window(
@@ -79,13 +86,15 @@ class OmniJointController:
                     slider.model.add_value_changed_fn(
                         partial(self._on_pose_changed, i)
                     )
+                
+                ui.Button("Write XYZ to sim", clicked_fn=self._write_xyz_to_sim)
 
                 for i, name in enumerate(self.joint_names):
                     ui.Label(name)
 
                     slider = ui.FloatSlider(
-                        min=-3.14,
-                        max=3.14,
+                        min=self.robot_joint_pos_lower_limit[0, i],
+                        max=self.robot_joint_pos_upper_limit[0, i],
                         step=0.01,
                         height=18,
                     )
@@ -98,8 +107,8 @@ class OmniJointController:
                     ui.Label("door_" + name)
 
                     slider = ui.FloatSlider(
-                        min=-3.14,
-                        max=3.14,
+                        min=self.door_joint_pos_lower_limit[0, i],
+                        max=self.door_joint_pos_upper_limit[0, i],
                         step=0.01,
                         height=18,
                     )
@@ -123,6 +132,10 @@ class OmniJointController:
                     width=120,
                 )
                 steps_field.model.set_value(self.step_temp)
+
+    def _write_xyz_to_sim(self):
+        if self.joint_pos_des is not None:
+            self.q_slider[0, self.joint_ids[3:]] = self.joint_pos_des
 
     def _record_key_pose(self):
         q = self.q_slider.clone()
@@ -229,12 +242,14 @@ class OmniJointController:
         self.ik_controller.reset()
 
         self.ik_controller.set_command(command=torch.cat((self.xyz, quat), dim=-1), ee_pos=ee_pos, ee_quat=ee_quat)
-        joint_pos_des = self.ik_controller.compute(
+        self.joint_pos_des = self.ik_controller.compute(
             ee_pos,
             ee_quat,
             hand_jac,
             current_joint_pos,
         )
+
+        self.joint_pos_des = torch.clamp(self.joint_pos_des, self.robot_joint_pos_lower_limit[..., 3:], self.robot_joint_pos_upper_limit[..., 3:])
 
         if hasattr(self, "goal_marker"):
             self.goal_marker.visualize(
@@ -242,4 +257,4 @@ class OmniJointController:
                 orientations=quat,
             )
 
-        self.q_slider[0, self.joint_ids[3:]] = joint_pos_des
+        # self.q_slider[0, self.joint_ids[3:]] = joint_pos_des
