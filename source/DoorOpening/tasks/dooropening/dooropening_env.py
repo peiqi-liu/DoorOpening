@@ -71,9 +71,6 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_arm_joint_pos_w = self.cfg.robot_arm_joint_pos_w
         self.robot_finger_joint_pos_w = self.cfg.robot_finger_joint_pos_w
 
-        self.extra_penalty_w = self.cfg.extra_penalty_w
-        self.extra_penalty_max = self.cfg.extra_penalty_max
-
         self.reset_base_pos_delta = (self.cfg.reset_base_pos_delta ** 2) * len(self.cfg.base_joints)
         self.reset_key_body_pos_delta = (self.cfg.reset_key_body_pos_delta ** 2) * len(self.cfg.robot_key_bodies)
         self.reset_door_pos_delta = (self.cfg.reset_door_pos_delta ** 2) * len(self.cfg.door_body_names)
@@ -213,9 +210,6 @@ class DooropeningEnv(DirectRLEnv):
             robot_base_joint_pos_w = self.robot_base_joint_pos_w,
             robot_arm_joint_pos_w = self.robot_arm_joint_pos_w,
             robot_finger_joint_pos_w = self.robot_finger_joint_pos_w,
-
-            # extra_penalty_w = self.extra_penalty_w,
-            # extra_penalty_max = self.extra_penalty_max,
         )
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -296,8 +290,6 @@ def compute_deep_mimic_rewards(
     robot_finger_joint_pos_w: float,
 
     # body_pos_delta: float = 0.02,
-    # extra_penalty_w: float = 0.5,
-    # extra_penalty_max: float = 0.5,
 ) -> torch.Tensor:
     # ----------------------------------
     # Robot body position error
@@ -346,8 +338,6 @@ def compute_deep_mimic_rewards(
     arm_joint_pos_r = torch.exp(-robot_arm_joint_pos_scale * arm_joint_pos_err)
     finger_joint_pos_r = torch.exp(-robot_finger_joint_pos_scale * finger_joint_pos_err)
 
-    # extra_penalty = torch.linalg.norm(ref_robot_key_body_pos - robot_key_body_pos, dim=-1)
-    # extra_penalty = torch.clamp(torch.sum(extra_penalty, dim=-1), 0, extra_penalty_max)
     # ----------------------------------
     # Final reward
     # ----------------------------------
@@ -357,7 +347,6 @@ def compute_deep_mimic_rewards(
          + robot_base_joint_pos_w * base_joint_pos_r\
          + robot_arm_joint_pos_w * arm_joint_pos_r\
          + robot_finger_joint_pos_w * finger_joint_pos_r
-        #  - extra_penalty_w * extra_penalty
     return reward
 
 def compute_tracking_error(

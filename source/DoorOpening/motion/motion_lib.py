@@ -8,7 +8,7 @@ class ReferenceMotionManager:
         motion_file: str,
         num_envs: int,
         device: torch.device,
-        reset_range=(60, 80),
+        reset_range=(0, 10),
         velocity=0.6,
     ):
         self.device = device
@@ -91,7 +91,8 @@ class ReferenceMotionManager:
     # Step reference motion
     # --------------------------------------------------
     def step(self):
-        self.frame_idx += self.velocity
+        # self.frame_idx += self.velocity
+        self.frame_idx += 1
         self.frame_idx.clamp_(max=self.num_frames - 1)
         self._update_current()
 

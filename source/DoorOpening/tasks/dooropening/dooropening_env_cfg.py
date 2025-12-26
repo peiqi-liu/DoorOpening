@@ -125,9 +125,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_finger_joint_pos_scale = 0.5
     door_joint_pos_scale = 5.0
 
-    extra_penalty_w = 0.5
-    extra_penalty_max = 0.5
-
     reset_base_pos_delta = 0.1
     reset_key_body_pos_delta = 0.2
     reset_door_pos_delta = 0.25

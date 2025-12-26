@@ -33,14 +33,17 @@ class OmniJointController:
         self.euler_angles = torch.stack(euler_xyz_from_quat(quat), dim = -1)
 
         # ===== Keyframe + playback state =====
-        self.key_poses = [scene["robot"].data.default_joint_pos.clone()]          # list[Tensor (1, num_joints)]
-        self.door_key_joint_angles = [scene["door"].data.default_joint_pos.clone()]     # list[Tensor (1, num_door_joints)]
+        self.key_poses = []          # list[Tensor (1, num_joints)]
+        self.door_key_joint_angles = []     # list[Tensor (1, num_door_joints)]
         self.traj = None             # Tensor (T, num_joints)
         self.playback = False
         self.play_idx = 0
 
         self.steps_per_segments = []
         self.step_temp = 60
+
+        self.pose_sliders = []
+        self.joint_sliders = []
 
         self._initialize_trajectory()
 
@@ -73,6 +76,7 @@ class OmniJointController:
             with ui.VStack(spacing=6):
                 ui.Label("Joint Position Control (rad)", height=30)
 
+                # 6 end effector pose sliders
                 for i, name in enumerate(self.pose_names):
                     ui.Label(name)
 
@@ -86,9 +90,11 @@ class OmniJointController:
                     slider.model.add_value_changed_fn(
                         partial(self._on_pose_changed, i)
                     )
+                    self.pose_sliders.append(slider)
                 
                 ui.Button("Write XYZ to sim", clicked_fn=self._write_xyz_to_sim)
 
+                # robot joint position sliders
                 for i, name in enumerate(self.joint_names):
                     ui.Label(name)
 
@@ -102,7 +108,9 @@ class OmniJointController:
                     slider.model.add_value_changed_fn(
                         partial(self._on_slider_changed, i)
                     )
+                    self.joint_sliders.append(slider)
 
+                # door joint position sliders
                 for i, name in enumerate(self.door_joint_names):
                     ui.Label("door_" + name)
 
@@ -134,16 +142,20 @@ class OmniJointController:
                 steps_field.model.set_value(self.step_temp)
 
     def _write_xyz_to_sim(self):
+        # Write joint positions to sim
+        # The robot might not reach the pose in the first shot, keep pressing the button to keep reaching the pose
         if self.joint_pos_des is not None:
             self.q_slider[0, self.joint_ids[3:]] = self.joint_pos_des
+        self._apply_joint_positions(self.q_slider)
 
     def _record_key_pose(self):
+        if len(self.key_poses) != 0:
+            self.steps_per_segments.append(self.step_temp)
         q = self.q_slider.clone()
         self.key_poses.append(q)
         print(f"[KEYPOSE] Recorded #{len(self.key_poses)}")
         self.door_key_joint_angles.append(self.door_q_slider.clone())
         print(f"[DOOR KEYPOSE] Recorded #{len(self.door_key_joint_angles)}")
-        self.steps_per_segments.append(self.step_temp)
 
     def _build_trajectory(self):
         assert len(self.key_poses) >= 2, "Need at least 2 key poses"
@@ -222,6 +234,7 @@ class OmniJointController:
         value = model.get_value_as_float()
 
         self.door_q_slider[0, joint_id] = value
+        self._sync_pose_from_sim()
 
     def _on_pose_changed(self, idx, model):
         self._initialize_trajectory()
@@ -258,3 +271,32 @@ class OmniJointController:
             )
 
         # self.q_slider[0, self.joint_ids[3:]] = joint_pos_des
+
+
+    def _sync_pose_from_sim(self):
+        pos = self.scene["robot"].data.body_pos_w[:, self.key_pose_idx]
+        quat = self.scene["robot"].data.body_quat_w[:, self.key_pose_idx]
+
+        self.xyz[:] = pos
+        roll, pitch, yaw = euler_xyz_from_quat(quat)
+        self.euler_angles[:] = torch.stack((roll, pitch, yaw), -1)
+
+        for i in range(3):
+            self.pose_sliders[i].model.set_value(float(self.xyz[0, i]))
+        for i in range(3):
+            self.pose_sliders[i + 3].model.set_value(float(self.euler_angles[0, i]))
+
+    def _sync_joint_sliders(self):
+        for i, jid in enumerate(self.joint_ids):
+            self.joint_sliders[i].model.set_value(float(self.q_slider[0, jid]))
+
+    def _apply_joint_positions(self, q, sync_pose = True):
+        self.q_slider[:] = q
+
+        # write to sim
+        self.scene["robot"].set_joint_position_target(q)
+
+        # FK → pose
+        if sync_pose:
+            self._sync_pose_from_sim()
+        self._sync_joint_sliders()
