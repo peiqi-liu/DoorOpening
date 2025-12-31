@@ -103,7 +103,6 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     count = 0
     # Simulate physics
 
-    joint_ids, _ = scene["robot"].find_joints(FULL_JOINT_NAMES)
     controller = OmniJointController(scene, FULL_JOINT_NAMES)
 
     cfg = FRAME_MARKER_CFG.replace(prim_path="/World/GoalFrame")

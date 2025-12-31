@@ -26,8 +26,8 @@ class OmniJointController:
         self.key_pose_idx = self.key_pose_idx[0]
         self.pose_names = ['x', 'y', 'z', 'roll', 'pitch', 'yaw']
 
-        self.q_slider = scene["robot"].data.joint_pos.clone()
-        self.door_q_slider = scene["door"].data.joint_pos.clone()
+        self.q_slider = scene["robot"].data.default_joint_pos.clone()
+        self.door_q_slider = scene["door"].data.default_joint_pos.clone()
         self.xyz = scene["robot"].data.body_pos_w[:, self.key_pose_idx].clone()
         quat = scene["robot"].data.body_quat_w[:, self.key_pose_idx].clone()
         self.euler_angles = torch.stack(euler_xyz_from_quat(quat), dim = -1)
@@ -56,7 +56,7 @@ class OmniJointController:
             command_type="pose", 
             use_relative_mode=False,
             ik_method="dls",
-            ik_params={"lambda_val": 0.3}
+            ik_params={"lambda_val": 0.05}
         )
         self.ik_controller = DifferentialIKController(
             ik_cfg, num_envs=self.scene.num_envs, device="cuda"

@@ -85,8 +85,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     door_handle_body_name = "link_1"
 
     # robot_key_bodies = ["base_x_link", "panda_link1",  "panda_link2",  "panda_link3",  "panda_link4",  "panda_link5",  "panda_link6",  "panda_link7",  "palm_center"]
-    # robot_key_bodies = ["base_x_link",  "panda_link4", "palm_center", "fingertip_3"]
-    robot_key_bodies = ["base_x_link",  "palm_center"]
+    robot_key_bodies = ["base_x_link",  "panda_link4", "panda_link6", "palm_center", "fingertip_2", "fingertip_4"]
 
     # robot(s)
     robot_cfg: ArticulationCfg = GLORBOT_CONFIG.replace(
@@ -116,7 +115,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     door_joint_pos_w = 3.0
     robot_base_joint_pos_w = 1.0
     robot_arm_joint_pos_w = 1.5
-    robot_finger_joint_pos_w = 1.0
+    robot_finger_joint_pos_w = 0.2
 
     robot_body_quat_scale = 1.0
     robot_key_body_pos_scale = 3.0

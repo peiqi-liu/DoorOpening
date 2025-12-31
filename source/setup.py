@@ -23,6 +23,7 @@ INSTALL_REQUIRES = [
     "urchin",
     "open3d",
     "geometrout",
+    "trimesh",
 ]
 
 # Installation operation

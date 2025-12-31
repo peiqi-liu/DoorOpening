@@ -34,30 +34,31 @@ def create_door_cfg(urdf_path: str) -> ArticulationCfg:
             joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
                 gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
             ),
-            scale = (1.0, 1.2, 1.0),
             # Note: joint_drive is usually not needed for URDF; PD gains can be in actuators
+            scale = (1.0, 1.2, 0.95),
+            activate_contact_sensors=True,
         ),
         init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 0.8),
-            # rot=(0, 0, 0, 1)
+            pos=(0.0, 0.0, 1.0),
+            rot=(0, 0, 0, 1)
             # rot=(0, -0.7071, 0, 0.7071)
         ),
         actuators={
             "body": ImplicitActuatorCfg(
                 joint_names_expr=[".*"],
-                stiffness=1.0,
-                damping=1e3,
+                stiffness=20,
+                damping=20,
             ),
         },
     )
 
 
 root_path = os.path.dirname(os.path.dirname(__file__))
-urdf_folder = os.path.join(root_path, "door/PartNet")
+urdf_folder = os.path.join(root_path, "door/PartNetv2")
 urdf_paths = sorted(glob.glob(os.path.join(urdf_folder, "**/mobility.urdf"), recursive=True))
 
 # An example of door urdf
-door_urdf_path = urdf_paths[24]
+door_urdf_path = urdf_paths[0]
 
 print("door_urdf_path: ", door_urdf_path)
 

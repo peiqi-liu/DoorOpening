@@ -110,7 +110,7 @@ GLORBOT_CONFIG = ArticulationCfg(
         joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
             gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
         ),
-        scale = (0.7, 0.7, 0.7),
+        scale = (0.8, 0.8, 0.8),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
         joint_pos=DEFAULT_JOINT_POS,
