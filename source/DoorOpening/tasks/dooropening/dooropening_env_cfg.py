@@ -129,7 +129,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     reset_key_body_pos_delta = 0.2
     reset_door_pos_delta = 0.25
 
-    velocity = 0.6
+    velocity = 1.0
 
     # Change this to where you store your motions
     motion_file = "trajectory.pkl"

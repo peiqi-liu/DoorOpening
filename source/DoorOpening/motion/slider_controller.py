@@ -26,8 +26,8 @@ class OmniJointController:
         self.key_pose_idx = self.key_pose_idx[0]
         self.pose_names = ['x', 'y', 'z', 'roll', 'pitch', 'yaw']
 
-        self.q_slider = scene["robot"].data.default_joint_pos.clone()
-        self.door_q_slider = scene["door"].data.default_joint_pos.clone()
+        self.q_slider = scene["robot"].data.joint_pos.clone()
+        self.door_q_slider = scene["door"].data.joint_pos.clone()
         self.xyz = scene["robot"].data.body_pos_w[:, self.key_pose_idx].clone()
         quat = scene["robot"].data.body_quat_w[:, self.key_pose_idx].clone()
         self.euler_angles = torch.stack(euler_xyz_from_quat(quat), dim = -1)
@@ -90,6 +90,7 @@ class OmniJointController:
                     slider.model.add_value_changed_fn(
                         partial(self._on_pose_changed, i)
                     )
+                    slider.model.set_value(self.xyz[0, i] if i < 3 else self.euler_angles[0, i - 3])
                     self.pose_sliders.append(slider)
                 
                 ui.Button("Write XYZ to sim", clicked_fn=self._write_xyz_to_sim)
@@ -98,6 +99,10 @@ class OmniJointController:
                 for i, name in enumerate(self.joint_names):
                     ui.Label(name)
 
+                    if name.startswith("base_"):
+                        self.robot_joint_pos_lower_limit[0, i] = -4.5
+                        self.robot_joint_pos_upper_limit[0, i] = 4.5
+
                     slider = ui.FloatSlider(
                         min=self.robot_joint_pos_lower_limit[0, i],
                         max=self.robot_joint_pos_upper_limit[0, i],
@@ -105,6 +110,7 @@ class OmniJointController:
                         height=18,
                     )
 
+                    slider.model.set_value(self.q_slider[0, self.joint_ids[i]])
                     slider.model.add_value_changed_fn(
                         partial(self._on_slider_changed, i)
                     )
@@ -121,6 +127,7 @@ class OmniJointController:
                         height=18,
                     )
 
+                    slider.model.set_value(self.door_q_slider[0, self.door_joint_ids[i]])
                     slider.model.add_value_changed_fn(
                         partial(self._on_door_slider_changed, i)
                     )
@@ -140,13 +147,6 @@ class OmniJointController:
                     width=120,
                 )
                 steps_field.model.set_value(self.step_temp)
-
-    def _write_xyz_to_sim(self):
-        # Write joint positions to sim
-        # The robot might not reach the pose in the first shot, keep pressing the button to keep reaching the pose
-        if self.joint_pos_des is not None:
-            self.q_slider[0, self.joint_ids[3:]] = self.joint_pos_des
-        self._apply_joint_positions(self.q_slider)
 
     def _record_key_pose(self):
         if len(self.key_poses) != 0:
@@ -208,13 +208,6 @@ class OmniJointController:
 
         self._initialize_trajectory()
 
-        # data = {
-        #     "joint_names": self.joint_names,
-        #     "q": self.traj.cpu(),
-        #     "dt": self.scene.sim.get_physics_dt(),
-        #     "source": "ui_keyframes",
-        # }
-
         with open(path, "wb") as f:
             pkl.dump(data, f)
 
@@ -247,6 +240,16 @@ class OmniJointController:
 
         roll, pitch, yaw = self.euler_angles.unbind(dim = -1)
         quat = quat_from_euler_xyz(roll, pitch, yaw)
+
+        if hasattr(self, "goal_marker"):
+            self.goal_marker.visualize(
+                translations=self.xyz,
+                orientations=quat,
+            )
+
+    def _write_xyz_to_sim(self):
+        roll, pitch, yaw = self.euler_angles.unbind(dim = -1)
+        quat = quat_from_euler_xyz(roll, pitch, yaw)
         ee_pos = self.scene["robot"].data.body_pos_w[:, self.key_pose_idx]
         ee_quat = self.scene["robot"].data.body_quat_w[:, self.key_pose_idx]
         hand_jac = self.scene["robot"].root_physx_view.get_jacobians()[:, self.key_pose_idx, :, self.joint_ids[3:]]
@@ -262,15 +265,13 @@ class OmniJointController:
             current_joint_pos,
         )
 
-        self.joint_pos_des = torch.clamp(self.joint_pos_des, self.robot_joint_pos_lower_limit[..., 3:], self.robot_joint_pos_upper_limit[..., 3:])
+        joint_pos_des = torch.clamp(self.joint_pos_des, self.robot_joint_pos_lower_limit[..., 3:], self.robot_joint_pos_upper_limit[..., 3:])
 
-        if hasattr(self, "goal_marker"):
-            self.goal_marker.visualize(
-                translations=self.xyz,
-                orientations=quat,
-            )
-
-        # self.q_slider[0, self.joint_ids[3:]] = joint_pos_des
+        # Write joint positions to sim
+        # The robot might not reach the pose in the first shot, keep pressing the button to keep reaching the pose
+        if joint_pos_des is not None:
+            self.q_slider[0, self.joint_ids[3:]] = joint_pos_des
+        self._apply_joint_positions(self.q_slider, sync_pose=False)
 
 
     def _sync_pose_from_sim(self):
