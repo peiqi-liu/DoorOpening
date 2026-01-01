@@ -8,7 +8,7 @@ class ReferenceMotionManager:
         motion_file: str,
         num_envs: int,
         device: torch.device,
-        reset_range=(0, 340),
+        reset_range=(0, 60),
         velocity=0.6,
     ):
         self.device = device

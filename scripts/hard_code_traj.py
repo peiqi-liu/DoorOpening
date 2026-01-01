@@ -36,6 +36,7 @@ parser.add_argument(
     default=False,
     help="Save the data from camera at index specified by ``--camera_id``.",
 )
+parser.add_argument("--debug", action="store_true", default=False, help="Debug output.")
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -67,6 +68,8 @@ from isaaclab.markers import VisualizationMarkers
 from isaaclab.markers.config import FRAME_MARKER_CFG
 from isaaclab.utils.math import quat_from_euler_xyz
 
+from isaaclab.sensors import ContactSensorCfg
+
 torch.set_printoptions(precision=3, sci_mode=False)
 
 @configclass
@@ -95,6 +98,23 @@ class SensorsSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Door",
     )
 
+    contact_forces_door1 = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Door/link_1",
+        update_period=0.0,
+        history_length=6,
+        debug_vis=True,
+        filter_prim_paths_expr=["{ENV_REGEX_NS}/Robot"],
+    )
+
+    contact_forces_door2 = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Door/link_2",
+        update_period=0.0,
+        history_length=6,
+        debug_vis=True,
+        filter_prim_paths_expr=["{ENV_REGEX_NS}/Robot"],
+    )
+
+
 def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     """Run the simulator."""
     # Define simulation stepping
@@ -102,6 +122,34 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     sim_time = 0.0
     count = 0
     # Simulate physics
+
+
+    # reset the scene entities
+    # root state
+    # we offset the root state by the origin since the states are written in simulation world frame
+    # if this is not done, then the robots will be spawned at the (0, 0, 0) of the simulation world
+    root_state = scene["robot"].data.default_root_state.clone()
+    root_state[:, :3] += scene.env_origins
+    print("root state: ", root_state)
+    scene["robot"].write_root_pose_to_sim(root_state[:, :7])
+    scene["robot"].write_root_velocity_to_sim(root_state[:, 7:])
+    joint_pos, joint_vel = (
+        scene["robot"].data.default_joint_pos.clone(),
+        scene["robot"].data.default_joint_vel.clone(),
+    )
+    scene["robot"].write_joint_state_to_sim(joint_pos, joint_vel)
+
+    root_state_door = scene["door"].data.default_root_state.clone()
+    root_state_door[:, :3] += scene.env_origins
+    print("root state door: ", root_state_door)
+    scene["door"].write_root_pose_to_sim(root_state_door[:, :7])
+    scene["door"].write_root_velocity_to_sim(root_state_door[:, 7:])
+    # door_pos = scene["door"].data.soft_joint_pos_limits[..., 0]
+    door_pos = torch.zeros_like(scene["door"].data.soft_joint_pos_limits[..., 0])
+    scene["door"].write_joint_position_to_sim(door_pos)
+
+    scene.reset()
+    print("[INFO]: Resetting robot state...")
 
     controller = OmniJointController(scene, FULL_JOINT_NAMES)
 
@@ -123,35 +171,6 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     
 
     while simulation_app.is_running():
-        # Reset
-        if count == 0:
-            # reset the scene entities
-            # root state
-            # we offset the root state by the origin since the states are written in simulation world frame
-            # if this is not done, then the robots will be spawned at the (0, 0, 0) of the simulation world
-            root_state = scene["robot"].data.default_root_state.clone()
-            root_state[:, :3] += scene.env_origins
-            print("root state: ", root_state)
-            scene["robot"].write_root_pose_to_sim(root_state[:, :7])
-            scene["robot"].write_root_velocity_to_sim(root_state[:, 7:])
-            joint_pos, joint_vel = (
-                scene["robot"].data.default_joint_pos.clone(),
-                scene["robot"].data.default_joint_vel.clone(),
-            )
-            scene["robot"].write_joint_state_to_sim(joint_pos, joint_vel)
-
-            root_state_door = scene["door"].data.default_root_state.clone()
-            root_state_door[:, :3] += scene.env_origins
-            print("root state door: ", root_state_door)
-            scene["door"].write_root_pose_to_sim(root_state_door[:, :7])
-            scene["door"].write_root_velocity_to_sim(root_state_door[:, 7:])
-            # door_pos = scene["door"].data.soft_joint_pos_limits[..., 0]
-            door_pos = torch.zeros_like(scene["door"].data.soft_joint_pos_limits[..., 0])
-            scene["door"].write_joint_position_to_sim(door_pos)
-
-            scene.reset()
-            print("[INFO]: Resetting robot state...")
-
         slider_pos = controller.q_slider.clone()
         joint_pos = scene["robot"].data.default_joint_pos.clone()
         joint_pos[..., :] = slider_pos
@@ -159,11 +178,21 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         door_pos = controller.door_q_slider.clone()
         door_joint_pos = scene["door"].data.default_joint_pos.clone()
         door_joint_pos[..., :] = door_pos
-        # print("door_joint_pos: ", door_joint_pos)
-        # scene["robot"].write_joint_position_to_sim(joint_pos)
-        scene["door"].write_joint_position_to_sim(door_joint_pos)
+        
+        # scene["door"].write_joint_position_to_sim(door_joint_pos)
         scene["robot"].set_joint_position_target(joint_pos)
-        # scene["door"].set_joint_position_target(door_joint_pos)
+        scene["door"].set_joint_position_target(door_joint_pos)
+
+        # print("-------------------------------")
+        if count % 10 == 0 and args_cli.debug:
+            # print(scene["contact_forces_door1"])
+            # print("Received force matrix of: ", scene["contact_forces_door1"].data.force_matrix_w)
+            print("Received contact force of link 1: ", scene["contact_forces_door1"].data.net_forces_w)
+            print("-------------------------------")
+            # print(scene["contact_forces_door2"])
+            # print("Received force matrix of: ", scene["contact_forces_door2"].data.force_matrix_w)
+            print("Received contact force of link 2: ", scene["contact_forces_door2"].data.net_forces_w)
+            print("-------------------------------")
         # -- write data to sim
         if controller.playback:
             q = controller.traj[controller.play_idx]

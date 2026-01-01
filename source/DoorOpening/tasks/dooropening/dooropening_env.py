@@ -43,6 +43,7 @@ class DooropeningEnv(DirectRLEnv):
 
         self._robot_base_link_idx, self.robot_base_link_name = self.robot.find_bodies(self.cfg.base_link_name)
         self._door_body_idx, _ = self.door.find_bodies(self.cfg.door_body_names)
+        self._door_joint_idx, _ = self.door.find_joints(self.cfg.door_joint_names)
 
         self.joint_pos = self.robot.data.joint_pos
         self.joint_vel = self.robot.data.joint_vel
@@ -113,6 +114,8 @@ class DooropeningEnv(DirectRLEnv):
     def _get_observations(self) -> dict:
         self.joint_pos = self.robot.data.joint_pos
         self.joint_vel = self.robot.data.joint_vel
+        self.door_joint_pos = self.door.data.joint_pos
+        self.door_joint_vel = self.door.data.joint_vel
         base_link_pos = self.robot.data.body_pos_w[:, self._robot_base_link_idx]
         base_link_pos -= self.scene.env_origins.repeat((1, 1
             )).reshape(self.num_envs, 1, 3) 
@@ -133,6 +136,8 @@ class DooropeningEnv(DirectRLEnv):
                 self.joint_vel[:, self._robot_dof_idx].unsqueeze(dim = 1),
                 door_to_base_link_pos,
                 rel_robot_key_body_pos,
+                self.door_joint_pos[:, self._door_joint_idx].unsqueeze(dim = 1),
+                self.door_joint_vel[:, self._door_joint_idx].unsqueeze(dim = 1),
             ),
             dim=-1,
         )
