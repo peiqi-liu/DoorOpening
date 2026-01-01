@@ -231,7 +231,8 @@ class DooropeningEnv(DirectRLEnv):
         )
         time_out = self.episode_length_buf >= self.max_trial_steps - 1
         # print(arm_joint_pos_err, finger_joint_pos_err, base_joint_pos_err)
-        return (base_joint_pos_err > self.reset_base_pos_delta) | (key_body_pos_err > self.reset_key_body_pos_delta) | (door_err > self.reset_door_pos_delta), time_out
+        warm_up = self.episode_length_buf >= 20
+        return warm_up & ((base_joint_pos_err > self.reset_base_pos_delta) | (key_body_pos_err > self.reset_key_body_pos_delta) | (door_err > self.reset_door_pos_delta)), time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
