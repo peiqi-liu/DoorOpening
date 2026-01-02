@@ -58,23 +58,22 @@ from isaaclab.utils import configclass
 from isaaclab.assets import ArticulationCfg
 
 from DoorOpening.assets.door.door_cfg import DOOR_CONFIG
+from DoorOpening.assets.door.create_door_cfg import ProceduralDoorGenerator
+
 
 torch.set_printoptions(precision=4, sci_mode=False)
 
 @configclass
 class SensorsSceneCfg(InteractiveSceneCfg):
-    """Design the scene with sensors on the robot."""
-
-    # ground plane
-    ground = AssetBaseCfg(prim_path="/World/defaultGroundPlane", spawn=sim_utils.GroundPlaneCfg())
-
-    # lights
-    dome_light = AssetBaseCfg(
-        prim_path="/World/Light", spawn=sim_utils.DomeLightCfg(intensity=3000.0, color=(0.75, 0.75, 0.75))
+    ground = AssetBaseCfg(
+        prim_path="/World/defaultGroundPlane",
+        spawn=sim_utils.GroundPlaneCfg(),
     )
 
-    door: ArticulationCfg = DOOR_CONFIG.replace(prim_path="{ENV_REGEX_NS}/Door")
-
+    dome_light = AssetBaseCfg(
+        prim_path="/World/Light",
+        spawn=sim_utils.DomeLightCfg(intensity=3000.0),
+    )
 
 def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     """Run the simulator."""
@@ -82,6 +81,26 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     sim_dt = sim.get_physics_dt()
     sim_time = 0.0
     count = 0
+
+    door_generator = ProceduralDoorGenerator(
+        device=sim.device,
+        seed=0,
+    )
+
+    doors = []
+
+    for env_id in range(scene.num_envs):
+        env_ns = scene.env_ns[env_id]
+        prim_path = f"{env_ns}/Door"
+
+        door = door_generator.spawn(
+            prim_path=prim_path,
+            translation=(0.0, 0.0, 0.0),
+        )
+
+        doors.append(door)
+
+    scene.add_articulation("door", doors)
 
     # Simulate physics
     while simulation_app.is_running():

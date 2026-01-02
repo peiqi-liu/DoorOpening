@@ -37,6 +37,7 @@ parser.add_argument(
     help="Save the data from camera at index specified by ``--camera_id``.",
 )
 parser.add_argument("--debug", action="store_true", default=False, help="Debug output.")
+parser.add_argument("--force", action="store_true", default=False, help="Force reset the scene.")
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -180,8 +181,12 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         door_joint_pos[..., :] = door_pos
         
         # scene["door"].write_joint_position_to_sim(door_joint_pos)
-        scene["robot"].set_joint_position_target(joint_pos)
-        scene["door"].set_joint_position_target(door_joint_pos)
+        if not args_cli.force:
+            scene["robot"].set_joint_position_target(joint_pos)
+            scene["door"].set_joint_position_target(door_joint_pos)
+        else:
+            scene["robot"].write_joint_position_to_sim(joint_pos)
+            scene["door"].write_joint_position_to_sim(door_joint_pos)
 
         # print("-------------------------------")
         if count % 10 == 0 and args_cli.debug:

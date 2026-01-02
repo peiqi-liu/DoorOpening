@@ -36,6 +36,7 @@ class DooropeningEnv(DirectRLEnv):
         self._robot_deep_mimic_dof_idx, _ = self.robot.find_joints(deep_mimic_joints)
 
         self._robot_key_body_idx, _ = self.robot.find_bodies(self.cfg.robot_key_bodies)
+        self._robot_reset_key_body_idx, _ = self.robot.find_bodies(self.cfg.robot_reset_key_bodies)
 
         self._robot_base_dof_idx, _ = self.robot.find_joints(self.cfg.base_joints)
         self._robot_arm_dof_idx, _ = self.robot.find_joints(self.cfg.arm_joints)
@@ -73,11 +74,11 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_finger_joint_pos_w = self.cfg.robot_finger_joint_pos_w
 
         self.reset_base_pos_delta = (self.cfg.reset_base_pos_delta ** 2) * len(self.cfg.base_joints)
-        self.reset_key_body_pos_delta = (self.cfg.reset_key_body_pos_delta ** 2) * len(self.cfg.robot_key_bodies)
+        self.reset_key_body_pos_delta = (self.cfg.reset_key_body_pos_delta ** 2) * len(self.cfg.robot_reset_key_bodies)
         self.reset_door_pos_delta = (self.cfg.reset_door_pos_delta ** 2) * len(self.cfg.door_body_names)
 
         self._ref_motion_lib = ReferenceMotionManager(self.cfg.motion_file, self.num_envs, self.device, velocity=self.cfg.velocity)
-        self.max_trial_steps = self._ref_motion_lib.num_frames + 50 # Add 50 steps to the motion length to allow more time for the robot to reach the target
+        self.max_trial_steps = self._ref_motion_lib.num_frames # Add 50 steps to the motion length to allow more time for the robot to reach the target
 
         torch.set_printoptions(precision=4, sci_mode=False)
 
@@ -148,6 +149,8 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_key_body_pos = self.robot.data.body_pos_w[:, self._robot_key_body_idx]\
              - self.scene.env_origins.repeat((1, 1)).reshape(self.num_envs, 1, 3)
         self.robot_key_body_quat = self.robot.data.body_quat_w[:, self._robot_key_body_idx]
+        self.robot_reset_key_body_pos = self.robot.data.body_pos_w[:, self._robot_reset_key_body_idx]\
+             - self.scene.env_origins.repeat((1, 1)).reshape(self.num_envs, 1, 3)
         self.robot_base_joint_pos = self.robot.data.joint_pos[:, self._robot_base_dof_idx]
         self.robot_arm_joint_pos = self.robot.data.joint_pos[:, self._robot_arm_dof_idx]
         self.robot_finger_joint_pos = self.robot.data.joint_pos[:, self._robot_finger_dof_idx]
@@ -155,6 +158,7 @@ class DooropeningEnv(DirectRLEnv):
 
         self.ref_robot_key_body_pos = self._ref_motion_lib.get_robot_body_pos()[:, self._robot_key_body_idx]
         self.ref_robot_key_body_quat = self._ref_motion_lib.get_robot_body_quat()[:, self._robot_key_body_idx]
+        self.ref_robot_reset_key_body_pos = self._ref_motion_lib.get_robot_body_pos()[:, self._robot_reset_key_body_idx]
         self.ref_robot_joint_pos = self._ref_motion_lib.get_robot_joint_pos()
         self.ref_robot_base_joint_pos = self.ref_robot_joint_pos[:, self._robot_base_dof_idx]
         self.ref_robot_arm_joint_pos = self.ref_robot_joint_pos[:, self._robot_arm_dof_idx]
@@ -220,14 +224,14 @@ class DooropeningEnv(DirectRLEnv):
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         self._get_intermediate_values()
         key_body_pos_err, key_body_quat_err, door_err, base_joint_pos_err, arm_joint_pos_err, finger_joint_pos_err = compute_tracking_error(
-            robot_key_body_pos = self.robot_key_body_pos,
+            robot_key_body_pos = self.robot_reset_key_body_pos,
             robot_key_body_quat = self.robot_key_body_quat,
             door_joint_pos = self.door_joint_pos,
             robot_base_joint_pos = self.robot_base_joint_pos,
             robot_arm_joint_pos = self.robot_arm_joint_pos,
             robot_finger_joint_pos = self.robot_finger_joint_pos,
 
-            ref_robot_key_body_pos = self.ref_robot_key_body_pos,
+            ref_robot_key_body_pos = self.ref_robot_reset_key_body_pos,
             ref_robot_key_body_quat = self.ref_robot_key_body_quat,
             ref_door_joint_pos = self.ref_door_joint_pos,
             ref_robot_base_joint_pos = self.ref_robot_base_joint_pos,
