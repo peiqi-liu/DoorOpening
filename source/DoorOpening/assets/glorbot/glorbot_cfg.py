@@ -12,6 +12,7 @@ Defines the Glorbot robot configuration for simulation with Isaac Sim.
 """
 
 import os
+from tkinter import N
 
 import isaaclab.sim as sim_utils
 from isaaclab.actuators.actuator_cfg import ImplicitActuatorCfg
@@ -20,6 +21,8 @@ from isaaclab.assets.articulation import ArticulationCfg
 module_path = os.path.dirname(__file__)
 root_path = os.path.dirname(module_path)
 glorbot_urdf_path = os.path.join(root_path, "glorbot/glorbot.urdf")
+glorbot_usd_path = os.path.join(root_path, "glorbot/glorbot.usd")
+print("glorbot_usd_path: ", glorbot_usd_path)
 
 import numpy as np
 
@@ -99,17 +102,21 @@ FINGER_JOINT_NAMES = [
 FULL_JOINT_NAMES = BASE_JOINT_NAMES + FRANKA_JOINT_NAMES + FINGER_JOINT_NAMES
 
 GLORBOT_CONFIG = ArticulationCfg(
-    spawn=sim_utils.UrdfFileCfg(
-        fix_base=True,
-        merge_fixed_joints=False,
-        make_instanceable=False,
-        asset_path=glorbot_urdf_path,
-        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-            enabled_self_collisions=False, solver_position_iteration_count=4, solver_velocity_iteration_count=0
-        ),
-        joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
-            gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
-        ),
+    # spawn=sim_utils.UrdfFileCfg(
+    #     fix_base=True,
+    #     merge_fixed_joints=False,
+    #     make_instanceable=False,
+    #     asset_path=glorbot_urdf_path,
+    #     articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+    #         enabled_self_collisions=False, solver_position_iteration_count=4, solver_velocity_iteration_count=0
+    #     ),
+    #     joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
+    #         gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
+    #     ),
+    #     scale = (0.8, 0.8, 0.8),
+    # ),
+    spawn=sim_utils.UsdFileCfg(
+        usd_path=glorbot_usd_path,
         scale = (0.8, 0.8, 0.8),
     ),
     init_state=ArticulationCfg.InitialStateCfg(

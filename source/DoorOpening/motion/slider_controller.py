@@ -5,6 +5,8 @@ import pickle as pkl
 from isaaclab.scene import InteractiveScene
 from isaaclab.controllers import DifferentialIKController, DifferentialIKControllerCfg
 from isaaclab.utils.math import euler_xyz_from_quat, quat_from_euler_xyz
+from scipy.interpolate import CubicSpline
+import numpy as np
 
 class OmniJointController:
     def __init__(self, scene: InteractiveScene, joint_names):
@@ -39,8 +41,7 @@ class OmniJointController:
         self.playback = False
         self.play_idx = 0
 
-        self.steps_per_segments = []
-        self.step_temp = 60
+        self.total_steps = 500
 
         self.pose_sliders = []
         self.joint_sliders = []
@@ -138,51 +139,79 @@ class OmniJointController:
                 ui.Button("Play Trajectory", clicked_fn=self._start_playback)
                 ui.Button("Save Trajectory", clicked_fn=self._save_trajectory)
 
-                ui.Label("Steps per key pose:", width=160)
+                ui.Label("Estimated Trajectory Length:", width=160)
 
-                steps_field = ui.IntField(
+                length_field = ui.IntField(
                     min=1,
-                    max=150,
-                    step=10,
+                    max=1000,
+                    step=1,
                     width=120,
                 )
-                steps_field.model.set_value(self.step_temp)
+                length_field.model.set_value(self.total_steps)
 
     def _record_key_pose(self):
-        if len(self.key_poses) != 0:
-            self.steps_per_segments.append(self.step_temp)
-        q = self.q_slider.clone()
+        # q = self.q_slider.clone()
+        q = self.scene["robot"].data.joint_pos.clone()
         self.key_poses.append(q)
         print(f"[KEYPOSE] Recorded #{len(self.key_poses)}")
-        self.door_key_joint_angles.append(self.door_q_slider.clone())
+        door_q = self.scene["door"].data.joint_pos.clone()
+        self.door_key_joint_angles.append(door_q)
         print(f"[DOOR KEYPOSE] Recorded #{len(self.door_key_joint_angles)}")
 
     def _build_trajectory(self):
         assert len(self.key_poses) >= 2, "Need at least 2 key poses"
         assert len(self.door_key_joint_angles) >= 2, "Need at least 2 door key poses"
-        assert len(self.steps_per_segments) >= 1, "Need at least 1 steps per segment"
 
-        traj = []
-        for i in range(len(self.key_poses) - 1):
-            q0 = self.key_poses[i][0]
-            q1 = self.key_poses[i + 1][0]
-            steps = self.steps_per_segments[i]
+        # traj = []
+        # for i in range(len(self.key_poses) - 1):
+        #     q0 = self.key_poses[i][0]
+        #     q1 = self.key_poses[i + 1][0]
+        #     steps = self.steps_per_segments[i]
 
-            for a in torch.linspace(0, 1, steps):
-                traj.append((1 - a) * q0 + a * q1)
+        #     for a in torch.linspace(0, 1, steps):
+        #         traj.append((1 - a) * q0 + a * q1)
 
-        self.traj = torch.stack(traj)   # (T, num_joints)
+        # self.traj = torch.stack(traj)   # (T, num_joints)
+        num_key_poses = self.key_poses[0].shape[-1]
+        num_door_poses = self.door_key_joint_angles[0].shape[-1]
 
-        door_traj = []
-        for i in range(len(self.door_key_joint_angles) - 1):
-            q0 = self.door_key_joint_angles[i][0]
-            q1 = self.door_key_joint_angles[i + 1][0]
-            steps = self.steps_per_segments[i]
+        combined_poses = [torch.cat((i, j), dim = -1) for i, j in zip(self.key_poses, self.door_key_joint_angles)]
+        qs = torch.stack([kp[0] for kp in combined_poses]).detach().cpu().numpy()
 
-            for a in torch.linspace(0, 1, steps):
-                door_traj.append((1 - a) * q0 + a * q1)
+        # automatic timing
+        dq = np.linalg.norm(qs[1:] - qs[:-1], axis=1)
+        dt = np.maximum(dq / 1.0, 0.1)
+        t_key = np.concatenate([[0], np.cumsum(dt)])
+        t_key /= t_key[-1]
 
-        self.door_traj = torch.stack(door_traj)   # (T, num_joints)
+        cs = CubicSpline(t_key, qs, axis=0, bc_type="clamped")
+
+        t = np.linspace(0, 1, self.total_steps)
+        self.traj = torch.tensor(cs(t))
+        self.qd = torch.tensor(cs(t, 1))
+        self.qdd = torch.tensor(cs(t, 2))
+
+        key_indices = np.searchsorted(t, t_key)
+        key_indices = np.clip(key_indices, 0, len(t) - 1)
+
+
+        self.door_traj = self.traj[:, num_key_poses:]
+        self.traj = self.traj[:, :num_key_poses]
+        self.qd = self.qd[:, :num_key_poses]
+        self.qdd = self.qdd[:, :num_key_poses]
+
+        # door_traj = []
+        # for i in range(len(self.door_key_joint_angles) - 1):
+        #     q0 = self.door_key_joint_angles[i][0]
+        #     q1 = self.door_key_joint_angles[i + 1][0]
+        #     steps = self.steps_per_segments[i]
+
+        #     for a in torch.linspace(0, 1, steps):
+        #         door_traj.append((1 - a) * q0 + a * q1)
+
+        # self.door_traj = torch.stack(door_traj)   # (T, num_joints)
+        self.key_indices = torch.from_numpy(key_indices)
+
         self.play_idx = 0
 
     def _initialize_trajectory(self):
@@ -198,7 +227,13 @@ class OmniJointController:
     def _save_trajectory(self, path="trajectory.pkl"):
         if self.traj is None or self.door_traj is None:
             self._build_trajectory()
-        data = {"robot_joint_pos_traj": self.traj, "door_traj": self.door_traj}
+        data = {
+            "robot_joint_pos_traj": self.traj, 
+            "robot_joint_vel_traj": self.qd, 
+            "robot_joint_acc_traj": self.qdd, 
+            "door_traj": self.door_traj, 
+            "key_indices": self.key_indices
+        }
         if len(self.robot_body_pos_traj) > 0:
             self.robot_body_pos_traj = torch.stack(self.robot_body_pos_traj, dim = 0)
             data["robot_body_pos_traj"] = self.robot_body_pos_traj

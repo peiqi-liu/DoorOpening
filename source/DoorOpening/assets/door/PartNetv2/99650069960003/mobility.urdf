@@ -9,13 +9,13 @@
 				<mesh filename="texture_dae/frame.obj" scale="0.8200447754284704 0.8200447754284704 0.8200447754284704" />
 			</geometry>
 		</visual>
-		<!-- <collision>
+		<collision>
 			<origin xyz="0 0 0" />
 			<geometry>
-				<mesh filename="texture_dae/frame.dae" scale="0.8200447754284704 0.8200447754284704 0.8200447754284704" />
+				<!-- <mesh filename="texture_dae/frame.dae" scale="0.8200447754284704 0.8200447754284704 0.8200447754284704" /> -->
 				<mesh filename="texture_dae/frame.obj" scale="0.8200447754284704 0.8200447754284704 0.8200447754284704" />
 			</geometry>
-		</collision> -->
+		</collision>
 		
 	</link>
 	<joint name="joint_0" type="fixed">

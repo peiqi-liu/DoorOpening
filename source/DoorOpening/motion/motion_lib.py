@@ -8,7 +8,7 @@ class ReferenceMotionManager:
         motion_file: str,
         num_envs: int,
         device: torch.device,
-        reset_range=(0, 100),
+        reset_range=(0, 200),
         velocity=0.6,
     ):
         self.device = device
@@ -39,6 +39,8 @@ class ReferenceMotionManager:
         self.door_traj = motions["door_traj"]
         self.robot_body_pos_traj = motions["robot_body_pos_traj"]
         self.robot_body_quat_traj = motions["robot_body_quat_traj"]
+        self.robot_joint_vel_traj = motions["robot_joint_vel_traj"]
+        self.key_indices = motions["key_indices"]
 
         if isinstance(self.robot_joint_pos_traj, list):
             self.robot_joint_pos_traj = torch.stack(self.robot_joint_pos_traj, dim = 0)
@@ -48,11 +50,14 @@ class ReferenceMotionManager:
             self.robot_body_pos_traj = torch.stack(self.robot_body_pos_traj, dim = 0)
         if isinstance(self.robot_body_quat_traj, list):
             self.robot_body_quat_traj = torch.stack(self.robot_body_quat_traj, dim = 0)
+        if isinstance(self.robot_joint_vel_traj, list):
+            self.robot_joint_vel_traj = torch.stack(self.robot_joint_vel_traj, dim = 0)
 
         self.robot_joint_pos_traj = self.robot_joint_pos_traj.to(self.device).squeeze()
         self.door_traj = self.door_traj.to(self.device).squeeze()
         self.robot_body_pos_traj = self.robot_body_pos_traj.to(self.device).squeeze()
         self.robot_body_quat_traj = self.robot_body_quat_traj.to(self.device).squeeze()
+        self.robot_joint_vel_traj = self.robot_joint_vel_traj.to(self.device).squeeze()
 
         self.num_frames = self.robot_joint_pos_traj.shape[0]
 
@@ -79,13 +84,15 @@ class ReferenceMotionManager:
     # Reset logic
     # --------------------------------------------------
     def reset(self, env_ids: Sequence[int]):
-        self.frame_idx[env_ids] = torch.randint(
-            self.reset_lo,
-            self.reset_hi + 1,
-            (env_ids.shape[0],),
-            device=self.device,
-        ).float()
+        idx = torch.randint(
+            low=0,
+            high=len(self.key_indices),
+            size=(env_ids.shape[0],),
+            device=self.key_indices.device
+        )
+        self.frame_idx[env_ids] = self.key_indices[idx].squeeze().to(self.frame_idx)
         self._update_current()
+        return self.frame_idx[env_ids]
 
     # --------------------------------------------------
     # Step reference motion
@@ -107,6 +114,7 @@ class ReferenceMotionManager:
         ceil_idx = torch.ceil(idx).int()
         interp_ratio = (idx - floor_idx).unsqueeze(-1)
         self.ref_robot_joint_pos = self._lerp(self.robot_joint_pos_traj[floor_idx], self.robot_joint_pos_traj[ceil_idx], interp_ratio)
+        self.ref_robot_joint_vel = self._lerp(self.robot_joint_vel_traj[floor_idx], self.robot_joint_vel_traj[ceil_idx], interp_ratio)
         self.ref_door_joint_pos = self._lerp(self.door_traj[floor_idx], self.door_traj[ceil_idx], interp_ratio)
         self.ref_robot_body_pos = self._lerp(self.robot_body_pos_traj[floor_idx], self.robot_body_pos_traj[ceil_idx], interp_ratio)
         self.ref_robot_body_quat = self._lerp(self.robot_body_quat_traj[floor_idx], self.robot_body_quat_traj[ceil_idx], interp_ratio)
@@ -137,6 +145,12 @@ class ReferenceMotionManager:
             return self.ref_robot_body_quat
         else:
             return self.ref_robot_body_quat[env_ids]
+
+    def get_robot_joint_vel(self, env_ids: Optional[Sequence[int]] = None):
+        if env_ids is None:
+            return self.ref_robot_joint_vel
+        else:
+            return self.ref_robot_joint_vel[env_ids]
 
 if __name__ == "__main__":
     motion_file = "traj.pkl"

@@ -203,7 +203,13 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             q = controller.traj[controller.play_idx]
             joint_pos = scene["robot"].data.default_joint_pos.clone()
             joint_pos[..., :] = q
-            scene["robot"].write_joint_position_to_sim(joint_pos)
+
+            qd = controller.qd[controller.play_idx]
+            joint_vel = scene["robot"].data.default_joint_vel.clone()
+            joint_vel[..., :] = qd
+            scene["robot"].write_joint_state_to_sim(joint_pos, joint_vel)
+            # scene["robot"].write_joint_velocity_to_sim(joint_vel)
+            # scene["robot"].write_joint_position_to_sim(joint_pos)
 
             door_q = controller.door_traj[controller.play_idx]
             door_joint_pos = scene["door"].data.default_joint_pos.clone()
