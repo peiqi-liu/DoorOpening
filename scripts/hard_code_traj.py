@@ -59,7 +59,7 @@ from isaaclab.utils import configclass
 from isaaclab.assets import ArticulationCfg
 
 from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, DEFAULT_JOINT_POS
-from DoorOpening.assets.door.door_cfg import DOOR_CONFIG
+from DoorOpening.assets.door.door_cfg import DOOR_CONFIG, edit_door_articulation
 
 from DoorOpening.assets.glorbot.glorbot_cfg import FULL_JOINT_NAMES
 
@@ -180,6 +180,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         door_joint_pos = scene["door"].data.default_joint_pos.clone()
         door_joint_pos[..., :] = door_pos
         
+        edit_door_articulation(scene["door"], door_closed_range=0.02, hinge_range=0.4)
         # scene["door"].write_joint_position_to_sim(door_joint_pos)
         if not args_cli.force:
             scene["robot"].set_joint_position_target(joint_pos)

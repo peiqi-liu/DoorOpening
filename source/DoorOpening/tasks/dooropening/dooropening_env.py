@@ -15,6 +15,7 @@ from isaaclab.envs import DirectRLEnv
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from DoorOpening.utils.quat_utils import quat_diff_angle
 from DoorOpening.motion.motion_lib import ReferenceMotionManager
+from DoorOpening.assets.door.door_cfg import edit_door_articulation
 from .dooropening_env_cfg import DooropeningEnvCfg
 
 import pickle as pkl
@@ -113,6 +114,7 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
 
     def _apply_action(self):
+        edit_door_articulation(self.door)
         self._ref_motion_lib.step()
         self.robot.set_joint_position_target(self.robot_dof_targets, joint_ids=self._robot_dof_idx)
         # joint_pos = self.robot.data.joint_pos.clone()
