@@ -102,23 +102,23 @@ FINGER_JOINT_NAMES = [
 FULL_JOINT_NAMES = BASE_JOINT_NAMES + FRANKA_JOINT_NAMES + FINGER_JOINT_NAMES
 
 GLORBOT_CONFIG = ArticulationCfg(
-    # spawn=sim_utils.UrdfFileCfg(
-    #     fix_base=True,
-    #     merge_fixed_joints=False,
-    #     make_instanceable=False,
-    #     asset_path=glorbot_urdf_path,
-    #     articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-    #         enabled_self_collisions=False, solver_position_iteration_count=4, solver_velocity_iteration_count=0
-    #     ),
-    #     joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
-    #         gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
-    #     ),
-    #     scale = (0.8, 0.8, 0.8),
-    # ),
-    spawn=sim_utils.UsdFileCfg(
-        usd_path=glorbot_usd_path,
+    spawn=sim_utils.UrdfFileCfg(
+        fix_base=True,
+        merge_fixed_joints=False,
+        make_instanceable=False,
+        asset_path=glorbot_urdf_path,
+        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+            enabled_self_collisions=False, solver_position_iteration_count=4, solver_velocity_iteration_count=0
+        ),
+        joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
+            gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
+        ),
         scale = (0.8, 0.8, 0.8),
     ),
+    # spawn=sim_utils.UsdFileCfg(
+    #     usd_path=glorbot_usd_path,
+    #     scale = (0.8, 0.8, 0.8),
+    # ),
     init_state=ArticulationCfg.InitialStateCfg(
         joint_pos=DEFAULT_JOINT_POS,
         pos=(0.0, 0.0, 0.0),
