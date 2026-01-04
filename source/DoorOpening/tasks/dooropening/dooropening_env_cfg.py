@@ -133,7 +133,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     reset_base_pos_delta = 0.1
     reset_key_body_pos_delta = 0.2
-    reset_door_pos_delta = 1.0
 
     velocity = 1.0
 

@@ -21,29 +21,29 @@ from isaaclab.assets.articulation import ArticulationCfg, Articulation
 def create_door_cfg(asset_path: str, training_mode: bool = False) -> ArticulationCfg:
     """Helper to create an ArticulationCfg from a URDF path."""
     return ArticulationCfg(
-        spawn=sim_utils.UrdfFileCfg(
-            fix_base=True,
-            merge_fixed_joints=False,
-            make_instanceable=False,
-            asset_path=asset_path,
-            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                enabled_self_collisions=False,
-                solver_position_iteration_count=4,
-                solver_velocity_iteration_count=0,
-            ),
-            joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
-                gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
-            ),
-            # Note: joint_drive is usually not needed for URDF; PD gains can be in actuators
-            scale = (1.0, 1.2, 0.95),
-            activate_contact_sensors=True,
-            collider_type = "convex_hull" if training_mode else "convex_decomposition"
-        ),
-        # spawn=sim_utils.UsdFileCfg(
-        #     usd_path=asset_path,
+        # spawn=sim_utils.UrdfFileCfg(
+        #     fix_base=True,
+        #     merge_fixed_joints=False,
+        #     make_instanceable=False,
+        #     asset_path=asset_path,
+        #     articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+        #         enabled_self_collisions=False,
+        #         solver_position_iteration_count=4,
+        #         solver_velocity_iteration_count=0,
+        #     ),
+        #     joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
+        #         gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
+        #     ),
+        #     # Note: joint_drive is usually not needed for URDF; PD gains can be in actuators
         #     scale = (1.0, 1.2, 0.95),
         #     activate_contact_sensors=True,
+        #     collider_type = "convex_hull" if training_mode else "convex_decomposition"
         # ),
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=asset_path,
+            scale = (1.0, 1.2, 0.95),
+            activate_contact_sensors=True,
+        ),
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0.0, 0.0, 1.0),
             rot=(0, 0, 0, 1)
@@ -66,7 +66,7 @@ def create_door_cfg(asset_path: str, training_mode: bool = False) -> Articulatio
 
 root_path = os.path.dirname(os.path.dirname(__file__))
 asset_base_folder = os.path.join(root_path, "door/PartNetv2")
-asset_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/mobility.urdf"), recursive=True))
+asset_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/mobility.usd"), recursive=True))
 
 # An example of door urdf
 door_asset_path = asset_paths[0]
@@ -87,19 +87,22 @@ ALL_DOOR_CONFIGS = setup_doors()
 
 def edit_door_articulation(
     door: Articulation, 
-    door_closed_range = 0.02,     # radians
+    door_closed_range = 0.01,     # radians
     hinge_range = 0.4,
 ):
     joint_idx, joint_names = door.find_joints(["joint_1", "joint_2"])
-    joint_pos_limits = door.data.joint_pos_limits.clone()
-    for i in range(door.data.joint_pos.shape[0]):
-        locked = (door.data.joint_pos[i, joint_idx[joint_names.index('joint_1')]].abs() < door_closed_range)\
-                & (door.data.joint_pos[i, joint_idx[joint_names.index('joint_2')]].abs() < hinge_range)
-        if locked:
-            joint_pos_limits[i, :] = door.data.joint_pos_limits.clone()[i, :]
-            joint_pos_limits[i, joint_idx[joint_names.index('joint_1')], 0] = 0
-            joint_pos_limits[i, joint_idx[joint_names.index('joint_1')], 1] = 0
-        else:
-            joint_pos_limits[i, :] = door.data.default_joint_pos_limits.clone()[i, :]
-    
-    door.write_joint_position_limit_to_sim(joint_pos_limits)
+    j1 = joint_idx[joint_names.index("joint_1")]
+    j2 = joint_idx[joint_names.index("joint_2")]
+
+    # joint positions
+    q = door.data.joint_pos
+
+    # locked mask: (num_envs,)
+    locked = (q[:, j1].abs() < door_closed_range) & (q[:, j2].abs() < hinge_range)
+
+    joint_stiffness = door.data.default_joint_stiffness.clone()
+    joint_damping = door.data.default_joint_damping.clone()
+    joint_stiffness[locked, j1] = 1e6
+    joint_damping[locked, j1] = 5e4
+    door.write_joint_stiffness_to_sim(joint_stiffness)
+    door.write_joint_damping_to_sim(joint_damping)

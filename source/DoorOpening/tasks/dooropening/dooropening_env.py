@@ -82,7 +82,6 @@ class DooropeningEnv(DirectRLEnv):
 
         self.reset_base_pos_delta = (self.cfg.reset_base_pos_delta ** 2) * len(self.cfg.base_joints)
         self.reset_key_body_pos_delta = (self.cfg.reset_key_body_pos_delta ** 2) * len(self.cfg.robot_reset_key_bodies)
-        self.reset_door_pos_delta = (self.cfg.reset_door_pos_delta ** 2) * len(self.cfg.door_body_names)
 
         # self._ref_motion_lib = ReferenceMotionManager(self.cfg.motion_file, self.num_envs, self.device, velocity=self.cfg.velocity, reset_range = (0, 1))
         self._ref_motion_lib = ReferenceMotionManager(self.cfg.motion_file, self.num_envs, self.device, velocity=self.cfg.velocity)
@@ -286,7 +285,7 @@ class DooropeningEnv(DirectRLEnv):
         time_out = self.episode_length_buf >= self.max_trial_steps - 1
         # print(arm_joint_pos_err, finger_joint_pos_err, base_joint_pos_err)
         warm_up = self.episode_length_buf >= 20
-        return warm_up & ((base_joint_pos_err > self.reset_base_pos_delta) | (key_body_pos_err > self.reset_key_body_pos_delta) | (door_err > self.reset_door_pos_delta)), time_out
+        return warm_up & ((base_joint_pos_err > self.reset_base_pos_delta) | (key_body_pos_err > self.reset_key_body_pos_delta)), time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
