@@ -13,7 +13,7 @@ Defines the door configuration for simulation with Isaac Sim.
 
 import os
 import glob
-
+import torch
 import isaaclab.sim as sim_utils
 from isaaclab.actuators.actuator_cfg import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg, Articulation
@@ -73,7 +73,7 @@ door_asset_path = asset_paths[0]
 
 print("door_asset_path: ", door_asset_path)
 
-DOOR_CONFIG = create_door_cfg(door_asset_path, training_mode=True)
+DOOR_CONFIG = create_door_cfg(door_asset_path, training_mode=False)
 
 def setup_doors():
     """Load all door cfg"""

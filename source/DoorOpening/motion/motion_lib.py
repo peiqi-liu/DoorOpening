@@ -8,13 +8,13 @@ class ReferenceMotionManager:
         motion_file: str,
         num_envs: int,
         device: torch.device,
-        reset_range=(0, 200),
         velocity=0.6,
+        reset_from_start=False,
     ):
         self.device = device
         self.num_envs = num_envs
-        self.reset_lo, self.reset_hi = reset_range
         self.velocity = velocity
+        self.reset_from_start = reset_from_start
 
         self._load_motion_pkl(motion_file)
         self._init_env_buffers()
@@ -61,9 +61,6 @@ class ReferenceMotionManager:
 
         self.num_frames = self.robot_joint_pos_traj.shape[0]
 
-        assert self.reset_hi < self.num_frames, \
-            "reset_range exceeds motion length"
-
     # --------------------------------------------------
     # Per-env buffers
     # --------------------------------------------------
@@ -84,12 +81,17 @@ class ReferenceMotionManager:
     # Reset logic
     # --------------------------------------------------
     def reset(self, env_ids: Sequence[int]):
-        idx = torch.randint(
-            low=0,
-            high=len(self.key_indices),
-            size=(env_ids.shape[0],),
-            device=self.key_indices.device
-        )
+        if not self.reset_from_start:
+            idx = torch.randint(
+                low=0,
+                high=len(self.key_indices),
+                size=(env_ids.shape[0],),
+                device=self.key_indices.device
+            )
+        else:
+            idx = torch.zeros(
+                (env_ids.shape[0],),
+            ).to(self.key_indices)
         self.frame_idx[env_ids] = self.key_indices[idx].squeeze().to(self.frame_idx)
         self._update_current()
         return self.frame_idx[env_ids]
@@ -151,16 +153,3 @@ class ReferenceMotionManager:
             return self.ref_robot_joint_vel
         else:
             return self.ref_robot_joint_vel[env_ids]
-
-if __name__ == "__main__":
-    motion_file = "traj.pkl"
-    num_envs = 5
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    reset_range = (0, 30)
-    motion_lib = ReferenceMotionManager(motion_file, num_envs, device, reset_range)
-    motion_lib.reset(torch.tensor([1]))
-    motion_lib.step()
-    print(motion_lib.get_robot_joint_pos().shape)
-    print(motion_lib.get_door_joint_pos().shape)
-    print(motion_lib.get_robot_body_pos().shape)
-    print(motion_lib.get_robot_body_quat([1, 3]).shape)

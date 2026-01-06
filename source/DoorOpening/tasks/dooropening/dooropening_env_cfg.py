@@ -19,14 +19,13 @@ from isaaclab.envs.common import ViewerCfg
 @configclass
 class DooropeningEnvCfg(DirectRLEnvCfg):
     sim_dt = 1/60.
-    decimation = 2
+    decimation = 1
     episode_length_s = 3.
-    fabric_decimation = 2 # number of fabric steps per physics step
     num_sim_steps_to_render=2
     # - spaces definition
     state_space = 0
 
-    viewer: ViewerCfg = ViewerCfg(eye=(0.5, 2.0, 0.5), lookat=(0.5, 0.0, 0.6), origin_type="env")
+    viewer: ViewerCfg = ViewerCfg(eye=(1.5, 1.5, 1.0), lookat=(0.0, 0.0, 0.7), origin_type="env")
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
@@ -108,7 +107,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=6.0, replicate_physics=True)
 
-    action_scale = 10.0
+    action_scale = 0.1
 
     # Deep Mimic Reward Parameters
     robot_body_quat_w = 1.0
