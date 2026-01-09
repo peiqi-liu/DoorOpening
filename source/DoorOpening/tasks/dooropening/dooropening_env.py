@@ -31,7 +31,7 @@ class DooropeningEnv(DirectRLEnv):
         self.num_arm_joints = len(self.cfg.arm_joints)
 
         actuated_joints = self.cfg.base_joints + self.cfg.arm_joints + self.cfg.finger_joints
-        self._robot_dof_idx, _ = self.robot.find_joints(actuated_joints)
+        self._robot_dof_idx, joint_names = self.robot.find_joints(actuated_joints)
 
         deep_mimic_joints = self.cfg.base_joints + self.cfg.arm_joints
         self._robot_deep_mimic_dof_idx, _ = self.robot.find_joints(deep_mimic_joints)
@@ -39,9 +39,9 @@ class DooropeningEnv(DirectRLEnv):
         self._robot_key_body_idx, _ = self.robot.find_bodies(self.cfg.robot_key_bodies)
         self._robot_reset_key_body_idx, _ = self.robot.find_bodies(self.cfg.robot_reset_key_bodies)
 
-        self._robot_base_dof_idx, _ = self.robot.find_joints(self.cfg.base_joints)
-        self._robot_arm_dof_idx, _ = self.robot.find_joints(self.cfg.arm_joints)
-        self._robot_finger_dof_idx, _ = self.robot.find_joints(self.cfg.finger_joints)
+        self._robot_base_dof_idx, base_joint_names = self.robot.find_joints(self.cfg.base_joints)
+        self._robot_arm_dof_idx, arm_joint_names = self.robot.find_joints(self.cfg.arm_joints)
+        self._robot_finger_dof_idx, finger_joint_names = self.robot.find_joints(self.cfg.finger_joints)
 
         self._robot_base_link_idx, self.robot_base_link_name = self.robot.find_bodies(self.cfg.base_link_name)
         self._door_body_idx, _ = self.door.find_bodies(self.cfg.door_body_names)
@@ -82,9 +82,10 @@ class DooropeningEnv(DirectRLEnv):
 
         self.reset_base_pos_delta = (self.cfg.reset_base_pos_delta ** 2) * len(self.cfg.base_joints)
         self.reset_key_body_pos_delta = (self.cfg.reset_key_body_pos_delta ** 2) * len(self.cfg.robot_reset_key_bodies)
+        self.reset_key_body_quat_delta = (self.cfg.reset_key_body_quat_delta ** 2) * len(self.cfg.robot_reset_key_bodies)
 
-        self.ref_motion_lib = ReferenceMotionManager(self.cfg.motion_file, self.num_envs, self.device, velocity=self.cfg.velocity, reset_from_start = False)
-        self.max_trial_steps = self.ref_motion_lib.num_frames * torch.ones_like(self.episode_length_buf, device=self.device) # Add 50 steps to the motion length to allow more time for the robot to reach the target
+        self.ref_motion_lib = ReferenceMotionManager(self.cfg.motion_file, self.num_envs, self.device, velocity=self.cfg.velocity, reset_from_start = True)
+        self.max_trial_steps = self.ref_motion_lib.num_frames * torch.ones_like(self.episode_length_buf, device=self.device)
 
         torch.set_printoptions(precision=4, sci_mode=False)
 
@@ -107,8 +108,12 @@ class DooropeningEnv(DirectRLEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor):
         # delta actions
-        self.actions = actions.clone().clamp(-1.0, 1.0)
-        targets = self.robot_dof_targets + self.dt * self.actions * self.cfg.action_scale
+        self.scaled_actions = actions.clone().clamp(-1.0, 1.0)
+        # targets = self.robot_dof_targets + self.dt * self.actions * self.cfg.action_scale
+        self.scaled_actions[:, :self.num_base_joints] = self.scaled_actions[:, :self.num_base_joints] * self.cfg.base_action_scale
+        self.scaled_actions[:, self.num_base_joints:self.num_base_joints + self.num_arm_joints] = self.scaled_actions[:, self.num_base_joints:self.num_base_joints + self.num_arm_joints] * self.cfg.arm_action_scale
+        self.scaled_actions[:, self.num_base_joints + self.num_arm_joints:] = self.scaled_actions[:, self.num_base_joints + self.num_arm_joints:] * self.cfg.finger_action_scale
+        targets = self.robot_dof_targets + self.dt * self.scaled_actions
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
 
     def _apply_action(self):
@@ -212,9 +217,9 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["error/base_joint_pos_err"] = base_joint_pos_err.mean()
         self.extras["error/arm_joint_pos_err"] = arm_joint_pos_err.mean()
         self.extras["error/finger_joint_pos_err"] = finger_joint_pos_err.mean()
-        self.extras["error/base_joint_vel_err"] = base_joint_vel_err.mean()
-        self.extras["error/arm_joint_vel_err"] = arm_joint_vel_err.mean()
-        self.extras["error/finger_joint_vel_err"] = finger_joint_vel_err.mean()
+        # self.extras["error/base_joint_vel_err"] = base_joint_vel_err.mean()
+        # self.extras["error/arm_joint_vel_err"] = arm_joint_vel_err.mean()
+        # self.extras["error/finger_joint_vel_err"] = finger_joint_vel_err.mean()
 
         return compute_deep_mimic_rewards(
             robot_key_body_pos = self.robot_key_body_pos, 
@@ -284,14 +289,18 @@ class DooropeningEnv(DirectRLEnv):
         time_out = self.episode_length_buf >= self.max_trial_steps - 1
         # print(arm_joint_pos_err, finger_joint_pos_err, base_joint_pos_err)
         # warm_up = self.episode_length_buf >= 20
-        return (base_joint_pos_err > self.reset_base_pos_delta) | (key_body_pos_err > self.reset_key_body_pos_delta), time_out
+        return \
+            (base_joint_pos_err > self.reset_base_pos_delta) | \
+            (key_body_pos_err > self.reset_key_body_pos_delta) | \
+            (key_body_quat_err > self.reset_key_body_quat_delta), \
+            time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
 
         reset_frame_idx = self.ref_motion_lib.reset(env_ids)
-        self.max_trial_steps[env_ids] = (self.ref_motion_lib.num_frames - reset_frame_idx).long()
+        self.max_trial_steps[env_ids] = ((self.ref_motion_lib.num_frames - reset_frame_idx) // self.ref_motion_lib.velocity).long()
 
         deep_mimic_initial_joint_pos = self.ref_motion_lib.get_robot_joint_pos(env_ids)
         deep_mimic_initial_joint_vel = self.ref_motion_lib.get_robot_joint_vel(env_ids)

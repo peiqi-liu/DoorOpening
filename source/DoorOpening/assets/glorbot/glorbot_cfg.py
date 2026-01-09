@@ -108,7 +108,7 @@ GLORBOT_CONFIG = ArticulationCfg(
         make_instanceable=False,
         asset_path=glorbot_urdf_path,
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-            enabled_self_collisions=False, solver_position_iteration_count=4, solver_velocity_iteration_count=0
+            enabled_self_collisions=False, solver_position_iteration_count=8, solver_velocity_iteration_count=0
         ),
         joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
             gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
@@ -132,8 +132,8 @@ GLORBOT_CONFIG = ArticulationCfg(
         # ),
         "base": ImplicitActuatorCfg(
             joint_names_expr=["base_.*"],
-            effort_limit_sim=10000.0,
-            stiffness=10000,
+            effort_limit_sim=1000.0,
+            stiffness=1000,
             damping=200,
         ),
         "panda_shoulder": ImplicitActuatorCfg(

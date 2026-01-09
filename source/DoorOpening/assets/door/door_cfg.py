@@ -28,7 +28,7 @@ def create_door_cfg(asset_path: str, training_mode: bool = False) -> Articulatio
             asset_path=asset_path,
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 enabled_self_collisions=False,
-                solver_position_iteration_count=4,
+                solver_position_iteration_count=8,
                 solver_velocity_iteration_count=0,
             ),
             joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
@@ -57,8 +57,8 @@ def create_door_cfg(asset_path: str, training_mode: bool = False) -> Articulatio
             ),
             "joint_2": ImplicitActuatorCfg(
                 joint_names_expr=["joint_2"],
-                stiffness=10,
-                damping=0.1,
+                stiffness=2.5,
+                damping=1,
             ),
         },
     )
@@ -103,6 +103,6 @@ def edit_door_articulation(
     joint_stiffness = door.data.default_joint_stiffness.clone()
     joint_damping = door.data.default_joint_damping.clone()
     joint_stiffness[locked, j1] = 1e6
-    joint_damping[locked, j1] = 5e4
+    joint_damping[locked, j1] = 1e5
     door.write_joint_stiffness_to_sim(joint_stiffness)
     door.write_joint_damping_to_sim(joint_damping)

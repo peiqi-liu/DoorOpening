@@ -84,7 +84,12 @@ class ReferenceMotionManager:
         if not self.reset_from_start:
             idx = torch.randint(
                 low=0,
-                high=len(self.key_indices),
+                # The first key frame is the start frame
+                # The second key frame is the pregrasp frame
+                # The third key frame is the grasp frame
+                # The fourth key frame is the finishing-lever-rotation frame
+                # The fifth key frame is the finishing-door-frame-opening frame
+                high=min(len(self.key_indices), 5),
                 size=(env_ids.shape[0],),
                 device=self.key_indices.device
             )
@@ -100,8 +105,7 @@ class ReferenceMotionManager:
     # Step reference motion
     # --------------------------------------------------
     def step(self):
-        # self.frame_idx += self.velocity
-        self.frame_idx += 1
+        self.frame_idx += self.velocity
         self.frame_idx.clamp_(max=self.num_frames - 1)
         self._update_current()
 
@@ -150,6 +154,6 @@ class ReferenceMotionManager:
 
     def get_robot_joint_vel(self, env_ids: Optional[Sequence[int]] = None):
         if env_ids is None:
-            return self.ref_robot_joint_vel
+            return self.ref_robot_joint_vel / self.velocity
         else:
-            return self.ref_robot_joint_vel[env_ids]
+            return self.ref_robot_joint_vel[env_ids] / self.velocity
