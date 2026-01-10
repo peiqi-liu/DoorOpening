@@ -89,7 +89,8 @@ class ReferenceMotionManager:
                 # The third key frame is the grasp frame
                 # The fourth key frame is the finishing-lever-rotation frame
                 # The fifth key frame is the finishing-door-frame-opening frame
-                high=min(len(self.key_indices), 5),
+                # high=min(len(self.key_indices), 5),
+                high=len(self.key_indices),
                 size=(env_ids.shape[0],),
                 device=self.key_indices.device
             )
@@ -98,6 +99,14 @@ class ReferenceMotionManager:
                 (env_ids.shape[0],),
             ).to(self.key_indices)
         self.frame_idx[env_ids] = self.key_indices[idx].squeeze().to(self.frame_idx)
+        if not self.reset_from_start:
+            self.frame_idx[env_ids] = self.frame_idx[env_ids] + torch.randint(
+                low=-2,
+                high=2,
+                size=(env_ids.shape[0],),
+                device=self.frame_idx.device
+            )
+            self.frame_idx[env_ids] = torch.clamp(self.frame_idx[env_ids], min=0, max=self.num_frames - 1)
         self._update_current()
         return self.frame_idx[env_ids]
 
