@@ -141,9 +141,10 @@ class DooropeningEnv(DirectRLEnv):
         
         door_to_base_link_pos = (self.door_link_pos - base_link_pos).reshape(self.num_envs, 1, -1)
 
-        robot_key_body_pos = self.robot.data.body_pos_w[:, self._robot_key_body_idx]
-        robot_key_body_pos -= self.scene.env_origins.repeat((1, 1)).reshape(self.num_envs, 1, 3)
-        rel_robot_key_body_pos = (robot_key_body_pos - base_link_pos).reshape(self.num_envs, 1, -1)
+        rel_robot_key_body_pos = (self.robot_key_body_pos - base_link_pos).reshape(self.num_envs, 1, -1)
+
+        key_pos_err = self.robot_key_body_pos - (self.ref_robot_key_body_pos).to(self.robot_key_body_pos)
+        key_pos_err = key_pos_err.reshape(self.num_envs, 1, -1)
 
         joint_err = self.joint_pos[:, self._robot_dof_idx] - (self.ref_robot_joint_pos[:, self._robot_dof_idx]).to(self.joint_pos)
         joint_err = joint_err.reshape(self.num_envs, 1, -1)
@@ -152,7 +153,8 @@ class DooropeningEnv(DirectRLEnv):
             (
                 self.joint_pos[:, self._robot_dof_idx].unsqueeze(dim = 1),
                 self.joint_vel[:, self._robot_dof_idx].unsqueeze(dim = 1),
-                joint_err,
+                # joint_err,
+                key_pos_err,
                 door_to_base_link_pos,
                 rel_robot_key_body_pos,
                 self.door_joint_pos[:, self._door_joint_idx].unsqueeze(dim = 1),
