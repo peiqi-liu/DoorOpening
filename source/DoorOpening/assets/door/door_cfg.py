@@ -45,7 +45,7 @@ def create_door_cfg(asset_path: str, training_mode: bool = False) -> Articulatio
         #     activate_contact_sensors=True,
         # ),
         init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 1.0),
+            pos=(0.0, 0.0, 0.9),
             rot=(0, 0, 0, 1)
             # rot=(0, -0.7071, 0, 0.7071)
         ),

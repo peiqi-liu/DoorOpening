@@ -37,6 +37,7 @@ class OmniJointController:
         # ===== Keyframe + playback state =====
         self.key_poses = []          # list[Tensor (1, num_joints)]
         self.door_key_joint_angles = []     # list[Tensor (1, num_door_joints)]
+        self.door_pos_traj = []            # list[Tensor (1, num_door_joints)]
         self.traj = None             # Tensor (T, num_joints)
         self.playback = False
         self.play_idx = 0
@@ -162,16 +163,6 @@ class OmniJointController:
         assert len(self.key_poses) >= 2, "Need at least 2 key poses"
         assert len(self.door_key_joint_angles) >= 2, "Need at least 2 door key poses"
 
-        # traj = []
-        # for i in range(len(self.key_poses) - 1):
-        #     q0 = self.key_poses[i][0]
-        #     q1 = self.key_poses[i + 1][0]
-        #     steps = self.steps_per_segments[i]
-
-        #     for a in torch.linspace(0, 1, steps):
-        #         traj.append((1 - a) * q0 + a * q1)
-
-        # self.traj = torch.stack(traj)   # (T, num_joints)
         num_key_poses = self.key_poses[0].shape[-1]
         num_door_poses = self.door_key_joint_angles[0].shape[-1]
 
@@ -194,22 +185,11 @@ class OmniJointController:
         key_indices = np.searchsorted(t, t_key)
         key_indices = np.clip(key_indices, 0, len(t) - 1)
 
-
         self.door_traj = self.traj[:, num_key_poses:]
         self.traj = self.traj[:, :num_key_poses]
         self.qd = self.qd[:, :num_key_poses]
         self.qdd = self.qdd[:, :num_key_poses]
 
-        # door_traj = []
-        # for i in range(len(self.door_key_joint_angles) - 1):
-        #     q0 = self.door_key_joint_angles[i][0]
-        #     q1 = self.door_key_joint_angles[i + 1][0]
-        #     steps = self.steps_per_segments[i]
-
-        #     for a in torch.linspace(0, 1, steps):
-        #         door_traj.append((1 - a) * q0 + a * q1)
-
-        # self.door_traj = torch.stack(door_traj)   # (T, num_joints)
         self.key_indices = torch.from_numpy(key_indices)
 
         self.play_idx = 0
@@ -217,6 +197,7 @@ class OmniJointController:
     def _initialize_trajectory(self):
         self.robot_body_pos_traj = []
         self.robot_body_quat_traj = []
+        self.door_pos_traj = []
 
     def _start_playback(self):
         self._initialize_trajectory()
@@ -240,6 +221,9 @@ class OmniJointController:
         if len(self.robot_body_quat_traj) > 0:
             self.robot_body_quat_traj = torch.stack(self.robot_body_quat_traj, dim = 0)
             data["robot_body_quat_traj"] = self.robot_body_quat_traj
+        if len(self.door_pos_traj) > 0:
+            self.door_pos_traj = torch.stack(self.door_pos_traj, dim = 0)
+            data["door_pos_traj"] = self.door_pos_traj
 
         self._initialize_trajectory()
 

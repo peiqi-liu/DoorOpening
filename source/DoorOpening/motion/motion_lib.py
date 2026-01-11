@@ -40,6 +40,7 @@ class ReferenceMotionManager:
         self.robot_body_pos_traj = motions["robot_body_pos_traj"]
         self.robot_body_quat_traj = motions["robot_body_quat_traj"]
         self.robot_joint_vel_traj = motions["robot_joint_vel_traj"]
+        self.door_pos_traj = motions["door_pos_traj"]
         self.key_indices = motions["key_indices"]
 
         if isinstance(self.robot_joint_pos_traj, list):
@@ -52,12 +53,15 @@ class ReferenceMotionManager:
             self.robot_body_quat_traj = torch.stack(self.robot_body_quat_traj, dim = 0)
         if isinstance(self.robot_joint_vel_traj, list):
             self.robot_joint_vel_traj = torch.stack(self.robot_joint_vel_traj, dim = 0)
+        if isinstance(self.door_pos_traj, list):
+            self.door_pos_traj = torch.stack(self.door_pos_traj, dim = 0)
 
         self.robot_joint_pos_traj = self.robot_joint_pos_traj.to(self.device).squeeze()
         self.door_traj = self.door_traj.to(self.device).squeeze()
         self.robot_body_pos_traj = self.robot_body_pos_traj.to(self.device).squeeze()
         self.robot_body_quat_traj = self.robot_body_quat_traj.to(self.device).squeeze()
         self.robot_joint_vel_traj = self.robot_joint_vel_traj.to(self.device).squeeze()
+        self.door_pos_traj = self.door_pos_traj.to(self.device).squeeze()
 
         self.num_frames = self.robot_joint_pos_traj.shape[0]
 
@@ -133,6 +137,7 @@ class ReferenceMotionManager:
         self.ref_door_joint_pos = self._lerp(self.door_traj[floor_idx], self.door_traj[ceil_idx], interp_ratio)
         self.ref_robot_body_pos = self._lerp(self.robot_body_pos_traj[floor_idx], self.robot_body_pos_traj[ceil_idx], interp_ratio)
         self.ref_robot_body_quat = self._lerp(self.robot_body_quat_traj[floor_idx], self.robot_body_quat_traj[ceil_idx], interp_ratio)
+        self.ref_door_pos = self._lerp(self.door_pos_traj[floor_idx], self.door_pos_traj[ceil_idx], interp_ratio)
 
     # --------------------------------------------------
     # Getters (explicit, readable)
@@ -166,3 +171,9 @@ class ReferenceMotionManager:
             return self.ref_robot_joint_vel / self.velocity
         else:
             return self.ref_robot_joint_vel[env_ids] / self.velocity
+
+    def get_door_pos(self, env_ids: Optional[Sequence[int]] = None):
+        if env_ids is None:
+            return self.ref_door_pos
+        else:
+            return self.ref_door_pos[env_ids]

@@ -217,9 +217,10 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             door_joint_pos[..., :] = door_q
             scene["door"].write_joint_position_to_sim(door_joint_pos)
 
-            # controller.door_joint_pos_traj.append(scene["door"].data.joint_pos.squeeze().cpu().clone())
+            # Write these poses data to the controller so it can be saved to pickle later
             controller.robot_body_pos_traj.append(scene["robot"].data.body_pos_w.squeeze().cpu().clone())
             controller.robot_body_quat_traj.append(scene["robot"].data.body_quat_w.squeeze().cpu().clone())
+            controller.door_pos_traj.append(scene["door"].data.body_pos_w.squeeze().cpu().clone())
 
             controller.play_idx += 1
             if controller.play_idx >= len(controller.traj):
