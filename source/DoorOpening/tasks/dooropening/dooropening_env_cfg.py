@@ -102,7 +102,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     actuated_joints_num = len(arm_joints) + len(base_joints) + len(finger_joints)
     action_space = actuated_joints_num * 1
-    observation_space = actuated_joints_num * 2 + len(door_body_names) * 3 + len(robot_key_bodies) * 3 + len(door_joint_names) * 2
+    observation_space = actuated_joints_num * 3 + len(door_body_names) * 3 + len(robot_key_bodies) * 3 + len(door_joint_names) * 2
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=6.0, replicate_physics=True)
