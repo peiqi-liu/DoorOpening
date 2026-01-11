@@ -23,6 +23,8 @@ INSTALL_REQUIRES = [
     "urchin",
     "open3d",
     "geometrout",
+    "trimesh",
+    "usd_core"
 ]
 
 # Installation operation

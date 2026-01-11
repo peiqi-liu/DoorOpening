@@ -14,16 +14,18 @@ from isaaclab.utils import configclass
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 
 from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.envs.common import ViewerCfg
 
 @configclass
 class DooropeningEnvCfg(DirectRLEnvCfg):
-    sim_dt = 1/60.
+    sim_dt = 1/120.
     decimation = 2
-    episode_length_s = 3.
-    fabric_decimation = 2 # number of fabric steps per physics step
+    episode_length_s = 10.
     num_sim_steps_to_render=2
     # - spaces definition
     state_space = 0
+
+    viewer: ViewerCfg = ViewerCfg(eye=(1.5, 1.5, 1.0), lookat=(0.0, 0.0, 0.7), origin_type="env")
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
@@ -79,7 +81,11 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     ]
 
     door_body_names = ["link_1", "link_2"]
-    door_handle_body_name = "link_1"
+
+    door_joint_names = ["joint_1", "joint_2"]
+
+    robot_key_bodies = ["base_x_link", "panda_link4", "panda_link6", "palm_center"]
+    robot_reset_key_bodies = ["base_x_link", "panda_link4", "palm_center"]
 
     # robot(s)
     robot_cfg: ArticulationCfg = GLORBOT_CONFIG.replace(
@@ -96,27 +102,44 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     actuated_joints_num = len(arm_joints) + len(base_joints) + len(finger_joints)
     action_space = actuated_joints_num * 1
-    observation_space = actuated_joints_num * 2 + len(door_body_names) * 3
+    observation_space = actuated_joints_num * 2 + len(door_body_names) * 3 + len(robot_key_bodies) * 3 + len(door_joint_names) * 2
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=6.0, replicate_physics=True)
 
-    action_scale = 5.0
+    base_action_scale = 1.0
+    arm_action_scale = 0.6
+    finger_action_scale = 0.5
 
     # Deep Mimic Reward Parameters
-    robot_body_quat_w = 0.5
-    robot_base_pos_w = 1.0
-    robot_arm_pos_w = 0.4
-    door_joint_pos_w = 1.0
-    robot_base_joint_pos_w = 1.0
-    robot_arm_joint_pos_w = 0.7
+    robot_body_quat_w = 3.0
+    robot_key_body_pos_w = 2.0
+    robot_base_joint_pos_w = 2.0
+    robot_arm_joint_pos_w = 5.0
+    robot_finger_joint_pos_w = 1.0
+    robot_base_joint_vel_w = 1.0
+    robot_arm_joint_vel_w = 2.0
+    robot_finger_joint_vel_w = 0.5
+    # robot_base_joint_vel_w = 0.0
+    # robot_arm_joint_vel_w = 0.0
+    # robot_finger_joint_vel_w = 0.0
+    door_joint_pos_w = 4.0
 
-    robot_body_quat_scale = 0.25
-    robot_base_pos_scale = 1.0
-    robot_arm_pos_scale = 5.0
+    robot_body_quat_scale = 1.0
+    robot_key_body_pos_scale = 3.0
     robot_base_joint_pos_scale = 0.5
-    robot_arm_joint_pos_scale = 2.0
-    door_joint_pos_scale = 20.0
+    robot_arm_joint_pos_scale = 0.01
+    robot_finger_joint_pos_scale = 0.05
+    robot_base_joint_vel_scale = 0.5
+    robot_arm_joint_vel_scale = 0.5
+    robot_finger_joint_vel_scale = 0.5
+    door_joint_pos_scale = 5.0
+
+    reset_base_pos_delta = 0.1
+    reset_key_body_pos_delta = 0.2
+    reset_key_body_quat_delta = 1.0
+
+    velocity = 0.4
 
     # Change this to where you store your motions
-    motion_file = "traj.pkl"
+    motion_file = "trajectory.pkl"

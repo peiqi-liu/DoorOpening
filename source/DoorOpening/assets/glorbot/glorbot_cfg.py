@@ -12,6 +12,7 @@ Defines the Glorbot robot configuration for simulation with Isaac Sim.
 """
 
 import os
+from tkinter import N
 
 import isaaclab.sim as sim_utils
 from isaaclab.actuators.actuator_cfg import ImplicitActuatorCfg
@@ -20,6 +21,8 @@ from isaaclab.assets.articulation import ArticulationCfg
 module_path = os.path.dirname(__file__)
 root_path = os.path.dirname(module_path)
 glorbot_urdf_path = os.path.join(root_path, "glorbot/glorbot.urdf")
+glorbot_usd_path = os.path.join(root_path, "glorbot/glorbot.usd")
+print("glorbot_usd_path: ", glorbot_usd_path)
 
 import numpy as np
 
@@ -77,6 +80,27 @@ BASE_JOINT_NAMES = [
 
 DM_JOINT_NAMES = BASE_JOINT_NAMES + FRANKA_JOINT_NAMES
 
+FINGER_JOINT_NAMES = [
+    'finger_joint_0',
+    'finger_joint_1',
+    'finger_joint_2',
+    'finger_joint_3',
+    'finger_joint_4',
+    'finger_joint_5',
+    'finger_joint_6',
+    'finger_joint_7',
+    'finger_joint_8',
+    'finger_joint_9',
+    'finger_joint_10',
+    'finger_joint_11',
+    'finger_joint_12',
+    'finger_joint_13',
+    'finger_joint_14',
+    'finger_joint_15',
+]
+
+FULL_JOINT_NAMES = BASE_JOINT_NAMES + FRANKA_JOINT_NAMES + FINGER_JOINT_NAMES
+
 GLORBOT_CONFIG = ArticulationCfg(
     spawn=sim_utils.UrdfFileCfg(
         fix_base=True,
@@ -84,12 +108,17 @@ GLORBOT_CONFIG = ArticulationCfg(
         make_instanceable=False,
         asset_path=glorbot_urdf_path,
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-            enabled_self_collisions=False, solver_position_iteration_count=4, solver_velocity_iteration_count=0
+            enabled_self_collisions=False, solver_position_iteration_count=8, solver_velocity_iteration_count=0
         ),
         joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
             gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
         ),
+        scale = (0.8, 0.8, 0.8),
     ),
+    # spawn=sim_utils.UsdFileCfg(
+    #     usd_path=glorbot_usd_path,
+    #     scale = (0.8, 0.8, 0.8),
+    # ),
     init_state=ArticulationCfg.InitialStateCfg(
         joint_pos=DEFAULT_JOINT_POS,
         pos=(0.0, 0.0, 0.0),
@@ -103,8 +132,8 @@ GLORBOT_CONFIG = ArticulationCfg(
         # ),
         "base": ImplicitActuatorCfg(
             joint_names_expr=["base_.*"],
-            effort_limit_sim=10000.0,
-            stiffness=10000,
+            effort_limit_sim=1000.0,
+            stiffness=1000,
             damping=200,
         ),
         "panda_shoulder": ImplicitActuatorCfg(
@@ -130,9 +159,9 @@ GLORBOT_CONFIG = ArticulationCfg(
         ),
         "finger": ImplicitActuatorCfg(
             joint_names_expr=["finger_joint_.*"],
-            effort_limit_sim=5,
-            stiffness=5,
-            damping=0.5,
+            effort_limit_sim=50,
+            stiffness=100,
+            damping=10,
         ),
     }
 )

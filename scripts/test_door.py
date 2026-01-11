@@ -58,23 +58,26 @@ from isaaclab.utils import configclass
 from isaaclab.assets import ArticulationCfg
 
 from DoorOpening.assets.door.door_cfg import DOOR_CONFIG
+from DoorOpening.assets.door.create_door_cfg import BASIC_DOOR_CFG
+
 
 torch.set_printoptions(precision=4, sci_mode=False)
 
 @configclass
 class SensorsSceneCfg(InteractiveSceneCfg):
-    """Design the scene with sensors on the robot."""
-
-    # ground plane
-    ground = AssetBaseCfg(prim_path="/World/defaultGroundPlane", spawn=sim_utils.GroundPlaneCfg())
-
-    # lights
-    dome_light = AssetBaseCfg(
-        prim_path="/World/Light", spawn=sim_utils.DomeLightCfg(intensity=3000.0, color=(0.75, 0.75, 0.75))
+    ground = AssetBaseCfg(
+        prim_path="/World/defaultGroundPlane",
+        spawn=sim_utils.GroundPlaneCfg(),
     )
 
-    door: ArticulationCfg = DOOR_CONFIG.replace(prim_path="{ENV_REGEX_NS}/Door")
+    dome_light = AssetBaseCfg(
+        prim_path="/World/Light",
+        spawn=sim_utils.DomeLightCfg(intensity=3000.0),
+    )
 
+    door : ArticulationCfg = BASIC_DOOR_CFG.replace(
+        prim_path="/World/envs/env_0/Door",
+    )
 
 def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     """Run the simulator."""
@@ -82,6 +85,23 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     sim_dt = sim.get_physics_dt()
     sim_time = 0.0
     count = 0
+
+    # door_generator = BASIC_DOOR_CFG
+
+    # doors = []
+
+    # for env_id in range(scene.num_envs):
+    #     env_ns = scene.env_ns[env_id]
+    #     prim_path = f"{env_ns}/Door"
+
+    #     door = door_generator.spawn(
+    #         prim_path=prim_path,
+    #         translation=(0.0, 0.0, 0.0),
+    #     )
+
+    #     doors.append(door)
+
+    # scene.add_articulation("door", doors)
 
     # Simulate physics
     while simulation_app.is_running():
@@ -103,8 +123,8 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             # print("joint_pos: ", scene["door"].data.joint_pos)
 
         door_target_pos = scene["door"].data.joint_pos_limits[..., 1]
-        scene["door"].set_joint_position_target(door_target_pos)
-        # scene["door"].set_joint_velocity_target(torch.tensor([1, 1]))
+        # scene["door"].set_joint_position_target(door_target_pos)
+        scene["door"].write_joint_position_to_sim(door_target_pos)
         if count % 100 == 0:
             print("joint_pos: ", scene["door"].data.joint_pos)
             # print("door pos: ", scene["door"].data.body_pos_w)

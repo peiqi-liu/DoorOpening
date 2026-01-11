@@ -13,60 +13,96 @@ Defines the door configuration for simulation with Isaac Sim.
 
 import os
 import glob
-
+import torch
 import isaaclab.sim as sim_utils
 from isaaclab.actuators.actuator_cfg import ImplicitActuatorCfg
-from isaaclab.assets.articulation import ArticulationCfg
+from isaaclab.assets.articulation import ArticulationCfg, Articulation
 
-def create_door_cfg(urdf_path: str) -> ArticulationCfg:
+def create_door_cfg(asset_path: str, training_mode: bool = False) -> ArticulationCfg:
     """Helper to create an ArticulationCfg from a URDF path."""
     return ArticulationCfg(
         spawn=sim_utils.UrdfFileCfg(
             fix_base=True,
             merge_fixed_joints=False,
             make_instanceable=False,
-            asset_path=urdf_path,
+            asset_path=asset_path,
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 enabled_self_collisions=False,
-                solver_position_iteration_count=4,
+                solver_position_iteration_count=8,
                 solver_velocity_iteration_count=0,
             ),
             joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
                 gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
             ),
-            scale = (1.5, 1.2, 1.0),
             # Note: joint_drive is usually not needed for URDF; PD gains can be in actuators
+            scale = (1.0, 1.2, 0.95),
+            activate_contact_sensors=True,
+            collider_type = "convex_hull" if training_mode else "convex_decomposition"
         ),
+        # spawn=sim_utils.UsdFileCfg(
+        #     usd_path=asset_path,
+        #     scale = (1.0, 1.2, 0.95),
+        #     activate_contact_sensors=True,
+        # ),
         init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 0.8),
+            pos=(0.0, 0.0, 1.0),
+            rot=(0, 0, 0, 1)
             # rot=(0, -0.7071, 0, 0.7071)
         ),
         actuators={
-            "body": ImplicitActuatorCfg(
-                joint_names_expr=[".*"],
-                stiffness=1e7,
-                damping=1e5,
+            "joint_1": ImplicitActuatorCfg(
+                joint_names_expr=["joint_1"],
+                stiffness=100,
+                damping=10,
+            ),
+            "joint_2": ImplicitActuatorCfg(
+                joint_names_expr=["joint_2"],
+                stiffness=2.5,
+                damping=1,
             ),
         },
     )
 
 
 root_path = os.path.dirname(os.path.dirname(__file__))
-urdf_folder = os.path.join(root_path, "door/PartNet")
-urdf_paths = sorted(glob.glob(os.path.join(urdf_folder, "**/mobility.urdf"), recursive=True))
+asset_base_folder = os.path.join(root_path, "door/PartNetv2")
+asset_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/mobility.urdf"), recursive=True))
 
 # An example of door urdf
-door_urdf_path = urdf_paths[2]
+door_asset_path = asset_paths[0]
 
-print("door_urdf_path: ", door_urdf_path)
+print("door_asset_path: ", door_asset_path)
 
-DOOR_CONFIG = create_door_cfg(door_urdf_path)
+DOOR_CONFIG = create_door_cfg(door_asset_path, training_mode=False)
 
 def setup_doors():
     """Load all door cfg"""
     door_configs = []
-    for urdf_path in urdf_paths:
-        door_configs.append(create_door_cfg(urdf_path))
+    for asset_path in asset_paths:
+        door_configs.append(create_door_cfg(asset_path))
     return door_configs
 
 ALL_DOOR_CONFIGS = setup_doors()
+
+
+def edit_door_articulation(
+    door: Articulation, 
+    door_closed_range = 0.01,     # radians
+    hinge_range = 0.4,
+):
+    joint_idx, joint_names = door.find_joints(["joint_1", "joint_2"])
+    j1 = joint_idx[joint_names.index("joint_1")]
+    j2 = joint_idx[joint_names.index("joint_2")]
+
+    # joint positions
+    q = door.data.joint_pos
+
+    # locked mask: (num_envs,)
+    locked = (q[:, j1].abs() < door_closed_range) & (q[:, j2].abs() < hinge_range)
+
+    joint_stiffness = door.data.default_joint_stiffness.clone()
+    joint_damping = door.data.default_joint_damping.clone()
+    joint_stiffness[locked, j1] = 1e6
+    joint_damping[locked, j1] = 1e5
+    door.write_joint_stiffness_to_sim(joint_stiffness)
+    door.write_joint_damping_to_sim(joint_damping)

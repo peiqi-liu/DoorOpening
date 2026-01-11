@@ -249,13 +249,13 @@ class MotionGenerator:
 
     def door_opening_motion(self):
         pose_reached, far = self.check_ee_pos()
+        # joint_pos_target = self.compute_arm_target(compute_base = True)
+        # return joint_pos_target
         if pose_reached:
             self.open_door()
             return None
         else:
             joint_pos_target = self.compute_arm_target(compute_base = True)
-            # print("joint_pos_target: ", joint_pos_target[..., :10])
-            # print("joint_pos: ", self.scene["robot"].data.joint_pos[..., :10])
             return joint_pos_target
 
     def move_away_from_door(self):
