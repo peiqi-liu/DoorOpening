@@ -91,6 +91,8 @@ class DooropeningEnv(DirectRLEnv):
 
         torch.set_printoptions(precision=4, sci_mode=False)
 
+        self.step_count = 0
+
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
         self.door = Articulation(self.cfg.door_cfg)
@@ -109,6 +111,7 @@ class DooropeningEnv(DirectRLEnv):
         light_cfg.func("/World/Light", light_cfg)    
 
     def _pre_physics_step(self, actions: torch.Tensor):
+        self.step_count += 1
         # delta actions
         self.scaled_actions = actions.clone().clamp(-1.0, 1.0)
         # targets = self.robot_dof_targets + self.dt * self.actions * self.cfg.action_scale
@@ -228,6 +231,12 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["error/arm_joint_pos_err"] = arm_joint_pos_err.mean()
         self.extras["error/finger_joint_pos_err"] = finger_joint_pos_err.mean()
         self.extras["error/door_pos_err"] = door_pos_err.mean()
+
+        progress = min(self.step_count / 1e6, 1.0)
+        alpha = 0.9 - 0.7 * progress  # from 0.9 → 0.2
+
+        probs = (1 - alpha) * (alpha ** 0)
+        self.extras["step_count/prob_get_first_key_frame"] = probs
         # self.extras["error/base_joint_vel_err"] = base_joint_vel_err.mean()
         # self.extras["error/arm_joint_vel_err"] = arm_joint_vel_err.mean()
         # self.extras["error/finger_joint_vel_err"] = finger_joint_vel_err.mean()
@@ -316,7 +325,7 @@ class DooropeningEnv(DirectRLEnv):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
 
-        reset_frame_idx = self.ref_motion_lib.reset(env_ids)
+        reset_frame_idx = self.ref_motion_lib.reset(env_ids, step_count=self.step_count)
         self.max_trial_steps[env_ids] = ((self.ref_motion_lib.num_frames - reset_frame_idx) // self.ref_motion_lib.velocity).long()
 
         deep_mimic_initial_joint_pos = self.ref_motion_lib.get_robot_joint_pos(env_ids)

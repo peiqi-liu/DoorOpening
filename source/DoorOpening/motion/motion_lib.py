@@ -84,20 +84,26 @@ class ReferenceMotionManager:
     # --------------------------------------------------
     # Reset logic
     # --------------------------------------------------
-    def reset(self, env_ids: Sequence[int]):
+    def reset(self, env_ids: Sequence[int], step_count: Optional[int] = None):
         if not self.reset_from_start:
-            idx = torch.randint(
-                low=0,
-                # The first key frame is the start frame
-                # The second key frame is the pregrasp frame
-                # The third key frame is the grasp frame
-                # The fourth key frame is the finishing-lever-rotation frame
-                # The fifth key frame is the finishing-door-frame-opening frame
-                # high=min(len(self.key_indices), 5),
-                high=len(self.key_indices),
-                size=(env_ids.shape[0],),
-                device=self.key_indices.device
-            )
+            if step_count is not None:
+                progress = min(step_count / 5e5, 1.0)
+                alpha = 0.9 - 0.7 * progress  # from 0.9 → 0.2
+
+                probs = torch.tensor(
+                    [(1 - alpha) * (alpha ** i) for i in range(len(self.key_indices))],
+                    device=self.key_indices.device
+                )
+                probs = probs / probs.sum()
+
+                idx = torch.multinomial(probs, env_ids.shape[0], replacement=True)
+            else:
+                idx = torch.randint(
+                    low=0,
+                    high=len(self.key_indices),
+                    size=(env_ids.shape[0],),
+                    device=self.key_indices.device
+                )
         else:
             idx = torch.zeros(
                 (env_ids.shape[0],),
