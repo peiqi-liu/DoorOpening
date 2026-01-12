@@ -82,9 +82,15 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_finger_joint_vel_w = self.cfg.robot_finger_joint_vel_w
         self.door_pos_w = self.cfg.door_pos_w
 
-        self.reset_base_pos_delta = (self.cfg.reset_base_pos_delta ** 2) * len(self.cfg.base_joints)
-        self.reset_key_body_pos_delta = (self.cfg.reset_key_body_pos_delta ** 2) * len(self.cfg.robot_reset_key_bodies)
-        self.reset_key_body_quat_delta = (self.cfg.reset_key_body_quat_delta ** 2) * len(self.cfg.robot_reset_key_bodies)
+        # self.reset_base_pos_delta = (self.cfg.reset_base_pos_delta ** 2) * len(self.cfg.base_joints)
+        # self.reset_key_body_pos_delta = (self.cfg.reset_key_body_pos_delta ** 2) * len(self.cfg.robot_reset_key_bodies)
+        # self.reset_key_body_quat_delta = (self.cfg.reset_key_body_quat_delta ** 2) * len(self.cfg.robot_reset_key_bodies)
+        self.reset_base_pos_delta_min = (self.cfg.reset_base_pos_delta_min ** 2) * len(self.cfg.base_joints)
+        self.reset_key_body_pos_delta_min = (self.cfg.reset_key_body_pos_delta_min ** 2) * len(self.cfg.robot_reset_key_bodies)
+        self.reset_key_body_quat_delta_min = (self.cfg.reset_key_body_quat_delta_min ** 2) * len(self.cfg.robot_reset_key_bodies)
+        self.reset_base_pos_delta_max = (self.cfg.reset_base_pos_delta_max ** 2) * len(self.cfg.base_joints)
+        self.reset_key_body_pos_delta_max = (self.cfg.reset_key_body_pos_delta_max ** 2) * len(self.cfg.robot_reset_key_bodies)
+        self.reset_key_body_quat_delta_max = (self.cfg.reset_key_body_quat_delta_max ** 2) * len(self.cfg.robot_reset_key_bodies)
 
         self.ref_motion_lib = ReferenceMotionManager(self.cfg.motion_file, self.num_envs, self.device, velocity=self.cfg.velocity, reset_from_start = False)
         self.max_trial_steps = self.ref_motion_lib.num_frames * torch.ones_like(self.episode_length_buf, device=self.device)
@@ -92,6 +98,7 @@ class DooropeningEnv(DirectRLEnv):
         torch.set_printoptions(precision=4, sci_mode=False)
 
         self.step_count = 0
+        self.reset_progress_total = self.cfg.reset_progress_total
 
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
@@ -231,15 +238,17 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["error/arm_joint_pos_err"] = arm_joint_pos_err.mean()
         self.extras["error/finger_joint_pos_err"] = finger_joint_pos_err.mean()
         self.extras["error/door_pos_err"] = door_pos_err.mean()
-
-        progress = min(self.step_count / 1e6, 1.0)
-        alpha = 0.9 - 0.7 * progress  # from 0.9 → 0.2
-
-        probs = (1 - alpha) * (alpha ** 0)
-        self.extras["step_count/prob_get_first_key_frame"] = probs
         # self.extras["error/base_joint_vel_err"] = base_joint_vel_err.mean()
         # self.extras["error/arm_joint_vel_err"] = arm_joint_vel_err.mean()
         # self.extras["error/finger_joint_vel_err"] = finger_joint_vel_err.mean()
+
+        progress = min(self.step_count / self.reset_progress_total, 1.0)
+        alpha = 0.9 - 0.7 * progress  # from 0.9 → 0.2
+        probs = torch.tensor(
+            [(1 - alpha) * (alpha ** i) for i in range(len(self.ref_motion_lib.key_indices))]
+        )
+        probs = probs / probs.sum()
+        self.extras["reset/prob_get_first_key_frame"] = probs[0]
 
         return compute_deep_mimic_rewards(
             robot_key_body_pos = self.robot_key_body_pos, 
@@ -289,6 +298,13 @@ class DooropeningEnv(DirectRLEnv):
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         self._get_intermediate_values()
+        progress = min(self.step_count / self.reset_progress_total, 1.0)
+        reset_base_pos_delta = self.reset_base_pos_delta_min + (self.reset_base_pos_delta_max - self.reset_base_pos_delta_min) * progress
+        reset_key_body_pos_delta = self.reset_key_body_pos_delta_min + (self.reset_key_body_pos_delta_max - self.reset_key_body_pos_delta_min) * progress
+        reset_key_body_quat_delta = self.reset_key_body_quat_delta_min + (self.reset_key_body_quat_delta_max - self.reset_key_body_quat_delta_min) * progress
+        self.extras["reset/reset_base_pos_delta"] = reset_base_pos_delta
+        self.extras["reset/reset_key_body_pos_delta"] = reset_key_body_pos_delta
+        self.extras["reset/reset_key_body_quat_delta"] = reset_key_body_quat_delta
         key_body_pos_err, key_body_quat_err, door_err, base_joint_pos_err, arm_joint_pos_err, finger_joint_pos_err, _, _, _, door_pos_err = compute_tracking_error(
             robot_key_body_pos = self.robot_reset_key_body_pos,
             robot_key_body_quat = self.robot_key_body_quat,
@@ -316,16 +332,16 @@ class DooropeningEnv(DirectRLEnv):
         # print(arm_joint_pos_err, finger_joint_pos_err, base_joint_pos_err)
         # warm_up = self.episode_length_buf >= 20
         return \
-            (base_joint_pos_err > self.reset_base_pos_delta) | \
-            (key_body_pos_err > self.reset_key_body_pos_delta) | \
-            (key_body_quat_err > self.reset_key_body_quat_delta), \
+            (base_joint_pos_err > reset_base_pos_delta) | \
+            (key_body_pos_err > reset_key_body_pos_delta) | \
+            (key_body_quat_err > reset_key_body_quat_delta), \
             time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
 
-        reset_frame_idx = self.ref_motion_lib.reset(env_ids, step_count=self.step_count)
+        reset_frame_idx = self.ref_motion_lib.reset(env_ids, step_count=self.step_count, reset_progress_total=self.reset_progress_total)
         self.max_trial_steps[env_ids] = ((self.ref_motion_lib.num_frames - reset_frame_idx) // self.ref_motion_lib.velocity).long()
 
         deep_mimic_initial_joint_pos = self.ref_motion_lib.get_robot_joint_pos(env_ids)

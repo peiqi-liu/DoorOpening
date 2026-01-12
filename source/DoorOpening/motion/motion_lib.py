@@ -84,10 +84,10 @@ class ReferenceMotionManager:
     # --------------------------------------------------
     # Reset logic
     # --------------------------------------------------
-    def reset(self, env_ids: Sequence[int], step_count: Optional[int] = None):
+    def reset(self, env_ids: Sequence[int], step_count: Optional[int] = None, reset_progress_total: Optional[int] = None):
         if not self.reset_from_start:
-            if step_count is not None:
-                progress = min(step_count / 5e5, 1.0)
+            if step_count is not None and reset_progress_total is not None:
+                progress = min(step_count / reset_progress_total, 1.0)
                 alpha = 0.9 - 0.7 * progress  # from 0.9 → 0.2
 
                 probs = torch.tensor(
