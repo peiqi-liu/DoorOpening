@@ -27,7 +27,7 @@ class DooropeningEnv(DirectRLEnv):
 
     def __init__(self, cfg: DooropeningEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
-        self.early_stopping = False
+        self.early_stopping = True
 
         self.num_base_joints = len(self.cfg.base_joints)
         self.num_arm_joints = len(self.cfg.arm_joints)
