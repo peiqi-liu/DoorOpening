@@ -27,6 +27,7 @@ class DooropeningEnv(DirectRLEnv):
 
     def __init__(self, cfg: DooropeningEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
+        self.early_stopping = False
 
         self.num_base_joints = len(self.cfg.base_joints)
         self.num_arm_joints = len(self.cfg.arm_joints)
@@ -232,12 +233,12 @@ class DooropeningEnv(DirectRLEnv):
             ref_door_body_pos = self.ref_door_link_pos,
         )
 
-        self.extras["error/key_body_pos_err"] = math.sqrt(key_body_pos_err.max().item() / len(self.cfg.robot_reset_key_bodies))
-        self.extras["error/key_body_quat_err"] = math.sqrt(key_body_quat_err.max().item() / len(self.cfg.robot_reset_key_bodies))
-        self.extras["error/door_err"] = math.sqrt(door_err.max().item() / len(self.cfg.door_body_names))
-        self.extras["error/base_joint_pos_err"] = math.sqrt(base_joint_pos_err.max().item() / len(self.cfg.base_joints))
-        self.extras["error/arm_joint_pos_err"] = math.sqrt(arm_joint_pos_err.max().item() / len(self.cfg.arm_joints))
-        self.extras["error/finger_joint_pos_err"] = math.sqrt(finger_joint_pos_err.max().item() / len(self.cfg.finger_joints))
+        self.extras["error/key_body_pos_err"] = math.sqrt(key_body_pos_err.mean().item() / len(self.cfg.robot_reset_key_bodies))
+        self.extras["error/key_body_quat_err"] = math.sqrt(key_body_quat_err.mean().item() / len(self.cfg.robot_reset_key_bodies))
+        self.extras["error/door_err"] = math.sqrt(door_err.mean().item() / len(self.cfg.door_body_names))
+        self.extras["error/base_joint_pos_err"] = math.sqrt(base_joint_pos_err.mean().item() / len(self.cfg.base_joints))
+        self.extras["error/arm_joint_pos_err"] = math.sqrt(arm_joint_pos_err.mean().item() / len(self.cfg.arm_joints))
+        self.extras["error/finger_joint_pos_err"] = math.sqrt(finger_joint_pos_err.mean().item() / len(self.cfg.finger_joints))
         # self.extras["error/door_pos_err"] = math.sqrt(door_pos_err.max() / len(self.cfg.door_body_names))
         # self.extras["error/base_joint_vel_err"] = base_joint_vel_err.mean()
         # self.extras["error/arm_joint_vel_err"] = arm_joint_vel_err.mean()
@@ -298,6 +299,9 @@ class DooropeningEnv(DirectRLEnv):
         )
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        time_out = self.episode_length_buf >= self.max_trial_steps - 1
+        if not self.early_stopping:
+            return False, time_out
         self._get_intermediate_values()
         progress = min(self.step_count / self.reset_progress_total, 1.0)
         reset_base_pos_delta = self.reset_base_pos_delta_min + (self.reset_base_pos_delta_max - self.reset_base_pos_delta_min) * progress
@@ -329,7 +333,6 @@ class DooropeningEnv(DirectRLEnv):
             ref_robot_finger_joint_vel = self.ref_robot_finger_joint_vel,
             ref_door_body_pos = self.ref_door_link_pos,
         )
-        time_out = self.episode_length_buf >= self.max_trial_steps - 1
         # print(arm_joint_pos_err, finger_joint_pos_err, base_joint_pos_err)
         # warm_up = self.episode_length_buf >= 20
         return \
