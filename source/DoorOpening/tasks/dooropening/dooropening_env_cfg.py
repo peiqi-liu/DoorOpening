@@ -129,8 +129,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_body_quat_scale = 1.0
     robot_key_body_pos_scale = 3.0
     robot_base_joint_pos_scale = 0.5
-    robot_arm_joint_pos_scale = 0.01
-    robot_finger_joint_pos_scale = 0.05
+    robot_arm_joint_pos_scale = 0.75
+    robot_finger_joint_pos_scale = 1.0
     robot_base_joint_vel_scale = 0.5
     robot_arm_joint_vel_scale = 0.5
     robot_finger_joint_vel_scale = 0.5
