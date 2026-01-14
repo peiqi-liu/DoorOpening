@@ -141,14 +141,14 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # reset_key_body_pos_delta = 0.5
     # reset_key_body_quat_delta = 1.0
     reset_base_pos_delta_min = 0.2
-    reset_key_body_pos_delta_min = 0.5
-    reset_key_body_quat_delta_min = 1.0
+    reset_key_body_pos_delta_min = 0.4
+    reset_key_body_quat_delta_min = 0.8
     reset_base_pos_delta_max = 0.8
     reset_key_body_pos_delta_max = 1.0
     reset_key_body_quat_delta_max = 3.2
     # We are slowly increasing our tolerance on base position drift and slowly only resettting the env from the first key frame
     # This variable is used to indicate when we stop increasing the tolerance and reset the env from the first key frame for the greatest probability
-    reset_progress_total = 5e5
+    reset_progress_total = 7.5e5
 
     velocity = 0.5
 
