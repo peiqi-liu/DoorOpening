@@ -87,12 +87,19 @@ class DooropeningEnv(DirectRLEnv):
         # self.reset_base_pos_delta = (self.cfg.reset_base_pos_delta ** 2) * len(self.cfg.base_joints)
         # self.reset_key_body_pos_delta = (self.cfg.reset_key_body_pos_delta ** 2) * len(self.cfg.robot_reset_key_bodies)
         # self.reset_key_body_quat_delta = (self.cfg.reset_key_body_quat_delta ** 2) * len(self.cfg.robot_reset_key_bodies)
-        self.reset_base_pos_delta_min = (self.cfg.reset_base_pos_delta_min ** 2) * len(self.cfg.base_joints)
-        self.reset_key_body_pos_delta_min = (self.cfg.reset_key_body_pos_delta_min ** 2) * len(self.cfg.robot_reset_key_bodies)
-        self.reset_key_body_quat_delta_min = (self.cfg.reset_key_body_quat_delta_min ** 2) * len(self.cfg.robot_reset_key_bodies)
-        self.reset_base_pos_delta_max = (self.cfg.reset_base_pos_delta_max ** 2) * len(self.cfg.base_joints)
-        self.reset_key_body_pos_delta_max = (self.cfg.reset_key_body_pos_delta_max ** 2) * len(self.cfg.robot_reset_key_bodies)
-        self.reset_key_body_quat_delta_max = (self.cfg.reset_key_body_quat_delta_max ** 2) * len(self.cfg.robot_reset_key_bodies)
+
+        # self.reset_base_pos_delta_min = (self.cfg.reset_base_pos_delta_min ** 2) * len(self.cfg.base_joints)
+        # self.reset_key_body_pos_delta_min = (self.cfg.reset_key_body_pos_delta_min ** 2) * len(self.cfg.robot_reset_key_bodies)
+        # self.reset_key_body_quat_delta_min = (self.cfg.reset_key_body_quat_delta_min ** 2) * len(self.cfg.robot_reset_key_bodies)
+        # self.reset_base_pos_delta_max = (self.cfg.reset_base_pos_delta_max ** 2) * len(self.cfg.base_joints)
+        # self.reset_key_body_pos_delta_max = (self.cfg.reset_key_body_pos_delta_max ** 2) * len(self.cfg.robot_reset_key_bodies)
+        # self.reset_key_body_quat_delta_max = (self.cfg.reset_key_body_quat_delta_max ** 2) * len(self.cfg.robot_reset_key_bodies)
+        self.reset_base_pos_delta_min = self.cfg.reset_base_pos_delta_min
+        self.reset_key_body_pos_delta_min = self.cfg.reset_key_body_pos_delta_min
+        self.reset_key_body_quat_delta_min = self.cfg.reset_key_body_quat_delta_min
+        self.reset_base_pos_delta_max = self.cfg.reset_base_pos_delta_max
+        self.reset_key_body_pos_delta_max = self.cfg.reset_key_body_pos_delta_max
+        self.reset_key_body_quat_delta_max = self.cfg.reset_key_body_quat_delta_max
 
         self.ref_motion_lib = ReferenceMotionManager(self.cfg.motion_file, self.num_envs, self.device, velocity=self.cfg.velocity, reset_from_start = False)
         self.max_trial_steps = self.ref_motion_lib.num_frames * torch.ones_like(self.episode_length_buf, device=self.device)
@@ -304,12 +311,21 @@ class DooropeningEnv(DirectRLEnv):
             return False, time_out
         self._get_intermediate_values()
         progress = min(self.step_count / self.reset_progress_total, 1.0)
+        # reset_base_pos_delta = self.reset_base_pos_delta_min + (self.reset_base_pos_delta_max - self.reset_base_pos_delta_min) * progress
+        # reset_key_body_pos_delta = self.reset_key_body_pos_delta_min + (self.reset_key_body_pos_delta_max - self.reset_key_body_pos_delta_min) * progress
+        # reset_key_body_quat_delta = self.reset_key_body_quat_delta_min + (self.reset_key_body_quat_delta_max - self.reset_key_body_quat_delta_min) * progress
         reset_base_pos_delta = self.reset_base_pos_delta_min + (self.reset_base_pos_delta_max - self.reset_base_pos_delta_min) * progress
         reset_key_body_pos_delta = self.reset_key_body_pos_delta_min + (self.reset_key_body_pos_delta_max - self.reset_key_body_pos_delta_min) * progress
         reset_key_body_quat_delta = self.reset_key_body_quat_delta_min + (self.reset_key_body_quat_delta_max - self.reset_key_body_quat_delta_min) * progress
-        self.extras["reset/reset_base_pos_delta"] = math.sqrt(reset_base_pos_delta / len(self.cfg.base_joints))
-        self.extras["reset/reset_key_body_pos_delta"] = math.sqrt(reset_key_body_pos_delta / len(self.cfg.robot_reset_key_bodies))
-        self.extras["reset/reset_key_body_quat_delta"] = math.sqrt(reset_key_body_quat_delta / len(self.cfg.robot_reset_key_bodies))
+        # self.extras["reset/reset_base_pos_delta"] = math.sqrt(reset_base_pos_delta / len(self.cfg.base_joints))
+        # self.extras["reset/reset_key_body_pos_delta"] = math.sqrt(reset_key_body_pos_delta / len(self.cfg.robot_reset_key_bodies))
+        # self.extras["reset/reset_key_body_quat_delta"] = math.sqrt(reset_key_body_quat_delta / len(self.cfg.robot_reset_key_bodies))
+        self.extras["reset/reset_base_pos_delta"] = reset_base_pos_delta
+        self.extras["reset/reset_key_body_pos_delta"] = reset_key_body_pos_delta
+        self.extras["reset/reset_key_body_quat_delta"] = reset_key_body_quat_delta
+        reset_base_pos_delta = reset_base_pos_delta ** 2 * len(self.cfg.base_joints)
+        reset_key_body_pos_delta = reset_key_body_pos_delta ** 2 * len(self.cfg.robot_reset_key_bodies)
+        reset_key_body_quat_delta = reset_key_body_quat_delta ** 2 * len(self.cfg.robot_reset_key_bodies)
         key_body_pos_err, key_body_quat_err, door_err, base_joint_pos_err, arm_joint_pos_err, finger_joint_pos_err, _, _, _, door_pos_err = compute_tracking_error(
             robot_key_body_pos = self.robot_reset_key_body_pos,
             robot_key_body_quat = self.robot_key_body_quat,
