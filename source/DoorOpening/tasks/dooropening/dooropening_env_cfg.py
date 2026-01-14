@@ -18,8 +18,8 @@ from isaaclab.envs.common import ViewerCfg
 
 @configclass
 class DooropeningEnvCfg(DirectRLEnvCfg):
-    sim_dt = 1/120.
-    decimation = 2
+    sim_dt = 1/60.
+    decimation = 1
     episode_length_s = 10.
     num_sim_steps_to_render=2
     # - spaces definition
@@ -150,7 +150,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # This variable is used to indicate when we stop increasing the tolerance and reset the env from the first key frame for the greatest probability
     reset_progress_total = 5e5
 
-    velocity = 1.0
+    velocity = 0.5
 
     # Change this to where you store your motions
     motion_file = "trajectory.pkl"

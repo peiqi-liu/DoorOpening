@@ -127,7 +127,8 @@ class DooropeningEnv(DirectRLEnv):
         light_cfg.func("/World/Light", light_cfg)    
 
     def _pre_physics_step(self, actions: torch.Tensor):
-        self.step_count += 1
+        # self.step_count += 1
+        self.step_count = self._sim_step_counter
         # delta actions
         self.scaled_actions = actions.clone().clamp(-1.0, 1.0)
         # targets = self.robot_dof_targets + self.dt * self.actions * self.cfg.action_scale
@@ -143,7 +144,7 @@ class DooropeningEnv(DirectRLEnv):
         self.robot.set_joint_position_target(self.robot_dof_targets, joint_ids=self._robot_dof_idx)
         # joint_pos = self.robot.data.joint_pos.clone()
         # joint_pos[:] = self.ref_motion_lib.get_robot_joint_pos()
-        # self.robot.write_joint_position_to_sim(joint_pos)
+        # self.robot.set_joint_position_target(joint_pos)
         # door_pos = self.door.data.joint_pos.clone()
         # door_pos[:] = self.ref_motion_lib.get_door_joint_pos()
         # self.door.write_joint_position_to_sim(door_pos)
@@ -349,8 +350,6 @@ class DooropeningEnv(DirectRLEnv):
             ref_robot_finger_joint_vel = self.ref_robot_finger_joint_vel,
             ref_door_body_pos = self.ref_door_link_pos,
         )
-        # print(arm_joint_pos_err, finger_joint_pos_err, base_joint_pos_err)
-        # warm_up = self.episode_length_buf >= 20
         return \
             (base_joint_pos_err > reset_base_pos_delta) | \
             (key_body_pos_err > reset_key_body_pos_delta) | \
