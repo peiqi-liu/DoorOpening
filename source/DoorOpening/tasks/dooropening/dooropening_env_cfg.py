@@ -112,14 +112,14 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     finger_action_scale = 0.5
 
     # Deep Mimic Reward Parameters
-    robot_body_quat_w = 3.0
+    robot_body_quat_w = 0.5
     robot_key_body_pos_w = 2.0
     robot_base_joint_pos_w = 2.0
     robot_arm_joint_pos_w = 4.0
-    robot_finger_joint_pos_w = 1.0
+    robot_finger_joint_pos_w = 2.0
     robot_base_joint_vel_w = 1.0
     robot_arm_joint_vel_w = 2.0
-    robot_finger_joint_vel_w = 0.5
+    robot_finger_joint_vel_w = 1.0
     # robot_base_joint_vel_w = 0.0
     # robot_arm_joint_vel_w = 0.0
     # robot_finger_joint_vel_w = 0.0
@@ -140,11 +140,11 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # reset_base_pos_delta = 0.25
     # reset_key_body_pos_delta = 0.5
     # reset_key_body_quat_delta = 1.0
-    reset_base_pos_delta_min = 0.2
-    reset_key_body_pos_delta_min = 0.4
+    reset_base_pos_delta_min = 0.25
+    reset_key_body_pos_delta_min = 0.5
     reset_key_body_quat_delta_min = 0.8
-    reset_base_pos_delta_max = 0.8
-    reset_key_body_pos_delta_max = 1.0
+    reset_base_pos_delta_max = 0.3
+    reset_key_body_pos_delta_max = 0.6
     reset_key_body_quat_delta_max = 3.2
     # We are slowly increasing our tolerance on base position drift and slowly only resettting the env from the first key frame
     # This variable is used to indicate when we stop increasing the tolerance and reset the env from the first key frame for the greatest probability
