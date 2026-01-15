@@ -66,7 +66,7 @@ def quat_diff_angle(q0, q1):
     _, angle = quat_to_axis_angle(dq)
     return angle
 
-if __name__ == "__main__":
-    q0 = torch.randn(10, 4)
-    q1 = torch.randn(10, 4)
-    print(quat_diff_angle(q0, q1))
+def hinge_angle_diff(theta_a, theta_b):
+    diff = theta_b - theta_a
+    err = torch.remainder(diff + torch.pi, 2 * torch.pi) - torch.pi
+    return torch.abs(err)
