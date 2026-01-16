@@ -9,9 +9,10 @@ from scipy.interpolate import CubicSpline
 import numpy as np
 
 class OmniJointController:
-    def __init__(self, scene: InteractiveScene, joint_names):
+    def __init__(self, scene: InteractiveScene, joint_names, sim_dt=1/60):
         self.scene = scene
 
+        self.sim_dt = sim_dt
         self.joint_names = joint_names
         self.joint_ids, self.joint_names = scene["robot"].find_joints(joint_names)
 
@@ -42,7 +43,7 @@ class OmniJointController:
         self.playback = False
         self.play_idx = 0
 
-        self.total_steps = 500
+        self.total_steps = 1000
 
         self.pose_sliders = []
         self.joint_sliders = []
@@ -179,8 +180,7 @@ class OmniJointController:
 
         t = np.linspace(0, 1, self.total_steps)
         self.traj = torch.tensor(cs(t))
-        self.qd = torch.tensor(cs(t, 1))
-        self.qdd = torch.tensor(cs(t, 2))
+        self.qd = torch.tensor(cs(t, 1)) / (self.sim_dt * self.total_steps)
 
         key_indices = np.searchsorted(t, t_key)
         key_indices = np.clip(key_indices, 0, len(t) - 1)
@@ -188,7 +188,6 @@ class OmniJointController:
         self.door_traj = self.traj[:, num_key_poses:]
         self.traj = self.traj[:, :num_key_poses]
         self.qd = self.qd[:, :num_key_poses]
-        self.qdd = self.qdd[:, :num_key_poses]
 
         self.key_indices = torch.from_numpy(key_indices)
 
@@ -211,7 +210,6 @@ class OmniJointController:
         data = {
             "robot_joint_pos_traj": self.traj, 
             "robot_joint_vel_traj": self.qd, 
-            "robot_joint_acc_traj": self.qdd, 
             "door_traj": self.door_traj, 
             "key_indices": self.key_indices
         }

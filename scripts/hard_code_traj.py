@@ -152,7 +152,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     scene.reset()
     print("[INFO]: Resetting robot state...")
 
-    controller = OmniJointController(scene, FULL_JOINT_NAMES)
+    controller = OmniJointController(scene, FULL_JOINT_NAMES, sim_dt=sim_dt)
 
     cfg = FRAME_MARKER_CFG.replace(prim_path="/World/GoalFrame")
     cfg.markers["frame"].scale = (0.03, 0.03, 0.03)
