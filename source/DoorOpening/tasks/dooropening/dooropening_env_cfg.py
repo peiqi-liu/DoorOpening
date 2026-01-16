@@ -157,7 +157,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # reset_key_body_pos_delta_min = 0.4
     # reset_base_pos_delta_max = 0.8
     # reset_key_body_pos_delta_max = 1.0
-    reset_root_pos_delta_min = 0.2
+    reset_root_pos_delta_min = 0.4
     reset_root_rot_delta_min = 0.4
     reset_root_pos_delta_max = 0.8
     reset_root_rot_delta_max = 1.0
