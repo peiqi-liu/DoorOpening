@@ -80,15 +80,14 @@ class DooropeningEnv(DirectRLEnv):
 
         # self.reset_base_pos_delta = (self.cfg.reset_base_pos_delta ** 2) * len(self.cfg.base_joints)
         # self.reset_key_body_pos_delta = (self.cfg.reset_key_body_pos_delta ** 2) * len(self.cfg.robot_reset_key_bodies)
-
-        # self.reset_base_pos_delta_min = (self.cfg.reset_base_pos_delta_min ** 2) * len(self.cfg.base_joints)
-        # self.reset_key_body_pos_delta_min = (self.cfg.reset_key_body_pos_delta_min ** 2) * len(self.cfg.robot_reset_key_bodies)
-        # self.reset_base_pos_delta_max = (self.cfg.reset_base_pos_delta_max ** 2) * len(self.cfg.base_joints)
-        # self.reset_key_body_pos_delta_max = (self.cfg.reset_key_body_pos_delta_max ** 2) * len(self.cfg.robot_reset_key_bodies)
-        self.reset_base_pos_delta_min = self.cfg.reset_base_pos_delta_min
-        self.reset_key_body_pos_delta_min = self.cfg.reset_key_body_pos_delta_min
-        self.reset_base_pos_delta_max = self.cfg.reset_base_pos_delta_max
-        self.reset_key_body_pos_delta_max = self.cfg.reset_key_body_pos_delta_max
+        # self.reset_base_pos_delta_min = self.cfg.reset_base_pos_delta_min
+        # self.reset_key_body_pos_delta_min = self.cfg.reset_key_body_pos_delta_min
+        # self.reset_base_pos_delta_max = self.cfg.reset_base_pos_delta_max
+        # self.reset_key_body_pos_delta_max = self.cfg.reset_key_body_pos_delta_max
+        self.reset_root_pos_delta_min = self.cfg.reset_root_pos_delta_min
+        self.reset_root_rot_delta_min = self.cfg.reset_root_rot_delta_min
+        self.reset_root_pos_delta_max = self.cfg.reset_root_pos_delta_max
+        self.reset_root_rot_delta_max = self.cfg.reset_root_rot_delta_max
 
         self.ref_motion_lib = ReferenceMotionManager(self.cfg.motion_file, self.num_envs, self.device, velocity=self.cfg.velocity, reset_from_start = False)
         self.max_trial_steps = self.ref_motion_lib.num_frames * torch.ones_like(self.episode_length_buf, device=self.device)
@@ -150,9 +149,9 @@ class DooropeningEnv(DirectRLEnv):
         
         door_to_base_link_pos = (self.door_link_pos - base_link_pos).reshape(self.num_envs, 1, -1)
 
-        rel_robot_key_body_pos = (self.robot_key_body_pos - base_link_pos).reshape(self.num_envs, 1, -1)
+        rel_robot_key_body_pos = (self.robot_key_body_pos_world - base_link_pos).reshape(self.num_envs, 1, -1)
 
-        key_pos_err = self.robot_key_body_pos - (self.ref_robot_key_body_pos).to(self.robot_key_body_pos)
+        key_pos_err = self.robot_key_body_pos_world - (self.ref_robot_key_body_pos_world).to(self.robot_key_body_pos_world)
         key_pos_err = key_pos_err.reshape(self.num_envs, 1, -1)
 
         obs = torch.cat(
@@ -171,10 +170,12 @@ class DooropeningEnv(DirectRLEnv):
         return observations
 
     def _get_intermediate_values(self):
-        self.robot_key_body_pos = self.robot.data.body_pos_w[:, self._robot_key_body_idx]\
+        self.robot_key_body_pos_world = self.robot.data.body_pos_w[:, self._robot_key_body_idx]\
              - self.scene.env_origins.repeat((1, 1)).reshape(self.num_envs, 1, 3)
-        self.robot_reset_key_body_pos = self.robot.data.body_pos_w[:, self._robot_reset_key_body_idx]\
+        self.robot_reset_key_body_pos_world = self.robot.data.body_pos_w[:, self._robot_reset_key_body_idx]\
              - self.scene.env_origins.repeat((1, 1)).reshape(self.num_envs, 1, 3)
+        self.robot_key_body_pos = self.robot_key_body_pos_world - self.robot_key_body_pos_world[:, 0:1]
+        self.robot_reset_key_body_pos = self.robot_reset_key_body_pos_world - self.robot_reset_key_body_pos_world[:, 0:1]
         self.door_joint_pos = self.door.data.joint_pos
         self.robot_base_joint_pos = self.robot.data.joint_pos[:, self._robot_base_dof_idx]
         self.robot_arm_joint_pos = self.robot.data.joint_pos[:, self._robot_arm_dof_idx]
@@ -184,8 +185,10 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_finger_joint_vel = self.robot.data.joint_vel[:, self._robot_finger_dof_idx]
         self.door_link_pos = self.door.data.body_pos_w[:, self._door_body_idx]
 
-        self.ref_robot_key_body_pos = self.ref_motion_lib.get_robot_body_pos()[:, self._robot_key_body_idx]
-        self.ref_robot_reset_key_body_pos = self.ref_motion_lib.get_robot_body_pos()[:, self._robot_reset_key_body_idx]
+        self.ref_robot_key_body_pos_world = self.ref_motion_lib.get_robot_body_pos()[:, self._robot_key_body_idx]
+        self.ref_robot_reset_key_body_pos_world = self.ref_motion_lib.get_robot_body_pos()[:, self._robot_reset_key_body_idx]
+        self.ref_robot_key_body_pos = self.ref_robot_key_body_pos_world - self.ref_robot_key_body_pos_world[:, 0:1]
+        self.ref_robot_reset_key_body_pos = self.ref_robot_reset_key_body_pos_world - self.ref_robot_reset_key_body_pos_world[:, 0:1]
         self.ref_door_joint_pos = self.ref_motion_lib.get_door_joint_pos()
         self.ref_robot_joint_pos = self.ref_motion_lib.get_robot_joint_pos()
         self.ref_robot_base_joint_pos = self.ref_robot_joint_pos[:, self._robot_base_dof_idx]
@@ -198,7 +201,7 @@ class DooropeningEnv(DirectRLEnv):
     def _get_rewards(self) -> torch.Tensor:
         self._get_intermediate_values()
 
-        key_body_pos_err, door_err, base_joint_pos_err, arm_joint_pos_err, finger_joint_pos_err, base_joint_vel_err, arm_joint_vel_err, finger_joint_vel_err= compute_tracking_error(
+        key_body_pos_err, door_err, root_pos_err, root_rot_err, arm_joint_pos_err, finger_joint_pos_err= compute_tracking_error(
             robot_key_body_pos = self.robot_key_body_pos,
             door_joint_pos = self.door_joint_pos,
             robot_base_joint_pos = self.robot_base_joint_pos,
@@ -218,14 +221,20 @@ class DooropeningEnv(DirectRLEnv):
             ref_robot_finger_joint_vel = self.ref_robot_finger_joint_vel,
         )
 
-        self.extras["error/key_body_pos_err"] = math.sqrt(key_body_pos_err.mean().item() / len(self.cfg.robot_reset_key_bodies))
+        # self.extras["error/key_body_pos_err"] = math.sqrt(key_body_pos_err.mean().item() / (len(self.cfg.robot_key_bodies) - 1))
+        # self.extras["error/door_err"] = math.sqrt(door_err.mean().item() / len(self.cfg.door_body_names))
+        # self.extras["error/base_joint_pos_err"] = math.sqrt(base_joint_pos_err.mean().item() / len(self.cfg.base_joints))
+        # self.extras["error/arm_joint_pos_err"] = math.sqrt(arm_joint_pos_err.mean().item() / len(self.cfg.arm_joints))
+        # self.extras["error/finger_joint_pos_err"] = math.sqrt(finger_joint_pos_err.mean().item() / len(self.cfg.finger_joints))
+        # self.extras["error/base_joint_vel_err"] = math.sqrt(base_joint_vel_err.mean().item() / len(self.cfg.base_joints))
+        # self.extras["error/arm_joint_vel_err"] = math.sqrt(arm_joint_vel_err.mean().item() / len(self.cfg.arm_joints))
+        # self.extras["error/finger_joint_vel_err"] = math.sqrt(finger_joint_vel_err.mean().item() / len(self.cfg.finger_joints))
+        self.extras["error/key_body_pos_err"] = math.sqrt(key_body_pos_err.mean().item() / (len(self.cfg.robot_key_bodies) - 1))
         self.extras["error/door_err"] = math.sqrt(door_err.mean().item() / len(self.cfg.door_body_names))
-        self.extras["error/base_joint_pos_err"] = math.sqrt(base_joint_pos_err.mean().item() / len(self.cfg.base_joints))
+        self.extras["error/root_pos_err"] = math.sqrt(root_pos_err.mean().item())
+        self.extras["error/root_rot_err"] = math.sqrt(root_rot_err.mean().item())
         self.extras["error/arm_joint_pos_err"] = math.sqrt(arm_joint_pos_err.mean().item() / len(self.cfg.arm_joints))
         self.extras["error/finger_joint_pos_err"] = math.sqrt(finger_joint_pos_err.mean().item() / len(self.cfg.finger_joints))
-        self.extras["error/base_joint_vel_err"] = math.sqrt(base_joint_vel_err.mean().item() / len(self.cfg.base_joints))
-        self.extras["error/arm_joint_vel_err"] = math.sqrt(arm_joint_vel_err.mean().item() / len(self.cfg.arm_joints))
-        self.extras["error/finger_joint_vel_err"] = math.sqrt(finger_joint_vel_err.mean().item() / len(self.cfg.finger_joints))
 
         progress = min(self.step_count / self.reset_progress_total, 1.0)
         alpha = 0.9 - 0.7 * progress  # from 0.9 → 0.2
@@ -277,14 +286,20 @@ class DooropeningEnv(DirectRLEnv):
             return False, time_out
         self._get_intermediate_values()
         progress = min(self.step_count / self.reset_progress_total, 1.0)
-        reset_base_pos_delta = self.reset_base_pos_delta_min + (self.reset_base_pos_delta_max - self.reset_base_pos_delta_min) * progress
-        reset_key_body_pos_delta = self.reset_key_body_pos_delta_min + (self.reset_key_body_pos_delta_max - self.reset_key_body_pos_delta_min) * progress
-        self.extras["reset/reset_base_pos_delta"] = reset_base_pos_delta
-        self.extras["reset/reset_key_body_pos_delta"] = reset_key_body_pos_delta
-        reset_base_pos_delta = reset_base_pos_delta ** 2 * len(self.cfg.base_joints)
-        reset_key_body_pos_delta = reset_key_body_pos_delta ** 2 * len(self.cfg.robot_reset_key_bodies)
-        key_body_pos_err, door_err, base_joint_pos_err, arm_joint_pos_err, finger_joint_pos_err, base_joint_vel_err, arm_joint_vel_err, finger_joint_vel_err = compute_tracking_error(
-            robot_key_body_pos = self.robot_reset_key_body_pos,
+        # reset_base_pos_delta = self.reset_base_pos_delta_min + (self.reset_base_pos_delta_max - self.reset_base_pos_delta_min) * progress
+        # reset_key_body_pos_delta = self.reset_key_body_pos_delta_min + (self.reset_key_body_pos_delta_max - self.reset_key_body_pos_delta_min) * progress
+        # self.extras["reset/reset_base_pos_delta"] = reset_base_pos_delta
+        # self.extras["reset/reset_key_body_pos_delta"] = reset_key_body_pos_delta
+        # reset_base_pos_delta = reset_base_pos_delta ** 2 * len(self.cfg.base_joints)
+        # reset_key_body_pos_delta = reset_key_body_pos_delta ** 2 * (len(self.cfg.robot_reset_key_bodies) - 1)
+        reset_root_pos_delta = self.reset_root_pos_delta_min + (self.reset_root_pos_delta_max - self.reset_root_pos_delta_min) * progress
+        reset_root_rot_delta = self.reset_root_rot_delta_min + (self.reset_root_rot_delta_max - self.reset_root_rot_delta_min) * progress
+        self.extras["reset/reset_root_pos_delta"] = reset_root_pos_delta
+        self.extras["reset/reset_root_rot_delta"] = reset_root_rot_delta
+        reset_root_pos_delta = reset_root_pos_delta ** 2
+        reset_root_rot_delta = reset_root_rot_delta ** 2
+        key_body_pos_err, door_err, root_pos_err, root_rot_err, arm_joint_pos_err, finger_joint_pos_err = compute_tracking_error(
+            robot_key_body_pos = self.robot_reset_key_body_pos_world,
             door_joint_pos = self.door_joint_pos,
             robot_base_joint_pos = self.robot_base_joint_pos,
             robot_arm_joint_pos = self.robot_arm_joint_pos,
@@ -293,7 +308,7 @@ class DooropeningEnv(DirectRLEnv):
             robot_arm_joint_vel = self.robot_arm_joint_vel,
             robot_finger_joint_vel = self.robot_finger_joint_vel,
 
-            ref_robot_key_body_pos = self.ref_robot_reset_key_body_pos,
+            ref_robot_key_body_pos = self.ref_robot_reset_key_body_pos_world,
             ref_door_joint_pos = self.ref_door_joint_pos,
             ref_robot_base_joint_pos = self.ref_robot_base_joint_pos,
             ref_robot_arm_joint_pos = self.ref_robot_arm_joint_pos,
@@ -303,8 +318,8 @@ class DooropeningEnv(DirectRLEnv):
             ref_robot_finger_joint_vel = self.ref_robot_finger_joint_vel,
         )
         return \
-            (base_joint_pos_err > reset_base_pos_delta) | \
-            (key_body_pos_err > reset_key_body_pos_delta) | \
+            (root_pos_err > reset_root_pos_delta) | \
+            (root_rot_err > reset_root_rot_delta), \
             time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
@@ -473,16 +488,20 @@ def compute_tracking_error(
     # ----------------------------------
     # Robot joint position error
     # ----------------------------------
-    base_joint_pos_diff = ref_robot_base_joint_pos - robot_base_joint_pos
+    # base_joint_pos_diff = ref_robot_base_joint_pos - robot_base_joint_pos
+    # base_joint_pos_err = torch.sum(base_joint_pos_diff * base_joint_pos_diff, dim=-1)  # [B]
+    root_pos_diff = ref_robot_base_joint_pos[:, :2] - robot_base_joint_pos[:, :2]
+    root_pos_err = torch.sum(root_pos_diff * root_pos_diff, dim=-1)  # [B]
+    root_rot_diff = hinge_angle_diff(ref_robot_base_joint_pos[:, 2:], robot_base_joint_pos[:, 2:])
+    root_rot_err = torch.sum(root_rot_diff * root_rot_diff, dim=-1)  # [B]
     arm_joint_pos_diff = ref_robot_arm_joint_pos - robot_arm_joint_pos
-    base_joint_pos_err = torch.sum(base_joint_pos_diff * base_joint_pos_diff, dim=-1)  # [B]
     arm_joint_pos_err = torch.sum(arm_joint_pos_diff * arm_joint_pos_diff, dim=-1)  # [B]
     finger_joint_pos_diff = ref_robot_finger_joint_pos - robot_finger_joint_pos
     finger_joint_pos_err = torch.sum(finger_joint_pos_diff * finger_joint_pos_diff, dim=-1)  # [B]
-    base_joint_vel_diff = ref_robot_base_joint_vel - robot_base_joint_vel
-    base_joint_vel_err = torch.sum(base_joint_vel_diff * base_joint_vel_diff, dim=-1)  # [B]
-    arm_joint_vel_diff = ref_robot_arm_joint_vel - robot_arm_joint_vel
-    arm_joint_vel_err = torch.sum(arm_joint_vel_diff * arm_joint_vel_diff, dim=-1)  # [B]
-    finger_joint_vel_diff = ref_robot_finger_joint_vel - robot_finger_joint_vel
-    finger_joint_vel_err = torch.sum(finger_joint_vel_diff * finger_joint_vel_diff, dim=-1)  # [B]
-    return (key_body_pos_err, door_err, base_joint_pos_err, arm_joint_pos_err, finger_joint_pos_err, base_joint_vel_err, arm_joint_vel_err, finger_joint_vel_err)
+    # base_joint_vel_diff = ref_robot_base_joint_vel - robot_base_joint_vel
+    # base_joint_vel_err = torch.sum(base_joint_vel_diff * base_joint_vel_diff, dim=-1)  # [B]
+    # arm_joint_vel_diff = ref_robot_arm_joint_vel - robot_arm_joint_vel
+    # arm_joint_vel_err = torch.sum(arm_joint_vel_diff * arm_joint_vel_diff, dim=-1)  # [B]
+    # finger_joint_vel_diff = ref_robot_finger_joint_vel - robot_finger_joint_vel
+    # finger_joint_vel_err = torch.sum(finger_joint_vel_diff * finger_joint_vel_diff, dim=-1)  # [B]
+    return (key_body_pos_err, door_err, root_pos_err, root_rot_err, arm_joint_pos_err, finger_joint_pos_err)
