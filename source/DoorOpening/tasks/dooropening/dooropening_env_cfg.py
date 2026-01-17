@@ -84,8 +84,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     door_joint_names = ["joint_1", "joint_2"]
 
-    robot_key_bodies = ["base_x_link", "panda_link4", "panda_link6", "palm_center"]
-    robot_reset_key_bodies = ["base_x_link", "palm_center"]
+    robot_key_bodies = ["tidybot2_base_link", "panda_link4", "panda_link6", "palm_center"]
+    robot_reset_key_bodies = ["tidybot2_base_link", "palm_center"]
 
     # robot(s)
     robot_cfg: ArticulationCfg = GLORBOT_CONFIG.replace(
