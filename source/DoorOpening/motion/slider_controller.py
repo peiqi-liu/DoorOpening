@@ -42,7 +42,7 @@ class OmniJointController:
         self.playback = False
         self.play_idx = 0
 
-        self.total_steps = 500
+        self.total_steps = 1000
 
         self.pose_sliders = []
         self.joint_sliders = []
@@ -147,8 +147,15 @@ class OmniJointController:
                     max=1000,
                     step=1,
                     width=120,
+                ) 
+                length_field.model.add_value_changed_fn(
+                    partial(self._on_length_changed)
                 )
-                length_field.model.set_value(self.total_steps)
+
+                ui.Separator(height=10)
+
+    def _on_length_changed(self, model):
+        self.total_steps = model.get_value_as_int()
 
     def _record_key_pose(self):
         # q = self.q_slider.clone()
@@ -177,6 +184,7 @@ class OmniJointController:
 
         cs = CubicSpline(t_key, qs, axis=0, bc_type="clamped")
 
+        print("self.total_steps: ", self.total_steps)
         t = np.linspace(0, 1, self.total_steps)
         self.traj = torch.tensor(cs(t))
         self.qd = torch.tensor(cs(t, 1))

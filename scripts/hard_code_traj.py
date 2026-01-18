@@ -208,17 +208,19 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             qd = controller.qd[controller.play_idx]
             joint_vel = scene["robot"].data.default_joint_vel.clone()
             joint_vel[..., :] = qd
-            if controller.play_idx == 0:
-                scene["robot"].write_joint_state_to_sim(joint_pos, joint_vel)
-            else:
-                scene["robot"].set_joint_velocity_target(joint_vel)
-                scene["robot"].set_joint_position_target(joint_pos)
+            # if controller.play_idx == 0:
+            #     scene["robot"].write_joint_state_to_sim(joint_pos, joint_vel)
+            # else:
+            #     scene["robot"].set_joint_velocity_target(joint_vel)
+            #     scene["robot"].set_joint_position_target(joint_pos)
+            scene["robot"].write_joint_state_to_sim(joint_pos, joint_vel)
 
             door_q = controller.door_traj[controller.play_idx]
             door_joint_pos = scene["door"].data.default_joint_pos.clone()
             door_joint_pos[..., :] = door_q
             # scene["door"].write_joint_position_to_sim(door_joint_pos)
-            scene["door"].set_joint_position_target(door_joint_pos)
+            # scene["door"].set_joint_position_target(door_joint_pos)
+            scene["door"].write_joint_position_to_sim(door_joint_pos)
 
             # Write these poses data to the controller so it can be saved to pickle later
             controller.robot_body_pos_traj.append(scene["robot"].data.body_pos_w.squeeze().cpu().clone())

@@ -459,21 +459,15 @@ def compute_deep_mimic_rewards(
     # ----------------------------------
     # Robot joint position error
     # ----------------------------------
-    root_pos_diff = ref_robot_base_joint_pos[:, :2] - robot_base_joint_pos[:, :2]
-    root_pos_err = torch.sum(root_pos_diff * root_pos_diff, dim=-1)  # [B]
-    root_rot_diff = hinge_angle_diff(ref_robot_base_joint_pos[:, 2:], robot_base_joint_pos[:, 2:])
-    root_rot_err = torch.sum(root_rot_diff * root_rot_diff, dim=-1)  # [B]
+    base_joint_pos_diff = ref_robot_base_joint_pos - robot_base_joint_pos
+    base_joint_pos_err = torch.sum(base_joint_pos_diff * base_joint_pos_diff, dim=-1)  # [B]
     arm_joint_pos_diff = hinge_angle_diff(ref_robot_arm_joint_pos, robot_arm_joint_pos)
     arm_joint_pos_err = torch.sum(arm_joint_pos_diff * arm_joint_pos_diff, dim=-1)  # [B]
     finger_joint_pos_diff = hinge_angle_diff(ref_robot_finger_joint_pos, robot_finger_joint_pos)
     finger_joint_pos_err = torch.sum(finger_joint_pos_diff * finger_joint_pos_diff, dim=-1)  # [B]
 
-    # base_joint_vel_diff = ref_robot_base_joint_vel - robot_base_joint_vel
-    # base_joint_vel_err = torch.sum(base_joint_vel_diff * base_joint_vel_diff, dim=-1)  # [B]
-    root_vel_diff = ref_robot_base_joint_vel[:, :2] - robot_base_joint_vel[:, :2]
-    root_vel_err = torch.sum(root_vel_diff * root_vel_diff, dim=-1)  # [B]
-    root_ang_vel_diff = hinge_angle_diff(ref_robot_base_joint_vel[:, 2:], robot_base_joint_vel[:, 2:])
-    root_ang_vel_err = torch.sum(root_ang_vel_diff * root_ang_vel_diff, dim=-1)  # [B]
+    base_joint_vel_diff = ref_robot_base_joint_vel - robot_base_joint_vel
+    base_joint_vel_err = torch.sum(base_joint_vel_diff * base_joint_vel_diff, dim=-1)  # [B]
     arm_joint_vel_diff = ref_robot_arm_joint_vel - robot_arm_joint_vel
     arm_joint_vel_err = torch.sum(arm_joint_vel_diff * arm_joint_vel_diff, dim=-1)  # [B]
     finger_joint_vel_diff = ref_robot_finger_joint_vel - robot_finger_joint_vel
@@ -486,11 +480,11 @@ def compute_deep_mimic_rewards(
     key_body_quat_r = torch.exp(-robot_key_body_quat_scale * key_body_quat_err)
     door_r = torch.exp(-door_joint_pos_scale * door_err)
     # base_joint_pos_r = torch.exp(-robot_base_joint_pos_scale * base_joint_pos_err)
-    base_joint_pos_r = torch.exp(-robot_base_joint_pos_scale * root_pos_err - robot_base_joint_pos_scale * root_rot_err)
+    base_joint_pos_r = torch.exp(-robot_base_joint_pos_scale * base_joint_pos_err)
     arm_joint_pos_r = torch.exp(-robot_arm_joint_pos_scale * arm_joint_pos_err)
     finger_joint_pos_r = torch.exp(-robot_finger_joint_pos_scale * finger_joint_pos_err)
     # base_joint_vel_r = torch.exp(-robot_base_joint_vel_scale * base_joint_vel_err)
-    base_joint_vel_r = torch.exp(-robot_base_joint_vel_scale * root_vel_err - robot_base_joint_vel_scale * root_ang_vel_err)
+    base_joint_vel_r = torch.exp(-robot_base_joint_vel_scale * base_joint_vel_err)
     arm_joint_vel_r = torch.exp(-robot_arm_joint_vel_scale * arm_joint_vel_err)
     finger_joint_vel_r = torch.exp(-robot_finger_joint_vel_scale * finger_joint_vel_err)
     door_pos_r = torch.exp(-door_pos_scale * door_pos_err)
