@@ -131,7 +131,6 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     # if this is not done, then the robots will be spawned at the (0, 0, 0) of the simulation world
     root_state = scene["robot"].data.default_root_state.clone()
     root_state[:, :3] += scene.env_origins
-    print("root state: ", root_state)
     scene["robot"].write_root_pose_to_sim(root_state[:, :7])
     scene["robot"].write_root_velocity_to_sim(root_state[:, 7:])
     joint_pos, joint_vel = (

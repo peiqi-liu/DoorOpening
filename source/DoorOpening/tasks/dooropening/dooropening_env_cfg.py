@@ -101,7 +101,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     door_cfg: ArticulationCfg = DOOR_CONFIG.replace(prim_path="/World/envs/env_.*/Door")
 
     actuated_joints_num = len(arm_joints) + len(base_joints) + len(finger_joints)
-    action_space = actuated_joints_num * 1
+    # action_space = actuated_joints_num * 1
+    action_space = len(arm_joints) + len(base_joints) + 4
     observation_space = actuated_joints_num * 2 + len(door_body_names) * 3 + len(robot_key_bodies) * 3 * 2 + len(door_joint_names) * 2
 
     # scene

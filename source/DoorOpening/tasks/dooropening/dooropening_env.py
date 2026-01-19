@@ -16,6 +16,7 @@ from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from DoorOpening.utils.quat_utils import quat_diff_angle, hinge_angle_diff
 from DoorOpening.motion.motion_lib import ReferenceMotionManager
 from DoorOpening.assets.door.door_cfg import edit_door_articulation
+from DoorOpening.utils.finger_utils import joint_angle_to_tendon_utils, tendon_to_joint_angle_utils
 from .dooropening_env_cfg import DooropeningEnvCfg
 
 import pickle as pkl
@@ -130,11 +131,13 @@ class DooropeningEnv(DirectRLEnv):
         # self.step_count += 1
         self.step_count = self._sim_step_counter
         # delta actions
-        self.scaled_actions = actions.clone().clamp(-1.0, 1.0)
-        # targets = self.robot_dof_targets + self.dt * self.actions * self.cfg.action_scale
-        self.scaled_actions[:, :self.num_base_joints] = self.scaled_actions[:, :self.num_base_joints] * self.cfg.base_action_scale
-        self.scaled_actions[:, self.num_base_joints:self.num_base_joints + self.num_arm_joints] = self.scaled_actions[:, self.num_base_joints:self.num_base_joints + self.num_arm_joints] * self.cfg.arm_action_scale
-        self.scaled_actions[:, self.num_base_joints + self.num_arm_joints:] = self.scaled_actions[:, self.num_base_joints + self.num_arm_joints:] * self.cfg.finger_action_scale
+        clamped_actions = actions.clone().clamp(-1.0, 1.0)
+        self.scaled_actions = torch.zeros(clamped_actions.shape[0], self.num_base_joints + self.num_arm_joints + len(self._robot_finger_dof_idx), device=self.device)
+        self.scaled_actions[:, :self.num_base_joints] = clamped_actions[:, :self.num_base_joints] * self.cfg.base_action_scale
+        self.scaled_actions[:, self.num_base_joints:self.num_base_joints + self.num_arm_joints] = clamped_actions[:, self.num_base_joints:self.num_base_joints + self.num_arm_joints] * self.cfg.arm_action_scale
+        finger_tendon_actions = clamped_actions[:, self.num_base_joints + self.num_arm_joints:] * self.cfg.finger_action_scale
+        finger_joint_actions = tendon_to_joint_angle_utils(self.robot, finger_tendon_actions)[..., self._robot_finger_dof_idx]
+        self.scaled_actions[:, self.num_base_joints + self.num_arm_joints:] = finger_joint_actions
         targets = self.robot_dof_targets + self.dt * self.scaled_actions
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
 
