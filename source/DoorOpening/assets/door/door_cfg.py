@@ -52,8 +52,8 @@ def create_door_cfg(asset_path: str, training_mode: bool = False) -> Articulatio
         actuators={
             "joint_1": ImplicitActuatorCfg(
                 joint_names_expr=["joint_1"],
-                stiffness=100,
-                damping=10,
+                stiffness=5,
+                damping=1,
             ),
             "joint_2": ImplicitActuatorCfg(
                 joint_names_expr=["joint_2"],
