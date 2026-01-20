@@ -80,6 +80,13 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         'finger_joint_15',
     ]
 
+    abduction_joints = [
+        'finger_joint_0',
+        'finger_joint_12',
+        'finger_joint_4',
+        'finger_joint_8',
+    ]
+
     door_body_names = ["link_1", "link_2"]
 
     door_joint_names = ["joint_1", "joint_2"]
@@ -114,7 +121,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     # Deep Mimic Reward Parameters
     robot_body_quat_w = 0.0
-    robot_key_body_pos_w = 2.0
+    robot_key_body_pos_w = 3.0
     robot_base_joint_pos_w = 2.0
     robot_arm_joint_pos_w = 5.0
     robot_finger_joint_pos_w = 1.0
@@ -130,8 +137,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_body_quat_scale = 1.0
     robot_key_body_pos_scale = 3.0
     robot_base_joint_pos_scale = 0.5
-    robot_arm_joint_pos_scale = 0.75
-    robot_finger_joint_pos_scale = 1.0
+    robot_arm_joint_pos_scale = 0.1
+    robot_finger_joint_pos_scale = 0.3
     robot_base_joint_vel_scale = 0.5
     robot_arm_joint_vel_scale = 0.5
     robot_finger_joint_vel_scale = 0.5
