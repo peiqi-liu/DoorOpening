@@ -37,7 +37,8 @@ def create_door_cfg(asset_path: str, training_mode: bool = False) -> Articulatio
             # Note: joint_drive is usually not needed for URDF; PD gains can be in actuators
             scale = (1.0, 1.2, 0.95),
             activate_contact_sensors=True,
-            collider_type = "convex_hull" if training_mode else "convex_decomposition"
+            collider_type = "convex_hull" if training_mode else "convex_decomposition",
+            collision_props=collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.01, rest_offset=0.0)
         ),
         # spawn=sim_utils.UsdFileCfg(
         #     usd_path=asset_path,
