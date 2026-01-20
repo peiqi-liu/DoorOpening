@@ -101,8 +101,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     door_cfg: ArticulationCfg = DOOR_CONFIG.replace(prim_path="/World/envs/env_.*/Door")
 
     actuated_joints_num = len(arm_joints) + len(base_joints) + len(finger_joints)
-    # action_space = actuated_joints_num * 1
-    action_space = len(arm_joints) + len(base_joints) + 4
+    action_space = actuated_joints_num * 1
+    # action_space = len(arm_joints) + len(base_joints) + 4
     observation_space = actuated_joints_num * 2 + len(door_body_names) * 3 + len(robot_key_bodies) * 3 * 2 + len(door_joint_names) * 2
 
     # scene
@@ -138,15 +138,14 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     door_joint_pos_scale = 5.0
     door_pos_scale = 5.0
 
-    # reset_base_pos_delta = 0.25
-    # reset_key_body_pos_delta = 0.5
-    # reset_key_body_quat_delta = 1.0
     reset_base_pos_delta_min = 0.2
     reset_key_body_pos_delta_min = 0.4
     reset_key_body_quat_delta_min = 0.8
     reset_base_pos_delta_max = 0.8
     reset_key_body_pos_delta_max = 1.0
     reset_key_body_quat_delta_max = 3.2
+    reset_door_joint_pos_delta_min = 0.2
+    reset_door_joint_pos_delta_max = 0.8
     # We are slowly increasing our tolerance on base position drift and slowly only resettting the env from the first key frame
     # This variable is used to indicate when we stop increasing the tolerance and reset the env from the first key frame for the greatest probability
     reset_progress_total = 7.5e5

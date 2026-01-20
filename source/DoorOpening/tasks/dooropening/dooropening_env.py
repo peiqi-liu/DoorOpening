@@ -16,7 +16,7 @@ from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from DoorOpening.utils.quat_utils import quat_diff_angle, hinge_angle_diff
 from DoorOpening.motion.motion_lib import ReferenceMotionManager
 from DoorOpening.assets.door.door_cfg import edit_door_articulation
-from DoorOpening.utils.finger_utils import joint_angle_to_tendon_utils, tendon_to_joint_angle_utils
+from DoorOpening.utils.finger_utils import joint_angle_to_tendon_utils, tendon_to_joint_angle_utils, leap_joints_to_tendon
 from .dooropening_env_cfg import DooropeningEnvCfg
 
 import pickle as pkl
@@ -45,6 +45,7 @@ class DooropeningEnv(DirectRLEnv):
         self._robot_base_dof_idx, base_joint_names = self.robot.find_joints(self.cfg.base_joints)
         self._robot_arm_dof_idx, arm_joint_names = self.robot.find_joints(self.cfg.arm_joints)
         self._robot_finger_dof_idx, finger_joint_names = self.robot.find_joints(self.cfg.finger_joints)
+        self.finger_dof_names_to_id = {name: idx for idx, name in enumerate(finger_joint_names)}
 
         self._robot_base_link_idx, self.robot_base_link_name = self.robot.find_bodies(self.cfg.base_link_name)
         self._door_body_idx, _ = self.door.find_bodies(self.cfg.door_body_names)
@@ -101,6 +102,8 @@ class DooropeningEnv(DirectRLEnv):
         self.reset_base_pos_delta_max = self.cfg.reset_base_pos_delta_max
         self.reset_key_body_pos_delta_max = self.cfg.reset_key_body_pos_delta_max
         self.reset_key_body_quat_delta_max = self.cfg.reset_key_body_quat_delta_max
+        self.reset_door_joint_pos_delta_min = self.cfg.reset_door_joint_pos_delta_min
+        self.reset_door_joint_pos_delta_max = self.cfg.reset_door_joint_pos_delta_max
 
         self.ref_motion_lib = ReferenceMotionManager(self.cfg.motion_file, self.num_envs, self.device, velocity=self.cfg.velocity, reset_from_start = False)
         self.max_trial_steps = self.ref_motion_lib.num_frames * torch.ones_like(self.episode_length_buf, device=self.device)
@@ -128,17 +131,16 @@ class DooropeningEnv(DirectRLEnv):
         light_cfg.func("/World/Light", light_cfg)    
 
     def _pre_physics_step(self, actions: torch.Tensor):
-        # self.step_count += 1
         self.step_count = self._sim_step_counter
         # delta actions
-        clamped_actions = actions.clone().clamp(-1.0, 1.0)
-        self.scaled_actions = torch.zeros(clamped_actions.shape[0], self.num_base_joints + self.num_arm_joints + len(self._robot_finger_dof_idx), device=self.device)
-        self.scaled_actions[:, :self.num_base_joints] = clamped_actions[:, :self.num_base_joints] * self.cfg.base_action_scale
-        self.scaled_actions[:, self.num_base_joints:self.num_base_joints + self.num_arm_joints] = clamped_actions[:, self.num_base_joints:self.num_base_joints + self.num_arm_joints] * self.cfg.arm_action_scale
-        finger_tendon_actions = clamped_actions[:, self.num_base_joints + self.num_arm_joints:] * self.cfg.finger_action_scale
-        finger_joint_actions = tendon_to_joint_angle_utils(self.robot, finger_tendon_actions)[..., self._robot_finger_dof_idx]
-        self.scaled_actions[:, self.num_base_joints + self.num_arm_joints:] = finger_joint_actions
+        self.scaled_actions = actions.clone().clamp(-1.0, 1.0)
+        # targets = self.robot_dof_targets + self.dt * self.actions * self.cfg.action_scale
+        self.scaled_actions[:, :self.num_base_joints] = self.scaled_actions[:, :self.num_base_joints] * self.cfg.base_action_scale
+        self.scaled_actions[:, self.num_base_joints:self.num_base_joints + self.num_arm_joints] = self.scaled_actions[:, self.num_base_joints:self.num_base_joints + self.num_arm_joints] * self.cfg.arm_action_scale
+        self.scaled_actions[:, self.num_base_joints + self.num_arm_joints:] = self.scaled_actions[:, self.num_base_joints + self.num_arm_joints:] * self.cfg.finger_action_scale
         targets = self.robot_dof_targets + self.dt * self.scaled_actions
+        tendon_actions = leap_joints_to_tendon(targets[..., self.num_base_joints + self.num_arm_joints:], self.finger_dof_names_to_id, device=self.device)
+        targets[..., self.num_base_joints + self.num_arm_joints:] = tendon_to_joint_angle_utils(self.robot, tendon_actions)[..., self._robot_finger_dof_idx]
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
 
     def _apply_action(self):
@@ -323,15 +325,18 @@ class DooropeningEnv(DirectRLEnv):
         reset_base_pos_delta = self.reset_base_pos_delta_min + (self.reset_base_pos_delta_max - self.reset_base_pos_delta_min) * progress
         reset_key_body_pos_delta = self.reset_key_body_pos_delta_min + (self.reset_key_body_pos_delta_max - self.reset_key_body_pos_delta_min) * progress
         reset_key_body_quat_delta = self.reset_key_body_quat_delta_min + (self.reset_key_body_quat_delta_max - self.reset_key_body_quat_delta_min) * progress
+        reset_door_joint_pos_delta = self.reset_door_joint_pos_delta_min + (self.reset_door_joint_pos_delta_max - self.reset_door_joint_pos_delta_min) * progress
         # self.extras["reset/reset_base_pos_delta"] = math.sqrt(reset_base_pos_delta / len(self.cfg.base_joints))
         # self.extras["reset/reset_key_body_pos_delta"] = math.sqrt(reset_key_body_pos_delta / len(self.cfg.robot_reset_key_bodies))
         # self.extras["reset/reset_key_body_quat_delta"] = math.sqrt(reset_key_body_quat_delta / len(self.cfg.robot_reset_key_bodies))
         self.extras["reset/reset_base_pos_delta"] = reset_base_pos_delta
         self.extras["reset/reset_key_body_pos_delta"] = reset_key_body_pos_delta
         self.extras["reset/reset_key_body_quat_delta"] = reset_key_body_quat_delta
+        self.extras["reset/reset_door_joint_pos_delta"] = reset_door_joint_pos_delta
         reset_base_pos_delta = reset_base_pos_delta ** 2 * len(self.cfg.base_joints)
         reset_key_body_pos_delta = reset_key_body_pos_delta ** 2 * len(self.cfg.robot_reset_key_bodies)
         reset_key_body_quat_delta = reset_key_body_quat_delta ** 2 * len(self.cfg.robot_reset_key_bodies)
+        reset_door_joint_pos_delta = self.reset_door_joint_pos_delta_min + (self.reset_door_joint_pos_delta_max - self.reset_door_joint_pos_delta_min) * progress
         key_body_pos_err, key_body_quat_err, door_err, root_pos_err, root_rot_err, arm_joint_pos_err, finger_joint_pos_err, base_joint_vel_err, arm_joint_vel_err, finger_joint_vel_err, door_pos_err = compute_tracking_error(
             robot_key_body_pos = self.robot_reset_key_body_pos,
             robot_key_body_quat = self.robot_key_body_quat,
@@ -358,7 +363,8 @@ class DooropeningEnv(DirectRLEnv):
         return \
             (root_pos_err > reset_base_pos_delta) | \
             (key_body_pos_err > reset_key_body_pos_delta) | \
-            (key_body_quat_err > reset_key_body_quat_delta), \
+            (key_body_quat_err > reset_key_body_quat_delta) | \
+            (door_err > reset_door_joint_pos_delta), \
             time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
