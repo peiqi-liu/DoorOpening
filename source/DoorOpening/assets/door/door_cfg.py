@@ -88,7 +88,8 @@ ALL_DOOR_CONFIGS = setup_doors()
 def edit_door_articulation(
     door: Articulation, 
     door_closed_range = 0.01,     # radians
-    hinge_range = 0.4,
+    # hinge_range = 0.4,
+    hinge_range = -0.1,
 ):
     joint_idx, joint_names = door.find_joints(["joint_1", "joint_2"])
     j1 = joint_idx[joint_names.index("joint_1")]
