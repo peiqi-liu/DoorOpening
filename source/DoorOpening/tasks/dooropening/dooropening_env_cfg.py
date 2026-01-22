@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, CAMERA_JOINT_DEFAULT_VALUES
-from DoorOpening.assets.door.door_cfg import DOOR_CONFIG
+from DoorOpening.assets.door.door_cfg import DOOR_CONFIG, ALL_DOOR_CONFIGS
 
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
@@ -105,15 +105,15 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     )
 
     # door(s)
-    door_cfg: ArticulationCfg = DOOR_CONFIG.replace(prim_path="/World/envs/env_.*/Door")
+    door_cfg: ArticulationCfg = ALL_DOOR_CONFIGS.replace(prim_path="/World/envs/env_.*/Door")
 
     actuated_joints_num = len(arm_joints) + len(base_joints) + len(finger_joints)
     action_space = actuated_joints_num * 1
     # action_space = len(arm_joints) + len(base_joints) + 4
-    observation_space = actuated_joints_num * 2 + len(door_body_names) * 3 + len(robot_key_bodies) * 3 * 2 + len(door_joint_names) * 2
+    observation_space = actuated_joints_num * 2 + len(door_body_names) * 3 + len(robot_key_bodies) * 3 * 2 + len(door_joint_names)
 
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=6.0, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=6.0, replicate_physics=False)
 
     base_action_scale = 1.0
     arm_action_scale = 0.6
@@ -129,7 +129,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_arm_joint_vel_w = 2.0
     robot_finger_joint_vel_w = 0.5
     door_joint_pos_w = 4.0
-    door_pos_w = 0.0
 
     robot_body_quat_scale = 1.0
     robot_key_body_pos_scale = 3.0
@@ -139,6 +138,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_base_joint_vel_scale = 0.5
     robot_arm_joint_vel_scale = 0.5
     robot_finger_joint_vel_scale = 0.5
+    door_joint_pos_scale = 5.0
 
     reset_base_pos_delta_min = 0.2
     reset_key_body_pos_delta_min = 0.4

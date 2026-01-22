@@ -18,33 +18,27 @@ import isaaclab.sim as sim_utils
 from isaaclab.actuators.actuator_cfg import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg, Articulation
 
+def create_urdf_door_cfg(asset_path: str, training_mode: bool = False):
+    return sim_utils.UrdfFileCfg(
+        fix_base=True,
+        merge_fixed_joints=False,
+        make_instanceable=False,
+        asset_path=asset_path,
+        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+            enabled_self_collisions=False, solver_position_iteration_count=8, solver_velocity_iteration_count=0),
+        joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
+            gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
+        ),
+        scale = (1.0, 1.2, 0.95),
+        activate_contact_sensors=True,
+        collider_type = "convex_hull" if training_mode else "convex_decomposition",
+        collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.01, rest_offset=0.0),
+    )
+
 def create_door_cfg(asset_path: str, training_mode: bool = False) -> ArticulationCfg:
     """Helper to create an ArticulationCfg from a URDF path."""
     return ArticulationCfg(
-        spawn=sim_utils.UrdfFileCfg(
-            fix_base=True,
-            merge_fixed_joints=False,
-            make_instanceable=False,
-            asset_path=asset_path,
-            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                enabled_self_collisions=False,
-                solver_position_iteration_count=8,
-                solver_velocity_iteration_count=0,
-            ),
-            joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
-                gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
-            ),
-            # Note: joint_drive is usually not needed for URDF; PD gains can be in actuators
-            scale = (1.0, 1.2, 0.95),
-            activate_contact_sensors=True,
-            collider_type = "convex_hull" if training_mode else "convex_decomposition",
-            collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.01, rest_offset=0.0),
-        ),
-        # spawn=sim_utils.UsdFileCfg(
-        #     usd_path=asset_path,
-        #     scale = (1.0, 1.2, 0.95),
-        #     activate_contact_sensors=True,
-        # ),
+        spawn=create_urdf_door_cfg(asset_path, training_mode),
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.9),
             rot=(0, 0, 0, 1)
@@ -75,12 +69,35 @@ print("door_asset_path: ", door_asset_path)
 
 DOOR_CONFIG = create_door_cfg(door_asset_path, training_mode=False)
 
-def setup_doors():
+def setup_doors(training_mode: bool = False):
     """Load all door cfg"""
-    door_configs = []
-    for asset_path in asset_paths:
-        door_configs.append(create_door_cfg(asset_path))
-    return door_configs
+    door_urdf_configs = []
+    for asset_path in asset_paths[:2]:
+        door_urdf_configs.append(create_urdf_door_cfg(asset_path, training_mode=training_mode))
+    return ArticulationCfg(
+        prim_path="/World/envs/env_.*/Door",
+        spawn=sim_utils.MultiAssetSpawnerCfg(
+            assets_cfg=door_urdf_configs,
+            random_choice=True,
+        ),
+        init_state=ArticulationCfg.InitialStateCfg(
+            pos=(0.0, 0.0, 0.9),
+            rot=(0, 0, 0, 1)
+            # rot=(0, -0.7071, 0, 0.7071)
+        ),
+        actuators={
+            "joint_1": ImplicitActuatorCfg(
+                joint_names_expr=["joint_1"],
+                stiffness=5,
+                damping=1,
+            ),
+            "joint_2": ImplicitActuatorCfg(
+                joint_names_expr=["joint_2"],
+                stiffness=2.5,
+                damping=1,
+            ),
+        },
+    )
 
 ALL_DOOR_CONFIGS = setup_doors()
 
@@ -88,8 +105,8 @@ ALL_DOOR_CONFIGS = setup_doors()
 def edit_door_articulation(
     door: Articulation, 
     door_closed_range = 0.01,     # radians
-    # hinge_range = 0.4,
-    hinge_range = -0.1,
+    hinge_range = 0.4,
+    # hinge_range = -0.1,
 ):
     joint_idx, joint_names = door.find_joints(["joint_1", "joint_2"])
     j1 = joint_idx[joint_names.index("joint_1")]
