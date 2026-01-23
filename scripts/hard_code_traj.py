@@ -254,6 +254,13 @@ def main():
     scene = InteractiveScene(scene_cfg)
     # Play the simulator
     sim.reset()
+    print("material properties: ", scene["robot"].root_physx_view.get_material_properties())
+    material_properties = scene["robot"].root_physx_view.get_material_properties()
+    print("material properties: ", material_properties.shape)
+    material_properties[..., 0] = 2.0
+    material_properties[..., 1] = 1.5
+    env_ids = torch.arange(scene.num_envs, device="cpu")
+    scene["robot"].root_physx_view.set_material_properties(material_properties, env_ids)
     # Now we are ready!
     print("[INFO]: Setup complete...")
     # Run the simulator

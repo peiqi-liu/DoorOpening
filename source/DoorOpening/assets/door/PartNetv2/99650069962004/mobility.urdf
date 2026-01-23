@@ -43,8 +43,8 @@
 		<axis xyz="0 -1 0" />
 		<child link="link_1" />
 		<parent link="link_0" />
-		<!-- <limit lower="0" upper="1.5079644737231006" /> -->
-		<limit lower="-1.5079644737231006" upper="0" />
+		<limit lower="0" upper="1.5079644737231006" />
+		<!-- <limit lower="-1.5079644737231006" upper="0" /> -->
 	</joint>
 	<link name="link_2">
 		<visual name="handle">

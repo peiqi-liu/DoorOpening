@@ -286,6 +286,7 @@ class DooropeningEnv(DirectRLEnv):
             ref_robot_base_joint_vel = self.ref_robot_base_joint_vel,
             ref_robot_arm_joint_vel = self.ref_robot_arm_joint_vel,
             ref_robot_finger_joint_vel = self.ref_robot_finger_joint_vel,
+            ref_door_body_pos = self.ref_door_link_pos,
 
             robot_key_body_pos_scale = self.robot_key_body_pos_scale, 
             robot_key_body_quat_scale = self.robot_body_quat_scale,
@@ -364,6 +365,13 @@ class DooropeningEnv(DirectRLEnv):
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
+        if not hasattr(self, "_initialized_materials"):
+            props = self.robot.root_physx_view.get_material_properties().to(self.device)
+            print("material properties: ", props)
+            props[..., 0] = 3.0
+            props[..., 1] = 2.5
+            self.robot.root_physx_view.set_material_properties(props.cpu(), torch.arange(self.num_envs, device="cpu"))
+            self._initialized_materials = True
 
         reset_frame_idx = self.ref_motion_lib.reset(env_ids, step_count=self.step_count, reset_progress_total=self.reset_progress_total)
         self.max_trial_steps[env_ids] = ((self.ref_motion_lib.num_frames - reset_frame_idx) // self.ref_motion_lib.velocity).long()
@@ -411,6 +419,7 @@ def compute_deep_mimic_rewards(
     ref_robot_base_joint_vel: torch.Tensor,
     ref_robot_arm_joint_vel: torch.Tensor,
     ref_robot_finger_joint_vel: torch.Tensor,
+    ref_door_body_pos: torch.Tensor,
 
     robot_key_body_pos_scale: float,
     robot_key_body_quat_scale: float,
@@ -494,6 +503,21 @@ def compute_deep_mimic_rewards(
          + robot_base_joint_vel_w * base_joint_vel_r\
          + robot_arm_joint_vel_w * arm_joint_vel_r\
          + robot_finger_joint_vel_w * finger_joint_vel_r
+
+    # restricted_reward = (
+    #     robot_key_body_pos_w * key_body_pos_r\
+    #     + door_joint_pos_w * door_r\
+    # ) * (robot_key_body_pos_w + door_joint_pos_w + robot_base_joint_pos_w + robot_arm_joint_pos_w + robot_finger_joint_pos_w + robot_base_joint_vel_w + robot_arm_joint_vel_w + robot_finger_joint_vel_w) / \
+    # (robot_key_body_pos_w + door_joint_pos_w)
+
+    # # special_env_mask = (ref_door_joint_pos[:, 1] > 0) & (ref_door_joint_pos[:, 0] < 0)
+    # special_env_mask = torch.linalg.norm(ref_door_body_pos[:, 1] - ref_robot_key_body_pos[:, -1], dim=-1) < 0.15
+
+    # reward = torch.where(
+    #     special_env_mask,
+    #     restricted_reward,
+    #     reward
+    # )
     return reward
 
 def compute_tracking_error(

@@ -104,8 +104,8 @@ class OmniJointController:
 
                 # robot joint position sliders
                 for i, name in enumerate(self.joint_names):
-                    # if name.startswith("finger_joint_"):
-                    #     continue
+                    if name.startswith("finger_joint_"):
+                        continue
                     ui.Label(name)
 
                     if name.startswith("base_"):

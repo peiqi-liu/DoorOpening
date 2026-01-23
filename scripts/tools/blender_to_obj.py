@@ -10,7 +10,7 @@ This file processes a given dae mesh file and saves the resulting mesh file in o
 
 It needs to be called using the python packaged with blender, i.e.:
 
-    blender --background --python blender_obj.py -- -in_file FILE -out_file FILE
+    blender --background --python blender_obj.py -- --in_file FILE --out_file FILE
 
 For more information: https://docs.blender.org/api/current/index.html
 
