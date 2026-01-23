@@ -21,7 +21,7 @@ from isaaclab.assets.articulation import ArticulationCfg, Articulation
 def create_urdf_door_cfg(asset_path: str, training_mode: bool = False):
     return sim_utils.UrdfFileCfg(
         fix_base=True,
-        merge_fixed_joints=False,
+        merge_fixed_joints=True,
         make_instanceable=False,
         asset_path=asset_path,
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
@@ -60,7 +60,7 @@ def create_door_cfg(asset_path: str, training_mode: bool = False) -> Articulatio
 
 
 root_path = os.path.dirname(os.path.dirname(__file__))
-asset_base_folder = os.path.join(root_path, "door/PartNetv3")
+asset_base_folder = os.path.join(root_path, "door/PartNetv4")
 asset_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/mobility.urdf"), recursive=True))
 
 # An example of door urdf
@@ -72,13 +72,12 @@ DOOR_CONFIG = create_door_cfg(door_asset_path, training_mode=False)
 def setup_doors(training_mode: bool = False):
     """Load all door cfg"""
     door_urdf_configs = []
-    for asset_path in asset_paths[:2]:
+    for asset_path in asset_paths:
         door_urdf_configs.append(create_urdf_door_cfg(asset_path, training_mode=training_mode))
     return ArticulationCfg(
-        prim_path="/World/envs/env_.*/Door",
         spawn=sim_utils.MultiAssetSpawnerCfg(
             assets_cfg=door_urdf_configs,
-            random_choice=True,
+            random_choice=False,
         ),
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.9),

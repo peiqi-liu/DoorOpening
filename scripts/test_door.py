@@ -133,7 +133,7 @@ def main():
     # Set main camera
     sim.set_camera_view(eye=[3.0, 0.0, 3.0], target=[0.0, 0.0, 0.5])
     # Design scene
-    scene_cfg = SensorsSceneCfg(num_envs=args_cli.num_envs, env_spacing=2.0)
+    scene_cfg = SensorsSceneCfg(num_envs=args_cli.num_envs, env_spacing=2.0, replicate_physics=False)
     scene = InteractiveScene(scene_cfg)
     # Play the simulator
     sim.reset()

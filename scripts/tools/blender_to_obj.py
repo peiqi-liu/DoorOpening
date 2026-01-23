@@ -21,6 +21,25 @@ import bpy
 import os
 import sys
 
+import xml.etree.ElementTree as ET
+
+def sanitize_dae_texcoord(path: str):
+    """Ensure all <texture> tags have a texcoord attribute (required by Blender)."""
+    try:
+        tree = ET.parse(path)
+        root = tree.getroot()
+        changed = False
+
+        for elem in root.iter():
+            if elem.tag.endswith("texture") and "texcoord" not in elem.attrib:
+                elem.attrib["texcoord"] = "UVMap"
+                changed = True
+
+        if changed:
+            tree.write(path)
+    except Exception as e:
+        print(f"[WARN] Failed to sanitize dae {path}: {e}")
+
 
 def parse_cli_args():
     """Parse the input command line arguments."""
@@ -73,7 +92,13 @@ def convert_to_obj(in_file: str, out_file: str, save_usd: bool = False):
     bpy.ops.wm.read_factory_settings(use_empty=True)
     # load object into scene
     if in_file.endswith(".dae"):
-        bpy.ops.wm.collada_import(filepath=in_file)
+        # sanitize broken Collada files (PartNet / CAD issue)
+        sanitize_dae_texcoord(in_file)
+
+        try:
+            bpy.ops.wm.collada_import(filepath=in_file)
+        except RuntimeError as e:
+            raise RuntimeError(f"Collada import failed for {in_file}") from e
     elif in_file.endswith(".stl") or in_file.endswith(".STL"):
         bpy.ops.import_mesh.stl(filepath=in_file)
     else:
