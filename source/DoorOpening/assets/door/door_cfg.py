@@ -64,7 +64,7 @@ asset_base_folder = os.path.join(root_path, "door/PartNetv4")
 asset_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/mobility.urdf"), recursive=True))
 
 # An example of door urdf
-door_asset_path = asset_paths[-1]
+door_asset_path = asset_paths[0]
 print("door_asset_path: ", door_asset_path)
 
 DOOR_CONFIG = create_door_cfg(door_asset_path, training_mode=False)

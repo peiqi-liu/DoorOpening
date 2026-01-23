@@ -365,13 +365,14 @@ class DooropeningEnv(DirectRLEnv):
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
-        if not hasattr(self, "_initialized_materials"):
-            props = self.robot.root_physx_view.get_material_properties().to(self.device)
-            print("material properties: ", props)
-            props[..., 0] = 3.0
-            props[..., 1] = 2.5
-            self.robot.root_physx_view.set_material_properties(props.cpu(), torch.arange(self.num_envs, device="cpu"))
-            self._initialized_materials = True
+        # Optional: change static friction and dynamic friction of the robot
+        # if not hasattr(self, "_initialized_materials"):
+        #     props = self.robot.root_physx_view.get_material_properties().to(self.device)
+        #     print("material properties: ", props)
+        #     props[..., 0] = 3.0
+        #     props[..., 1] = 2.5
+        #     self.robot.root_physx_view.set_material_properties(props.cpu(), torch.arange(self.num_envs, device="cpu"))
+        #     self._initialized_materials = True
 
         reset_frame_idx = self.ref_motion_lib.reset(env_ids, step_count=self.step_count, reset_progress_total=self.reset_progress_total)
         self.max_trial_steps[env_ids] = ((self.ref_motion_lib.num_frames - reset_frame_idx) // self.ref_motion_lib.velocity).long()
