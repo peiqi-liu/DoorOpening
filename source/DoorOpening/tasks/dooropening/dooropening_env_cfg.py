@@ -154,7 +154,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # This variable is used to indicate when we stop increasing the tolerance and reset the env from the first key frame for the greatest probability
     reset_progress_total = 7.5e5
 
-    velocity = 0.5
+    velocity = 1.0
 
     # Change this to where you store your motions
     motion_file = "trajectory.pkl"
