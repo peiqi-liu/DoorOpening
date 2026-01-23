@@ -28,7 +28,7 @@ def create_door_cfg(asset_path: str, training_mode: bool = False) -> Articulatio
             asset_path=asset_path,
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 enabled_self_collisions=False,
-                solver_position_iteration_count=8,
+                solver_position_iteration_count=10,
                 solver_velocity_iteration_count=0,
             ),
             joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
@@ -38,7 +38,7 @@ def create_door_cfg(asset_path: str, training_mode: bool = False) -> Articulatio
             scale = (1.0, 1.2, 0.95),
             activate_contact_sensors=True,
             collider_type = "convex_hull" if training_mode else "convex_decomposition",
-            collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.01, rest_offset=0.0),
+            collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.03, rest_offset=0.0),
         ),
         # spawn=sim_utils.UsdFileCfg(
         #     usd_path=asset_path,
