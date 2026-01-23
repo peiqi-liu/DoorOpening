@@ -148,13 +148,13 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     reset_base_pos_delta_max = 0.8
     reset_key_body_pos_delta_max = 1.0
     reset_key_body_quat_delta_max = 3.2
-    reset_door_joint_pos_delta_min = 0.4
+    reset_door_joint_pos_delta_min = 0.2
     reset_door_joint_pos_delta_max = 0.8
     # We are slowly increasing our tolerance on base position drift and slowly only resettting the env from the first key frame
     # This variable is used to indicate when we stop increasing the tolerance and reset the env from the first key frame for the greatest probability
-    reset_progress_total = 1e6
+    reset_progress_total = 7.5e5
 
-    velocity = 1.0
+    velocity = 0.5
 
     # Change this to where you store your motions
     motion_file = "trajectory.pkl"

@@ -531,7 +531,8 @@ def compute_deep_mimic_rewards(
     (robot_key_body_pos_w + door_joint_pos_w)
 
     # special_env_mask = (ref_door_joint_pos[:, 1] > 0) & (ref_door_joint_pos[:, 0] < 0)
-    special_env_mask = (torch.linalg.norm(ref_door_body_pos[:, 1] - ref_robot_key_body_pos[:, -1], dim=-1) < 0.15) & (torch.linalg.norm(door_body_pos[:, 1] - robot_key_body_pos[:, 0], dim=-1) < 0.15)
+    # special_env_mask = (torch.linalg.norm(ref_door_body_pos[:, 1] - ref_robot_key_body_pos[:, -1], dim=-1) < 0.15) & (torch.linalg.norm(door_body_pos[:, 1] - robot_key_body_pos[:, 0], dim=-1) < 0.15)
+    special_env_mask = (torch.linalg.norm(ref_door_body_pos[:, 1] - ref_robot_key_body_pos[:, -1], dim=-1) < 0.15)
 
     reward = torch.where(
         special_env_mask,
