@@ -379,7 +379,7 @@ class DooropeningEnv(DirectRLEnv):
         if not hasattr(self, "_initialized_materials"):
             props = self.robot.root_physx_view.get_material_properties().to(self.device)
             print("material properties: ", props)
-            props[..., 0] = 3.0
+            props[..., 0] = 4.0
             props[..., 1] = 2.5
             self.robot.root_physx_view.set_material_properties(props.cpu(), torch.arange(self.num_envs, device="cpu"))
             self._initialized_materials = True
@@ -531,7 +531,7 @@ def compute_deep_mimic_rewards(
     (robot_key_body_pos_w + door_joint_pos_w)
 
     # special_env_mask = (ref_door_joint_pos[:, 1] > 0) & (ref_door_joint_pos[:, 0] < 0)
-    special_env_mask = (torch.linalg.norm(ref_door_body_pos[:, 1] - ref_robot_key_body_pos[:, -1], dim=-1) < 0.15)
+    special_env_mask = (torch.linalg.norm(ref_door_body_pos[:, 1] - ref_robot_key_body_pos[:, -1], dim=-1) < 0.15) & (torch.linalg.norm(door_body_pos[:, 1] - robot_key_body_pos[:, 0], dim=-1) < 0.15)
 
     reward = torch.where(
         special_env_mask,
