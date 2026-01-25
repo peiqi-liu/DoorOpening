@@ -34,7 +34,8 @@ def solve_ik(
     elbow_pose=None,
     palm_pose=None,
     base_pose=None,
-    damping=0.1,
+    damping=0.5,
+    step_scale = 0.1
 ):
     """
     IK solver for tidybot2 + franka arm.
@@ -68,13 +69,18 @@ def solve_ik(
     # current joint positions
     q = robot.data.joint_pos[:, actuated_joint_ids].cpu().clone()
 
-    # helper
     def get_quat_err(target_quat, cur_quat):
-        # quaternion error in axis-angle
         # q_err = q_target * q_cur^{-1}
-        conj = torch.cat([cur_quat[:, :3] * -1.0, cur_quat[:, 3:]], dim=1)
+        conj = torch.cat([-cur_quat[:, :3], cur_quat[:, 3:]], dim=1)
         q_err = quat_mul(target_quat, conj)
-        angle = 2.0 * torch.atan2(torch.norm(q_err[:, :3], dim=1), q_err[:, 3].clamp(-1,1))
+
+        sign = torch.sign(q_err[:, 3:4])
+        q_err = q_err * sign
+
+        angle = 2.0 * torch.atan2(
+            torch.norm(q_err[:, :3], dim=1),
+            q_err[:, 3].clamp(-1.0, 1.0)
+        )
         axis = q_err[:, :3] / (torch.norm(q_err[:, :3], dim=1, keepdim=True) + 1e-8)
         return axis * angle.unsqueeze(1)
 
@@ -178,7 +184,8 @@ def solve_ik(
     delta = JT @ torch.linalg.solve(A, err.unsqueeze(-1))
     delta = delta.squeeze(-1)
     # update joint positions
-    q = q + delta
+    delta = torch.clamp(delta, -step_scale, step_scale)
+    q = q + step_scale * delta
 
     return q
 
@@ -260,10 +267,51 @@ def write_joint_angle_to_door(door, target_board_joint_angle, target_hinge_joint
         target_board_joint_angle = torch.tensor(target_board_joint_angle)
     if not isinstance(target_hinge_joint_angle, torch.Tensor):
         target_hinge_joint_angle = torch.tensor(target_hinge_joint_angle)
-    target_joint_angle = torch.cat((target_board_joint_angle, target_hinge_joint_angle), dim=0)
+    if len(target_board_joint_angle.shape) < 2:
+        target_board_joint_angle = target_board_joint_angle.unsqueeze(0)
+    if len(target_hinge_joint_angle.shape) < 2:
+        target_hinge_joint_angle = target_hinge_joint_angle.unsqueeze(0)
+    if len(target_board_joint_angle.shape) > 2:
+        target_board_joint_angle = target_board_joint_angle.squeeze()
+    if len(target_hinge_joint_angle.shape) > 2:
+        target_hinge_joint_angle = target_hinge_joint_angle.squeeze()
+    target_joint_angle = torch.cat((target_board_joint_angle, target_hinge_joint_angle), dim=-1)
     door.write_joint_position_to_sim(target_joint_angle.to(door.data.joint_pos.device), joint_ids=door_joint_ids)
 
 def step_sim(scene, sim):
     scene.write_data_to_sim()
     sim.step()
     scene.update(sim.get_physics_dt())
+
+
+import ast
+
+def wrap_into_policy(code: str) -> str:
+    lines = code.splitlines()
+
+    # Drop empty leading/trailing lines
+    lines = [l.rstrip() for l in lines if l.strip() != ""]
+
+    # Strip *all* leading indentation
+    stripped = [l.lstrip() for l in lines]
+
+    # Re-indent uniformly
+    body = "\n".join("    " + l for l in stripped)
+
+    return (
+        "def policy_step(robot, door, scene, sim):\n"
+        + body
+        + "\n"
+    )
+
+def load_policy(code: str):
+    wrapped = wrap_into_policy(code)
+
+    tree = ast.parse(wrapped)  # ✅ now this cannot fail from indentation
+
+    funcs = [n for n in tree.body if isinstance(n, ast.FunctionDef)]
+    assert len(funcs) == 1
+
+    env = {}
+    exec(wrapped, env)
+    return env["policy_step"]
