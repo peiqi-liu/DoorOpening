@@ -37,7 +37,7 @@ def solve_ik(robot, palm_pose=None, base_pose=None):
             command_type="pose", 
             use_relative_mode=False,
             ik_method="dls",
-            ik_params={"lambda_val": 0.5}
+            ik_params={"lambda_val": 1.0}
         )
     ik_controller = DifferentialIKController(
         ik_cfg, num_envs=1, device=robot.data.joint_pos.device

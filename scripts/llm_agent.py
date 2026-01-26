@@ -67,6 +67,7 @@ from DoorOpening.assets.door.door_cfg import DOOR_CONFIG
 
 from isaaclab.utils.math import quat_from_euler_xyz
 import numpy as np
+import pickle as pkl
 
 euler_angles = torch.tensor([-np.pi / 4, 0.0, 0])  # (roll, pitch, yaw) in radians
 quat = quat_from_euler_xyz(euler_angles[0], euler_angles[1], euler_angles[2]) 
@@ -222,12 +223,48 @@ def collocate_and_playback(scene, sim, robot, door, key_joint_angles, length=100
     door_traj = traj[:, -2:]
     traj = traj[:, :-2]
 
-    print("starting playback...")
+    door_vel_traj = qd[:, -2:]
+    traj_vel = qd[:, :-2]
+    print("[INFO]: Starting playback...")
 
+    playback_and_save_traj(scene, sim, robot, door, door_traj, traj, door_vel_traj, traj_vel, key_indices)
+
+
+def playback_and_save_traj(scene, sim, robot, door, door_traj, traj, door_vel_traj, traj_vel, key_indices):
+    robot_body_pos_traj = []
+    robot_body_quat_traj = []
+    door_pos_traj = []
     for door_point, robot_point in zip(door_traj, traj):
         door.write_joint_position_to_sim(door_point)
         robot.write_joint_position_to_sim(robot_point)
+
         step_sim(scene, sim)
+        robot_body_pos_traj.append(scene["robot"].data.body_pos_w.squeeze().cpu().clone())
+        robot_body_quat_traj.append(scene["robot"].data.body_quat_w.squeeze().cpu().clone())
+        door_pos_traj.append(scene["door"].data.body_pos_w.squeeze().cpu().clone())
+
+    robot_body_pos_traj = torch.stack(robot_body_pos_traj, dim = 0)
+    robot_body_quat_traj = torch.stack(robot_body_quat_traj, dim = 0)
+    door_pos_traj = torch.stack(door_pos_traj, dim = 0)
+
+    data = {
+        "robot_joint_pos_traj": traj, 
+        "robot_joint_vel_traj": traj_vel, 
+        "door_traj": door_traj, 
+        "door_vel_traj": door_vel_traj, 
+        "robot_body_pos_traj": robot_body_pos_traj,
+        "robot_body_quat_traj": robot_body_quat_traj,
+        "door_pos_traj": door_pos_traj,
+        "key_indices": torch.from_numpy(key_indices)
+    }
+
+    answer = input("Do you want to save the trajectory? (y/n)")
+    if answer.lower() == "y":
+        with open("traj.pkl", "wb") as f:
+            pkl.dump(data, f)
+            print("Trajectory saved to traj.pkl")
+    else:
+        print("Trajectory not saved")
 
 
 def api_call_and_code_execution(scene, sim, code_list):
