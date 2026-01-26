@@ -107,7 +107,7 @@ class DooropeningEnv(DirectRLEnv):
         self.reset_door_joint_pos_delta_min = self.cfg.reset_door_joint_pos_delta_min
         self.reset_door_joint_pos_delta_max = self.cfg.reset_door_joint_pos_delta_max
 
-        self.ref_motion_lib = ReferenceMotionManager(self.cfg.motion_file, self.num_envs, self.device, velocity=self.cfg.velocity, reset_from_start = False)
+        self.ref_motion_lib = ReferenceMotionManager(self.cfg.motion_file, self.num_envs, self.device, velocity=self.cfg.velocity, reset_from_start = True)
         self.max_trial_steps = self.ref_motion_lib.num_frames * torch.ones_like(self.episode_length_buf, device=self.device)
 
         torch.set_printoptions(precision=4, sci_mode=False)
@@ -179,6 +179,8 @@ class DooropeningEnv(DirectRLEnv):
         joint_err = self.joint_pos[:, self._robot_dof_idx] - (self.ref_robot_joint_pos[:, self._robot_dof_idx]).to(self.joint_pos)
         joint_err = joint_err.reshape(self.num_envs, 1, -1)
 
+        door_joint_err = self.door_joint_pos[:, self._door_joint_idx] - (self.ref_door_joint_pos[:, self._door_joint_idx]).to(self.door_joint_pos)
+
         obs = torch.cat(
             (
                 self.joint_pos[:, self._robot_dof_idx].unsqueeze(dim = 1),
@@ -188,7 +190,8 @@ class DooropeningEnv(DirectRLEnv):
                 door_to_base_link_pos,
                 rel_robot_key_body_pos,
                 self.door_joint_pos[:, self._door_joint_idx].unsqueeze(dim = 1),
-                self.door_joint_vel[:, self._door_joint_idx].unsqueeze(dim = 1),
+                # self.door_joint_vel[:, self._door_joint_idx].unsqueeze(dim = 1),
+                door_joint_err.unsqueeze(dim = 1),
             ),
             dim=-1,
         )

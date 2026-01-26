@@ -91,7 +91,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     door_joint_names = ["joint_1", "joint_2"]
 
-    robot_key_bodies = ["tidybot2_base_link", "panda_link4", "panda_link6", "palm_center"]
+    robot_key_bodies = ["tidybot2_base_link", "panda_link2", "panda_link4", "panda_link6", "palm_center"]
     robot_reset_key_bodies = ["tidybot2_base_link", "palm_center"]
 
     # robot(s)
@@ -152,9 +152,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     reset_door_joint_pos_delta_max = 0.8
     # We are slowly increasing our tolerance on base position drift and slowly only resettting the env from the first key frame
     # This variable is used to indicate when we stop increasing the tolerance and reset the env from the first key frame for the greatest probability
-    reset_progress_total = 1e6
+    reset_progress_total = 7.5e5
 
-    velocity = 0.5
+    velocity = 1.0
 
     # Change this to where you store your motions
     motion_file = "trajectory.pkl"
