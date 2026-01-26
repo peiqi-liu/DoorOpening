@@ -60,6 +60,8 @@ DEFAULT_JOINT_POS = {
     "panda_joint5": 0.0,
     "panda_joint6": 0.5 * np.pi,
     "panda_joint7": 0.0,
+    "finger_joint_12": 0.5 * np.pi,
+    "finger_joint_13": 0.0,
 }
 
 FRANKA_JOINT_NAMES = [
@@ -161,8 +163,8 @@ GLORBOT_CONFIG = ArticulationCfg(
         "finger": ImplicitActuatorCfg(
             joint_names_expr=["finger_joint_.*"],
             effort_limit_sim=50,
-            stiffness=100,
-            damping=10,
+            stiffness=800,
+            damping=80,
         ),
     }
 )

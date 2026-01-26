@@ -80,11 +80,18 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         'finger_joint_15',
     ]
 
+    abduction_joints = [
+        'finger_joint_0',
+        'finger_joint_12',
+        'finger_joint_4',
+        'finger_joint_8',
+    ]
+
     door_body_names = ["link_1", "link_2"]
 
     door_joint_names = ["joint_1", "joint_2"]
 
-    robot_key_bodies = ["tidybot2_base_link", "panda_link4", "panda_link6", "palm_center"]
+    robot_key_bodies = ["tidybot2_base_link", "panda_link2", "panda_link4", "panda_link6", "palm_center"]
     robot_reset_key_bodies = ["tidybot2_base_link", "palm_center"]
 
     # robot(s)
@@ -102,6 +109,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     actuated_joints_num = len(arm_joints) + len(base_joints) + len(finger_joints)
     action_space = actuated_joints_num * 1
+    # action_space = len(arm_joints) + len(base_joints) + 4
     observation_space = actuated_joints_num * 2 + len(door_body_names) * 3 + len(robot_key_bodies) * 3 * 2 + len(door_joint_names) * 2
 
     # scene
@@ -120,9 +128,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_base_joint_vel_w = 1.0
     robot_arm_joint_vel_w = 2.0
     robot_finger_joint_vel_w = 0.5
-    # robot_base_joint_vel_w = 0.0
-    # robot_arm_joint_vel_w = 0.0
-    # robot_finger_joint_vel_w = 0.0
     door_joint_pos_w = 4.0
     door_pos_w = 0.0
 
@@ -137,20 +142,19 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     door_joint_pos_scale = 5.0
     door_pos_scale = 5.0
 
-    # reset_base_pos_delta = 0.25
-    # reset_key_body_pos_delta = 0.5
-    # reset_key_body_quat_delta = 1.0
     reset_base_pos_delta_min = 0.2
     reset_key_body_pos_delta_min = 0.4
     reset_key_body_quat_delta_min = 0.8
     reset_base_pos_delta_max = 0.8
     reset_key_body_pos_delta_max = 1.0
     reset_key_body_quat_delta_max = 3.2
+    reset_door_joint_pos_delta_min = 0.4
+    reset_door_joint_pos_delta_max = 0.8
     # We are slowly increasing our tolerance on base position drift and slowly only resettting the env from the first key frame
     # This variable is used to indicate when we stop increasing the tolerance and reset the env from the first key frame for the greatest probability
     reset_progress_total = 7.5e5
 
-    velocity = 0.5
+    velocity = 1.0
 
     # Change this to where you store your motions
     motion_file = "trajectory.pkl"
