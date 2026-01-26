@@ -39,7 +39,7 @@ def state_machine(robot, door, scene, sim, buffer):
 
     for _ in range(10):
         step_sim(scene, sim)
-    target_hinge_angle = torch.tensor([[-1.0]]).to(handle_pos.device)
+    target_hinge_angle = torch.tensor([[1.0]]).to(handle_pos.device)
     target_board_angle = torch.tensor([[0.0]]).to(handle_pos.device)
     write_joint_angle_to_door(door, target_board_angle, target_hinge_angle)
     step_sim(scene, sim)
@@ -54,7 +54,7 @@ def state_machine(robot, door, scene, sim, buffer):
 
     num_steps = 60
     target_board_angle = torch.tensor([[1.4]]).to(handle_pos.device)
-    target_hinge_angle = torch.tensor([[-1.0]]).to(handle_pos.device)
+    target_hinge_angle = torch.tensor([[1.0]]).to(handle_pos.device)
     write_joint_angle_to_door(door, target_board_angle, target_hinge_angle)
     step_sim(scene, sim)
     new_handle_pos = get_hinge_pos(door)
@@ -77,8 +77,8 @@ def state_machine(robot, door, scene, sim, buffer):
     handle_pos = get_hinge_pos(door)
     curr_base_pos, curr_base_rot = get_robot_link_pose(robot, "base")
     base_target_pos = curr_base_pos.clone()
-    base_target_pos[:, 0] += 0.4
-    base_target_pos[:, 1] += 0.2
+    base_target_pos[:, 0] -= 0.6
+    base_target_pos[:, 1] -= 0.2
     base_target_pose = torch.cat([base_target_pos, curr_base_rot], dim=-1)
     palm_target_rot = torch.tensor([[0.7071, 0.0, -0.7071, 0.0]]).repeat(handle_pos.shape[0], 1).to(handle_pos.device)
     palm_target_pose = torch.cat([handle_pos, palm_target_rot], dim=-1)
