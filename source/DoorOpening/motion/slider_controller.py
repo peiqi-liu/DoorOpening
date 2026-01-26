@@ -61,7 +61,7 @@ class OmniJointController:
             ik_params={"lambda_val": 0.05}
         )
         self.ik_controller = DifferentialIKController(
-            ik_cfg, num_envs=self.scene.num_envs, device="cuda"
+            ik_cfg, num_envs=self.scene.num_envs, device=self.scene["robot"].data.joint_pos.device
         )
         self.ik_controller.reset()
         self.joint_pos_des = None

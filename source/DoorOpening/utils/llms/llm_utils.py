@@ -3,6 +3,7 @@ from DoorOpening.utils.extract_pointcloud_from_articulation import sample_pointc
 from DoorOpening.assets.glorbot.glorbot_cfg import FRANKA_JOINT_NAMES, BASE_JOINT_NAMES
 from isaaclab.utils.math import quat_apply, euler_xyz_from_quat, quat_mul
 import torch
+from DoorOpening.utils.pose_utils import compute_base_joint, wrap_to_pi
 
 def get_board_frame_joint_angle(door):
     board_frame_joint_idx, _ = door.find_joints("joint_1")
@@ -29,7 +30,43 @@ def sample_pointcloud(door, joint_angles):
     door_pointcloud = quat_apply(door.data.body_quat_w[:, 0], door_pointcloud) + door.data.body_pos_w[:, 0]
     return door_pointcloud
 
-def solve_ik(
+from isaaclab.controllers import DifferentialIKController, DifferentialIKControllerCfg
+
+def solve_ik(robot, palm_pose=None, base_pose=None):
+    ik_cfg = DifferentialIKControllerCfg(
+            command_type="pose", 
+            use_relative_mode=False,
+            ik_method="dls",
+            ik_params={"lambda_val": 0.5}
+        )
+    ik_controller = DifferentialIKController(
+        ik_cfg, num_envs=1, device=robot.data.joint_pos.device
+    )
+    joint_names = ["base_x_joint", "base_y_joint", "base_rotation_joint", "panda_joint1", "panda_joint2", "panda_joint3", "panda_joint4", "panda_joint5", "panda_joint6", "panda_joint7"]
+    joint_ids, joint_names = robot.find_joints(joint_names)
+    base_pose_idx, _ = robot.find_bodies("tidybot2_base_link")
+    base_pose_idx = base_pose_idx[0]
+    key_pose_idx, _ = robot.find_bodies("palm_center")
+    key_pose_idx = key_pose_idx[0]
+    ee_pos = robot.data.body_pos_w[:, key_pose_idx]
+    ee_quat = robot.data.body_quat_w[:, key_pose_idx]
+    joint_pos_des = robot.data.joint_pos[:, joint_ids].clone()
+    if base_pose is not None:
+        base_joint_pos = compute_base_joint(robot, base_pose[:, :3]).to(robot.data.joint_pos.device)
+    if base_pose is not None and torch.linalg.norm(joint_pos_des[:, :3] - base_joint_pos) >= 0.2:
+        joint_pos_des[:, :3] = base_joint_pos
+        joint_pos_des[:, 3:] = wrap_to_pi(joint_pos_des[:, 3:])
+        return joint_pos_des
+    elif palm_pose is not None:
+        ik_controller.reset()
+        ik_controller.set_command(command=palm_pose, ee_pos=ee_pos, ee_quat=ee_quat)
+        hand_jac = robot.root_physx_view.get_jacobians()[:, key_pose_idx, :, joint_ids[3:]]
+        joint_pos_des[:, 3:] = ik_controller.compute(ee_pos, ee_quat, hand_jac, joint_pos_des[:, 3:])
+        joint_pos_des[:, 3:] = wrap_to_pi(joint_pos_des[:, 3:])
+        return joint_pos_des
+    return joint_pos_des
+
+def solve_ik_v1(
     robot,
     elbow_pose=None,
     palm_pose=None,
@@ -277,6 +314,7 @@ def write_joint_angle_to_door(door, target_board_joint_angle, target_hinge_joint
         target_hinge_joint_angle = target_hinge_joint_angle.squeeze()
     target_joint_angle = torch.cat((target_board_joint_angle, target_hinge_joint_angle), dim=-1)
     door.write_joint_position_to_sim(target_joint_angle.to(door.data.joint_pos.device), joint_ids=door_joint_ids)
+    door.set_joint_position_target(target_joint_angle.to(door.data.joint_pos.device), joint_ids=door_joint_ids)
 
 def step_sim(scene, sim):
     scene.write_data_to_sim()

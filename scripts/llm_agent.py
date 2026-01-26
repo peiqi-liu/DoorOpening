@@ -79,7 +79,7 @@ from DoorOpening.utils.llms.llm_utils import *
 from DoorOpening.utils.llms.llm_api import GeminiAgent
 from DoorOpening.utils.llms.prompt import PULL_LEVER_PROMPT
 
-llm_agent = GeminiAgent(prompt=PULL_LEVER_PROMPT, model="gemini-3-pro-preview")
+# llm_agent = GeminiAgent(prompt=PULL_LEVER_PROMPT, model="gemini-3-pro-preview")
 
 @configclass
 class SensorsSceneCfg(InteractiveSceneCfg):
@@ -184,15 +184,50 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         scene.update(sim_dt)
         print("updating buffers")
         code_list = []
-        api_call_and_code_execution(scene, sim, code_list)
-        final_code = "\n".join(code_list)
-        with open("code.py", "w") as f:
-            f.write(final_code)
-        # door = scene["door"]
-        # robot = scene["robot"]
+        # api_call_and_code_execution(scene, sim, code_list)
+        # final_code = "\n".join(code_list)
+        # with open("code.py", "w") as f:
+        #     f.write(final_code)
+        door = scene["door"]
+        robot = scene["robot"]
+        buffer = []
         # from DoorOpening.utils.llms.code import codes
         # exec(codes)
+        from DoorOpening.utils.llms.code import state_machine
+        state_machine(robot, door, scene, sim, buffer)
+        print("buffer: ", buffer)
+        collocate_and_playback(scene, sim, robot, door, buffer)
         break
+
+def collocate_and_playback(scene, sim, robot, door, key_joint_angles, length=1000):
+    from scipy.interpolate import CubicSpline
+    qs = torch.stack([kp[0] for kp in key_joint_angles]).detach().cpu().numpy()
+
+    # automatic timing
+    dq = np.linalg.norm(qs[1:] - qs[:-1], axis=1)
+    dt = np.maximum(dq / 1.0, 0.1)
+    t_key = np.concatenate([[0], np.cumsum(dt)])
+    t_key /= t_key[-1]
+
+    cs = CubicSpline(t_key, qs, axis=0, bc_type="clamped")
+
+    t = np.linspace(0, 1, length)
+    traj = torch.tensor(cs(t))
+    qd = torch.tensor(cs(t, 1))
+    qdd = torch.tensor(cs(t, 2))
+
+    key_indices = np.searchsorted(t, t_key)
+    key_indices = np.clip(key_indices, 0, len(t) - 1)
+
+    door_traj = traj[:, -2:]
+    traj = traj[:, :-2]
+
+    print("starting playback...")
+
+    for door_point, robot_point in zip(door_traj, traj):
+        door.write_joint_position_to_sim(door_point)
+        robot.write_joint_position_to_sim(robot_point)
+        step_sim(scene, sim)
 
 
 def api_call_and_code_execution(scene, sim, code_list):
