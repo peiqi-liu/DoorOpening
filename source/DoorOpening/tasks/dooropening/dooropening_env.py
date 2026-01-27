@@ -18,6 +18,7 @@ from DoorOpening.motion.motion_lib import ReferenceMotionManager
 from DoorOpening.assets.door.door_cfg import edit_door_articulation
 from DoorOpening.utils.finger_utils import joint_angle_to_tendon_utils, tendon_to_joint_angle_utils, leap_joints_to_tendon
 from .dooropening_env_cfg import DooropeningEnvCfg
+from isaaclab.sensors import ContactSensor
 
 import pickle as pkl
 import math
@@ -128,6 +129,9 @@ class DooropeningEnv(DirectRLEnv):
         # add articulation to scene
         self.scene.articulations["robot"] = self.robot
         self.scene.articulations["door"] = self.door
+        self.scene.sensors["contact_forces_door1"] = ContactSensor(self.cfg.contact_forces_door1)
+        self.scene.sensors["contact_forces_door2"] = ContactSensor(self.cfg.contact_forces_door2)
+        self.scene.sensors["contact_forces_robot_palm_center"] = ContactSensor(self.cfg.contact_forces_robot_palm_center)
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)    
@@ -147,6 +151,9 @@ class DooropeningEnv(DirectRLEnv):
         # tendon_actions = leap_joints_to_tendon(targets[..., self.num_base_joints + self.num_arm_joints:], self.finger_dof_names_to_id, device=self.device)
         # targets[..., self.num_base_joints + self.num_arm_joints:] = tendon_to_joint_angle_utils(self.robot, tendon_actions)[..., self._robot_finger_dof_idx]
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
+        self.scene.sensors["contact_forces_door1"].update(self.cfg.sim_dt, force_recompute=True)
+        self.scene.sensors["contact_forces_door2"].update(self.cfg.sim_dt, force_recompute=True)
+        self.scene.sensors["contact_forces_robot_palm_center"].update(self.cfg.sim_dt, force_recompute=True)
 
     def _apply_action(self):
         edit_door_articulation(self.door)
@@ -181,6 +188,17 @@ class DooropeningEnv(DirectRLEnv):
 
         door_joint_err = self.door_joint_pos[:, self._door_joint_idx] - (self.ref_door_joint_pos[:, self._door_joint_idx]).to(self.door_joint_pos)
 
+        contact_forces_door1 = self.scene.sensors["contact_forces_door1"].data.net_forces_w
+        contact_forces_door2 = self.scene.sensors["contact_forces_door2"].data.net_forces_w
+        contact_forces_robot_palm_center = self.scene.sensors["contact_forces_robot_palm_center"].data.net_forces_w
+        contact_forces_door1 = contact_forces_door1.reshape(self.num_envs, 1, -1)
+        contact_forces_door2 = contact_forces_door2.reshape(self.num_envs, 1, -1)
+        contact_forces_robot_palm_center = contact_forces_robot_palm_center.reshape(self.num_envs, 1, -1)
+        print("contact_forces_door1: ", contact_forces_door1)
+        print("contact_forces_door2: ", contact_forces_door2)
+        print("contact_forces_robot_palm_center: ", contact_forces_robot_palm_center)
+        print("-------------------------------")
+
         obs = torch.cat(
             (
                 self.joint_pos[:, self._robot_dof_idx].unsqueeze(dim = 1),
@@ -192,6 +210,9 @@ class DooropeningEnv(DirectRLEnv):
                 self.door_joint_pos[:, self._door_joint_idx].unsqueeze(dim = 1),
                 # self.door_joint_vel[:, self._door_joint_idx].unsqueeze(dim = 1),
                 door_joint_err.unsqueeze(dim = 1),
+                contact_forces_door1,
+                contact_forces_door2,
+                contact_forces_robot_palm_center,
             ),
             dim=-1,
         )
