@@ -105,7 +105,7 @@ class DooropeningEnv(DirectRLEnv):
         self.reset_door_joint_pos_delta_min = self.cfg.reset_door_joint_pos_delta_min
         self.reset_door_joint_pos_delta_max = self.cfg.reset_door_joint_pos_delta_max
 
-        self.ref_motion_lib = ReferenceMotionManager(self.cfg.motion_file, self.num_envs, self.device, velocity=self.cfg.velocity, reset_from_start = False)
+        self.ref_motion_lib = ReferenceMotionManager(self.cfg.motion_file, self.num_envs, self.device, velocity=self.cfg.velocity, reset_from_start = True)
         self.max_trial_steps = self.ref_motion_lib.num_frames * torch.ones_like(self.episode_length_buf, device=self.device)
 
         torch.set_printoptions(precision=4, sci_mode=False)
@@ -175,6 +175,8 @@ class DooropeningEnv(DirectRLEnv):
         joint_err = self.joint_pos[:, self._robot_dof_idx] - (self.ref_robot_joint_pos[:, self._robot_dof_idx]).to(self.joint_pos)
         joint_err = joint_err.reshape(self.num_envs, 1, -1)
 
+        door_joint_err = self.door_joint_pos[:, self._door_joint_idx] - (self.ref_door_joint_pos[:, self._door_joint_idx]).to(self.door_joint_pos)
+
         obs = torch.cat(
             (
                 self.joint_pos[:, self._robot_dof_idx].unsqueeze(dim = 1),
@@ -184,6 +186,8 @@ class DooropeningEnv(DirectRLEnv):
                 door_to_base_link_pos,
                 rel_robot_key_body_pos,
                 self.door_joint_pos[:, self._door_joint_idx].unsqueeze(dim = 1),
+                # self.door_joint_vel[:, self._door_joint_idx].unsqueeze(dim = 1),
+                door_joint_err.unsqueeze(dim = 1),
             ),
             dim=-1,
         )
@@ -374,6 +378,14 @@ class DooropeningEnv(DirectRLEnv):
         #     self.robot.root_physx_view.set_material_properties(props.cpu(), torch.arange(self.num_envs, device="cpu"))
         #     self._initialized_materials = True
 
+        if not hasattr(self, "_initialized_materials"):
+            props = self.robot.root_physx_view.get_material_properties().to(self.device)
+            print("material properties: ", props)
+            props[..., 0] = 4.0
+            props[..., 1] = 2.5
+            self.robot.root_physx_view.set_material_properties(props.cpu(), torch.arange(self.num_envs, device="cpu"))
+            self._initialized_materials = True
+
         reset_frame_idx = self.ref_motion_lib.reset(env_ids, step_count=self.step_count, reset_progress_total=self.reset_progress_total)
         self.max_trial_steps[env_ids] = ((self.ref_motion_lib.num_frames - reset_frame_idx) // self.ref_motion_lib.velocity).long()
 
@@ -503,6 +515,7 @@ def compute_deep_mimic_rewards(
          + robot_finger_joint_pos_w * finger_joint_pos_r\
          + robot_base_joint_vel_w * base_joint_vel_r\
          + robot_arm_joint_vel_w * arm_joint_vel_r\
+<<<<<<< HEAD
          + robot_finger_joint_vel_w * finger_joint_vel_r
 
     # restricted_reward = (
@@ -519,6 +532,27 @@ def compute_deep_mimic_rewards(
     #     restricted_reward,
     #     reward
     # )
+=======
+         + robot_finger_joint_vel_w * finger_joint_vel_r\
+         + door_pos_w * door_pos_r
+
+    restricted_reward = (
+        robot_key_body_pos_w * key_body_pos_r\
+        + door_joint_pos_w * door_r\
+    ) * (robot_key_body_pos_w + door_joint_pos_w + robot_base_joint_pos_w + robot_arm_joint_pos_w + robot_finger_joint_pos_w + robot_base_joint_vel_w + robot_arm_joint_vel_w + robot_finger_joint_vel_w + door_pos_w) / \
+    (robot_key_body_pos_w + door_joint_pos_w)
+
+    # special_env_mask = (ref_door_joint_pos[:, 1] > 0) & (ref_door_joint_pos[:, 0] < 0)
+    # special_env_mask = (torch.linalg.norm(ref_door_body_pos[:, 1] - ref_robot_key_body_pos[:, -1], dim=-1) < 0.15) & (torch.linalg.norm(door_body_pos[:, 1] - robot_key_body_pos[:, 0], dim=-1) < 0.15)
+    special_env_mask = (torch.linalg.norm(ref_door_body_pos[:, 1] - ref_robot_key_body_pos[:, -1], dim=-1) < 0.15)
+
+    reward = torch.where(
+        special_env_mask,
+        restricted_reward,
+        reward
+    )
+
+>>>>>>> 9a7446c62ff28e05b262359bd3284f8779112390
     return reward
 
 def compute_tracking_error(

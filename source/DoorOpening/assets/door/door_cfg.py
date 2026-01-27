@@ -38,9 +38,32 @@ def create_urdf_door_cfg(asset_path: str, training_mode: bool = False):
 def create_door_cfg(asset_path: str, training_mode: bool = False) -> ArticulationCfg:
     """Helper to create an ArticulationCfg from a URDF path."""
     return ArticulationCfg(
-        spawn=create_urdf_door_cfg(asset_path, training_mode),
+        spawn=sim_utils.UrdfFileCfg(
+            fix_base=True,
+            merge_fixed_joints=False,
+            make_instanceable=False,
+            asset_path=asset_path,
+            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                enabled_self_collisions=False,
+                solver_position_iteration_count=10,
+                solver_velocity_iteration_count=0,
+            ),
+            joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
+                gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
+            ),
+            # Note: joint_drive is usually not needed for URDF; PD gains can be in actuators
+            # scale = (1.0, 1.2, 0.95),
+            activate_contact_sensors=True,
+            collider_type = "convex_hull" if training_mode else "convex_decomposition",
+            collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.03, rest_offset=0.0),
+        ),
+        # spawn=sim_utils.UsdFileCfg(
+        #     usd_path=asset_path,
+        #     scale = (1.0, 1.2, 0.95),
+        #     activate_contact_sensors=True,
+        # ),
         init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 0.9),
+            pos=(0.0, 0.0, 1.0),
             rot=(0, 0, 0, 1)
             # rot=(0, -0.7071, 0, 0.7071)
         ),
@@ -64,7 +87,7 @@ asset_base_folder = os.path.join(root_path, "door/PartNetv4")
 asset_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/mobility.urdf"), recursive=True))
 
 # An example of door urdf
-door_asset_path = asset_paths[0]
+door_asset_path = asset_paths[2]
 print("door_asset_path: ", door_asset_path)
 
 DOOR_CONFIG = create_door_cfg(door_asset_path, training_mode=False)
@@ -105,6 +128,7 @@ def edit_door_articulation(
     door: Articulation, 
     door_closed_range = 0.01,     # radians
     hinge_range = 0.4,
+    # Optional: disable the latching behavior by setting the hinge range to a negative value
     # hinge_range = -0.1,
 ):
     joint_idx, joint_names = door.find_joints(["joint_1", "joint_2"])
