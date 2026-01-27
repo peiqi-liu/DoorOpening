@@ -108,7 +108,7 @@ class DooropeningEnv(DirectRLEnv):
         self.reset_door_joint_pos_delta_min = self.cfg.reset_door_joint_pos_delta_min
         self.reset_door_joint_pos_delta_max = self.cfg.reset_door_joint_pos_delta_max
 
-        self.ref_motion_lib = ReferenceMotionManager(self.cfg.motion_file, self.num_envs, self.device, velocity=self.cfg.velocity, reset_from_start = True)
+        self.ref_motion_lib = ReferenceMotionManager(self.cfg.motion_file, self.num_envs, self.device, velocity=self.cfg.velocity, reset_from_start = False)
         self.max_trial_steps = self.ref_motion_lib.num_frames * torch.ones_like(self.episode_length_buf, device=self.device)
 
         torch.set_printoptions(precision=4, sci_mode=False)
@@ -548,21 +548,21 @@ def compute_deep_mimic_rewards(
          + robot_finger_joint_vel_w * finger_joint_vel_r\
          + door_pos_w * door_pos_r
 
-    restricted_reward = (
-        robot_key_body_pos_w * key_body_pos_r\
-        + door_joint_pos_w * door_r\
-    ) * (robot_key_body_pos_w + door_joint_pos_w + robot_base_joint_pos_w + robot_arm_joint_pos_w + robot_finger_joint_pos_w + robot_base_joint_vel_w + robot_arm_joint_vel_w + robot_finger_joint_vel_w + door_pos_w) / \
-    (robot_key_body_pos_w + door_joint_pos_w)
+    # restricted_reward = (
+    #     robot_key_body_pos_w * key_body_pos_r\
+    #     + door_joint_pos_w * door_r\
+    # ) * (robot_key_body_pos_w + door_joint_pos_w + robot_base_joint_pos_w + robot_arm_joint_pos_w + robot_finger_joint_pos_w + robot_base_joint_vel_w + robot_arm_joint_vel_w + robot_finger_joint_vel_w + door_pos_w) / \
+    # (robot_key_body_pos_w + door_joint_pos_w)
 
-    # special_env_mask = (ref_door_joint_pos[:, 1] > 0) & (ref_door_joint_pos[:, 0] < 0)
-    # special_env_mask = (torch.linalg.norm(ref_door_body_pos[:, 1] - ref_robot_key_body_pos[:, -1], dim=-1) < 0.15) & (torch.linalg.norm(door_body_pos[:, 1] - robot_key_body_pos[:, 0], dim=-1) < 0.15)
-    special_env_mask = (torch.linalg.norm(ref_door_body_pos[:, 1] - ref_robot_key_body_pos[:, -1], dim=-1) < 0.15)
+    # # special_env_mask = (ref_door_joint_pos[:, 1] > 0) & (ref_door_joint_pos[:, 0] < 0)
+    # # special_env_mask = (torch.linalg.norm(ref_door_body_pos[:, 1] - ref_robot_key_body_pos[:, -1], dim=-1) < 0.15) & (torch.linalg.norm(door_body_pos[:, 1] - robot_key_body_pos[:, 0], dim=-1) < 0.15)
+    # special_env_mask = (torch.linalg.norm(ref_door_body_pos[:, 1] - ref_robot_key_body_pos[:, -1], dim=-1) < 0.15)
 
-    reward = torch.where(
-        special_env_mask,
-        restricted_reward,
-        reward
-    )
+    # reward = torch.where(
+    #     special_env_mask,
+    #     restricted_reward,
+    #     reward
+    # )
 
     return reward
 
