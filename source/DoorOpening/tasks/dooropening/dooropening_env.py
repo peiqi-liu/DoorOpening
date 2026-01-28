@@ -18,6 +18,7 @@ from DoorOpening.motion.motion_lib import ReferenceMotionManager
 from DoorOpening.assets.door.door_cfg import edit_door_articulation
 from DoorOpening.utils.finger_utils import joint_angle_to_tendon_utils, tendon_to_joint_angle_utils, leap_joints_to_tendon
 from .dooropening_env_cfg import DooropeningEnvCfg
+from DoorOpening.assets.door.door_cfg import motion_traj_paths
 
 import pickle as pkl
 import math
@@ -105,7 +106,9 @@ class DooropeningEnv(DirectRLEnv):
         self.reset_door_joint_pos_delta_min = self.cfg.reset_door_joint_pos_delta_min
         self.reset_door_joint_pos_delta_max = self.cfg.reset_door_joint_pos_delta_max
 
-        self.ref_motion_lib = ReferenceMotionManager(self.cfg.motion_file, self.num_envs, self.device, velocity=self.cfg.velocity, reset_from_start = True)
+        # self.ref_motion_lib = ReferenceMotionManager(self.cfg.motion_file, self.num_envs, self.device, velocity=self.cfg.velocity, reset_from_start = True)
+        env_to_file_map = [i % len(motion_traj_paths) for i in range(self.num_envs)]
+        self.ref_motion_lib = ReferenceMotionManager(num_envs=self.num_envs, device=self.device, velocity=self.cfg.velocity, reset_from_start = True, env_to_file_map=env_to_file_map)
         self.max_trial_steps = self.ref_motion_lib.num_frames * torch.ones_like(self.episode_length_buf, device=self.device)
 
         torch.set_printoptions(precision=4, sci_mode=False)
@@ -380,7 +383,6 @@ class DooropeningEnv(DirectRLEnv):
 
         if not hasattr(self, "_initialized_materials"):
             props = self.robot.root_physx_view.get_material_properties().to(self.device)
-            print("material properties: ", props)
             props[..., 0] = 4.0
             props[..., 1] = 2.5
             self.robot.root_physx_view.set_material_properties(props.cpu(), torch.arange(self.num_envs, device="cpu"))

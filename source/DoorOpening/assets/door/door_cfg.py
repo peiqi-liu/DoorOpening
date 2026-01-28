@@ -86,6 +86,8 @@ root_path = os.path.dirname(os.path.dirname(__file__))
 asset_base_folder = os.path.join(root_path, "door/PartNetv4")
 asset_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/mobility.urdf"), recursive=True))
 
+motion_traj_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/traj.pkl"), recursive=True))
+
 # for i in [7, 10, 13, 20, 25, 27, 28, 29]:
 #     print(asset_paths[i - 1])
 # An example of door urdf
@@ -109,7 +111,7 @@ def setup_doors(training_mode: bool = False):
             random_choice=False,
         ),
         init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 0.9),
+            pos=(0.0, 0.0, 0.91),
             rot=(0, 0, 0, 1)
             # rot=(0, -0.7071, 0, 0.7071)
         ),

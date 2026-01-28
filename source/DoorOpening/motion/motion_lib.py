@@ -5,23 +5,78 @@ from typing import Optional, Sequence
 class ReferenceMotionManager:
     def __init__(
         self,
-        motion_file: str,
-        num_envs: int,
-        device: torch.device,
+        motion_file: Optional[str] = None,
+        num_envs: int = 1,
+        device: torch.device = torch.device("cpu"),
         velocity=0.6,
         reset_from_start=False,
+        env_to_file_map: Optional[list] = None,
     ):
         self.device = device
         self.num_envs = num_envs
         self.velocity = velocity
         self.reset_from_start = reset_from_start
 
-        self._load_motion_pkl(motion_file)
+        if motion_file is not None:
+            self._load_motion_pkl_from_one_file(motion_file)
+            self.one_file_loaded = True
+        else:
+            self._load_motion_pkl_from_list()
+            self.env_to_file_map = torch.tensor(env_to_file_map, device=self.device)
+            self.one_file_loaded = False
         self._init_env_buffers()
 
     # --------------------------------------------------
     # Load motion data (moved from Env)
     # --------------------------------------------------
+    def _load_motion_pkl_from_list(self):
+        from DoorOpening.assets.door.door_cfg import motion_traj_paths
+
+        robot_joint_pos_trajs = []
+        door_trajs = []
+        robot_body_pos_trajs = []
+        robot_body_quat_trajs = []
+        robot_joint_vel_trajs = []
+        door_pos_trajs = []
+        key_indices_list = []
+
+        for motion_file in motion_traj_paths:
+            (robot_joint_pos_traj, door_traj, robot_body_pos_traj, robot_body_quat_traj, robot_joint_vel_traj, door_pos_traj, key_indices, self.num_frames) = self._load_motion_pkl(motion_file)
+            robot_joint_pos_trajs.append(robot_joint_pos_traj)
+            door_trajs.append(door_traj)
+            robot_body_pos_trajs.append(robot_body_pos_traj)
+            robot_body_quat_trajs.append(robot_body_quat_traj)
+            robot_joint_vel_trajs.append(robot_joint_vel_traj) 
+            if len(door_pos_trajs) != 0 and door_pos_traj.shape[1] != door_pos_trajs[0].shape[1]:
+                door_pos_traj = door_pos_traj[:, :door_pos_trajs[0].shape[1]]
+            door_pos_trajs.append(door_pos_traj)
+            key_indices_list.append(key_indices)
+
+        # stack motions: [M, T, ...]
+        self.robot_joint_pos_traj = torch.stack(robot_joint_pos_trajs, dim=0)
+        self.robot_joint_vel_traj = torch.stack(robot_joint_vel_trajs, dim=0)
+        self.robot_body_pos_traj = torch.stack(robot_body_pos_trajs, dim=0)
+        self.robot_body_quat_traj = torch.stack(robot_body_quat_trajs, dim=0)
+        self.door_traj = torch.stack(door_trajs, dim=0)
+        self.door_pos_traj = torch.stack(door_pos_trajs, dim=0)
+        self.key_indices = torch.stack(key_indices_list, dim=0).to(self.device)
+
+        self.num_motions = self.robot_joint_pos_traj.shape[0]
+
+
+    def _load_motion_pkl_from_one_file(self, motion_file: str):
+        (self.robot_joint_pos_traj,\
+            self.door_traj, \
+            self.robot_body_pos_traj, \
+            self.robot_body_quat_traj, \
+            self.robot_joint_vel_traj, \
+            self.door_pos_traj, \
+            key_indices, \
+            self.num_frames)\
+        = self._load_motion_pkl(motion_file)
+        self.key_indices = torch.tensor(key_indices, device=self.device).unsqueeze(0)
+
+
     def _load_motion_pkl(self, motion_file: str):
         with open(motion_file, "rb") as f:
             motions = pkl.load(f)
@@ -35,35 +90,37 @@ class ReferenceMotionManager:
         for k in required_keys:
             assert k in motions, f"{k} not found in motion file"
 
-        self.robot_joint_pos_traj = motions["robot_joint_pos_traj"]
-        self.door_traj = motions["door_traj"]
-        self.robot_body_pos_traj = motions["robot_body_pos_traj"]
-        self.robot_body_quat_traj = motions["robot_body_quat_traj"]
-        self.robot_joint_vel_traj = motions["robot_joint_vel_traj"]
-        self.door_pos_traj = motions["door_pos_traj"]
-        self.key_indices = motions["key_indices"]
+        robot_joint_pos_traj = motions["robot_joint_pos_traj"]
+        door_traj = motions["door_traj"]
+        robot_body_pos_traj = motions["robot_body_pos_traj"]
+        robot_body_quat_traj = motions["robot_body_quat_traj"]
+        robot_joint_vel_traj = motions["robot_joint_vel_traj"]
+        door_pos_traj = motions["door_pos_traj"]
+        key_indices = motions["key_indices"]
 
-        if isinstance(self.robot_joint_pos_traj, list):
-            self.robot_joint_pos_traj = torch.stack(self.robot_joint_pos_traj, dim = 0)
-        if isinstance(self.door_traj, list):
-            self.door_traj = torch.stack(self.door_traj, dim = 0)
-        if isinstance(self.robot_body_pos_traj, list):
-            self.robot_body_pos_traj = torch.stack(self.robot_body_pos_traj, dim = 0)
-        if isinstance(self.robot_body_quat_traj, list):
-            self.robot_body_quat_traj = torch.stack(self.robot_body_quat_traj, dim = 0)
-        if isinstance(self.robot_joint_vel_traj, list):
-            self.robot_joint_vel_traj = torch.stack(self.robot_joint_vel_traj, dim = 0)
-        if isinstance(self.door_pos_traj, list):
-            self.door_pos_traj = torch.stack(self.door_pos_traj, dim = 0)
+        if isinstance(robot_joint_pos_traj, list):
+            robot_joint_pos_traj = torch.stack(robot_joint_pos_traj, dim = 0)
+        if isinstance(door_traj, list):
+            door_traj = torch.stack(door_traj, dim = 0)
+        if isinstance(robot_body_pos_traj, list):
+            robot_body_pos_traj = torch.stack(robot_body_pos_traj, dim = 0)
+        if isinstance(robot_body_quat_traj, list):
+            robot_body_quat_traj = torch.stack(robot_body_quat_traj, dim = 0)
+        if isinstance(robot_joint_vel_traj, list):
+            robot_joint_vel_traj = torch.stack(robot_joint_vel_traj, dim = 0)
+        if isinstance(door_pos_traj, list):
+            door_pos_traj = torch.stack(door_pos_traj, dim = 0)
 
-        self.robot_joint_pos_traj = self.robot_joint_pos_traj.to(self.device).squeeze()
-        self.door_traj = self.door_traj.to(self.device).squeeze()
-        self.robot_body_pos_traj = self.robot_body_pos_traj.to(self.device).squeeze()
-        self.robot_body_quat_traj = self.robot_body_quat_traj.to(self.device).squeeze()
-        self.robot_joint_vel_traj = self.robot_joint_vel_traj.to(self.device).squeeze()
-        self.door_pos_traj = self.door_pos_traj.to(self.device).squeeze()
+        robot_joint_pos_traj = robot_joint_pos_traj.to(self.device).squeeze()
+        door_traj = door_traj.to(self.device).squeeze()
+        robot_body_pos_traj = robot_body_pos_traj.to(self.device).squeeze()
+        robot_body_quat_traj = robot_body_quat_traj.to(self.device).squeeze()
+        robot_joint_vel_traj = robot_joint_vel_traj.to(self.device).squeeze()
+        door_pos_traj = door_pos_traj.to(self.device).squeeze()
 
-        self.num_frames = self.robot_joint_pos_traj.shape[0]
+        num_frames = robot_joint_pos_traj.shape[0]
+
+        return robot_joint_pos_traj, door_traj, robot_body_pos_traj, robot_body_quat_traj, robot_joint_vel_traj, door_pos_traj, key_indices, num_frames
 
     # --------------------------------------------------
     # Per-env buffers
@@ -91,7 +148,7 @@ class ReferenceMotionManager:
                 alpha = 0.9 - 0.7 * progress  # from 0.9 → 0.2
 
                 probs = torch.tensor(
-                    [(1 - alpha) * (alpha ** i) for i in range(len(self.key_indices))],
+                    [(1 - alpha) * (alpha ** i) for i in range(self.key_indices.shape[1])],
                     device=self.key_indices.device
                 )
                 probs = probs / probs.sum()
@@ -100,7 +157,7 @@ class ReferenceMotionManager:
             else:
                 idx = torch.randint(
                     low=0,
-                    high=len(self.key_indices),
+                    high=self.key_indices.shape[1],
                     size=(env_ids.shape[0],),
                     device=self.key_indices.device
                 )
@@ -108,15 +165,18 @@ class ReferenceMotionManager:
             idx = torch.zeros(
                 (env_ids.shape[0],),
             ).to(self.key_indices)
-        self.frame_idx[env_ids] = self.key_indices[idx].squeeze().to(self.frame_idx)
-        if not self.reset_from_start:
-            self.frame_idx[env_ids] = self.frame_idx[env_ids] + torch.randint(
-                low=-2,
-                high=2,
-                size=(env_ids.shape[0],),
-                device=self.frame_idx.device
-            )
-            self.frame_idx[env_ids] = torch.clamp(self.frame_idx[env_ids], min=0, max=self.num_frames - 1)
+        if not self.one_file_loaded:
+            self.frame_idx[env_ids] = self.key_indices[self.env_to_file_map[env_ids]][torch.arange(len(env_ids), device=self.device), idx].squeeze().to(self.frame_idx)
+        else:
+            self.frame_idx[env_ids] = self.key_indices[idx].squeeze().to(self.frame_idx)
+        # if not self.reset_from_start:
+        #     self.frame_idx[env_ids] = self.frame_idx[env_ids] + torch.randint(
+        #         low=-2,
+        #         high=2,
+        #         size=(env_ids.shape[0],),
+        #         device=self.frame_idx.device
+        #     )
+        #     self.frame_idx[env_ids] = torch.clamp(self.frame_idx[env_ids], min=0, max=self.num_frames - 1)
         self._update_current()
         return self.frame_idx[env_ids]
 
@@ -138,12 +198,22 @@ class ReferenceMotionManager:
         floor_idx = torch.floor(idx).int()
         ceil_idx = torch.ceil(idx).int()
         interp_ratio = (idx - floor_idx).unsqueeze(-1)
-        self.ref_robot_joint_pos = self._lerp(self.robot_joint_pos_traj[floor_idx], self.robot_joint_pos_traj[ceil_idx], interp_ratio)
-        self.ref_robot_joint_vel = self._lerp(self.robot_joint_vel_traj[floor_idx], self.robot_joint_vel_traj[ceil_idx], interp_ratio)
-        self.ref_door_joint_pos = self._lerp(self.door_traj[floor_idx], self.door_traj[ceil_idx], interp_ratio)
-        self.ref_robot_body_pos = self._lerp(self.robot_body_pos_traj[floor_idx], self.robot_body_pos_traj[ceil_idx], interp_ratio)
-        self.ref_robot_body_quat = self._lerp(self.robot_body_quat_traj[floor_idx], self.robot_body_quat_traj[ceil_idx], interp_ratio)
-        self.ref_door_pos = self._lerp(self.door_pos_traj[floor_idx], self.door_pos_traj[ceil_idx], interp_ratio)
+        if self.one_file_loaded:
+            self.ref_robot_joint_pos = self._lerp(self.robot_joint_pos_traj[floor_idx], self.robot_joint_pos_traj[ceil_idx], interp_ratio)
+            self.ref_robot_joint_vel = self._lerp(self.robot_joint_vel_traj[floor_idx], self.robot_joint_vel_traj[ceil_idx], interp_ratio)
+            self.ref_door_joint_pos = self._lerp(self.door_traj[floor_idx], self.door_traj[ceil_idx], interp_ratio)
+            self.ref_robot_body_pos = self._lerp(self.robot_body_pos_traj[floor_idx], self.robot_body_pos_traj[ceil_idx], interp_ratio)
+            self.ref_robot_body_quat = self._lerp(self.robot_body_quat_traj[floor_idx], self.robot_body_quat_traj[ceil_idx], interp_ratio)
+            self.ref_door_pos = self._lerp(self.door_pos_traj[floor_idx], self.door_pos_traj[ceil_idx], interp_ratio)
+        else:
+            env_ids = torch.arange(self.num_envs, device=self.device)
+            indices = torch.arange(len(env_ids), device=self.device)
+            self.ref_robot_joint_pos = self._lerp(self.robot_joint_pos_traj[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_joint_pos_traj[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
+            self.ref_robot_joint_vel = self._lerp(self.robot_joint_vel_traj[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_joint_vel_traj[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
+            self.ref_door_joint_pos = self._lerp(self.door_traj[self.env_to_file_map[env_ids]][indices, floor_idx], self.door_traj[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
+            self.ref_robot_body_pos = self._lerp(self.robot_body_pos_traj[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_body_pos_traj[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
+            self.ref_robot_body_quat = self._lerp(self.robot_body_quat_traj[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_body_quat_traj[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
+            self.ref_door_pos = self._lerp(self.door_pos_traj[self.env_to_file_map[env_ids]][indices, floor_idx], self.door_pos_traj[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
 
     # --------------------------------------------------
     # Getters (explicit, readable)
