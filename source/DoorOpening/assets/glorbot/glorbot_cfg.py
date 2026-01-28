@@ -115,7 +115,7 @@ GLORBOT_CONFIG = ArticulationCfg(
         joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
             gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
         ),
-        scale = (0.8, 0.8, 0.8),
+        # scale = (0.8, 0.8, 0.8),
         activate_contact_sensors=True,
     ),
     # spawn=sim_utils.UsdFileCfg(

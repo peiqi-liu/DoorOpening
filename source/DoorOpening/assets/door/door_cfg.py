@@ -52,7 +52,7 @@ def create_door_cfg(asset_path: str, training_mode: bool = False) -> Articulatio
                 gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
             ),
             # Note: joint_drive is usually not needed for URDF; PD gains can be in actuators
-            # scale = (1.0, 1.2, 0.95),
+            scale = (1.0, 1.3, 1.0),
             activate_contact_sensors=True,
             collider_type = "convex_hull" if training_mode else "convex_decomposition",
             collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.03, rest_offset=0.0),
@@ -63,7 +63,7 @@ def create_door_cfg(asset_path: str, training_mode: bool = False) -> Articulatio
         #     activate_contact_sensors=True,
         # ),
         init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 1.0),
+            pos=(0.0, 0.0, 1.02),
             rot=(0, 0, 0, 1)
             # rot=(0, -0.7071, 0, 0.7071)
         ),
@@ -86,11 +86,17 @@ root_path = os.path.dirname(os.path.dirname(__file__))
 asset_base_folder = os.path.join(root_path, "door/PartNetv4")
 asset_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/mobility.urdf"), recursive=True))
 
+# for i in [7, 10, 13, 20, 25, 27, 28, 29]:
+#     print(asset_paths[i - 1])
 # An example of door urdf
-door_asset_path = asset_paths[2]
+door_asset_path = asset_paths[0]
 print("door_asset_path: ", door_asset_path)
 
 DOOR_CONFIG = create_door_cfg(door_asset_path, training_mode=False)
+
+DOOR_CONFIGS = []
+for asset_path in asset_paths:
+    DOOR_CONFIGS.append(create_door_cfg(asset_path, training_mode=False))
 
 def setup_doors(training_mode: bool = False):
     """Load all door cfg"""

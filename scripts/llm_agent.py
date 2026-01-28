@@ -29,14 +29,9 @@ from isaaclab.app import AppLauncher
 import numpy as np
 
 # add argparse arguments
-parser = argparse.ArgumentParser(description="Tutorial on adding sensors on a robot.")
+parser = argparse.ArgumentParser(description="LLM agent for door opening.")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to spawn.")
-parser.add_argument(
-    "--save",
-    action="store_true",
-    default=False,
-    help="Save the data from camera at index specified by ``--camera_id``.",
-)
+parser.add_argument("--door_number", type=int, default=0, help="Door number.")
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -63,7 +58,7 @@ import omni.replicator.core as rep
 from isaaclab.utils import convert_dict_to_backend
 
 from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, CAMERA_JOINT_DEFAULT_VALUES
-from DoorOpening.assets.door.door_cfg import DOOR_CONFIG
+from DoorOpening.assets.door.door_cfg import DOOR_CONFIG, DOOR_CONFIGS
 
 from isaaclab.utils.math import quat_from_euler_xyz
 import numpy as np
@@ -79,6 +74,7 @@ print("scene_quat:", scene_quat)
 from DoorOpening.utils.llms.llm_utils import *
 from DoorOpening.utils.llms.llm_api import GeminiAgent
 from DoorOpening.utils.llms.prompt import PULL_LEVER_PROMPT
+from isaaclab.sim.utils import stage as stage_utils
 
 # llm_agent = GeminiAgent(prompt=PULL_LEVER_PROMPT, model="gemini-3-pro-preview")
 
@@ -258,11 +254,13 @@ def playback_and_save_traj(scene, sim, robot, door, door_traj, traj, door_vel_tr
         "key_indices": torch.from_numpy(key_indices)
     }
 
-    answer = input("Do you want to save the trajectory? (y/n)")
+    # answer = input("Do you want to save the trajectory? (y/n)")
+    answer = "y"
     if answer.lower() == "y":
-        with open("traj.pkl", "wb") as f:
+        dir_path = os.path.dirname(door.cfg.spawn.asset_path)
+        with open(os.path.join(dir_path, "traj.pkl"), "wb") as f:
             pkl.dump(data, f)
-            print("Trajectory saved to traj.pkl")
+            print(f"Trajectory saved to {os.path.join(dir_path, 'traj.pkl')}")
     else:
         print("Trajectory not saved")
 
@@ -308,11 +306,11 @@ def main():
     sim.set_camera_view(eye=[4.0, -4.0, 3.5], target=[0.0, 0.0, 0.0])
     # Design scene
     scene_cfg = SensorsSceneCfg(num_envs=args_cli.num_envs, env_spacing=2.0)
+    door_cfg = DOOR_CONFIGS[args_cli.door_number].replace(prim_path="{ENV_REGEX_NS}/Door")
+    scene_cfg.door = door_cfg
     scene = InteractiveScene(scene_cfg)
     # Play the simulator
     sim.reset()
-    # Now we are ready!
-    print("[INFO]: Setup complete...")
     # Run the simulator
     run_simulator(sim, scene)
 
@@ -321,4 +319,7 @@ if __name__ == "__main__":
     # run the main function
     main()
     # close sim app
-    simulation_app.close()
+    # print("closing simulation app")
+    # simulation_app.close()
+    # print("simulation app closed")
+    os._exit(0)
