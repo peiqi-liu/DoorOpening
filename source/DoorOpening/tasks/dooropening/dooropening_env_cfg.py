@@ -121,8 +121,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     # Deep Mimic Reward Parameters
     robot_body_quat_w = 0.0
-    robot_key_body_pos_w = 2.0
-    robot_base_joint_pos_w = 2.0
+    robot_key_body_pos_w = 1.0
+    robot_base_joint_pos_w = 3.0
     robot_arm_joint_pos_w = 5.0
     robot_finger_joint_pos_w = 1.0
     robot_base_joint_vel_w = 1.0
@@ -141,8 +141,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     door_joint_pos_scale = 5.0
 
     reset_base_pos_delta_min = 0.2
-    reset_key_body_pos_delta_min = 0.4
-    reset_key_body_quat_delta_min = 0.8
+    reset_key_body_pos_delta_min = 0.5
+    reset_key_body_quat_delta_min = 1.0
     reset_base_pos_delta_max = 0.8
     reset_key_body_pos_delta_max = 1.0
     reset_key_body_quat_delta_max = 3.2
