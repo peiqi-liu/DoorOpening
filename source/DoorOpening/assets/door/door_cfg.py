@@ -21,7 +21,7 @@ from isaaclab.assets.articulation import ArticulationCfg, Articulation
 def create_urdf_door_cfg(asset_path: str, training_mode: bool = False):
     return sim_utils.UrdfFileCfg(
             fix_base=True,
-            merge_fixed_joints=False,
+            merge_fixed_joints=True,
             make_instanceable=False,
             asset_path=asset_path,
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
