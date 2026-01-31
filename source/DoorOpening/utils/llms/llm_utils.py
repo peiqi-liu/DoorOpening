@@ -23,11 +23,11 @@ def get_board_pos(door):
     joint_angles = door.data.joint_pos.clone()
     pointcloud = sample_pointcloud_from_link_name(door.cfg.spawn.asset_path, joint_angles, "link_1")
     door_pointcloud = quat_apply(door.data.body_quat_w[:, 0], pointcloud) + door.data.body_pos_w[:, 0]
-    door_pointcloud = door_pointcloud
-    board_pos = door_pointcloud.median(dim=-1).values
+    door_pointcloud = door_pointcloud.squeeze()
+    board_pos = door_pointcloud.median(dim=0).values
     if board_pos.ndim == 1:
         board_pos = board_pos.unsqueeze(0)
-    return pointcloud[0]
+    return board_pos
 
 def get_hinge_pos(door):
     # hinge_body_idx, _ = door.find_bodies("link_2")
@@ -37,9 +37,11 @@ def get_hinge_pos(door):
     pointcloud = sample_pointcloud_from_link_name(door.cfg.spawn.asset_path, joint_angles, "link_2")
     door_pointcloud = quat_apply(door.data.body_quat_w[:, 0], pointcloud) + door.data.body_pos_w[:, 0]
     door_pointcloud = door_pointcloud.squeeze()
-    board_pos = door_pointcloud.median(dim=0).values
-    # print("hinge pos: ", board_pos)
-    return pointcloud[0]
+    hinge_pos = door_pointcloud.median(dim=0).values
+    if hinge_pos.ndim == 1:
+        hinge_pos = hinge_pos.unsqueeze(0)
+    print("hinge pos: ", hinge_pos)
+    return hinge_pos
 
 def sample_pointcloud(door, joint_angles):
     door_pointcloud = sample_pointcloud_from_asset_path(door.cfg.spawn.asset_path, joint_angles, device=door.data.joint_pos.device)

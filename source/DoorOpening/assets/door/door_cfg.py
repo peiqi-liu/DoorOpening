@@ -20,32 +20,13 @@ from isaaclab.assets.articulation import ArticulationCfg, Articulation
 
 def create_urdf_door_cfg(asset_path: str, training_mode: bool = False):
     return sim_utils.UrdfFileCfg(
-        fix_base=True,
-        merge_fixed_joints=True,
-        make_instanceable=False,
-        asset_path=asset_path,
-        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-            enabled_self_collisions=False, solver_position_iteration_count=8, solver_velocity_iteration_count=0),
-        joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
-            gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
-        ),
-        scale = (1.0, 1.2, 0.95),
-        activate_contact_sensors=True,
-        collider_type = "convex_hull" if training_mode else "convex_decomposition",
-        collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.01, rest_offset=0.0),
-    )
-
-def create_door_cfg(asset_path: str, training_mode: bool = False) -> ArticulationCfg:
-    """Helper to create an ArticulationCfg from a URDF path."""
-    return ArticulationCfg(
-        spawn=sim_utils.UrdfFileCfg(
             fix_base=True,
             merge_fixed_joints=False,
             make_instanceable=False,
             asset_path=asset_path,
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 enabled_self_collisions=False,
-                solver_position_iteration_count=10,
+                solver_position_iteration_count=8,
                 solver_velocity_iteration_count=0,
             ),
             joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
@@ -56,7 +37,12 @@ def create_door_cfg(asset_path: str, training_mode: bool = False) -> Articulatio
             activate_contact_sensors=True,
             collider_type = "convex_hull" if training_mode else "convex_decomposition",
             collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.03, rest_offset=0.0),
-        ),
+    )
+
+def create_door_cfg(asset_path: str, training_mode: bool = False) -> ArticulationCfg:
+    """Helper to create an ArticulationCfg from a URDF path."""
+    return ArticulationCfg(
+        spawn=create_urdf_door_cfg(asset_path, training_mode),
         # spawn=sim_utils.UsdFileCfg(
         #     usd_path=asset_path,
         #     scale = (1.0, 1.2, 0.95),

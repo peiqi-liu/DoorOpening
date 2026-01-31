@@ -146,7 +146,7 @@ class DooropeningEnv(DirectRLEnv):
         self.scaled_actions[:, self.num_base_joints + self.num_arm_joints:] = self.scaled_actions[:, self.num_base_joints + self.num_arm_joints:] * self.cfg.finger_action_scale
         targets = self.robot_dof_targets + self.dt * self.scaled_actions
         # Optional: lock the abduction joints
-        targets[..., self._robot_abduction_dof_idx] = self.robot_abduction_default_pos
+        # targets[..., self._robot_abduction_dof_idx] = self.robot_abduction_default_pos
         targets[..., self.num_base_joints + self.num_arm_joints:] = torch.where( \
             (torch.linalg.norm(targets[..., self.num_base_joints + self.num_arm_joints:] - self.close_finger_joints, dim=-1) < \
             torch.linalg.norm(targets[..., self.num_base_joints + self.num_arm_joints:] - self.open_finger_joints, dim=-1)).unsqueeze(-1), \
