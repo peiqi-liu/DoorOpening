@@ -21,31 +21,31 @@ def get_board_pos(door):
     # board_body_idx = board_body_idx[0]
     # print("board pos: ", door.data.body_pos_w[:, board_body_idx].cpu().clone())
     joint_angles = door.data.joint_pos.clone()
-    pointcloud = sample_pointcloud_from_link_name(door.cfg.spawn.asset_path, joint_angles, "link_1")
-    door_pointcloud = quat_apply(door.data.body_quat_w[:, 0], pointcloud) + door.data.body_pos_w[:, 0]
+    pointcloud = sample_pointcloud_from_link_name(door.cfg.spawn.asset_path, joint_angles, "link_1", device = "cpu")
+    door_pointcloud = quat_apply(door.data.body_quat_w[:, 0].cpu(), pointcloud) + door.data.body_pos_w[:, 0].cpu()
     door_pointcloud = door_pointcloud.squeeze()
     board_pos = door_pointcloud.median(dim=0).values
     if board_pos.ndim == 1:
         board_pos = board_pos.unsqueeze(0)
-    return board_pos
+    return board_pos.cpu()
 
 def get_hinge_pos(door):
     # hinge_body_idx, _ = door.find_bodies("link_2")
     # hinge_body_idx = hinge_body_idx[0]
     # print("hinge pos: ", door.data.body_pos_w[:, hinge_body_idx].cpu().clone())
     joint_angles = door.data.joint_pos.clone()
-    pointcloud = sample_pointcloud_from_link_name(door.cfg.spawn.asset_path, joint_angles, "link_2")
-    door_pointcloud = quat_apply(door.data.body_quat_w[:, 0], pointcloud) + door.data.body_pos_w[:, 0]
+    pointcloud = sample_pointcloud_from_link_name(door.cfg.spawn.asset_path, joint_angles, "link_2", device = "cpu")
+    door_pointcloud = quat_apply(door.data.body_quat_w[:, 0].cpu(), pointcloud) + door.data.body_pos_w[:, 0].cpu()
     door_pointcloud = door_pointcloud.squeeze()
     hinge_pos = door_pointcloud.median(dim=0).values
     if hinge_pos.ndim == 1:
         hinge_pos = hinge_pos.unsqueeze(0)
     print("hinge pos: ", hinge_pos)
-    return hinge_pos
+    return hinge_pos.cpu()
 
 def sample_pointcloud(door, joint_angles):
-    door_pointcloud = sample_pointcloud_from_asset_path(door.cfg.spawn.asset_path, joint_angles, device=door.data.joint_pos.device)
-    door_pointcloud = quat_apply(door.data.body_quat_w[:, 0], door_pointcloud) + door.data.body_pos_w[:, 0]
+    door_pointcloud = sample_pointcloud_from_asset_path(door.cfg.spawn.asset_path, joint_angles.cpu(), device="cpu")
+    door_pointcloud = quat_apply(door.data.body_quat_w[:, 0].cpu(), door_pointcloud) + door.data.body_pos_w[:, 0].cpu()
     return door_pointcloud
 
 from isaaclab.controllers import DifferentialIKController, DifferentialIKControllerCfg

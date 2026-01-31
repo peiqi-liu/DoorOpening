@@ -1089,6 +1089,7 @@ def sample_pointcloud(urdf_path, joint_angles, device = "cuda", verbose = False)
     return pcd
 
 def sample_pointcloud_from_link_name(urdf_path, joint_angles, link_name, device = "cuda", verbose = False):
+    joint_angles = joint_angles.to(device)
     sampler = FrankaLeapSampler(urdf_path, device)
     pcd = sampler.sample_link_set(joint_angles, link_name)
     if verbose:
