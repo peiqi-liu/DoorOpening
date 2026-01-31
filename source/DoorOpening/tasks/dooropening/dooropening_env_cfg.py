@@ -81,10 +81,18 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     ]
 
     abduction_joints = [
+        # actual abduction joints
         'finger_joint_0',
         'finger_joint_12',
         'finger_joint_4',
         'finger_joint_8',
+        # additional joints we want to fix at default position
+        'finger_joint_3',
+        'finger_joint_7',
+        'finger_joint_11',
+        'finger_joint_13',
+        'finger_joint_14',
+        'finger_joint_15',
     ]
 
     door_body_names = ["link_1", "link_2"]
@@ -121,9 +129,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     # Deep Mimic Reward Parameters
     robot_body_quat_w = 0.0
-    robot_key_body_pos_w = 2.0
-    robot_base_joint_pos_w = 2.0
-    robot_arm_joint_pos_w = 3.0
+    robot_key_body_pos_w = 1.0
+    robot_base_joint_pos_w = 3.0
+    robot_arm_joint_pos_w = 5.0
     robot_finger_joint_pos_w = 1.0
     robot_base_joint_vel_w = 0.5
     robot_arm_joint_vel_w = 1.0
@@ -141,8 +149,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     door_joint_pos_scale = 5.0
 
     reset_base_pos_delta_min = 0.2
-    reset_key_body_pos_delta_min = 0.6
-    reset_key_body_quat_delta_min = 1.2
+    reset_key_body_pos_delta_min = 0.5
+    reset_key_body_quat_delta_min = 1.0
     reset_base_pos_delta_max = 0.8
     reset_key_body_pos_delta_max = 1.0
     reset_key_body_quat_delta_max = 3.2
