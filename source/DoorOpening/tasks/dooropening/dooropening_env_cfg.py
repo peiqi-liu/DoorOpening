@@ -15,6 +15,7 @@ from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMater
 
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.envs.common import ViewerCfg
+import torch
 
 @configclass
 class DooropeningEnvCfg(DirectRLEnvCfg):
@@ -81,11 +82,57 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     ]
 
     abduction_joints = [
+        # actual abduction joints
         'finger_joint_0',
         'finger_joint_12',
         'finger_joint_4',
         'finger_joint_8',
+        # additional joints we want to fix at default position
+        'finger_joint_3',
+        'finger_joint_7',
+        'finger_joint_11',
+        'finger_joint_13',
+        'finger_joint_14',
+        'finger_joint_15',
     ]
+
+    close_finger_joints = {
+        "finger_joint_0": 0.0,
+        "finger_joint_1": torch.pi / 2,
+        "finger_joint_2": 1.8,
+        "finger_joint_3": 1.0,
+        "finger_joint_4": 0.0,
+        "finger_joint_5": torch.pi / 2,
+        "finger_joint_6": 1.8,
+        "finger_joint_7": 1.0,
+        "finger_joint_8": 0.0,
+        "finger_joint_9": torch.pi / 2,
+        "finger_joint_10": 1.8,
+        "finger_joint_11": 1.0,
+        "finger_joint_12": torch.pi / 2,
+        "finger_joint_13": 0.0,
+        "finger_joint_14": 0.5,
+        "finger_joint_15": 1.0,
+    }
+
+    open_finger_joints = {
+        "finger_joint_0": 0.0,
+        "finger_joint_1": 0.0,
+        "finger_joint_2": 0.0,
+        "finger_joint_3": 0.0,
+        "finger_joint_4": 0.0,
+        "finger_joint_5": 0.0,
+        "finger_joint_6": 0.0,
+        "finger_joint_7": 0.0,
+        "finger_joint_8": 0.0,
+        "finger_joint_9": 0.0,
+        "finger_joint_10": 0.0,
+        "finger_joint_11": 0.0,
+        "finger_joint_12": torch.pi / 2,
+        "finger_joint_13": 0.0,
+        "finger_joint_14": 0.0,
+        "finger_joint_15": 0.0,
+    }
 
     door_body_names = ["link_1", "link_2"]
 
@@ -125,15 +172,15 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_base_joint_pos_w = 3.0
     robot_arm_joint_pos_w = 5.0
     robot_finger_joint_pos_w = 1.0
-    robot_base_joint_vel_w = 1.0
-    robot_arm_joint_vel_w = 2.0
+    robot_base_joint_vel_w = 0.5
+    robot_arm_joint_vel_w = 1.0
     robot_finger_joint_vel_w = 0.5
-    door_joint_pos_w = 4.0
+    door_joint_pos_w = 5.0
 
     robot_body_quat_scale = 1.0
     robot_key_body_pos_scale = 3.0
     robot_base_joint_pos_scale = 0.5
-    robot_arm_joint_pos_scale = 0.75
+    robot_arm_joint_pos_scale = 0.2
     robot_finger_joint_pos_scale = 1.0
     robot_base_joint_vel_scale = 0.5
     robot_arm_joint_vel_scale = 0.5
