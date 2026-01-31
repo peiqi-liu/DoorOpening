@@ -1,5 +1,6 @@
 from this import d
 from DoorOpening.utils.extract_pointcloud_from_articulation import sample_pointcloud as sample_pointcloud_from_asset_path
+from DoorOpening.utils.extract_pointcloud_from_articulation import sample_pointcloud_from_link_name
 from DoorOpening.assets.glorbot.glorbot_cfg import FRANKA_JOINT_NAMES, BASE_JOINT_NAMES
 from isaaclab.utils.math import quat_apply, euler_xyz_from_quat, quat_mul
 import torch
@@ -16,14 +17,29 @@ def get_frame_hinge_joint_angle(door):
     return door.data.joint_pos[:, frame_hinge_joint_idx].cpu().clone()
 
 def get_board_pos(door):
-    board_body_idx, _ = door.find_bodies("link_1")
-    board_body_idx = board_body_idx[0]
-    return door.data.body_pos_w[:, board_body_idx].cpu().clone()
+    # board_body_idx, _ = door.find_bodies("link_1")
+    # board_body_idx = board_body_idx[0]
+    # print("board pos: ", door.data.body_pos_w[:, board_body_idx].cpu().clone())
+    joint_angles = door.data.joint_pos.clone()
+    pointcloud = sample_pointcloud_from_link_name(door.cfg.spawn.asset_path, joint_angles, "link_1")
+    door_pointcloud = quat_apply(door.data.body_quat_w[:, 0], pointcloud) + door.data.body_pos_w[:, 0]
+    door_pointcloud = door_pointcloud
+    board_pos = door_pointcloud.median(dim=-1).values
+    if board_pos.ndim == 1:
+        board_pos = board_pos.unsqueeze(0)
+    return pointcloud[0]
 
 def get_hinge_pos(door):
-    hinge_body_idx, _ = door.find_bodies("link_2")
-    hinge_body_idx = hinge_body_idx[0]
-    return door.data.body_pos_w[:, hinge_body_idx].cpu().clone()
+    # hinge_body_idx, _ = door.find_bodies("link_2")
+    # hinge_body_idx = hinge_body_idx[0]
+    # print("hinge pos: ", door.data.body_pos_w[:, hinge_body_idx].cpu().clone())
+    joint_angles = door.data.joint_pos.clone()
+    pointcloud = sample_pointcloud_from_link_name(door.cfg.spawn.asset_path, joint_angles, "link_2")
+    door_pointcloud = quat_apply(door.data.body_quat_w[:, 0], pointcloud) + door.data.body_pos_w[:, 0]
+    door_pointcloud = door_pointcloud.squeeze()
+    board_pos = door_pointcloud.median(dim=0).values
+    # print("hinge pos: ", board_pos)
+    return pointcloud[0]
 
 def sample_pointcloud(door, joint_angles):
     door_pointcloud = sample_pointcloud_from_asset_path(door.cfg.spawn.asset_path, joint_angles, device=door.data.joint_pos.device)
@@ -320,36 +336,3 @@ def step_sim(scene, sim):
     scene.write_data_to_sim()
     sim.step()
     scene.update(sim.get_physics_dt())
-
-
-import ast
-
-def wrap_into_policy(code: str) -> str:
-    lines = code.splitlines()
-
-    # Drop empty leading/trailing lines
-    lines = [l.rstrip() for l in lines if l.strip() != ""]
-
-    # Strip *all* leading indentation
-    stripped = [l.lstrip() for l in lines]
-
-    # Re-indent uniformly
-    body = "\n".join("    " + l for l in stripped)
-
-    return (
-        "def policy_step(robot, door, scene, sim):\n"
-        + body
-        + "\n"
-    )
-
-def load_policy(code: str):
-    wrapped = wrap_into_policy(code)
-
-    tree = ast.parse(wrapped)  # ✅ now this cannot fail from indentation
-
-    funcs = [n for n in tree.body if isinstance(n, ast.FunctionDef)]
-    assert len(funcs) == 1
-
-    env = {}
-    exec(wrapped, env)
-    return env["policy_step"]
