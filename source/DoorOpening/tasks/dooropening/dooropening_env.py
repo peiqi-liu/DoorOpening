@@ -47,9 +47,10 @@ class DooropeningEnv(DirectRLEnv):
         self._robot_arm_dof_idx, arm_joint_names = self.robot.find_joints(self.cfg.arm_joints)
         self._robot_finger_dof_idx, finger_joint_names = self.robot.find_joints(self.cfg.finger_joints)
 
-        self._robot_abduction_dof_idx, abduction_joint_names = self.robot.find_joints(self.cfg.abduction_joints)
-        self.robot_abduction_default_pos = self.robot.data.default_joint_pos[..., self._robot_abduction_dof_idx]
+        robot_abduction_dof_idx, abduction_joint_names = self.robot.find_joints(self.cfg.abduction_joints)
+        self.robot_abduction_default_pos = self.robot.data.default_joint_pos[..., robot_abduction_dof_idx]
         self.finger_dof_names_to_id = {name: idx for idx, name in enumerate(finger_joint_names)}
+        self.robot_abduction_dof_idx_in_targets = [self.finger_dof_names_to_id[name] + self.num_base_joints + self.num_arm_joints for name in self.cfg.abduction_joints]
         self.close_finger_joints = torch.tensor([self.cfg.close_finger_joints[name] for name in finger_joint_names], device=self.device)
         self.open_finger_joints = torch.tensor([self.cfg.open_finger_joints[name] for name in finger_joint_names], device=self.device)
 
@@ -146,13 +147,13 @@ class DooropeningEnv(DirectRLEnv):
         self.scaled_actions[:, self.num_base_joints + self.num_arm_joints:] = self.scaled_actions[:, self.num_base_joints + self.num_arm_joints:] * self.cfg.finger_action_scale
         targets = self.robot_dof_targets + self.dt * self.scaled_actions
         # Optional: lock the abduction joints
-        # targets[..., self._robot_abduction_dof_idx] = self.robot_abduction_default_pos
-        targets[..., self.num_base_joints + self.num_arm_joints:] = torch.where( \
-            (torch.linalg.norm(targets[..., self.num_base_joints + self.num_arm_joints:] - self.close_finger_joints, dim=-1) < \
-            torch.linalg.norm(targets[..., self.num_base_joints + self.num_arm_joints:] - self.open_finger_joints, dim=-1)).unsqueeze(-1), \
-            self.close_finger_joints[None, :], \
-            self.open_finger_joints[None, :] \
-        )
+        targets[..., self.robot_abduction_dof_idx_in_targets] = self.robot_abduction_default_pos
+        # targets[..., self.num_base_joints + self.num_arm_joints:] = torch.where( \
+        #     (torch.linalg.norm(targets[..., self.num_base_joints + self.num_arm_joints:] - self.close_finger_joints, dim=-1) < \
+        #     torch.linalg.norm(targets[..., self.num_base_joints + self.num_arm_joints:] - self.open_finger_joints, dim=-1)).unsqueeze(-1), \
+        #     self.close_finger_joints[None, :], \
+        #     self.open_finger_joints[None, :] \
+        # )
         # Optional: use tendon actions to control the finger joints
         # tendon_actions = leap_joints_to_tendon(targets[..., self.num_base_joints + self.num_arm_joints:], self.finger_dof_names_to_id, device=self.device)
         # targets[..., self.num_base_joints + self.num_arm_joints:] = tendon_to_joint_angle_utils(self.robot, tendon_actions)[..., self._robot_finger_dof_idx]
