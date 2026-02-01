@@ -86,8 +86,8 @@ def state_machine(robot, door, scene, sim, buffer):
         base_target_rot = torch.tensor([[0.0, 0.0, 0.0, 1.0]]).repeat(handle_pos.shape[0], 1).to(handle_pos.device)
         base_target_pose = torch.cat([base_target_pos, base_target_rot], dim=-1)
         palm_target_rot = torch.tensor([[0.0, 0.0, 1.0, 0.0]]).repeat(handle_pos.shape[0], 1).to(handle_pos.device)
-        # new_handle_pos[:, 0] -= 0.1
-        # new_handle_pos[:, 1] -= 0.1
+        new_handle_pos[:, 0] -= 0.1
+        new_handle_pos[:, 1] -= 0.1
         palm_target_pose = torch.cat([new_handle_pos, palm_target_rot], dim=-1)
         for _ in range(num_steps):
             q = solve_ik(robot, palm_pose=palm_target_pose, base_pose=base_target_pose)
