@@ -298,6 +298,9 @@ def write_joint_angle_to_robot(robot, target_joint_angle):
 
 def record_joint_angles(robot, door, buffer):
     buffer.append(torch.cat((robot.data.joint_pos.clone(), door.data.joint_pos.clone()), dim=-1))
+    # body_idx, _ = robot.find_bodies(["palm_center", "tidybot2_base_link"])[0]
+    # robot_pos = robot.data.body_pos_w[:, body_idx].cpu().clone().reshape(-1, 3)
+    # buffer.append(torch.cat((robot_pos, door.data.joint_pos.clone()), dim=-1))
 
 def get_robot_link_pose(robot, link_name):
     link_names_correspondance = {
