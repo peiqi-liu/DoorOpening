@@ -69,7 +69,8 @@ def solve_ik(robot, palm_pose=None, base_pose=None):
     joint_pos_des = robot.data.joint_pos[:, joint_ids].clone()
     if base_pose is not None:
         base_joint_pos = compute_base_joint(robot, base_pose[:, :3]).to(robot.data.joint_pos.device)
-    if base_pose is not None and torch.linalg.norm(joint_pos_des[:, :3] - base_joint_pos) >= 0.2:
+    if base_pose is not None and torch.linalg.norm(joint_pos_des[:, :3] - base_joint_pos) >= 0.05:
+    # if base_pose is not None:
         joint_pos_des[:, :3] = base_joint_pos
         joint_pos_des[:, 3:] = wrap_to_pi(joint_pos_des[:, 3:])
         return joint_pos_des
@@ -81,166 +82,6 @@ def solve_ik(robot, palm_pose=None, base_pose=None):
         joint_pos_des[:, 3:] = wrap_to_pi(joint_pos_des[:, 3:])
         return joint_pos_des
     return joint_pos_des
-
-def solve_ik_v1(
-    robot,
-    elbow_pose=None,
-    palm_pose=None,
-    base_pose=None,
-    damping=0.5,
-    step_scale = 0.1
-):
-    """
-    IK solver for tidybot2 + franka arm.
-    Accepts elbow/palm/base target poses (3 or 7 dims).
-    Uses damped least squares and writes result to simulator.
-    """
-    assert elbow_pose is not None or palm_pose is not None or base_pose is not None, \
-        "At least one of elbow_pose, palm_pose, or base_pose must be provided"
-
-    device = "cpu"
-
-    # --- body names ---
-    elbow_body_name = "panda_link4"
-    palm_body_name  = "palm_center"
-    base_body_name  = "tidybot2_base_link"
-
-    elbow_body_idx, _ = robot.find_bodies(elbow_body_name)
-    palm_body_idx, _  = robot.find_bodies(palm_body_name)
-    base_body_idx, _  = robot.find_bodies(base_body_name)
-    if isinstance(elbow_body_idx, list):
-        elbow_body_idx = elbow_body_idx[0]
-    if isinstance(palm_body_idx, list):
-        palm_body_idx = palm_body_idx[0]
-    if isinstance(base_body_idx, list):
-        base_body_idx = base_body_idx[0]
-
-    # --- joints ---
-    actuated_joint_names = FRANKA_JOINT_NAMES + BASE_JOINT_NAMES
-    actuated_joint_ids, _ = robot.find_joints(actuated_joint_names)
-
-    # current joint positions
-    q = robot.data.joint_pos[:, actuated_joint_ids].cpu().clone()
-
-    def get_quat_err(target_quat, cur_quat):
-        # q_err = q_target * q_cur^{-1}
-        conj = torch.cat([-cur_quat[:, :3], cur_quat[:, 3:]], dim=1)
-        q_err = quat_mul(target_quat, conj)
-
-        sign = torch.sign(q_err[:, 3:4])
-        q_err = q_err * sign
-
-        angle = 2.0 * torch.atan2(
-            torch.norm(q_err[:, :3], dim=1),
-            q_err[:, 3].clamp(-1.0, 1.0)
-        )
-        axis = q_err[:, :3] / (torch.norm(q_err[:, :3], dim=1, keepdim=True) + 1e-8)
-        return axis * angle.unsqueeze(1)
-
-    # recompute Jacobians every iter
-    # robot_jacobians = robot.root_physx_view.get_jacobians()[:, [palm_body_idx, base_body_idx, elbow_body_idx], :, actuated_joint_ids]
-    robot_jacobians = robot.root_physx_view.get_jacobians().cpu().index_select(1, torch.tensor([palm_body_idx, base_body_idx, elbow_body_idx], device=device)).index_select(3, torch.tensor(actuated_joint_ids, device=device))
-
-    # current body positions / orientations
-    cur_elbow_pos = robot.data.body_pos_w[:, elbow_body_idx].cpu().clone()
-    cur_palm_pos  = robot.data.body_pos_w[:, palm_body_idx].cpu().clone()
-    cur_base_pos  = robot.data.body_pos_w[:, base_body_idx].cpu().clone()
-
-    cur_elbow_quat = robot.data.body_quat_w[:, elbow_body_idx].cpu().clone()
-    cur_palm_quat  = robot.data.body_quat_w[:, palm_body_idx].cpu().clone()
-    cur_base_quat  = robot.data.body_quat_w[:, base_body_idx].cpu().clone()
-
-    J_list = []
-    err_list = []
-
-    # elbow target
-    if elbow_pose is not None:
-        if len(elbow_pose.shape) > 2:
-            elbow_pose = elbow_pose[..., 0, :]
-        if len(elbow_pose.shape) < 2:
-            elbow_pose = elbow_pose.unsqueeze(0)
-        if elbow_pose.shape[-1] == 3:
-            tgt_pos = elbow_pose
-            tgt_quat = None
-        else:
-            tgt_pos = elbow_pose[..., :3]
-            tgt_quat = elbow_pose[..., 3:]
-
-        pos_err = (tgt_pos - cur_elbow_pos)
-        Jpos = robot_jacobians[:, 2, :3, :]
-        J_list.append(Jpos)
-        err_list.append(pos_err)
-
-        if tgt_quat is not None:
-            rot_err = get_quat_err(tgt_quat, cur_elbow_quat)
-            Jrot = robot_jacobians[:, 2, 3:6, :]
-            J_list.append(Jrot)
-            err_list.append(rot_err)
-
-    # palm target
-    if palm_pose is not None:
-        if len(palm_pose.shape) > 2:
-            palm_pose = palm_pose[..., 0, :]
-        if len(palm_pose.shape) < 2:
-            palm_pose = palm_pose.unsqueeze(0)
-        if palm_pose.shape[-1] == 3:
-            tgt_pos = palm_pose
-            tgt_quat = None
-        else:
-            tgt_pos = palm_pose[..., :3]
-            tgt_quat = palm_pose[..., 3:]
-
-        pos_err = (tgt_pos - cur_palm_pos)
-        Jpos = robot_jacobians[:, 0, :3, :]
-        J_list.append(Jpos)
-        err_list.append(pos_err)
-
-        if tgt_quat is not None:
-            rot_err = get_quat_err(tgt_quat, cur_palm_quat)
-            Jrot = robot_jacobians[:, 0, 3:6, :]
-            J_list.append(Jrot)
-            err_list.append(rot_err)
-
-    # base target
-    if base_pose is not None:
-        if len(base_pose.shape) > 2:
-            base_pose = base_pose[..., 0, :]
-        if len(base_pose.shape) < 2:
-            base_pose = base_pose.unsqueeze(0)
-        if base_pose.shape[-1] == 3:
-            tgt_pos = base_pose
-            tgt_quat = None
-        else:
-            tgt_pos = base_pose[..., :3]
-            tgt_quat = base_pose[..., 3:]
-
-        pos_err = (tgt_pos - cur_base_pos)
-        Jpos = robot_jacobians[:, 1, :3, :]
-        J_list.append(Jpos)
-        err_list.append(pos_err)
-
-        if tgt_quat is not None:
-            rot_err = get_quat_err(tgt_quat, cur_base_quat)
-            Jrot = robot_jacobians[:, 1, 3:6, :]
-            J_list.append(Jrot)
-            err_list.append(rot_err)
-
-    # stack into single task
-    J = torch.cat(J_list, dim=1)      # [env, m, n]
-    err = torch.cat(err_list, dim=1)  # [env, m]
-
-    # damped least squares
-    JT = J.transpose(1, 2)
-    m = J.shape[1]
-    I = torch.eye(m, device=device).unsqueeze(0)
-    A = J @ JT + (damping ** 2) * I
-    delta = JT @ torch.linalg.solve(A, err.unsqueeze(-1))
-    delta = delta.squeeze(-1)
-    # update joint positions
-    delta = torch.clamp(delta, -step_scale, step_scale)
-    q = q + step_scale * delta
-
-    return q
 
 def open_hand(robot):
     open_joint_values = {
@@ -297,10 +138,11 @@ def write_joint_angle_to_robot(robot, target_joint_angle):
     robot.write_joint_position_to_sim(target_joint_angle.to(robot.data.joint_pos.device), joint_ids=robot_joint_ids)
 
 def record_joint_angles(robot, door, buffer):
-    buffer.append(torch.cat((robot.data.joint_pos.clone(), door.data.joint_pos.clone()), dim=-1))
-    # body_idx, _ = robot.find_bodies(["palm_center", "tidybot2_base_link"])[0]
-    # robot_pos = robot.data.body_pos_w[:, body_idx].cpu().clone().reshape(-1, 3)
-    # buffer.append(torch.cat((robot_pos, door.data.joint_pos.clone()), dim=-1))
+    # buffer.append(torch.cat((robot.data.joint_pos.clone(), door.data.joint_pos.clone()), dim=-1))
+    body_idx, _ = robot.find_bodies(["palm_center", "tidybot2_base_link"])
+    robot_pos = robot.data.body_pos_w[:, body_idx].cpu().clone().reshape(robot.data.body_pos_w.shape[0], -1)
+    robot_quat = robot.data.body_quat_w[:, body_idx].cpu().clone().reshape(robot.data.body_quat_w.shape[0], -1)
+    buffer.append(torch.cat((robot_pos, robot_quat, door.data.joint_pos.clone().cpu()), dim=-1))
 
 def get_robot_link_pose(robot, link_name):
     link_names_correspondance = {

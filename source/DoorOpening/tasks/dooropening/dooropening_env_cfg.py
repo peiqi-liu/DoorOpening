@@ -26,7 +26,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # - spaces definition
     state_space = 0
 
-    viewer: ViewerCfg = ViewerCfg(eye=(1.5, 1.5, 1.0), lookat=(0.0, 0.0, 0.7), origin_type="env")
+    viewer: ViewerCfg = ViewerCfg(eye=(1.5, -2.0, 1.0), lookat=(0.4, 0.0, 0.7), origin_type="env")
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
