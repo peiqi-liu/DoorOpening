@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, CAMERA_JOINT_DEFAULT_VALUES
+from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, CAMERA_JOINT_DEFAULT_VALUES, CLOSE_FINGER_JOINT_VALUES, OPEN_FINGER_JOINT_VALUES
 from DoorOpening.assets.door.door_cfg import DOOR_CONFIG, ALL_DOOR_CONFIGS
 
 from isaaclab.assets import ArticulationCfg
@@ -96,43 +96,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         'finger_joint_15',
     ]
 
-    close_finger_joints = {
-        "finger_joint_0": 0.0,
-        "finger_joint_1": torch.pi / 2,
-        "finger_joint_2": 1.8,
-        "finger_joint_3": 1.0,
-        "finger_joint_4": 0.0,
-        "finger_joint_5": torch.pi / 2,
-        "finger_joint_6": 1.8,
-        "finger_joint_7": 1.0,
-        "finger_joint_8": 0.0,
-        "finger_joint_9": torch.pi / 2,
-        "finger_joint_10": 1.8,
-        "finger_joint_11": 1.0,
-        "finger_joint_12": torch.pi / 2,
-        "finger_joint_13": 0.0,
-        "finger_joint_14": 0.5,
-        "finger_joint_15": 1.0,
-    }
+    close_finger_joints = CLOSE_FINGER_JOINT_VALUES
 
-    open_finger_joints = {
-        "finger_joint_0": 0.0,
-        "finger_joint_1": 0.0,
-        "finger_joint_2": 0.0,
-        "finger_joint_3": 0.0,
-        "finger_joint_4": 0.0,
-        "finger_joint_5": 0.0,
-        "finger_joint_6": 0.0,
-        "finger_joint_7": 0.0,
-        "finger_joint_8": 0.0,
-        "finger_joint_9": 0.0,
-        "finger_joint_10": 0.0,
-        "finger_joint_11": 0.0,
-        "finger_joint_12": torch.pi / 2,
-        "finger_joint_13": 0.0,
-        "finger_joint_14": 0.0,
-        "finger_joint_15": 0.0,
-    }
+    open_finger_joints = OPEN_FINGER_JOINT_VALUES
 
     door_body_names = ["link_1", "link_2"]
 
@@ -200,7 +166,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     reset_base_pos_delta_max = 0.8
     reset_key_body_pos_delta_max = 1.0
     reset_key_body_quat_delta_max = 3.2
-    reset_door_joint_pos_delta_min = 0.4
+    reset_door_joint_pos_delta_min = 0.5
     reset_door_joint_pos_delta_max = 1.2
     # We are slowly increasing our tolerance on base position drift and slowly only resettting the env from the first key frame
     # This variable is used to indicate when we stop increasing the tolerance and reset the env from the first key frame for the greatest probability

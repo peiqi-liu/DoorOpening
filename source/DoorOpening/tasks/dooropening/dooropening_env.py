@@ -115,7 +115,7 @@ class DooropeningEnv(DirectRLEnv):
 
         # self.ref_motion_lib = ReferenceMotionManager(self.cfg.motion_file, self.num_envs, self.device, velocity=self.cfg.velocity, reset_from_start = True)
         env_to_file_map = [i % len(motion_traj_paths) for i in range(self.num_envs)]
-        self.ref_motion_lib = ReferenceMotionManager(num_envs=self.num_envs, device=self.device, velocity=self.cfg.velocity, reset_from_start = True, env_to_file_map=env_to_file_map)
+        self.ref_motion_lib = ReferenceMotionManager(num_envs=self.num_envs, device=self.device, velocity=self.cfg.velocity, reset_from_start = False, env_to_file_map=env_to_file_map)
         self.max_trial_steps = self.ref_motion_lib.num_frames * torch.ones_like(self.episode_length_buf, device=self.device)
 
         torch.set_printoptions(precision=4, sci_mode=False)
@@ -295,7 +295,8 @@ class DooropeningEnv(DirectRLEnv):
             ref_door_joint_pos = self.ref_door_joint_pos,
             ref_robot_base_joint_pos = self.ref_robot_base_joint_pos,
             ref_robot_arm_joint_pos = self.ref_robot_arm_joint_pos,
-            ref_robot_finger_joint_pos = self.ref_robot_finger_joint_pos,
+            # ref_robot_finger_joint_pos = self.ref_robot_finger_joint_pos,
+            ref_robot_finger_joint_pos = self.close_finger_joints,
             ref_door_body_pos = self.ref_door_link_pos,
             ref_robot_base_vel = self.ref_robot_base_vel,
             ref_robot_palm_vel = self.ref_robot_palm_vel,
@@ -516,7 +517,7 @@ def compute_deep_mimic_rewards(
     (robot_key_body_pos_w + door_joint_pos_w)
 
     # special_env_mask = (ref_door_joint_pos[:, 1] > 0) & (ref_door_joint_pos[:, 0] < 0)
-    special_env_mask = torch.linalg.norm(ref_door_body_pos[:, 1] - ref_robot_key_body_pos[:, -1], dim=-1) < 0.15
+    special_env_mask = torch.linalg.norm(ref_door_body_pos[:, 1] - ref_robot_key_body_pos[:, -1], dim=-1) < 0.25
 
     reward = torch.where(
         special_env_mask,
