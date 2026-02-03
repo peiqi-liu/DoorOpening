@@ -95,6 +95,7 @@ def setup_doors(training_mode: bool = False):
         spawn=sim_utils.MultiAssetSpawnerCfg(
             assets_cfg=door_urdf_configs,
             random_choice=False,
+            activate_contact_sensors=True,
         ),
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.91),

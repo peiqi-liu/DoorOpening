@@ -19,6 +19,7 @@ from DoorOpening.assets.door.door_cfg import edit_door_articulation
 from DoorOpening.utils.finger_utils import joint_angle_to_tendon_utils, tendon_to_joint_angle_utils, leap_joints_to_tendon
 from .dooropening_env_cfg import DooropeningEnvCfg
 from DoorOpening.assets.door.door_cfg import motion_traj_paths
+from isaaclab.sensors import ContactSensor
 
 import pickle as pkl
 import math
@@ -136,6 +137,9 @@ class DooropeningEnv(DirectRLEnv):
         # add articulation to scene
         self.scene.articulations["robot"] = self.robot
         self.scene.articulations["door"] = self.door
+        self.scene.sensors["contact_forces_door1"] = ContactSensor(self.cfg.contact_forces_door1)
+        self.scene.sensors["contact_forces_door2"] = ContactSensor(self.cfg.contact_forces_door2)
+        self.scene.sensors["contact_forces_robot_palm_center"] = ContactSensor(self.cfg.contact_forces_robot_palm_center)
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)    
@@ -160,6 +164,9 @@ class DooropeningEnv(DirectRLEnv):
         # Optional: use tendon actions to control the finger joints
         # tendon_actions = leap_joints_to_tendon(targets[..., self.num_base_joints + self.num_arm_joints:], self.finger_dof_names_to_id, device=self.device)
         # targets[..., self.num_base_joints + self.num_arm_joints:] = tendon_to_joint_angle_utils(self.robot, tendon_actions)[..., self._robot_finger_dof_idx]
+        self.scene.sensors["contact_forces_door1"].update(self.cfg.sim_dt, force_recompute=True)
+        self.scene.sensors["contact_forces_door2"].update(self.cfg.sim_dt, force_recompute=True)
+        self.scene.sensors["contact_forces_robot_palm_center"].update(self.cfg.sim_dt, force_recompute=True)
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
 
     def _apply_action(self):
@@ -193,6 +200,13 @@ class DooropeningEnv(DirectRLEnv):
 
         door_joint_err = self.door_joint_pos[:, self._door_joint_idx] - (self.ref_door_joint_pos[:, self._door_joint_idx]).to(self.door_joint_pos)
 
+        contact_forces_door1 = self.scene.sensors["contact_forces_door1"].data.net_forces_w
+        contact_forces_door2 = self.scene.sensors["contact_forces_door2"].data.net_forces_w
+        contact_forces_robot_palm_center = self.scene.sensors["contact_forces_robot_palm_center"].data.net_forces_w
+        contact_forces_door1 = contact_forces_door1.reshape(self.num_envs, 1, -1)
+        contact_forces_door2 = contact_forces_door2.reshape(self.num_envs, 1, -1)
+        contact_forces_robot_palm_center = contact_forces_robot_palm_center.reshape(self.num_envs, 1, -1)
+
         obs = torch.cat(
             (
                 self.joint_pos[:, self._robot_dof_idx].unsqueeze(dim = 1),
@@ -204,6 +218,9 @@ class DooropeningEnv(DirectRLEnv):
                 self.door_joint_pos[:, self._door_joint_idx].unsqueeze(dim = 1),
                 # self.door_joint_vel[:, self._door_joint_idx].unsqueeze(dim = 1),
                 door_joint_err.unsqueeze(dim = 1),
+                contact_forces_door1,
+                contact_forces_door2,
+                contact_forces_robot_palm_center,
             ),
             dim=-1,
         )
@@ -370,14 +387,6 @@ class DooropeningEnv(DirectRLEnv):
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
-        # Optional: change static friction and dynamic friction of the robot
-        # if not hasattr(self, "_initialized_materials"):
-        #     props = self.robot.root_physx_view.get_material_properties().to(self.device)
-        #     print("material properties: ", props)
-        #     props[..., 0] = 3.0
-        #     props[..., 1] = 2.5
-        #     self.robot.root_physx_view.set_material_properties(props.cpu(), torch.arange(self.num_envs, device="cpu"))
-        #     self._initialized_materials = True
 
         if not hasattr(self, "_initialized_materials"):
             props = self.robot.root_physx_view.get_material_properties().to(self.device)

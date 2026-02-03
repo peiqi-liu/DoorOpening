@@ -16,6 +16,7 @@ from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMater
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.envs.common import ViewerCfg
 import torch
+from isaaclab.sensors import ContactSensorCfg
 
 @configclass
 class DooropeningEnvCfg(DirectRLEnvCfg):
@@ -96,6 +97,32 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         'finger_joint_15',
     ]
 
+    contact_forces_door1 = ContactSensorCfg(
+        prim_path="/World/envs/env_.*/Door/link_1",
+        update_period=0.0,
+        history_length=6,
+        debug_vis=True,
+        filter_prim_paths_expr=["/World/envs/env_.*/Robot", "/World/envs/env_.*/Door/link_2"],
+    )
+
+    contact_forces_door2 = ContactSensorCfg(
+        prim_path="/World/envs/env_.*/Door/link_2",
+        update_period=0.0,
+        history_length=6,
+        debug_vis=True,
+        filter_prim_paths_expr=["/World/envs/env_.*/Robot"],
+    )
+
+    contact_forces_robot_palm_center = ContactSensorCfg(
+        prim_path="/World/envs/env_.*/Robot/palm_center",
+        update_period=0.0,
+        history_length=6,
+        debug_vis=True,
+        filter_prim_paths_expr=["/World/envs/env_.*/Door"],
+    )
+
+    contact_sensor_names = ["contact_forces_door1", "contact_forces_door2", "contact_forces_robot_palm_center"]
+
     close_finger_joints = CLOSE_FINGER_JOINT_VALUES
 
     open_finger_joints = OPEN_FINGER_JOINT_VALUES
@@ -126,7 +153,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     actuated_joints_num = len(arm_joints) + len(base_joints) + len(finger_joints)
     action_space = actuated_joints_num * 1
     # action_space = len(arm_joints) + len(base_joints) + 4
-    observation_space = actuated_joints_num * 2 + len(door_body_names) * 3 + len(robot_key_bodies) * 3 * 2 + len(door_joint_names) + len(door_joint_names)
+    observation_space = actuated_joints_num * 2 + len(door_body_names) * 3 + len(robot_key_bodies) * 3 * 2 + len(door_joint_names) + len(door_joint_names) + len(contact_sensor_names) * 3
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=False)
