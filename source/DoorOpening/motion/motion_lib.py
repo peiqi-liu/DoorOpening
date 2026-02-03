@@ -118,7 +118,12 @@ class ReferenceMotionManager:
             robot_palm_vel_traj = torch.stack(robot_palm_vel_traj, dim = 0)
         if isinstance(key_indices, list):
             key_indices = torch.tensor(key_indices)
-            key_indices = key_indices[[0, 1, -2]]
+        # key_indices = key_indices[[0, 1, -2]]
+        startable_indices = torch.zeros(3).to(key_indices)
+        startable_indices[0] = key_indices[0]
+        startable_indices[1] = key_indices[1] * 0.7 + key_indices[0] * 0.3
+        startable_indices[2] = key_indices[-2] * 0.9 + key_indices[-1] * 0.1
+        key_indices = startable_indices
 
         robot_joint_pos_traj = robot_joint_pos_traj.to(self.device).squeeze()
         door_traj = door_traj.to(self.device).squeeze()

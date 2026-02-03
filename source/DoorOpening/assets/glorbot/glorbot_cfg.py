@@ -103,6 +103,44 @@ FINGER_JOINT_NAMES = [
 
 FULL_JOINT_NAMES = BASE_JOINT_NAMES + FRANKA_JOINT_NAMES + FINGER_JOINT_NAMES
 
+CLOSE_FINGER_JOINT_VALUES = {
+    "finger_joint_0": 0.0,
+    "finger_joint_1": torch.pi / 2,
+    "finger_joint_2": 1.8,
+    "finger_joint_3": 1.0,
+    "finger_joint_4": 0.0,
+    "finger_joint_5": torch.pi / 2,
+    "finger_joint_6": 1.8,
+    "finger_joint_7": 1.0,
+    "finger_joint_8": 0.0,
+    "finger_joint_9": torch.pi / 2,
+    "finger_joint_10": 1.8,
+    "finger_joint_11": 1.0,
+    "finger_joint_12": torch.pi / 2,
+    "finger_joint_13": 0.0,
+    "finger_joint_14": 0.5,
+    "finger_joint_15": 1.0,
+}
+
+OPEN_FINGER_JOINT_VALUES = {
+    "finger_joint_0": 0.0,
+    "finger_joint_1": 0.0,
+    "finger_joint_2": 0.0,
+    "finger_joint_3": 0.0,
+    "finger_joint_4": 0.0,
+    "finger_joint_5": 0.0,
+    "finger_joint_6": 0.0,
+    "finger_joint_7": 0.0,
+    "finger_joint_8": 0.0,
+    "finger_joint_9": 0.0,
+    "finger_joint_10": 0.0,
+    "finger_joint_11": 0.0,
+    "finger_joint_12": torch.pi / 2,
+    "finger_joint_13": 0.0,
+    "finger_joint_14": 0.0,
+    "finger_joint_15": 0.0,
+}
+
 GLORBOT_CONFIG = ArticulationCfg(
     spawn=sim_utils.UrdfFileCfg(
         fix_base=True,
