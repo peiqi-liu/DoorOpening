@@ -26,7 +26,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # - spaces definition
     state_space = 0
 
-    viewer: ViewerCfg = ViewerCfg(eye=(1.5, 1.5, 1.0), lookat=(0.0, 0.0, 0.7), origin_type="env")
+    viewer: ViewerCfg = ViewerCfg(eye=(1.5, -2.0, 1.0), lookat=(0.4, 0.0, 0.7), origin_type="env")
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
@@ -141,6 +141,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_key_bodies = ["tidybot2_base_link", "panda_link2", "panda_link4", "panda_link6", "palm_center"]
     robot_reset_key_bodies = ["tidybot2_base_link", "palm_center"]
 
+    robot_palm_link_name = "palm_center"
+    robot_base_body_link_name = "tidybot2_base_link"
+
     # robot(s)
     robot_cfg: ArticulationCfg = GLORBOT_CONFIG.replace(
         prim_path="/World/envs/env_.*/Robot",
@@ -172,9 +175,11 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_base_joint_pos_w = 3.0
     robot_arm_joint_pos_w = 5.0
     robot_finger_joint_pos_w = 1.0
-    robot_base_joint_vel_w = 0.5
-    robot_arm_joint_vel_w = 1.0
-    robot_finger_joint_vel_w = 0.5
+    # robot_base_joint_vel_w = 0.5
+    # robot_arm_joint_vel_w = 1.0
+    # robot_finger_joint_vel_w = 0.5
+    robot_base_vel_w = 1.0
+    robot_palm_vel_w = 1.5
     door_joint_pos_w = 5.0
 
     robot_body_quat_scale = 1.0
@@ -182,22 +187,24 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_base_joint_pos_scale = 0.5
     robot_arm_joint_pos_scale = 0.2
     robot_finger_joint_pos_scale = 1.0
-    robot_base_joint_vel_scale = 0.5
-    robot_arm_joint_vel_scale = 0.5
-    robot_finger_joint_vel_scale = 0.5
+    # robot_base_joint_vel_scale = 0.5
+    # robot_arm_joint_vel_scale = 0.5
+    # robot_finger_joint_vel_scale = 0.5
+    robot_base_vel_scale = 0.5
+    robot_palm_vel_scale = 0.5
     door_joint_pos_scale = 5.0
 
-    reset_base_pos_delta_min = 0.2
+    reset_base_pos_delta_min = 0.3
     reset_key_body_pos_delta_min = 0.5
     reset_key_body_quat_delta_min = 1.0
     reset_base_pos_delta_max = 0.8
     reset_key_body_pos_delta_max = 1.0
     reset_key_body_quat_delta_max = 3.2
     reset_door_joint_pos_delta_min = 0.4
-    reset_door_joint_pos_delta_max = 0.8
+    reset_door_joint_pos_delta_max = 1.2
     # We are slowly increasing our tolerance on base position drift and slowly only resettting the env from the first key frame
     # This variable is used to indicate when we stop increasing the tolerance and reset the env from the first key frame for the greatest probability
-    reset_progress_total = 7.5e5
+    reset_progress_total = 5e5
 
     velocity = 1.0
 
