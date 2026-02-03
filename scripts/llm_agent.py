@@ -210,6 +210,7 @@ def collocate_and_playback(scene, sim, robot, door, key_joint_angles, length=100
 
     t = np.linspace(0, 1, length)
     traj = torch.tensor(cs(t))
+    traj_d = torch.tensor(cs(t, 1))
 
     key_indices = np.searchsorted(t, t_key)
     key_indices = np.clip(key_indices, 0, len(t) - 1)
@@ -218,17 +219,24 @@ def collocate_and_playback(scene, sim, robot, door, key_joint_angles, length=100
     traj_quat = traj[:, 2 * 3:-2]
     traj = traj[:, :2 * 3]
 
-    playback_and_save_traj(scene, sim, robot, door, door_traj, traj, traj_quat, key_indices)
+    playback_and_save_traj(scene, sim, robot, door, door_traj, traj, traj_quat, traj_d, key_indices)
 
 
-def playback_and_save_traj(scene, sim, robot, door, door_traj, traj, traj_quat, key_indices):
+def playback_and_save_traj(scene, sim, robot, door, door_traj, traj, traj_quat, traj_d, key_indices):
     robot_body_pos_traj = []
     robot_body_quat_traj = []
     door_pos_traj = []
     robot_joint_angle_traj = []
+    robot_base_vel_traj = []
+    robot_palm_vel_traj = []
+
     robot.write_joint_position_to_sim(robot.data.default_joint_pos)
     step_sim(scene, sim)
-    for door_point, robot_points, robot_quat in zip(door_traj, traj, traj_quat):
+    for door_point, robot_points, robot_quat, vel in zip(door_traj, traj, traj_quat, traj_d):
+        vel = vel[:2*3]
+        vel = vel.reshape(2, -1)
+        base_vel, palm_vel = vel[0], vel[1]
+
         robot_points = robot_points.reshape(2, -1)
         base_pose, palm_pose = robot_points[0], robot_points[1]
         
@@ -247,11 +255,18 @@ def playback_and_save_traj(scene, sim, robot, door, door_traj, traj, traj_quat, 
         robot_body_quat_traj.append(robot.data.body_quat_w.squeeze().cpu().clone())
         door_pos_traj.append(door.data.body_pos_w.squeeze().cpu().clone())
         robot_joint_angle_traj.append(robot.data.joint_pos.squeeze().cpu().clone())
+
+        robot_base_vel_traj.append(base_vel.squeeze().cpu().clone())
+        robot_palm_vel_traj.append(palm_vel.squeeze().cpu().clone())
     
     robot_body_pos_traj = torch.stack(robot_body_pos_traj, dim = 0)
     robot_body_quat_traj = torch.stack(robot_body_quat_traj, dim = 0)
     door_pos_traj = torch.stack(door_pos_traj, dim = 0)
     robot_joint_angle_traj = torch.stack(robot_joint_angle_traj, dim = 0)
+    robot_base_vel_traj = torch.stack(robot_base_vel_traj, dim = 0)
+    robot_palm_vel_traj = torch.stack(robot_palm_vel_traj, dim = 0)
+    # print("robot_base_vel_traj: ", robot_base_vel_traj.shape)
+    # print("robot_palm_vel_traj: ", robot_palm_vel_traj.shape)
 
     data = {
         "door_traj": door_traj, 
@@ -259,6 +274,8 @@ def playback_and_save_traj(scene, sim, robot, door, door_traj, traj, traj_quat, 
         "robot_body_quat_traj": robot_body_quat_traj,
         "door_pos_traj": door_pos_traj,
         "robot_joint_pos_traj": robot_joint_angle_traj,
+        "robot_base_vel_traj": robot_base_vel_traj,
+        "robot_palm_vel_traj": robot_palm_vel_traj,
         "key_indices": torch.from_numpy(key_indices)
     }
 
