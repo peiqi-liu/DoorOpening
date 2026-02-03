@@ -12,7 +12,7 @@ Defines the Glorbot robot configuration for simulation with Isaac Sim.
 """
 
 import os
-from tkinter import N
+import torch
 
 import isaaclab.sim as sim_utils
 from isaaclab.actuators.actuator_cfg import ImplicitActuatorCfg

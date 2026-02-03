@@ -73,7 +73,7 @@ def state_machine(robot, door, scene, sim, buffer):
     #     write_joint_angle_to_robot(robot, q)
     #     step_sim(scene, sim)
 
-    for i in torch.arange(0, 1.51, 0.1):
+    for i in torch.arange(0, 1.41, 0.2):
         # base_target_pos, base_target_rot = get_robot_link_pose(robot, "base")
         # base_target_pos[:, 0] += 0.7
         # base_target_pose = torch.cat([base_target_pos, base_target_rot], dim=-1)
@@ -107,15 +107,24 @@ def state_machine(robot, door, scene, sim, buffer):
             step_sim(scene, sim)
         write_joint_angle_to_door(door, target_board_angle, target_hinge_angle)
         step_sim(scene, sim)
+        record_joint_angles(robot, door, buffer)
 
-    record_joint_angles(robot, door, buffer)
+    # record_joint_angles(robot, door, buffer)
 
     print("Step 5 & 6: Move the arm backward and the base move forward")
     num_steps = 40
     handle_pos = get_hinge_pos(door)
     curr_base_pos, curr_base_rot = get_robot_link_pose(robot, "base")
     base_target_pos = curr_base_pos.clone()
-    base_target_pos[:, 0] -= 0.8
+    base_target_pos[:, 0] -= 0.6
+    for _ in range(num_steps):
+        q = solve_ik(robot, palm_pose=palm_target_pose, base_pose=base_target_pose)
+        write_joint_angle_to_robot(robot, q)
+        write_joint_angle_to_door(door, target_board_angle, target_hinge_angle)
+        step_sim(scene, sim)
+    record_joint_angles(robot, door, buffer)
+
+    base_target_pos[:, 0] -= 0.4
     # retract_palm_pos = handle_pos.clone()
     # retract_palm_pos[:, 0] += 0.2
     # retract_palm_pos[:, 1] += 0.2

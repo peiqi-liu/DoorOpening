@@ -8,7 +8,7 @@ class ReferenceMotionManager:
         motion_file: Optional[str] = None,
         num_envs: int = 1,
         device: torch.device = torch.device("cpu"),
-        velocity=0.6,
+        velocity=1.0,
         reset_from_start=False,
         env_to_file_map: Optional[list] = None,
     ):
@@ -119,10 +119,10 @@ class ReferenceMotionManager:
         if isinstance(key_indices, list):
             key_indices = torch.tensor(key_indices)
         # key_indices = key_indices[[0, 1, -2]]
-        startable_indices = torch.zeros(3).to(key_indices)
+        startable_indices = torch.zeros(2).to(key_indices)
         startable_indices[0] = key_indices[0]
         startable_indices[1] = key_indices[1] * 0.7 + key_indices[0] * 0.3
-        startable_indices[2] = key_indices[-2] * 0.9 + key_indices[-1] * 0.1
+        # startable_indices[2] = key_indices[-2] * 0.9 + key_indices[-1] * 0.1
         key_indices = startable_indices
 
         robot_joint_pos_traj = robot_joint_pos_traj.to(self.device).squeeze()

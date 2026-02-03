@@ -9,7 +9,8 @@ for door in $(seq 0 20); do
 
     python scripts/llm_agent.py \
         --enable_cameras \
-        --door_number "$door"
+        --door_number "$door" \
+        --headless
 done
 
-python scripts/rl_games/train.py --task Dooropening --num_envs 1024 agent.params.config.minibatch_size=4096 --max_iterations 20000 --video --wandb-project-name dooropeningv11 --wandb-entity peiqiliu --seed 1 --headless --track
+python scripts/rl_games/train.py --task Dooropening --num_envs 1024 agent.params.config.minibatch_size=4096 --max_iterations 20000 --video --wandb-project-name dooropeningv11 --wandb-entity peiqiliu --seed 42 --headless --track

@@ -57,7 +57,7 @@ from isaaclab.actuators import ImplicitActuatorCfg
 import omni.replicator.core as rep
 from isaaclab.utils import convert_dict_to_backend
 
-from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, CAMERA_JOINT_DEFAULT_VALUES
+from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, DEFAULT_JOINT_POS   
 from DoorOpening.assets.door.door_cfg import DOOR_CONFIG, DOOR_CONFIGS
 
 from isaaclab.utils.math import quat_from_euler_xyz
@@ -94,7 +94,7 @@ class SensorsSceneCfg(InteractiveSceneCfg):
     robot: ArticulationCfg = GLORBOT_CONFIG.replace(
         prim_path="{ENV_REGEX_NS}/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
-            joint_pos=CAMERA_JOINT_DEFAULT_VALUES,
+            joint_pos=DEFAULT_JOINT_POS,
             pos=(1.5, 0.0, 0.0),
             rot=(0.0, 0.0, 0.0, 1.0)
         ),
