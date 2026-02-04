@@ -119,10 +119,12 @@ class ReferenceMotionManager:
         if isinstance(key_indices, list):
             key_indices = torch.tensor(key_indices)
         # key_indices = key_indices[[0, 1, -2]]
-        startable_indices = torch.zeros(2).to(key_indices)
+        startable_indices = torch.zeros(5).to(key_indices)
         startable_indices[0] = key_indices[0]
-        startable_indices[1] = key_indices[1] * 0.7 + key_indices[0] * 0.3
-        # startable_indices[2] = key_indices[-2] * 0.9 + key_indices[-1] * 0.1
+        startable_indices[1] = key_indices[1]
+        startable_indices[2] = key_indices[2]
+        startable_indices[3] = key_indices[3]
+        startable_indices[4] = key_indices[-2]
         key_indices = startable_indices
 
         robot_joint_pos_traj = robot_joint_pos_traj.to(self.device).squeeze()

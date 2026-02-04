@@ -100,7 +100,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             scene.reset()
             # print("joint_pos: ", scene["door"].data.joint_pos)
 
-        door_target_pos = scene["door"].data.joint_pos_limits[..., 1]
+        door_target_pos = (scene["door"].data.joint_pos_limits[..., 1] - scene["door"].data.soft_joint_pos_limits[..., 0]) * ((count % 500) / 500) + scene["door"].data.soft_joint_pos_limits[..., 0]
         # scene["door"].set_joint_position_target(door_target_pos)
         scene["door"].write_joint_position_to_sim(door_target_pos)
         # if count % 100 == 0:

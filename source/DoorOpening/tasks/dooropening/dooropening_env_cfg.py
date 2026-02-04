@@ -131,7 +131,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     door_joint_names = ["joint_1", "joint_2"]
 
-    robot_key_bodies = ["tidybot2_base_link", "panda_link2", "panda_link4", "panda_link6", "palm_center"]
+    robot_key_bodies = ["tidybot2_base_link", "panda_link2", "panda_link4", "palm_center"]
     robot_reset_key_bodies = ["tidybot2_base_link", "palm_center"]
 
     robot_palm_link_name = "palm_center"
@@ -171,8 +171,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # robot_base_joint_vel_w = 0.5
     # robot_arm_joint_vel_w = 1.0
     # robot_finger_joint_vel_w = 0.5
-    robot_base_vel_w = 1.0
-    robot_palm_vel_w = 1.5
+    robot_base_vel_w = 0.5
+    robot_palm_vel_w = 1.0
     door_joint_pos_w = 5.0
 
     robot_body_quat_scale = 1.0

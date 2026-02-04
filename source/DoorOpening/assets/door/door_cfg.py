@@ -110,8 +110,8 @@ def setup_doors(training_mode: bool = False):
             ),
             "joint_2": ImplicitActuatorCfg(
                 joint_names_expr=["joint_2"],
-                stiffness=2.5,
-                damping=1,
+                stiffness=100,
+                damping=10,
             ),
         },
     )

@@ -132,7 +132,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
 
 
     targets = scene["robot"].data.default_joint_pos.clone()
-    targets[..., :2] += 0.5
+    # targets[..., :2] += 0.5
 
     # Simulate physics
     while simulation_app.is_running():

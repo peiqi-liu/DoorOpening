@@ -232,7 +232,7 @@ def playback_and_save_traj(scene, sim, robot, door, door_traj, traj, traj_quat, 
 
     robot.write_joint_position_to_sim(robot.data.default_joint_pos)
     step_sim(scene, sim)
-    for door_point, robot_points, robot_quat, vel in zip(door_traj, traj, traj_quat, traj_d):
+    for i, (door_point, robot_points, robot_quat, vel) in enumerate(zip(door_traj, traj, traj_quat, traj_d)):
         vel = vel[:2*3]
         vel = vel.reshape(2, -1)
         base_vel, palm_vel = vel[0], vel[1]
@@ -249,7 +249,6 @@ def playback_and_save_traj(scene, sim, robot, door, door_traj, traj, traj_quat, 
         door.write_joint_position_to_sim(door_point)
         joint_pos_des = solve_ik(robot, base_pose=base_pose, palm_pose=palm_pose)
         write_joint_angle_to_robot(robot, joint_pos_des)
-
         step_sim(scene, sim)
         robot_body_pos_traj.append(robot.data.body_pos_w.squeeze().cpu().clone())
         robot_body_quat_traj.append(robot.data.body_quat_w.squeeze().cpu().clone())
@@ -265,8 +264,6 @@ def playback_and_save_traj(scene, sim, robot, door, door_traj, traj, traj_quat, 
     robot_joint_angle_traj = torch.stack(robot_joint_angle_traj, dim = 0)
     robot_base_vel_traj = torch.stack(robot_base_vel_traj, dim = 0)
     robot_palm_vel_traj = torch.stack(robot_palm_vel_traj, dim = 0)
-    # print("robot_base_vel_traj: ", robot_base_vel_traj.shape)
-    # print("robot_palm_vel_traj: ", robot_palm_vel_traj.shape)
 
     data = {
         "door_traj": door_traj, 
