@@ -18,6 +18,26 @@ import isaaclab.sim as sim_utils
 from isaaclab.actuators.actuator_cfg import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg, Articulation
 
+def create_initial_state():
+    return ArticulationCfg.InitialStateCfg(
+        pos=(0.0, 0.0, 1.1),
+        rot=(0, 0, 0, 1)
+    )
+
+def create_actuators():
+    return {
+        "joint_1": ImplicitActuatorCfg(
+            joint_names_expr=["joint_1"],
+            stiffness=5,
+            damping=1,
+        ),
+        "joint_2": ImplicitActuatorCfg(
+            joint_names_expr=["joint_2"],
+            stiffness=100,
+            damping=10,
+        ),
+    }
+
 def create_urdf_door_cfg(asset_path: str, training_mode: bool = False):
     return sim_utils.UrdfFileCfg(
             fix_base=True,
@@ -48,23 +68,8 @@ def create_door_cfg(asset_path: str, training_mode: bool = False) -> Articulatio
         #     scale = (1.0, 1.2, 0.95),
         #     activate_contact_sensors=True,
         # ),
-        init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 1.02),
-            rot=(0, 0, 0, 1)
-            # rot=(0, -0.7071, 0, 0.7071)
-        ),
-        actuators={
-            "joint_1": ImplicitActuatorCfg(
-                joint_names_expr=["joint_1"],
-                stiffness=5,
-                damping=1,
-            ),
-            "joint_2": ImplicitActuatorCfg(
-                joint_names_expr=["joint_2"],
-                stiffness=2.5,
-                damping=1,
-            ),
-        },
+        init_state=create_initial_state(),
+        actuators=create_actuators(),
     )
 
 
@@ -97,23 +102,8 @@ def setup_doors(training_mode: bool = False):
             random_choice=False,
             activate_contact_sensors=True,
         ),
-        init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 0.91),
-            rot=(0, 0, 0, 1)
-            # rot=(0, -0.7071, 0, 0.7071)
-        ),
-        actuators={
-            "joint_1": ImplicitActuatorCfg(
-                joint_names_expr=["joint_1"],
-                stiffness=5,
-                damping=1,
-            ),
-            "joint_2": ImplicitActuatorCfg(
-                joint_names_expr=["joint_2"],
-                stiffness=100,
-                damping=10,
-            ),
-        },
+        init_state=create_initial_state(),
+        actuators=create_actuators(),
     )
 
 ALL_DOOR_CONFIGS = setup_doors()

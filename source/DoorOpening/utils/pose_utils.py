@@ -1,5 +1,26 @@
 import torch
 from isaaclab.utils.math import euler_xyz_from_quat
+from isaaclab.utils.math import (
+    quat_mul,
+    quat_conjugate,
+    quat_apply_inverse,
+)
+
+def world_to_base_frame(base_pos, base_quat, palm_pos_w, palm_quat_w):
+    """
+    Convert palm pose from world frame to base frame using IsaacLab math utils.
+
+    All quaternions are [w, x, y, z].
+    Supports batched tensors.
+    """
+
+    # Position: p_b = R_wb^T * (p_w - t_wb)
+    palm_pos_b = quat_apply_inverse(base_quat, palm_pos_w - base_pos)
+
+    # Orientation: q_b = q_wb^{-1} * q_wp
+    palm_quat_b = quat_mul(quat_conjugate(base_quat), palm_quat_w)
+
+    return palm_pos_b, palm_quat_b
 
 def world_to_local(points, pos, quat):
     """

@@ -131,7 +131,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     door_joint_names = ["joint_1", "joint_2"]
 
-    robot_key_bodies = ["tidybot2_base_link", "panda_link2", "panda_link4", "panda_link6", "panda_link7", "palm_lower", "palm_center"]
+    robot_key_bodies = ["tidybot2_base_link", "panda_link2", "panda_link4", "palm_center"]
     robot_reset_key_bodies = ["tidybot2_base_link", "palm_center"]
 
     robot_palm_link_name = "palm_center"
@@ -153,8 +153,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     actuated_joints_num = len(arm_joints) + len(base_joints) + len(finger_joints)
     action_space = actuated_joints_num * 1
     # action_space = len(arm_joints) + len(base_joints) + 4
-    observation_space = actuated_joints_num * 2 + len(door_body_names) * 3 + len(robot_key_bodies) * 3 * 2 + len(door_joint_names) + len(door_joint_names) + len(contact_sensor_names) * 3
-
+    # observation_space = actuated_joints_num * 2 + len(door_body_names) * 3 + len(robot_key_bodies) * 3 * 2 + len(door_joint_names) + len(door_joint_names) + len(contact_sensor_names) * 3
+    observation_space = actuated_joints_num * 2 + len(door_body_names) * 3 + len(robot_key_bodies) * 3 * 2 + len(door_joint_names) + len(door_joint_names)
+    
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=False)
 

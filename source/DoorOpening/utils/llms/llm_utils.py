@@ -4,6 +4,18 @@ from DoorOpening.assets.glorbot.glorbot_cfg import FRANKA_JOINT_NAMES, BASE_JOIN
 from isaaclab.utils.math import quat_apply, euler_xyz_from_quat, quat_mul
 import torch
 from DoorOpening.utils.pose_utils import compute_base_joint, wrap_to_pi
+import pinocchio as pin
+import numpy as np
+from DoorOpening.assets.glorbot.glorbot_cfg import OPEN_FINGER_JOINT_VALUES, CLOSE_FINGER_JOINT_VALUES
+
+class PinRobot:
+    def __init__(self, urdf_path, mesh_dir=None):
+        if mesh_dir is None:
+            # Usually meshes are relative to URDF dir
+            mesh_dir = urdf_path.rsplit("/", 1)[0]
+
+        self.model = pin.buildModelFromUrdf(urdf_path)
+        self.data = self.model.createData()
 
 def get_board_frame_joint_angle(door):
     board_frame_joint_idx, _ = door.find_joints("joint_1")
@@ -15,11 +27,12 @@ def get_frame_hinge_joint_angle(door):
     frame_hinge_joint_idx = frame_hinge_joint_idx[0]
     return door.data.joint_pos[:, frame_hinge_joint_idx].cpu().clone()
 
-def get_board_pos(door):
+def get_board_pos(door, joint_angles=None):
     # board_body_idx, _ = door.find_bodies("link_1")
     # board_body_idx = board_body_idx[0]
     # return door.data.body_pos_w[:, board_body_idx].cpu().clone()
-    joint_angles = door.data.joint_pos.clone()
+    if joint_angles is None:
+        joint_angles = door.data.joint_pos.clone()
     pointcloud = sample_pointcloud_from_link_name(door.cfg.spawn.asset_path, joint_angles, "link_1", device = "cpu")
     door_pointcloud = quat_apply(door.data.body_quat_w[:, 0].cpu(), pointcloud) + door.data.body_pos_w[:, 0].cpu()
     door_pointcloud = door_pointcloud.squeeze()
@@ -28,18 +41,18 @@ def get_board_pos(door):
         board_pos = board_pos.unsqueeze(0)
     return board_pos.cpu()
 
-def get_hinge_pos(door):
+def get_hinge_pos(door, joint_angles=None):
     # hinge_body_idx, _ = door.find_bodies("link_2")
     # hinge_body_idx = hinge_body_idx[0]
     # return door.data.body_pos_w[:, hinge_body_idx].cpu().clone()
-    joint_angles = door.data.joint_pos.clone()
+    if joint_angles is None:
+        joint_angles = door.data.joint_pos.clone()
     pointcloud = sample_pointcloud_from_link_name(door.cfg.spawn.asset_path, joint_angles, "link_2", device = "cpu")
     door_pointcloud = quat_apply(door.data.body_quat_w[:, 0].cpu(), pointcloud) + door.data.body_pos_w[:, 0].cpu()
     door_pointcloud = door_pointcloud.squeeze()
     hinge_pos = door_pointcloud.median(dim=0).values
     if hinge_pos.ndim == 1:
         hinge_pos = hinge_pos.unsqueeze(0)
-    print("hinge pos: ", hinge_pos)
     return hinge_pos.cpu()
 
 def sample_pointcloud(door, joint_angles):
@@ -71,7 +84,6 @@ def solve_ik(robot, palm_pose=None, base_pose=None):
     if base_pose is not None:
         base_joint_pos = compute_base_joint(robot, base_pose[:, :3]).to(robot.data.joint_pos.device)
     if base_pose is not None and torch.linalg.norm(joint_pos_des[:, :3] - base_joint_pos) >= 0.05:
-    # if base_pose is not None:
         joint_pos_des[:, :3] = base_joint_pos
         joint_pos_des[:, 3:] = wrap_to_pi(joint_pos_des[:, 3:])
         return joint_pos_des
@@ -84,25 +96,18 @@ def solve_ik(robot, palm_pose=None, base_pose=None):
         return joint_pos_des
     return joint_pos_des
 
+def open_hand_by(robot, value):
+    robot_finger_joint_ids, joint_names = robot.find_joints(OPEN_FINGER_JOINT_VALUES.keys())
+    joint_values = torch.zeros_like(robot.data.joint_pos[..., robot_finger_joint_ids])
+    for id in range(len(robot_finger_joint_ids)):
+        joint_values[..., id] = (OPEN_FINGER_JOINT_VALUES[joint_names[id]] - CLOSE_FINGER_JOINT_VALUES[joint_names[id]]) * value
+    cur_finger_joints = robot.data.joint_pos.clone()[:, robot_finger_joint_ids]
+    cur_finger_joints += joint_values.to(robot.data.joint_pos)
+    cur_finger_joints = cur_finger_joints.clamp(robot.data.joint_pos_limits[..., 0][:, robot_finger_joint_ids], robot.data.joint_pos_limits[..., 1][:, robot_finger_joint_ids])
+    robot.set_joint_position_target(cur_finger_joints.to(robot.data.joint_pos), joint_ids=robot_finger_joint_ids)
+
 def open_hand(robot):
-    open_joint_values = {
-        "finger_joint_0": 0.0,
-        "finger_joint_1": 0.0,
-        "finger_joint_2": 0.0,
-        "finger_joint_3": 0.0,
-        "finger_joint_4": 0.0,
-        "finger_joint_5": 0.0,
-        "finger_joint_6": 0.0,
-        "finger_joint_7": 0.0,
-        "finger_joint_8": 0.0,
-        "finger_joint_9": 0.0,
-        "finger_joint_10": 0.0,
-        "finger_joint_11": 0.0,
-        "finger_joint_12": torch.pi / 2,
-        "finger_joint_13": 0.0,
-        "finger_joint_14": 0.0,
-        "finger_joint_15": 0.0,
-    }
+    open_joint_values = OPEN_FINGER_JOINT_VALUES
     robot_finger_joint_ids, joint_names = robot.find_joints(open_joint_values.keys())
     joint_values = torch.zeros_like(robot.data.joint_pos[..., robot_finger_joint_ids])
     for id in range(len(robot_finger_joint_ids)):
@@ -110,24 +115,7 @@ def open_hand(robot):
     robot.write_joint_position_to_sim(joint_values.to(robot.data.joint_pos.device), joint_ids=robot_finger_joint_ids)
 
 def close_hand(robot):
-    close_joint_values = {
-        "finger_joint_0": 0.0,
-        "finger_joint_1": torch.pi / 2,
-        "finger_joint_2": 1.8,
-        "finger_joint_3": 1.0,
-        "finger_joint_4": 0.0,
-        "finger_joint_5": torch.pi / 2,
-        "finger_joint_6": 1.8,
-        "finger_joint_7": 1.0,
-        "finger_joint_8": 0.0,
-        "finger_joint_9": torch.pi / 2,
-        "finger_joint_10": 1.8,
-        "finger_joint_11": 1.0,
-        "finger_joint_12": torch.pi / 2,
-        "finger_joint_13": 0.0,
-        "finger_joint_14": 0.5,
-        "finger_joint_15": 1.0,
-    }
+    close_joint_values = CLOSE_FINGER_JOINT_VALUES
     robot_finger_joint_ids, joint_names = robot.find_joints(close_joint_values.keys())
     joint_values = torch.zeros_like(robot.data.joint_pos[..., robot_finger_joint_ids])
     for id in range(len(robot_finger_joint_ids)):
@@ -182,3 +170,4 @@ def step_sim(scene, sim):
     scene.write_data_to_sim()
     sim.step()
     scene.update(sim.get_physics_dt())
+    # input("Press Enter to continue...")
