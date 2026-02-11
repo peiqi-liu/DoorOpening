@@ -17,11 +17,12 @@ import torch
 import isaaclab.sim as sim_utils
 from isaaclab.actuators.actuator_cfg import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg, Articulation
+from DoorOpening.constants.env_constants import DOOR_INITIAL_POS, DOOR_INITIAL_ROT
 
 def create_initial_state():
     return ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 1.1),
-        rot=(0, 0, 0, 1)
+        pos=DOOR_INITIAL_POS,
+        rot=DOOR_INITIAL_ROT
     )
 
 def create_actuators():
@@ -53,7 +54,7 @@ def create_urdf_door_cfg(asset_path: str, training_mode: bool = False):
                 gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
             ),
             # Note: joint_drive is usually not needed for URDF; PD gains can be in actuators
-            scale = (1.0, 1.2, 1.1),
+            # scale = (1.0, 1.2, 1.1),
             activate_contact_sensors=True,
             collider_type = "convex_hull" if training_mode else "convex_decomposition",
             collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.03, rest_offset=0.0),

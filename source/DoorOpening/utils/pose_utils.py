@@ -4,6 +4,7 @@ from isaaclab.utils.math import (
     quat_mul,
     quat_conjugate,
     quat_apply_inverse,
+    quat_apply,
 )
 
 def world_to_base_frame(base_pos, base_quat, palm_pos_w, palm_quat_w):
@@ -21,6 +22,22 @@ def world_to_base_frame(base_pos, base_quat, palm_pos_w, palm_quat_w):
     palm_quat_b = quat_mul(quat_conjugate(base_quat), palm_quat_w)
 
     return palm_pos_b, palm_quat_b
+
+def base_to_world_frame(base_pos, base_quat, palm_pos_b, palm_quat_b):
+    """
+    Convert palm pose from base frame to world frame using IsaacLab math utils.
+
+    All quaternions are [w, x, y, z].
+    Supports batched tensors.
+    """
+
+    # Position: p_w = R_wb * p_b + t_wb
+    palm_pos_w = quat_apply(base_quat, palm_pos_b) + base_pos
+
+    # Orientation: q_w = q_wb * q_b
+    palm_quat_w = quat_mul(base_quat, palm_quat_b)
+
+    return palm_pos_w, palm_quat_w
 
 def world_to_local(points, pos, quat):
     """

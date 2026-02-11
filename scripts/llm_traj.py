@@ -61,8 +61,6 @@ from isaaclab.assets import ArticulationCfg
 from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, DEFAULT_JOINT_POS
 from DoorOpening.assets.door.door_cfg import DOOR_CONFIG, edit_door_articulation
 
-from DoorOpening.assets.glorbot.glorbot_cfg import FULL_JOINT_NAMES
-
 from DoorOpening.motion.slider_controller import OmniJointController
 
 from isaaclab.markers import VisualizationMarkers

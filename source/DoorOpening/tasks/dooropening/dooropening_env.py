@@ -137,9 +137,9 @@ class DooropeningEnv(DirectRLEnv):
         # add articulation to scene
         self.scene.articulations["robot"] = self.robot
         self.scene.articulations["door"] = self.door
-        # self.scene.sensors["contact_forces_door1"] = ContactSensor(self.cfg.contact_forces_door1)
-        # self.scene.sensors["contact_forces_door2"] = ContactSensor(self.cfg.contact_forces_door2)
-        # self.scene.sensors["contact_forces_robot_palm_center"] = ContactSensor(self.cfg.contact_forces_robot_palm_center)
+        self.scene.sensors["contact_forces_door1"] = ContactSensor(self.cfg.contact_forces_door1)
+        self.scene.sensors["contact_forces_door2"] = ContactSensor(self.cfg.contact_forces_door2)
+        self.scene.sensors["contact_forces_robot_palm_center"] = ContactSensor(self.cfg.contact_forces_robot_palm_center)
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)    
@@ -165,9 +165,9 @@ class DooropeningEnv(DirectRLEnv):
         # tendon_actions = leap_joints_to_tendon(targets[..., self.num_base_joints + self.num_arm_joints:], self.finger_dof_names_to_id, device=self.device)
         # targets[..., self.num_base_joints + self.num_arm_joints:] = tendon_to_joint_angle_utils(self.robot, tendon_actions)[..., self._robot_finger_dof_idx]
 
-        # self.scene.sensors["contact_forces_door1"].update(self.cfg.sim_dt, force_recompute=True)
-        # self.scene.sensors["contact_forces_door2"].update(self.cfg.sim_dt, force_recompute=True)
-        # self.scene.sensors["contact_forces_robot_palm_center"].update(self.cfg.sim_dt, force_recompute=True)
+        self.scene.sensors["contact_forces_door1"].update(self.cfg.sim_dt, force_recompute=True)
+        self.scene.sensors["contact_forces_door2"].update(self.cfg.sim_dt, force_recompute=True)
+        self.scene.sensors["contact_forces_robot_palm_center"].update(self.cfg.sim_dt, force_recompute=True)
 
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
 
@@ -291,13 +291,13 @@ class DooropeningEnv(DirectRLEnv):
         # self.extras["error/arm_joint_vel_err"] = arm_joint_vel_err.mean()
         # self.extras["error/finger_joint_vel_err"] = finger_joint_vel_err.mean()
 
-        progress = min(self.step_count / self.reset_progress_total, 1.0)
-        alpha = 0.9 - 0.7 * progress  # from 0.9 → 0.2
-        probs = torch.tensor(
-            [(1 - alpha) * (alpha ** i) for i in range(len(self.ref_motion_lib.key_indices))]
-        )
-        probs = probs / probs.sum()
-        self.extras["reset/prob_get_first_key_frame"] = probs[0]
+        # progress = min(self.step_count / self.reset_progress_total, 1.0)
+        # alpha = 0.9 - 0.7 * progress  # from 0.9 → 0.2
+        # probs = torch.tensor(
+        #     [(1 - alpha) * (alpha ** i) for i in range(len(self.ref_motion_lib.key_indices))]
+        # )
+        # probs = probs / probs.sum()
+        # self.extras["reset/prob_get_first_key_frame"] = probs[0]
 
         return compute_deep_mimic_rewards(
             robot_key_body_pos = self.robot_key_body_pos, 

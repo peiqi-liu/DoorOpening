@@ -5,7 +5,7 @@
 
 from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, CAMERA_JOINT_DEFAULT_VALUES, CLOSE_FINGER_JOINT_VALUES, OPEN_FINGER_JOINT_VALUES
 from DoorOpening.assets.door.door_cfg import DOOR_CONFIG, ALL_DOOR_CONFIGS
-
+from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
@@ -142,8 +142,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         prim_path="/World/envs/env_.*/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
             joint_pos=CAMERA_JOINT_DEFAULT_VALUES,
-            pos=(1.5, 0.0, 0.0),
-            rot=(0.0, 0.0, 0.0, 1.0)
+            pos=ROBOT_INITIAL_POS,
+            rot=ROBOT_INITIAL_ROT
         ),
     )
 

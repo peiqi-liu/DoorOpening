@@ -1075,12 +1075,11 @@ class FrankaLeapSampler:
         idx = np.random.choice(pc.shape[1], num_points, replace=False)
         return pc[:, idx, :]
 
-sampler = None
-
 def sample_pointcloud(urdf_path, joint_angles, device = "cuda", verbose = False):
-    global sampler
-    if sampler is None or sampler.urdf_path != urdf_path:
-        sampler = FrankaLeapSampler(urdf_path, device)
+    if not isinstance(joint_angles, torch.Tensor):
+        joint_angles = torch.tensor(joint_angles, dtype=torch.float32)
+    joint_angles = joint_angles.to(device)
+    sampler = FrankaLeapSampler(urdf_path, device)
     pcd = sampler.sample(joint_angles)
 
     if verbose:
@@ -1089,6 +1088,8 @@ def sample_pointcloud(urdf_path, joint_angles, device = "cuda", verbose = False)
     return pcd
 
 def sample_pointcloud_from_link_name(urdf_path, joint_angles, link_name, device = "cuda", verbose = False):
+    if not isinstance(joint_angles, torch.Tensor):
+        joint_angles = torch.tensor(joint_angles, dtype=torch.float32)
     joint_angles = joint_angles.to(device)
     sampler = FrankaLeapSampler(urdf_path, device)
     pcd = sampler.sample_link_set(joint_angles, link_name)
@@ -1098,8 +1099,8 @@ def sample_pointcloud_from_link_name(urdf_path, joint_angles, link_name, device 
     return pcd
 
 if __name__ == "__main__":
-    urdf_path = "/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/door/PartNet/8893/mobility.urdf"
-    # urdf_path = "/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/glorbot/glorbot.urdf"
+    # urdf_path = "/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/door/PartNet/8893/mobility.urdf"
+    urdf_path = "/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/glorbot/glorbot.urdf"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     sampler = FrankaLeapSampler(urdf_path, device)
     joint_angles = torch.randn(1, 32, device=device)
@@ -1107,5 +1108,5 @@ if __name__ == "__main__":
     verbose = True
     if verbose:
         from DoorOpening.utils.point_utils import tensor_to_ply
-        tensor_to_ply(pcd[0], "points.ply")
+        tensor_to_ply(pcd[0], "points.pcd")
     print(pcd.shape)
