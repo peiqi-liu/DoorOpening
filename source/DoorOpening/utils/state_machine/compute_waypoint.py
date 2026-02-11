@@ -14,6 +14,7 @@ from viser.extras import ViserUrdf
 
 from yourdfpy import URDF
 from DoorOpening.utils.state_machine.pin import PinocchioIKSolver
+import glob
 
 
 def get_robot_constants():
@@ -388,13 +389,13 @@ def play_trajectories_in_viser(
     # Playback loop
     # -------------------------
     t_idx = 0
-    pc_handle = None
 
     print("Viser running. Open the URL in your browser.")
 
-    timestamp = time.time()
+    # timestamp = time.time()
 
-    while time.time() - timestamp < 60:
+    # while time.time() - timestamp < 60:
+    while True:
         if playing:
             q_robot = robot_traj[t_idx].detach().cpu().numpy()
             q_door  = door_traj[t_idx].detach().cpu().numpy()
@@ -420,15 +421,6 @@ def play_trajectories_in_viser(
 
             viser_robot.update_cfg(q_robot)
             viser_door.update_cfg(q_door)
-
-            # Optional: overlay pointcloud (hinge, sampled door points, etc.)
-            # pc = sample_pc_fn(q_door)
-            # if pc is not None:
-            #     server.scene.add_point_cloud(
-            #         "/door_pc",
-            #         points=pc,
-            #         point_size=0.01,
-            #     )
 
             t_idx = (t_idx + 1) % T
 
@@ -533,8 +525,15 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path):
 
 if __name__ == "__main__":
     robot_urdf_path = "/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/glorbot/glorbot.urdf"
-    door_urdf_path = "/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/door/PartNetv4/99650089960001/mobility.urdf"
+    # door_urdf_path = "/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/door/PartNetv4/99650089960001/mobility.urdf"
     # door_urdf_path = "/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/door/PartNetv4/99655059960012/mobility.urdf"
 
+    root_path = "source/DoorOpening/assets/"
+    asset_base_folder = os.path.join(root_path, "door/PartNetv4")
+    asset_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/mobility.urdf"), recursive=True))
+
+    # for door_urdf_path in asset_paths:
+    door_urdf_path = asset_paths[0]
     play_and_save_traj(robot_urdf_path, door_urdf_path)
+    print("Finished processing ", door_urdf_path)
     
