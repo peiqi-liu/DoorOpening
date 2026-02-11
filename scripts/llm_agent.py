@@ -75,6 +75,7 @@ from DoorOpening.utils.llms.llm_utils import *
 from DoorOpening.utils.llms.llm_api import GeminiAgent
 from DoorOpening.utils.llms.prompt import PULL_LEVER_PROMPT
 from isaaclab.sim.utils import stage as stage_utils
+from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
 
 # llm_agent = GeminiAgent(prompt=PULL_LEVER_PROMPT, model="gemini-3-pro-preview")
 
@@ -95,8 +96,8 @@ class SensorsSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
             joint_pos=DEFAULT_JOINT_POS,
-            pos=(1.5, 0.0, 0.0),
-            rot=(0.0, 0.0, 0.0, 1.0)
+            pos=ROBOT_INITIAL_POS,
+            rot=ROBOT_INITIAL_ROT
         ),
     )
 

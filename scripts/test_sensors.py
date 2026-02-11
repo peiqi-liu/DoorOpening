@@ -67,6 +67,8 @@ from DoorOpening.assets.door.door_cfg import DOOR_CONFIG
 
 from isaaclab.utils.math import quat_from_euler_xyz
 
+from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
+
 euler_angles = torch.tensor([-np.pi / 4, 0.0, 0])  # (roll, pitch, yaw) in radians
 quat = quat_from_euler_xyz(euler_angles[0], euler_angles[1], euler_angles[2]) 
 
@@ -87,8 +89,8 @@ class SensorsSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
             joint_pos=CAMERA_JOINT_DEFAULT_VALUES,
-            pos=(1.5, 0.0, 0.0),
-            rot=(0.0, 0.0, 0.0, 1.0)
+            pos=ROBOT_INITIAL_POS,
+            rot=ROBOT_INITIAL_ROT
         ),
     )
 

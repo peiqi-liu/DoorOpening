@@ -62,6 +62,7 @@ from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, DEFAULT_JOINT
 from DoorOpening.assets.door.door_cfg import DOOR_CONFIG, edit_door_articulation
 
 from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES
+from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
 
 from DoorOpening.motion.slider_controller import OmniJointController
 
@@ -90,8 +91,8 @@ class SensorsSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
             joint_pos=DEFAULT_JOINT_POS,
-            pos=(1.5, 0.0, 0.0),
-            rot=(0.0, 0.0, 0.0, 1.0)
+            pos=ROBOT_INITIAL_POS,
+            rot=ROBOT_INITIAL_ROT
         ),
     )
 
@@ -168,6 +169,13 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
 
     # give controller access to marker
     controller.goal_marker = goal_marker
+
+    body_idx, body_name = scene["robot"].find_bodies(["tidybot2_base_link", "panda_link2", "panda_link4", "panda_link6", "palm_center"])
+    print("body idx: ", body_idx)
+    print("body name: ", body_name)
+
+    print("robot body pos: ", scene["robot"].data.body_pos_w[:, body_idx])
+    print("robot body quat: ", scene["robot"].data.body_quat_w[:, body_idx])
     
 
     while simulation_app.is_running():

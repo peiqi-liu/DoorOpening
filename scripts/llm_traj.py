@@ -72,6 +72,7 @@ from DoorOpening.assets.glorbot.glorbot_cfg import FRANKA_JOINT_NAMES, BASE_JOIN
 
 from DoorOpening.utils.llm_utils import solve_ik, open_hand, close_hand, write_joint_angle_to_robot, record_joint_angles, get_robot_link_pose, write_joint_angle_to_door, step_sim
 from DoorOpening.utils.llm_utils import get_board_frame_joint_angle, get_frame_hinge_joint_angle, get_board_pos, get_hinge_pos
+from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
 
 torch.set_printoptions(precision=3, sci_mode=False)
 
@@ -92,8 +93,8 @@ class SensorsSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
             joint_pos=DEFAULT_JOINT_POS,
-            pos=(1.5, 0.0, 0.0),
-            rot=(0.0, 0.0, 0.0, 1.0)
+            pos=ROBOT_INITIAL_POS,
+            rot=ROBOT_INITIAL_ROT
         ),
     )
 

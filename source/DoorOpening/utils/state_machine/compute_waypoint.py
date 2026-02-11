@@ -1,12 +1,20 @@
 from DoorOpening.utils.state_machine.api import solve_ik, get_hinge_pos, open_hand
 import torch
-from isaaclab.utils.math import quat_from_euler_xyz
+from isaaclab.utils.math import quat_from_euler_xyz, quat_from_matrix, combine_frame_transforms
 from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES, CAMERA_JOINT_DEFAULT_VALUES, DEFAULT_JOINT_POS, OPEN_FINGER_JOINT_VALUES
 import numpy as np
 import time
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT, DOOR_INITIAL_POS, DOOR_INITIAL_ROT
 import pickle as pkl
 import os
+from scipy.interpolate import CubicSpline
+
+import viser
+from viser.extras import ViserUrdf
+
+from yourdfpy import URDF
+from DoorOpening.utils.state_machine.pin import PinocchioIKSolver
+
 
 def get_robot_constants():
     all_joint_names = FULL_JOINT_NAMES + list(CAMERA_JOINT_DEFAULT_VALUES.keys())
@@ -232,7 +240,6 @@ def state_machine_offline(
     return robot_traj, door_traj
 
 def collocate_and_playback(robot_traj, door_traj, length=1000):
-    from scipy.interpolate import CubicSpline
     robot_traj = torch.stack(robot_traj).detach().cpu().numpy()
     door_traj = torch.stack(door_traj).detach().cpu().numpy()
     traj = np.concatenate([robot_traj, door_traj], axis=-1)
@@ -245,6 +252,7 @@ def collocate_and_playback(robot_traj, door_traj, length=1000):
 
     traj_out = []
     traj_d_out = []
+    key_indices = [0]
 
     samples_used = 0
 
@@ -257,6 +265,8 @@ def collocate_and_playback(robot_traj, door_traj, length=1000):
         if i == N - 2:  # last segment: fill remainder
             seg_len = length - samples_used
         samples_used += seg_len
+
+        key_indices.append(key_indices[-1] + seg_len)
 
         # local time [0, 1]
         t_local = np.array([0.0, 1.0])
@@ -272,6 +282,7 @@ def collocate_and_playback(robot_traj, door_traj, length=1000):
 
     traj = torch.tensor(np.concatenate(traj_out, axis=0), dtype=torch.float32)
     traj_d = torch.tensor(np.concatenate(traj_d_out, axis=0), dtype=torch.float32)
+    print(key_indices)
 
     # # automatic timing
     # dq = np.linalg.norm(traj[1:] - traj[:-1], axis=1)
@@ -292,7 +303,7 @@ def collocate_and_playback(robot_traj, door_traj, length=1000):
     robot_traj_d = traj_d[:, :-2]
     door_traj_d = traj_d[:, -2:]
 
-    return robot_traj, door_traj, robot_traj_d, door_traj_d
+    return robot_traj, door_traj, robot_traj_d, door_traj_d, key_indices
 
 
 def play_trajectories_in_viser(
@@ -381,17 +392,9 @@ def play_trajectories_in_viser(
 
     print("Viser running. Open the URL in your browser.")
 
-    # from DoorOpening.utils.state_machine.pin import PinocchioIKSolver
-    # ik_solver = PinocchioIKSolver(
-    #     urdf_path=robot_urdf_path, 
-    #     ee_link_name="palm_center", 
-    #     controlled_joints=["base_x_joint", 
-    #         "base_y_joint", "base_rotation_joint", "panda_joint1", 
-    #         "panda_joint2", "panda_joint3", "panda_joint4", "panda_joint5", 
-    #         "panda_joint6", "panda_joint7"]
-    # ) 
+    timestamp = time.time()
 
-    while True:
+    while time.time() - timestamp < 60:
         if playing:
             q_robot = robot_traj[t_idx].detach().cpu().numpy()
             q_door  = door_traj[t_idx].detach().cpu().numpy()
@@ -438,7 +441,6 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path):
     door_initial_pose = torch.tensor([[DOOR_INITIAL_POS[0], DOOR_INITIAL_POS[1], DOOR_INITIAL_POS[2], DOOR_INITIAL_ROT[0], DOOR_INITIAL_ROT[1], DOOR_INITIAL_ROT[2], DOOR_INITIAL_ROT[3]]], device="cpu")
     robot_constants, robot_initial_q = get_robot_constants()
     door_initial_q = torch.tensor([0.0, 0.0], device="cpu")
-    robot_initial_q[0] = 0.5
     robot_traj, door_traj = state_machine_offline(robot_urdf_path, door_urdf_path, robot_initial_pose, door_initial_pose, robot_initial_q, door_initial_q, device="cpu")
     torch.set_printoptions(precision=4, sci_mode=False)
     print(torch.stack(robot_traj)[:, :10])
@@ -450,17 +452,11 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path):
     #         new_door_traj.append(door_point)
     # robot_traj = new_robot_traj
     # door_traj = new_door_traj
-    robot_traj, door_traj, robot_traj_d, door_traj_d = collocate_and_playback(robot_traj, door_traj, length=1000)
-    # print(robot_traj.shape)
-    # print(door_traj.shape)
-    # print(robot_traj_d.shape)
-    # print(door_traj_d.shape)
-
-
-    import viser
-    from viser.extras import ViserUrdf
-
-    from yourdfpy import URDF
+    robot_traj, door_traj, robot_traj_d, door_traj_d, key_indices = collocate_and_playback(robot_traj, door_traj, length=1000)
+    print(robot_traj.shape)
+    print(door_traj.shape)
+    print(robot_traj_d.shape)
+    print(door_traj_d.shape)
 
     robot_urdf = URDF.load(robot_urdf_path)
     door_urdf  = URDF.load(door_urdf_path)
@@ -482,27 +478,63 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path):
         hz=60,
     )
 
-    # answer = input("Do you want to save the trajectory? (y/n)")
-    # if answer.lower() == "y":
-    #     data = {
-    #         "door_traj": door_traj, 
-    #         "robot_body_pos_traj": robot_body_pos_traj,
-    #         "robot_body_quat_traj": robot_body_quat_traj,
-    #         "robot_joint_pos_traj": robot_traj,
-    #         "robot_base_vel_traj": robot_base_vel_traj,
-    #         "robot_palm_vel_traj": robot_palm_vel_traj,
-    #         "key_indices": torch.from_numpy(key_indices)
-    #     }
-    #     with open(os.path.join(dir_path, "traj.pkl"), "wb") as f:
-    #         pkl.dump(robot_traj, f)
-    #         pkl.dump(door_traj, f)
-    #         print("Trajectory saved to traj.pkl")
-    # else:
-    #     print("Trajectory not saved")
+    answer = input("Do you want to save the trajectory? (y/n)")
+    if answer.lower() == "y":
+        robot_ik_solver = PinocchioIKSolver(
+            urdf_path=robot_urdf_path, 
+            ee_link_name="palm_center", 
+            controlled_joints=["base_x_joint", 
+                "base_y_joint", "base_rotation_joint", "panda_joint1", 
+                "panda_joint2", "panda_joint3", "panda_joint4", "panda_joint5", 
+                "panda_joint6", "panda_joint7"]
+        ) 
+
+        robot_key_bodies = ["tidybot2_base_link", "panda_link2", "panda_link4", "panda_link6", "palm_center"]
+        robot_body_pos_traj = []
+        robot_body_quat_traj = []
+        
+        for robot_point in robot_traj:
+            body_poses = []
+            body_quats = []
+            for node_a in robot_key_bodies:
+                transform = robot_ik_solver.get_frame_pose(config = robot_point[:10], node_b = "base_link", node_a = node_a)
+                translation, rotation = torch.tensor(transform.translation).unsqueeze(0).float(), torch.tensor(transform.rotation).unsqueeze(0).float()
+                quat = quat_from_matrix(rotation)
+                body_world_pos, body_world_quat = combine_frame_transforms(t01 = torch.tensor(robot_world_pos).unsqueeze(0).float(), q01 = torch.tensor(robot_world_quat).unsqueeze(0).float(), t12 = translation, q12 = quat)
+                body_poses.append(body_world_pos.squeeze())
+                body_quats.append(body_world_quat.squeeze())
+            robot_body_pos_traj.append(torch.stack(body_poses, dim=0))
+            robot_body_quat_traj.append(torch.stack(body_quats, dim=0))
+
+        robot_body_pos_traj = torch.stack(robot_body_pos_traj, dim=0)
+        robot_body_quat_traj = torch.stack(robot_body_quat_traj, dim=0)
+
+        print(robot_body_pos_traj.shape)
+        print(robot_body_quat_traj.shape)
+
+        print(robot_key_bodies)
+        # for i in torch.arange(0, robot_body_pos_traj.shape[0], 100):
+        #     print(i, robot_body_pos_traj[i], robot_body_quat_traj[i])
+
+        data = {
+            "door_traj": door_traj, 
+            "robot_body_pos_traj": robot_body_pos_traj,
+            "robot_body_quat_traj": robot_body_quat_traj,
+            "robot_joint_pos_traj": robot_traj,
+            "robot_joint_vel_traj": robot_traj_d,
+            "key_indices": torch.tensor(key_indices, dtype=torch.int32)
+        }
+        with open(os.path.join(dir_path, "traj.pkl"), "wb") as f:
+            pkl.dump(data, f)
+            print("Trajectory saved to traj.pkl")
+    else:
+        print("Trajectory not saved")
 
 
 if __name__ == "__main__":
     robot_urdf_path = "/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/glorbot/glorbot.urdf"
     door_urdf_path = "/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/door/PartNetv4/99650089960001/mobility.urdf"
     # door_urdf_path = "/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/door/PartNetv4/99655059960012/mobility.urdf"
+
+    play_and_save_traj(robot_urdf_path, door_urdf_path)
     

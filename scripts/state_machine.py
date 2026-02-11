@@ -54,6 +54,8 @@ print("scene_quat:", scene_quat)
 
 from DoorOpening.utils.llms.llm_utils import *
 
+from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
+
 @configclass
 class SensorsSceneCfg(InteractiveSceneCfg):
     """Design the scene with sensors on the robot."""
@@ -71,8 +73,8 @@ class SensorsSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
             joint_pos=DEFAULT_JOINT_POS,
-            pos=(1.5, 0.0, 0.0),
-            rot=(0.0, 0.0, 0.0, 1.0)
+            pos=ROBOT_INITIAL_POS,
+            rot=ROBOT_INITIAL_ROT
         ),
     )
 
