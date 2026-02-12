@@ -136,7 +136,7 @@ class ReferenceMotionManager:
         if not self.reset_from_start:
             if step_count is not None and reset_progress_total is not None:
                 progress = min(step_count / reset_progress_total, 1.0)
-                alpha = 1.0 - 0.8 * progress  # from 1.0 → 0.2
+                alpha = 0.9 - 0.7 * progress  # from 0.9 → 0.2
                 probs = torch.tensor(
                     [(1 - alpha) * (alpha ** i) for i in range(self.key_indices.shape[1])],
                     device=self.key_indices.device
@@ -189,8 +189,6 @@ class ReferenceMotionManager:
         idx = self.frame_idx
         floor_idx = torch.floor(idx).int().clamp(min=0, max=self.num_frames - 1)
         ceil_idx = torch.ceil(idx).int().clamp(min=0, max=self.num_frames - 1)
-        floor_idx = torch.floor(idx).int()
-        ceil_idx = torch.ceil(idx).int()
         interp_ratio = (idx - floor_idx).unsqueeze(-1)
         if self.one_file_loaded:
             self.ref_robot_joint_pos = self._lerp(self.robot_joint_pos_traj[floor_idx], self.robot_joint_pos_traj[ceil_idx], interp_ratio)
