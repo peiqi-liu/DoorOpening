@@ -34,7 +34,7 @@ def backup_file(path):
 def scale_urdf_meshes(
     input_urdf,
     output_urdf,
-    scale_factor=1.2,
+    scale_factor=1.1,
     default_scale=(1.0, 1.0, 1.0)
 ):
     tree = ET.parse(input_urdf)
@@ -67,6 +67,6 @@ if __name__ == "__main__":
         scale_urdf_meshes(
             input_urdf=asset_path.replace(".urdf", ".urdf_scaled.bak"),
             output_urdf=asset_path,
-            scale_factor=1.35,
+            scale_factor=1.25,
             default_scale=(0.9, 1.0, 0.8)
         )

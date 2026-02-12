@@ -149,7 +149,7 @@ def state_machine_offline(
 
         new_handle_pos[:, 0] += 0.1 * torch.cos(theta)
         new_handle_pos[:, 1] -= 0.1 * torch.sin(theta)
-        new_handle_pos[:, 2] += 0.05
+        new_handle_pos[:, 2] += 0.1
         palm_target_pose = torch.cat([new_handle_pos, palm_target_rot], dim=-1)
 
         q_robot[:10] = solve_ik(
@@ -167,9 +167,10 @@ def state_machine_offline(
     # Step 5 : Base forward
     # -------------------------
     palm_target_pose[:, 0] += 0.45
-    # palm_target_pose[:, 1] -= 0.25
-    palm_target_pose[:, 2] -= 0.1
+    palm_target_pose[:, 1] += 0.15
+    # palm_target_pose[:, 2] -= 0.1
     palm_target_pose[:, 3:] = get_rotation_quat(0.0, 0.0, torch.pi, device)
+
     q_robot[10:10+16] = open_hand(0.9)
     q_door = torch.tensor([1.5, 0.0], device=device)
 
@@ -192,14 +193,16 @@ def state_machine_offline(
     # -------------------------
     # Step 7: Move base completely through the door
     # -------------------------
+    delta_palm_pos = palm_target_pos - base_target_pos
     base_target_pos[:, 0] = 0.0
     base_target_pos[:, 1] = 0.0
     base_target_pose = torch.cat([base_target_pos, base_target_rot], dim=-1)
 
     palm_pose = base_target_pos.clone()
-    palm_pose[:, 2] = 0.75
-    palm_pose[:, 0] += 0.5
-    palm_pose[:, 1] -= 0.2
+    # palm_pose[:, 2] = 0.75
+    # palm_pose[:, 0] += 0.6
+    # palm_pose[:, 1] -= 0.3
+    palm_pose[:, :3] += delta_palm_pos[:, :3]
     palm_pose = torch.cat([palm_pose, base_target_rot], dim=-1)
 
     q_robot[:10] = solve_ik(
@@ -422,9 +425,13 @@ def play_trajectories_in_viser(
             viser_robot.update_cfg(q_robot)
             viser_door.update_cfg(q_door)
 
-            t_idx = (t_idx + 1) % T
+            # t_idx = (t_idx + 1) % T
+            t_idx += 1
+            if t_idx == T:
+                break
 
         time.sleep(1.0 / (hz * speed_slider.value))
+    server.stop()
 
 
 def play_and_save_traj(robot_urdf_path, door_urdf_path):
@@ -470,57 +477,53 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path):
         hz=60,
     )
 
-    answer = input("Do you want to save the trajectory? (y/n)")
-    if answer.lower() == "y":
-        robot_ik_solver = PinocchioIKSolver(
-            urdf_path=robot_urdf_path, 
-            ee_link_name="palm_center", 
-            controlled_joints=["base_x_joint", 
-                "base_y_joint", "base_rotation_joint", "panda_joint1", 
-                "panda_joint2", "panda_joint3", "panda_joint4", "panda_joint5", 
-                "panda_joint6", "panda_joint7"]
-        ) 
+    robot_ik_solver = PinocchioIKSolver(
+        urdf_path=robot_urdf_path, 
+        ee_link_name="palm_center", 
+        controlled_joints=["base_x_joint", 
+            "base_y_joint", "base_rotation_joint", "panda_joint1", 
+            "panda_joint2", "panda_joint3", "panda_joint4", "panda_joint5", 
+            "panda_joint6", "panda_joint7"]
+    ) 
 
-        robot_key_bodies = ["tidybot2_base_link", "panda_link2", "panda_link4", "panda_link6", "palm_center"]
-        robot_body_pos_traj = []
-        robot_body_quat_traj = []
-        
-        for robot_point in robot_traj:
-            body_poses = []
-            body_quats = []
-            for node_a in robot_key_bodies:
-                transform = robot_ik_solver.get_frame_pose(config = robot_point[:10], node_b = "base_link", node_a = node_a)
-                translation, rotation = torch.tensor(transform.translation).unsqueeze(0).float(), torch.tensor(transform.rotation).unsqueeze(0).float()
-                quat = quat_from_matrix(rotation)
-                body_world_pos, body_world_quat = combine_frame_transforms(t01 = torch.tensor(robot_world_pos).unsqueeze(0).float(), q01 = torch.tensor(robot_world_quat).unsqueeze(0).float(), t12 = translation, q12 = quat)
-                body_poses.append(body_world_pos.squeeze())
-                body_quats.append(body_world_quat.squeeze())
-            robot_body_pos_traj.append(torch.stack(body_poses, dim=0))
-            robot_body_quat_traj.append(torch.stack(body_quats, dim=0))
+    robot_key_bodies = ["tidybot2_base_link", "panda_link2", "panda_link4", "panda_link6", "palm_center"]
+    robot_body_pos_traj = []
+    robot_body_quat_traj = []
+    
+    for robot_point in robot_traj:
+        body_poses = []
+        body_quats = []
+        for node_a in robot_key_bodies:
+            transform = robot_ik_solver.get_frame_pose(config = robot_point[:10], node_b = "base_link", node_a = node_a)
+            translation, rotation = torch.tensor(transform.translation).unsqueeze(0).float(), torch.tensor(transform.rotation).unsqueeze(0).float()
+            quat = quat_from_matrix(rotation)
+            body_world_pos, body_world_quat = combine_frame_transforms(t01 = torch.tensor(robot_world_pos).unsqueeze(0).float(), q01 = torch.tensor(robot_world_quat).unsqueeze(0).float(), t12 = translation, q12 = quat)
+            body_poses.append(body_world_pos.squeeze())
+            body_quats.append(body_world_quat.squeeze())
+        robot_body_pos_traj.append(torch.stack(body_poses, dim=0))
+        robot_body_quat_traj.append(torch.stack(body_quats, dim=0))
 
-        robot_body_pos_traj = torch.stack(robot_body_pos_traj, dim=0)
-        robot_body_quat_traj = torch.stack(robot_body_quat_traj, dim=0)
+    robot_body_pos_traj = torch.stack(robot_body_pos_traj, dim=0)
+    robot_body_quat_traj = torch.stack(robot_body_quat_traj, dim=0)
 
-        print(robot_body_pos_traj.shape)
-        print(robot_body_quat_traj.shape)
+    print(robot_body_pos_traj.shape)
+    print(robot_body_quat_traj.shape)
 
-        print(robot_key_bodies)
-        # for i in torch.arange(0, robot_body_pos_traj.shape[0], 100):
-        #     print(i, robot_body_pos_traj[i], robot_body_quat_traj[i])
+    print(robot_key_bodies)
+    # for i in torch.arange(0, robot_body_pos_traj.shape[0], 100):
+    #     print(i, robot_body_pos_traj[i], robot_body_quat_traj[i])
 
-        data = {
-            "door_traj": door_traj, 
-            "robot_body_pos_traj": robot_body_pos_traj,
-            "robot_body_quat_traj": robot_body_quat_traj,
-            "robot_joint_pos_traj": robot_traj,
-            "robot_joint_vel_traj": robot_traj_d,
-            "key_indices": torch.tensor(key_indices, dtype=torch.int32)
-        }
-        with open(os.path.join(dir_path, "traj.pkl"), "wb") as f:
-            pkl.dump(data, f)
-            print("Trajectory saved to traj.pkl")
-    else:
-        print("Trajectory not saved")
+    data = {
+        "door_traj": door_traj, 
+        "robot_body_pos_traj": robot_body_pos_traj,
+        "robot_body_quat_traj": robot_body_quat_traj,
+        "robot_joint_pos_traj": robot_traj,
+        "robot_joint_vel_traj": robot_traj_d,
+        "key_indices": torch.tensor(key_indices, dtype=torch.int32)
+    }
+    with open(os.path.join(dir_path, "traj.pkl"), "wb") as f:
+        pkl.dump(data, f)
+        print("Trajectory saved to traj.pkl")
 
 
 if __name__ == "__main__":
@@ -530,10 +533,9 @@ if __name__ == "__main__":
 
     root_path = "source/DoorOpening/assets/"
     asset_base_folder = os.path.join(root_path, "door/PartNetv4")
-    asset_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/mobility.urdf"), recursive=True))
+    asset_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/mobility.urdf"), recursive=True), reverse=True)
 
-    # for door_urdf_path in asset_paths:
-    door_urdf_path = asset_paths[0]
-    play_and_save_traj(robot_urdf_path, door_urdf_path)
-    print("Finished processing ", door_urdf_path)
+    for door_urdf_path in asset_paths:
+        play_and_save_traj(robot_urdf_path, door_urdf_path)
+        print("Finished processing ", door_urdf_path)
     
