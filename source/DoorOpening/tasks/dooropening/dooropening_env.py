@@ -545,20 +545,20 @@ def compute_deep_mimic_rewards(
          + robot_arm_joint_vel_w * arm_joint_vel_r\
          + robot_finger_joint_vel_w * finger_joint_vel_r
 
-    restricted_reward = (
-        robot_key_body_pos_w * key_body_pos_r\
-        + door_joint_pos_w * door_r\
-    ) * (robot_key_body_pos_w + door_joint_pos_w + robot_base_joint_pos_w + robot_arm_joint_pos_w + robot_finger_joint_pos_w + robot_base_joint_vel_w + robot_arm_joint_vel_w + robot_finger_joint_vel_w) / \
-    (robot_key_body_pos_w + door_joint_pos_w)
+    # restricted_reward = (
+    #     robot_key_body_pos_w * key_body_pos_r\
+    #     + door_joint_pos_w * door_r\
+    # ) * (robot_key_body_pos_w + door_joint_pos_w + robot_base_joint_pos_w + robot_arm_joint_pos_w + robot_finger_joint_pos_w + robot_base_joint_vel_w + robot_arm_joint_vel_w + robot_finger_joint_vel_w) / \
+    # (robot_key_body_pos_w + door_joint_pos_w)
 
-    # special_env_mask = (ref_door_joint_pos[:, 1] > 0) & (ref_door_joint_pos[:, 0] < 0)
-    special_env_mask = torch.linalg.norm(door_body_pos[:, 1] - robot_key_body_pos[:, -1], dim=-1) < 0.2
+    # # special_env_mask = (ref_door_joint_pos[:, 1] > 0) & (ref_door_joint_pos[:, 0] < 0)
+    # special_env_mask = torch.linalg.norm(door_body_pos[:, 1] - robot_key_body_pos[:, -1], dim=-1) < 0.2
 
-    reward = torch.where(
-        special_env_mask,
-        restricted_reward,
-        reward
-    )
+    # reward = torch.where(
+    #     special_env_mask,
+    #     restricted_reward,
+    #     reward
+    # )
     return reward
 
 def compute_tracking_error(
