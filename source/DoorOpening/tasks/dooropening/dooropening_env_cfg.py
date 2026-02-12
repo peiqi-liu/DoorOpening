@@ -3,8 +3,9 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, CAMERA_JOINT_DEFAULT_VALUES, CLOSE_FINGER_JOINT_VALUES, OPEN_FINGER_JOINT_VALUES
+from DoorOpening.constants.robot_constants import CAMERA_JOINT_DEFAULT_VALUES, CLOSE_FINGER_JOINT_VALUES, OPEN_FINGER_JOINT_VALUES
 from DoorOpening.assets.door.door_cfg import DOOR_CONFIG, ALL_DOOR_CONFIGS
+from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
@@ -131,7 +132,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     door_joint_names = ["joint_1", "joint_2"]
 
-    robot_key_bodies = ["tidybot2_base_link", "panda_link2", "panda_link4", "palm_center"]
+    robot_key_bodies = ["tidybot2_base_link", "panda_link2", "panda_link4", "panda_link6", "palm_center"]
     robot_reset_key_bodies = ["tidybot2_base_link", "palm_center"]
 
     robot_palm_link_name = "palm_center"
@@ -169,28 +170,24 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_base_joint_pos_w = 3.0
     robot_arm_joint_pos_w = 5.0
     robot_finger_joint_pos_w = 1.0
-    # robot_base_joint_vel_w = 0.5
-    # robot_arm_joint_vel_w = 1.0
-    # robot_finger_joint_vel_w = 0.5
-    robot_base_vel_w = 0.5
-    robot_palm_vel_w = 1.0
-    door_joint_pos_w = 5.0
+    robot_base_joint_vel_w = 1.0
+    robot_arm_joint_vel_w = 2.0
+    robot_finger_joint_vel_w = 0.5
+    door_joint_pos_w = 4.0
 
     robot_body_quat_scale = 1.0
     robot_key_body_pos_scale = 3.0
     robot_base_joint_pos_scale = 0.5
     robot_arm_joint_pos_scale = 0.2
     robot_finger_joint_pos_scale = 1.0
-    # robot_base_joint_vel_scale = 0.5
-    # robot_arm_joint_vel_scale = 0.5
-    # robot_finger_joint_vel_scale = 0.5
-    robot_base_vel_scale = 0.5
-    robot_palm_vel_scale = 0.5
+    robot_base_joint_vel_scale = 0.5
+    robot_arm_joint_vel_scale = 0.5
+    robot_finger_joint_vel_scale = 0.5
     door_joint_pos_scale = 5.0
 
-    reset_base_pos_delta_min = 0.3
-    reset_key_body_pos_delta_min = 0.5
-    reset_key_body_quat_delta_min = 1.0
+    reset_base_pos_delta_min = 0.2
+    reset_key_body_pos_delta_min = 0.4
+    reset_key_body_quat_delta_min = 0.8
     reset_base_pos_delta_max = 0.8
     reset_key_body_pos_delta_max = 1.0
     reset_key_body_quat_delta_max = 3.2
