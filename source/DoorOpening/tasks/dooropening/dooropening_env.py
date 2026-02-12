@@ -208,6 +208,8 @@ class DooropeningEnv(DirectRLEnv):
         # contact_forces_door2 = contact_forces_door2.reshape(self.num_envs, 1, -1)
         # contact_forces_robot_palm_center = contact_forces_robot_palm_center.reshape(self.num_envs, 1, -1)
 
+        frame_idx = torch.ceil(self.ref_motion_lib.frame_idx).unsqueeze(dim = -1).to(self.device)
+
         obs = torch.cat(
             (
                 self.joint_pos[:, self._robot_dof_idx].unsqueeze(dim = 1),
@@ -218,6 +220,7 @@ class DooropeningEnv(DirectRLEnv):
                 self.door_joint_pos[:, self._door_joint_idx].unsqueeze(dim = 1),
                 # self.door_joint_vel[:, self._door_joint_idx].unsqueeze(dim = 1),
                 door_joint_err.unsqueeze(dim = 1),
+                frame_idx.unsqueeze(dim = -1),
                 # contact_forces_door1,
                 # contact_forces_door2,
                 # contact_forces_robot_palm_center,
@@ -298,7 +301,7 @@ class DooropeningEnv(DirectRLEnv):
         # self.extras["error/finger_joint_vel_err"] = finger_joint_vel_err.mean()
 
         progress = min(self.step_count / self.reset_progress_total, 1.0)
-        alpha = 0.9 - 0.7 * progress  # from 0.9 → 0.2
+        alpha = 1.2 - 0.8 * progress  # from 1.2 → 0.4
         probs = torch.tensor(
             [(1 - alpha) * (alpha ** i) for i in range(len(self.ref_motion_lib.key_indices))]
         )
