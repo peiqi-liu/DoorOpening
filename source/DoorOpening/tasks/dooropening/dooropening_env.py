@@ -208,7 +208,7 @@ class DooropeningEnv(DirectRLEnv):
         # contact_forces_door2 = contact_forces_door2.reshape(self.num_envs, 1, -1)
         # contact_forces_robot_palm_center = contact_forces_robot_palm_center.reshape(self.num_envs, 1, -1)
 
-        frame_idx = torch.ceil(self.ref_motion_lib.frame_idx).unsqueeze(dim = -1).to(self.device)
+        frame_idx = torch.ceil(self.ref_motion_lib.frame_idx).unsqueeze(dim = -1).to(self.device) // (self.ref_motion_lib.num_frames // 10)
 
         obs = torch.cat(
             (
@@ -218,7 +218,6 @@ class DooropeningEnv(DirectRLEnv):
                 door_to_base_link_pos,
                 rel_robot_key_body_pos,
                 self.door_joint_pos[:, self._door_joint_idx].unsqueeze(dim = 1),
-                # self.door_joint_vel[:, self._door_joint_idx].unsqueeze(dim = 1),
                 door_joint_err.unsqueeze(dim = 1),
                 frame_idx.unsqueeze(dim = -1),
                 # contact_forces_door1,
@@ -300,13 +299,13 @@ class DooropeningEnv(DirectRLEnv):
         # self.extras["error/arm_joint_vel_err"] = arm_joint_vel_err.mean()
         # self.extras["error/finger_joint_vel_err"] = finger_joint_vel_err.mean()
 
-        progress = min(self.step_count / self.reset_progress_total, 1.0)
-        alpha = 1.2 - 0.8 * progress  # from 1.2 → 0.4
-        probs = torch.tensor(
-            [(1 - alpha) * (alpha ** i) for i in range(len(self.ref_motion_lib.key_indices))]
-        )
-        probs = probs / probs.sum()
-        self.extras["reset/prob_get_first_key_frame"] = probs[0]
+        # progress = min(self.step_count / self.reset_progress_total, 1.0)
+        # alpha = 1.2 - 0.8 * progress  # from 1.2 → 0.4
+        # probs = torch.tensor(
+        #     [(1 - alpha) * (alpha ** i) for i in range(len(self.ref_motion_lib.key_indices))]
+        # )
+        # probs = probs / probs.sum()
+        # self.extras["reset/prob_get_first_key_frame"] = probs[0]
 
         return compute_deep_mimic_rewards(
             robot_key_body_pos = self.robot_key_body_pos, 

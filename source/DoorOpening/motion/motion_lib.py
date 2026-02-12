@@ -136,8 +136,7 @@ class ReferenceMotionManager:
         if not self.reset_from_start:
             if step_count is not None and reset_progress_total is not None:
                 progress = min(step_count / reset_progress_total, 1.0)
-                alpha = 0.9 - 0.7 * progress  # from 0.9 → 0.2
-
+                alpha = 1.0 - 0.8 * progress  # from 1.0 → 0.2
                 probs = torch.tensor(
                     [(1 - alpha) * (alpha ** i) for i in range(self.key_indices.shape[1])],
                     device=self.key_indices.device
