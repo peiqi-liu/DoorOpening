@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-from DoorOpening.constants.robot_constants import CAMERA_JOINT_DEFAULT_VALUES, CLOSE_FINGER_JOINT_VALUES, OPEN_FINGER_JOINT_VALUES
+from DoorOpening.constants.robot_constants import CAMERA_JOINT_DEFAULT_VALUES, CLOSE_FINGER_JOINT_VALUES, OPEN_FINGER_JOINT_VALUES, ROBOT_KEY_BODY_NAMES, ROBOT_RESET_KEY_BODY_NAMES    
 from DoorOpening.assets.door.door_cfg import DOOR_CONFIG, ALL_DOOR_CONFIGS
 from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
@@ -132,8 +132,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     door_joint_names = ["joint_1", "joint_2"]
 
-    robot_key_bodies = ["tidybot2_base_link", "panda_link2", "panda_link4", "panda_link6", "palm_center"]
-    robot_reset_key_bodies = ["tidybot2_base_link", "palm_center"]
+    robot_key_bodies = ROBOT_KEY_BODY_NAMES
+    robot_reset_key_bodies = ROBOT_RESET_KEY_BODY_NAMES
 
     robot_palm_link_name = "palm_center"
     robot_base_body_link_name = "tidybot2_base_link"

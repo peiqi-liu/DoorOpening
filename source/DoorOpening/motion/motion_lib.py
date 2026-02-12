@@ -55,6 +55,7 @@ class ReferenceMotionManager:
         self.robot_body_quat_traj = torch.stack(robot_body_quat_trajs, dim=0)
         self.door_traj = torch.stack(door_trajs, dim=0)
         self.key_indices = torch.stack(key_indices_list, dim=0).to(self.device)
+        self.key_indices = self.key_indices[..., :-1] # remove the last key index
 
         self.num_motions = self.robot_joint_pos_traj.shape[0]
 
@@ -156,10 +157,12 @@ class ReferenceMotionManager:
                 (env_ids.shape[0],),
             ).to(self.key_indices)
         if not self.one_file_loaded:
+            # print("frame_idx", self.frame_idx.shape)
+            # print("env_ids", env_ids)
+            # print("self.env_to_file_map[env_ids]", self.env_to_file_map[env_ids].shape)
             self.frame_idx[env_ids] = self.key_indices[self.env_to_file_map[env_ids]][torch.arange(len(env_ids), device=self.device), idx].squeeze().to(self.frame_idx)
         else:
             self.frame_idx[env_ids] = self.key_indices[idx].squeeze().to(self.frame_idx)
-        # if not self.reset_from_start:
         #     self.frame_idx[env_ids] = self.frame_idx[env_ids] + torch.randint(
         #         low=-2,
         #         high=2,
@@ -185,6 +188,8 @@ class ReferenceMotionManager:
 
     def _update_current(self):
         idx = self.frame_idx
+        floor_idx = torch.floor(idx).int().clamp(min=0, max=self.num_frames - 1)
+        ceil_idx = torch.ceil(idx).int().clamp(min=0, max=self.num_frames - 1)
         floor_idx = torch.floor(idx).int()
         ceil_idx = torch.ceil(idx).int()
         interp_ratio = (idx - floor_idx).unsqueeze(-1)

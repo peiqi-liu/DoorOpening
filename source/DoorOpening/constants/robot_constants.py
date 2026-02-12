@@ -76,6 +76,19 @@ FINGER_JOINT_NAMES = [
 
 FULL_JOINT_NAMES = BASE_JOINT_NAMES + FRANKA_JOINT_NAMES + FINGER_JOINT_NAMES
 
+ROBOT_KEY_BODY_NAMES = [
+    "tidybot2_base_link",
+    "panda_link2",
+    "panda_link4",
+    "panda_link6",
+    "palm_center",
+]
+
+ROBOT_RESET_KEY_BODY_NAMES = [
+    "tidybot2_base_link",
+    "palm_center",
+]
+
 CLOSE_FINGER_JOINT_VALUES = {
     "finger_joint_0": 0.0,
     "finger_joint_1": torch.pi / 2,

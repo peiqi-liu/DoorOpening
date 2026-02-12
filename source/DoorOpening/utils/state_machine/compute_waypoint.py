@@ -1,7 +1,7 @@
 from DoorOpening.utils.state_machine.api import solve_ik, get_hinge_pos, open_hand
 import torch
 from isaaclab.utils.math import quat_from_euler_xyz, quat_from_matrix, combine_frame_transforms
-from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES, CAMERA_JOINT_DEFAULT_VALUES, DEFAULT_JOINT_POS, OPEN_FINGER_JOINT_VALUES
+from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES, CAMERA_JOINT_DEFAULT_VALUES, DEFAULT_JOINT_POS, OPEN_FINGER_JOINT_VALUES, ROBOT_KEY_BODY_NAMES, DM_JOINT_NAMES
 import numpy as np
 import time
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT, DOOR_INITIAL_POS, DOOR_INITIAL_ROT
@@ -480,13 +480,10 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path):
     robot_ik_solver = PinocchioIKSolver(
         urdf_path=robot_urdf_path, 
         ee_link_name="palm_center", 
-        controlled_joints=["base_x_joint", 
-            "base_y_joint", "base_rotation_joint", "panda_joint1", 
-            "panda_joint2", "panda_joint3", "panda_joint4", "panda_joint5", 
-            "panda_joint6", "panda_joint7"]
+        controlled_joints=DM_JOINT_NAMES
     ) 
 
-    robot_key_bodies = ["tidybot2_base_link", "panda_link2", "panda_link4", "panda_link6", "palm_center"]
+    robot_key_bodies = ROBOT_KEY_BODY_NAMES
     robot_body_pos_traj = []
     robot_body_quat_traj = []
     
