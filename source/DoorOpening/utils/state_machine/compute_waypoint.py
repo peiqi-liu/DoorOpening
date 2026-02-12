@@ -59,6 +59,7 @@ def state_machine_offline(
 
     robot_traj = []
     door_traj = []
+    key_idx_in_key_indices = []
 
     q_robot = robot_initial_q.clone()
     q_door = door_initial_q.clone()
@@ -82,8 +83,8 @@ def state_machine_offline(
     base_target_pose = torch.cat([base_target_pos, base_target_rot], dim=-1)
 
     palm_target_pos = handle_pos.clone()
-    palm_target_pos[:, 0] += 0.1
-    palm_target_pos[:, 2] += 0.1
+    palm_target_pos[:, 0] += 0.2
+    palm_target_pos[:, 2] += 0.2
     palm_target_rot = get_rotation_quat(0.0, 0.0, torch.pi, device)
     palm_target_pose = torch.cat([palm_target_pos, palm_target_rot], dim=-1)
 
@@ -97,6 +98,8 @@ def state_machine_offline(
 
     robot_traj.append(q_robot.clone())
     door_traj.append(q_door.clone())
+
+    key_idx_in_key_indices.append(len(robot_traj) - 1)
 
     # -------------------------
     # Step 2: Move to grasp
@@ -121,6 +124,8 @@ def state_machine_offline(
     robot_traj.append(q_robot.clone())
     door_traj.append(q_door.clone())
 
+    key_idx_in_key_indices.append(len(robot_traj) - 1)
+
     # -------------------------
     # Step 3: Rotate hinge (unlatch)
     # -------------------------
@@ -128,10 +133,12 @@ def state_machine_offline(
     robot_traj.append(q_robot.clone())
     door_traj.append(q_door.clone())
 
+    key_idx_in_key_indices.append(len(robot_traj) - 1)
+
     # -------------------------
     # Step 4: Pull door open
     # -------------------------
-    for theta in torch.arange(0.3, 1.21, 0.3):
+    for theta in torch.arange(0.3, 1.21, 0.1):
         q_door = torch.tensor([theta, 0], device=device)
 
         new_handle_pos = get_hinge_pos(
@@ -163,6 +170,8 @@ def state_machine_offline(
         robot_traj.append(q_robot.clone())
         door_traj.append(q_door.clone())
 
+    key_idx_in_key_indices.append(len(robot_traj) - 1)
+
     # -------------------------
     # Step 5 : Base forward
     # -------------------------
@@ -189,6 +198,8 @@ def state_machine_offline(
 
         robot_traj.append(q_robot.clone())
         door_traj.append(q_door.clone())
+
+    key_idx_in_key_indices.append(len(robot_traj) - 1)
 
     # -------------------------
     # Step 7: Move base completely through the door
@@ -218,6 +229,8 @@ def state_machine_offline(
     robot_traj.append(q_robot.clone())
     door_traj.append(q_door.clone())
 
+    key_idx_in_key_indices.append(len(robot_traj) - 1)
+
     base_target_pos[:, 0] = -1.0
     base_target_pos[:, 1] = 0.0
     base_target_pose = torch.cat([base_target_pos, base_target_rot], dim=-1)
@@ -241,7 +254,7 @@ def state_machine_offline(
     robot_traj.append(q_robot.clone())
     door_traj.append(q_door.clone())
 
-    return robot_traj, door_traj
+    return robot_traj, door_traj, key_idx_in_key_indices
 
 def collocate_and_playback(robot_traj, door_traj, length=1000):
     robot_traj = torch.stack(robot_traj).detach().cpu().numpy()
@@ -440,15 +453,16 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path):
     door_initial_pose = torch.tensor([[DOOR_INITIAL_POS[0], DOOR_INITIAL_POS[1], DOOR_INITIAL_POS[2], DOOR_INITIAL_ROT[0], DOOR_INITIAL_ROT[1], DOOR_INITIAL_ROT[2], DOOR_INITIAL_ROT[3]]], device="cpu")
     robot_constants, robot_initial_q = get_robot_constants()
     door_initial_q = torch.tensor([0.0, 0.0], device="cpu")
-    robot_traj, door_traj = state_machine_offline(robot_urdf_path, door_urdf_path, robot_initial_pose, door_initial_pose, robot_initial_q, door_initial_q, device="cpu")
+    robot_traj, door_traj, key_idx_in_key_indices = state_machine_offline(robot_urdf_path, door_urdf_path, robot_initial_pose, door_initial_pose, robot_initial_q, door_initial_q, device="cpu")
     torch.set_printoptions(precision=4, sci_mode=False)
     print(torch.stack(robot_traj)[:, :10])
     # new_robot_traj = []
     # new_door_traj = []
-    # for robot_point, door_point in zip(robot_traj, door_traj):
-    #     for _ in range(100):
-    #         new_robot_traj.append(robot_point)
-    #         new_door_traj.append(door_point)
+    # for i, (robot_point, door_point) in enumerate(zip(robot_traj, door_traj)):
+    #     if i in key_idx_in_key_indices:
+    #         for _ in range(100):
+    #             new_robot_traj.append(robot_point)
+    #             new_door_traj.append(door_point)
     # robot_traj = new_robot_traj
     # door_traj = new_door_traj
     robot_traj, door_traj, robot_traj_d, door_traj_d, key_indices = collocate_and_playback(robot_traj, door_traj, length=1000)
@@ -506,7 +520,7 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path):
     print(robot_body_pos_traj.shape)
     print(robot_body_quat_traj.shape)
 
-    print(robot_key_bodies)
+    # print(robot_key_bodies)
     # for i in torch.arange(0, robot_body_pos_traj.shape[0], 100):
     #     print(i, robot_body_pos_traj[i], robot_body_quat_traj[i])
 
@@ -516,11 +530,12 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path):
         "robot_body_quat_traj": robot_body_quat_traj,
         "robot_joint_pos_traj": robot_traj,
         "robot_joint_vel_traj": robot_traj_d,
-        "key_indices": torch.tensor(key_indices, dtype=torch.int32)
+        "key_indices": torch.tensor(key_indices, dtype=torch.int32)[key_idx_in_key_indices]
     }
+    print(torch.tensor(key_indices, dtype=torch.int32)[key_idx_in_key_indices])
     with open(os.path.join(dir_path, "traj.pkl"), "wb") as f:
         pkl.dump(data, f)
-        print("Trajectory saved to traj.pkl")
+        print("Trajectory saved to " + os.path.join(dir_path, "traj.pkl"))
 
 
 if __name__ == "__main__":
