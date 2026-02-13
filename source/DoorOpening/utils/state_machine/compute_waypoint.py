@@ -83,8 +83,9 @@ def state_machine_offline(
     base_target_pose = torch.cat([base_target_pos, base_target_rot], dim=-1)
 
     palm_target_pos = handle_pos.clone()
-    palm_target_pos[:, 0] += 0.2
-    palm_target_pos[:, 2] += 0.2
+    palm_target_pos[:, 0] += 0.25
+    palm_target_pos[:, 1] -= 0.03
+    palm_target_pos[:, 2] += 0.25
     palm_target_rot = get_rotation_quat(0.0, 0.0, torch.pi, device)
     palm_target_pose = torch.cat([palm_target_pos, palm_target_rot], dim=-1)
 
@@ -105,9 +106,11 @@ def state_machine_offline(
     # Step 2: Move to grasp
     # -------------------------
     palm_target_pos = handle_pos.clone()
-    palm_target_pos[:, 0] += 0.1
-    palm_target_pos[:, 2] += 0.1
-    # palm_target_pos[:, 1] += 0.01
+    # palm_target_pos[:, 0] += 0.1
+    # palm_target_pos[:, 2] += 0.1
+    palm_target_pos[:, 0] += 0.08
+    palm_target_pos[:, 1] -= 0.04
+    palm_target_pos[:, 2] += 0.05
     palm_target_rot = get_rotation_quat(0.0, 0.0, torch.pi, device)
     palm_target_pose = torch.cat([palm_target_pos, palm_target_rot], dim=-1)
 
@@ -129,7 +132,16 @@ def state_machine_offline(
     # -------------------------
     # Step 3: Rotate hinge (unlatch)
     # -------------------------
-    q_door = torch.tensor([0.0, 0.8], device=device)
+    q_door = torch.tensor([0.0, 1.0], device=device)
+    palm_target_pose[:, 2] -= 0.04
+    palm_target_pose[:, 3:] = get_rotation_quat(0.0, 0.0, torch.pi + 1.0, device)
+    q_robot[:10] = solve_ik(
+        robot_urdf_path,
+        q_robot[:10],
+        palm_pose=palm_target_pose,
+        base_pose=base_target_pose,
+        robot_initial_pose=robot_initial_pose,
+    )[0]
     robot_traj.append(q_robot.clone())
     door_traj.append(q_door.clone())
 
@@ -152,11 +164,11 @@ def state_machine_offline(
         base_target_pos[:, 1] = theta / 1.45 * 0.25
         base_target_pose = torch.cat([base_target_pos, base_target_rot], dim=-1)
 
-        palm_target_rot = get_rotation_quat(-min(theta.item(), 0.6), 0.0, torch.pi, device)
+        palm_target_rot = get_rotation_quat(-theta.item(), 0.0, torch.pi, device)
 
-        new_handle_pos[:, 0] += 0.1 * torch.cos(theta)
-        new_handle_pos[:, 1] -= 0.1 * torch.sin(theta)
-        new_handle_pos[:, 2] += 0.1
+        new_handle_pos[:, 0] += 0.05 * torch.cos(theta)
+        new_handle_pos[:, 1] -= 0.05 * torch.sin(theta)
+        new_handle_pos[:, 2] += 0.05
         palm_target_pose = torch.cat([new_handle_pos, palm_target_rot], dim=-1)
 
         q_robot[:10] = solve_ik(
@@ -176,15 +188,15 @@ def state_machine_offline(
     # Step 5 : Base forward
     # -------------------------
     palm_target_pose[:, 0] += 0.45
-    palm_target_pose[:, 1] += 0.15
+    palm_target_pose[:, 1] += 0.08
     # palm_target_pose[:, 2] -= 0.1
     palm_target_pose[:, 3:] = get_rotation_quat(0.0, 0.0, torch.pi, device)
 
-    q_robot[10:10+16] = open_hand(0.9)
+    q_robot[10:10+16] = open_hand(1.0)
     q_door = torch.tensor([1.5, 0.0], device=device)
 
     for _ in range(1):
-        base_target_pos[:, 0] -= 0.15
+        base_target_pos[:, 0] -= 0.25
         base_target_pos[:, 1] = 0.1
         base_target_pose = torch.cat([base_target_pos, base_target_rot], dim=-1)
 
@@ -209,20 +221,20 @@ def state_machine_offline(
     base_target_pos[:, 1] = 0.0
     base_target_pose = torch.cat([base_target_pos, base_target_rot], dim=-1)
 
-    palm_pose = base_target_pos.clone()
-    # palm_pose[:, 2] = 0.75
-    # palm_pose[:, 0] += 0.6
-    # palm_pose[:, 1] -= 0.3
-    palm_pose[:, :3] += delta_palm_pos[:, :3]
-    palm_pose = torch.cat([palm_pose, base_target_rot], dim=-1)
+    # palm_pose = base_target_pos.clone()
+    # palm_pose[:, :3] += delta_palm_pos[:, :3]
+    # palm_pose = torch.cat([palm_pose, base_target_rot], dim=-1)
+    prev_q = q_robot[3:10].clone()
 
     q_robot[:10] = solve_ik(
         robot_urdf_path,
         q_robot[:10],
-        palm_pose=palm_pose,
+        # palm_pose=palm_pose,
+        palm_pose=None,
         base_pose=base_target_pose,
         robot_initial_pose=robot_initial_pose,
     )[0]
+    q_robot[3:10] = prev_q
     q_robot[10:10+16] = open_hand(1.0)
     q_door = torch.tensor([1.5, 0.0], device="cpu")
 
@@ -249,6 +261,7 @@ def state_machine_offline(
         robot_initial_pose=robot_initial_pose,
     )[0]
 
+    q_robot[3:10] = robot_initial_q[3:10]
     q_door = torch.tensor([0.0, 0.0], device="cpu")
 
     robot_traj.append(q_robot.clone())
@@ -531,6 +544,7 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path):
         "robot_joint_pos_traj": robot_traj,
         "robot_joint_vel_traj": robot_traj_d,
         "key_indices": torch.tensor(key_indices, dtype=torch.int32)[key_idx_in_key_indices]
+        # "key_indices": key_indices
     }
     print(torch.tensor(key_indices, dtype=torch.int32)[key_idx_in_key_indices])
     with open(os.path.join(dir_path, "traj.pkl"), "wb") as f:
@@ -547,7 +561,7 @@ if __name__ == "__main__":
     asset_base_folder = os.path.join(root_path, "door/PartNetv4")
     asset_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/mobility.urdf"), recursive=True), reverse=True)
 
-    for door_urdf_path in asset_paths:
+    for i, door_urdf_path in enumerate(asset_paths):
         play_and_save_traj(robot_urdf_path, door_urdf_path)
-        print("Finished processing ", door_urdf_path)
+        print("Finished processing ", door_urdf_path, ", index: ", i)
     

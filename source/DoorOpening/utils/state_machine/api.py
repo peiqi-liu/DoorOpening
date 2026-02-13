@@ -65,6 +65,10 @@ def solve_ik(robot_urdf_path, q, palm_pose, base_pose, robot_initial_pose):
         ee_link_name="palm_center", 
         controlled_joints=BASE_JOINT_NAMES + FRANKA_JOINT_NAMES
     )
+    # if palm_pose is not None:
+    #     palm_pose[:, 0] += 0.08
+    #     palm_pose[:, 1] -= 0.05
+    #     palm_pose[:, 2] += 0.05
     if palm_pose is not None and palm_pose.shape[-1] == 7:
         palm_pos = palm_pose[..., :3]
         palm_quat = palm_pose[..., 3:]
