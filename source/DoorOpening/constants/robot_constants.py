@@ -86,7 +86,7 @@ ROBOT_KEY_BODY_NAMES = [
 
 ROBOT_RESET_KEY_BODY_NAMES = [
     "tidybot2_base_link",
-    "palm_center",
+    "palm_lower",
 ]
 
 CLOSE_FINGER_JOINT_VALUES = {
