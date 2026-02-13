@@ -34,8 +34,8 @@ def create_actuators():
         ),
         "joint_2": ImplicitActuatorCfg(
             joint_names_expr=["joint_2"],
-            stiffness=100,
-            damping=10,
+            stiffness=2.5,
+            damping=1,
         ),
     }
 

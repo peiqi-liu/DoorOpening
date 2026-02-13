@@ -210,6 +210,8 @@ class DooropeningEnv(DirectRLEnv):
 
         frame_idx = torch.ceil(self.ref_motion_lib.frame_idx).unsqueeze(dim = -1).to(self.device) // (self.ref_motion_lib.num_frames // 10)
 
+        ref_joint_vel = self.ref_joint_vel[:, self.ref_robot_dof_idx]
+
         obs = torch.cat(
             (
                 self.joint_pos[:, self._robot_dof_idx].unsqueeze(dim = 1),
@@ -217,6 +219,7 @@ class DooropeningEnv(DirectRLEnv):
                 key_pos_err,
                 door_to_base_link_pos,
                 rel_robot_key_body_pos,
+                ref_joint_vel.unsqueeze(dim = 1),
                 self.door_joint_pos[:, self._door_joint_idx].unsqueeze(dim = 1),
                 door_joint_err.unsqueeze(dim = 1),
                 frame_idx.unsqueeze(dim = -1),
@@ -255,9 +258,10 @@ class DooropeningEnv(DirectRLEnv):
         self.ref_robot_base_joint_pos = self.ref_robot_joint_pos[:, self.ref_base_joint_idx]
         self.ref_robot_arm_joint_pos = self.ref_robot_joint_pos[:, self.ref_arm_joint_idx]
         self.ref_robot_finger_joint_pos = self.ref_robot_joint_pos[:, self.ref_finger_joint_idx]
-        self.ref_robot_base_joint_vel = self.ref_motion_lib.get_robot_joint_vel()[:, self.ref_base_joint_idx]
-        self.ref_robot_arm_joint_vel = self.ref_motion_lib.get_robot_joint_vel()[:, self.ref_arm_joint_idx]
-        self.ref_robot_finger_joint_vel = self.ref_motion_lib.get_robot_joint_vel()[:, self.ref_finger_joint_idx]
+        self.ref_joint_vel = self.ref_motion_lib.get_robot_joint_vel()
+        self.ref_robot_base_joint_vel = self.ref_joint_vel[:, self.ref_base_joint_idx]
+        self.ref_robot_arm_joint_vel = self.ref_joint_vel[:, self.ref_arm_joint_idx]
+        self.ref_robot_finger_joint_vel = self.ref_joint_vel[:, self.ref_finger_joint_idx]
         self.ref_door_joint_pos = self.ref_motion_lib.get_door_joint_pos()
 
     def _get_rewards(self) -> torch.Tensor:

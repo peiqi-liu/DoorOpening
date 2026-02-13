@@ -55,7 +55,7 @@ class ReferenceMotionManager:
         self.robot_body_quat_traj = torch.stack(robot_body_quat_trajs, dim=0)
         self.door_traj = torch.stack(door_trajs, dim=0)
         self.key_indices = torch.stack(key_indices_list, dim=0).to(self.device)
-        self.key_indices = self.key_indices[..., :-1] # remove the last key index
+        # self.key_indices = self.key_indices[..., :-1] # remove the last key index
 
         self.num_motions = self.robot_joint_pos_traj.shape[0]
 
