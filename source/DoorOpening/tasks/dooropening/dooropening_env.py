@@ -210,6 +210,7 @@ class DooropeningEnv(DirectRLEnv):
 
         phase = (self.ref_motion_lib.frame_idx % self.ref_motion_lib.num_frames) \
             / self.ref_motion_lib.num_frames
+        # frame_idx = torch.ceil(self.ref_motion_lib.frame_idx).unsqueeze(dim = -1).to(self.device) // (self.ref_motion_lib.num_frames // 10)
 
         # ref_joint_vel = self.ref_joint_vel[:, self.ref_robot_dof_idx]
 
@@ -224,6 +225,7 @@ class DooropeningEnv(DirectRLEnv):
                 self.door_joint_pos[:, self._door_joint_idx].unsqueeze(dim = 1),
                 door_joint_err.unsqueeze(dim = 1),
                 phase.unsqueeze(dim = -1).unsqueeze(dim = -1),
+                # frame_idx.unsqueeze(dim = -1),
                 # contact_forces_door1,
                 # contact_forces_door2,
                 # contact_forces_robot_palm_center,
@@ -429,7 +431,8 @@ class DooropeningEnv(DirectRLEnv):
         default_root_state = self.robot.data.default_root_state[env_ids]
         default_root_state[:, :3] += self.scene.env_origins[env_ids]
 
-        # self.joint_pos[env_ids] = self.robot.data.default_joint_pos[env_ids]
+        self.joint_pos[env_ids] = self.robot.data.default_joint_pos[env_ids]
+        self.joint_vel[env_ids] = self.robot.data.default_joint_vel[env_ids]
         self.joint_vel[env_ids[:, None], self._robot_dof_idx[None, :]] = deep_mimic_initial_joint_vel.to(self.joint_vel)[..., self.ref_robot_dof_idx]
         self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]] = deep_mimic_initial_joint_pos.to(self.joint_pos)[..., self.ref_robot_dof_idx]
 
