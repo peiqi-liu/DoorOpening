@@ -81,7 +81,7 @@ ROBOT_KEY_BODY_NAMES = [
     "panda_link2",
     "panda_link4",
     "panda_link6",
-    "palm_center",
+    "palm_lower",
 ]
 
 ROBOT_RESET_KEY_BODY_NAMES = [

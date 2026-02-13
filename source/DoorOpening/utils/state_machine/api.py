@@ -62,7 +62,7 @@ def solve_ik(robot_urdf_path, q, palm_pose, base_pose, robot_initial_pose):
 
     ik_solver = PinocchioIKSolver(
         urdf_path=robot_urdf_path, 
-        ee_link_name="palm_center", 
+        ee_link_name="palm_lower", 
         controlled_joints=BASE_JOINT_NAMES + FRANKA_JOINT_NAMES
     )
     # if palm_pose is not None:
@@ -100,11 +100,58 @@ def solve_ik(robot_urdf_path, q, palm_pose, base_pose, robot_initial_pose):
 
 
 def get_hinge_pos(door_urdf_path, door_initial_pose, joint_angles):
-    door_initial_pos, door_initial_quat = door_initial_pose[..., :3], door_initial_pose[..., 3:]
-    pointcloud = sample_pointcloud_from_link_name(door_urdf_path, joint_angles, "link_2", device = "cpu")
+    door_initial_pos, door_initial_quat = (
+        door_initial_pose[..., :3],
+        door_initial_pose[..., 3:]
+    )
+
+    # Sample point cloud (link frame)
+    pointcloud = sample_pointcloud_from_link_name(
+        door_urdf_path, joint_angles, "link_2", device="cpu"
+    )
+
+    # Transform to world frame
     door_pointcloud = quat_apply(door_initial_quat, pointcloud) + door_initial_pos
-    door_pointcloud = door_pointcloud.squeeze()
-    hinge_pos = door_pointcloud.median(dim=0).values
+    P = door_pointcloud.squeeze()
+
+    # ----------------------------
+    # 1. Estimate rotation axis via PCA
+    # ----------------------------
+    centroid = P.mean(dim=0)
+    centered = P - centroid
+
+    cov = centered.T @ centered / P.shape[0]
+    eigvals, eigvecs = torch.linalg.eigh(cov)
+
+    # Smallest eigenvalue → axis direction
+    axis_dir = eigvecs[:, 0]
+    axis_dir = axis_dir / axis_dir.norm()
+
+    # ----------------------------
+    # 2. Estimate axis origin
+    # ----------------------------
+    # Project centroid onto axis
+    axis_origin = centroid - (centroid @ axis_dir) * axis_dir
+
+    # ----------------------------
+    # 3. Compute radial distances
+    # ----------------------------
+    v = P - axis_origin
+    proj = (v @ axis_dir)[:, None] * axis_dir
+    radial = v - proj
+    radial_dist = radial.norm(dim=1)
+
+    # ----------------------------
+    # 4. Extract lever points
+    # ----------------------------
+    threshold = 0.6 * radial_dist.max()
+    lever_points = P[radial_dist > threshold]
+
+    if lever_points.shape[0] < 10:
+        lever_points = P
+
+    hinge_pos = lever_points.mean(dim=0)
+
     if hinge_pos.ndim == 1:
         hinge_pos = hinge_pos.unsqueeze(0)
     return hinge_pos.cpu()
