@@ -98,6 +98,21 @@ def solve_ik(robot_urdf_path, q, palm_pose, base_pose, robot_initial_pose):
     # print("fk: ", ik_solver.compute_fk(q[0, :10]))
     return q
 
+def get_board_pos(door_urdf_path, door_initial_pose, joint_angles):
+    door_initial_pos, door_initial_quat = (
+        door_initial_pose[..., :3],
+        door_initial_pose[..., 3:]
+    )
+
+    # Sample point cloud (link frame)
+    pointcloud = sample_pointcloud_from_link_name(
+        door_urdf_path, joint_angles, "link_1", device="cpu"
+    )
+
+    door_pointcloud = quat_apply(door_initial_quat, pointcloud) + door_initial_pos
+    P = door_pointcloud.squeeze()
+
+    return P.mean(dim = 0).unsqueeze(0)
 
 def get_hinge_pos(door_urdf_path, door_initial_pose, joint_angles):
     door_initial_pos, door_initial_quat = (

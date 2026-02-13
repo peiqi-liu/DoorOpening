@@ -46,6 +46,8 @@ class ReferenceMotionManager:
             robot_body_pos_trajs.append(robot_body_pos_traj)
             robot_body_quat_trajs.append(robot_body_quat_traj)
             robot_joint_vel_trajs.append(robot_joint_vel_traj) 
+            if isinstance(key_indices, list):
+                key_indices = torch.tensor(key_indices, device=self.device)
             key_indices_list.append(key_indices)
 
         # stack motions: [M, T, ...]

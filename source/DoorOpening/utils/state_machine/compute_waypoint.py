@@ -131,8 +131,8 @@ def state_machine_offline(
     # Step 3: Rotate hinge (unlatch)
     # -------------------------
     q_door = torch.tensor([0.0, 1.0], device=device)
-    palm_target_pose[:, 2] -= 0.04
-    palm_target_pose[:, 1] -= 0.05
+    palm_target_pose[:, 2] -= 0.08
+    palm_target_pose[:, 1] -= 0.02
     palm_target_pose[:, 3:] = get_rotation_quat(0.0 + torch.pi, 0.0 + torch.pi, torch.pi + 1.0, device)
     q_robot[:10] = solve_ik(
         robot_urdf_path,
@@ -266,71 +266,103 @@ def state_machine_offline(
     robot_traj.append(q_robot.clone())
     door_traj.append(q_door.clone())
 
+    key_idx_in_key_indices.append(len(robot_traj) - 1)
+
     return robot_traj, door_traj, key_idx_in_key_indices
 
-def collocate_and_playback(robot_traj, door_traj, length=1000):
+def collocate_and_playback(robot_traj, door_traj, key_idx_in_key_indices, length=1000):
+    """
+    Interpolate trajectory between keyframes using cubic splines
+    with segment-wise time allocation proportional to geometric length.
+    """
+
+    # ---- Convert to numpy ----
     robot_traj = torch.stack(robot_traj).detach().cpu().numpy()
     door_traj = torch.stack(door_traj).detach().cpu().numpy()
     traj = np.concatenate([robot_traj, door_traj], axis=-1)
-    N, D = traj.shape
 
-    # segment lengths -> timing
-    dq = np.linalg.norm(traj[1:] - traj[:-1], axis=1)
-    dt = np.maximum(dq / 1.0, 0.1)
-    seg_ratios = dt / dt.sum()
+    N = len(key_idx_in_key_indices)
 
+    # ---- Compute geometric length of each keyframe segment ----
+    seg_lengths = []
+    for i in range(N - 1):
+        start = key_idx_in_key_indices[i]
+        end = key_idx_in_key_indices[i + 1]
+
+        seg = traj[start:end + 1]
+        if len(seg) < 2:
+            seg_lengths.append(1e-6)
+            continue
+
+        dists = np.linalg.norm(seg[1:] - seg[:-1], axis=1)
+        seg_lengths.append(max(dists.sum(), 1e-6))
+
+    seg_lengths = np.array(seg_lengths)
+    seg_ratios = seg_lengths / seg_lengths.sum()
+
+    # ---- Interpolation ----
     traj_out = []
     traj_d_out = []
     key_indices = [0]
-
     samples_used = 0
 
     for i in range(N - 1):
-        p0 = traj[i]
-        p1 = traj[i + 1]
 
-        # allocate samples for this segment
+        start = key_idx_in_key_indices[i]
+        end = key_idx_in_key_indices[i + 1]
+        ps = traj[start:end + 1]
+
+        # allocate samples proportionally
         seg_len = int(np.round(seg_ratios[i] * length))
-        if i == N - 2:  # last segment: fill remainder
-            seg_len = length - samples_used
-        samples_used += seg_len
 
+        # ensure final segment fills remainder
+        if i == N - 2:
+            seg_len = length - samples_used
+
+        seg_len = max(seg_len, 1)
+        samples_used += seg_len
         key_indices.append(key_indices[-1] + seg_len)
 
-        # local time [0, 1]
-        t_local = np.array([0.0, 1.0])
-        cs = CubicSpline(t_local, np.stack([p0, p1]), axis=0, bc_type="clamped")
+        # ---- Chord-length parameterization ----
+        if len(ps) == 1:
+            # Degenerate case: repeat point
+            seg_traj = np.repeat(ps, seg_len, axis=0)
+            seg_traj_d = np.zeros_like(seg_traj)
+        else:
+            dists = np.linalg.norm(ps[1:] - ps[:-1], axis=1)
+            t_local = np.concatenate([[0.0], np.cumsum(dists)])
+            t_local = t_local / max(t_local[-1], 1e-6)
 
-        t_samples = np.linspace(0.0, 1.0, seg_len, endpoint=False if i < N - 2 else True)
+            cs = CubicSpline(t_local, ps, axis=0, bc_type="clamped")
 
-        seg_traj = cs(t_samples)
-        seg_traj_d = cs(t_samples, 1)
+            t_samples = np.linspace(
+                0.0, 1.0,
+                seg_len,
+                endpoint=(i == N - 2)
+            )
+
+            seg_traj = cs(t_samples)
+            seg_traj_d = cs(t_samples, 1)
 
         traj_out.append(seg_traj)
         traj_d_out.append(seg_traj_d)
 
-    traj = torch.tensor(np.concatenate(traj_out, axis=0), dtype=torch.float32)
-    traj_d = torch.tensor(np.concatenate(traj_d_out, axis=0), dtype=torch.float32)
-    print(key_indices)
+    # ---- Concatenate segments ----
+    traj_interp = np.concatenate(traj_out, axis=0)
+    traj_d_interp = np.concatenate(traj_d_out, axis=0)
 
-    # # automatic timing
-    # dq = np.linalg.norm(traj[1:] - traj[:-1], axis=1)
-    # dt = np.maximum(dq / 1.0, 0.1)
-    # t = np.concatenate([[0], np.cumsum(dt)])
-    # t /= t[-1]
+    traj_interp = torch.tensor(traj_interp, dtype=torch.float32)
+    traj_d_interp = torch.tensor(traj_d_interp, dtype=torch.float32)
 
-    # cs = CubicSpline(t, traj, axis=0, bc_type="clamped")
+    # ---- Split robot / door ----
+    robot_traj = traj_interp[:, :-2]
+    door_traj = traj_interp[:, -2:]
+    robot_traj_d = traj_d_interp[:, :-2]
+    door_traj_d = traj_d_interp[:, -2:]
 
-    # t = np.linspace(0, 1, length)
-    # traj = torch.tensor(cs(t))
-    # traj_d = torch.tensor(cs(t, 1))
-
-    robot_traj = traj[:, :-2]
-    door_traj = traj[:, -2:]
+    # clamp door values
     door_traj[:, 0] = door_traj[:, 0].clamp(min=0.0, max=1.5)
     door_traj[:, 1] = door_traj[:, 1].clamp(min=0.0, max=1.0)
-    robot_traj_d = traj_d[:, :-2]
-    door_traj_d = traj_d[:, -2:]
 
     return robot_traj, door_traj, robot_traj_d, door_traj_d, key_indices
 
@@ -467,7 +499,6 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path):
     door_initial_q = torch.tensor([0.0, 0.0], device="cpu")
     robot_traj, door_traj, key_idx_in_key_indices = state_machine_offline(robot_urdf_path, door_urdf_path, robot_initial_pose, door_initial_pose, robot_initial_q, door_initial_q, device="cpu")
     torch.set_printoptions(precision=4, sci_mode=False)
-    print(torch.stack(robot_traj)[:, :10])
     # new_robot_traj = []
     # new_door_traj = []
     # for i, (robot_point, door_point) in enumerate(zip(robot_traj, door_traj)):
@@ -477,7 +508,7 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path):
     #             new_door_traj.append(door_point)
     # robot_traj = new_robot_traj
     # door_traj = new_door_traj
-    robot_traj, door_traj, robot_traj_d, door_traj_d, key_indices = collocate_and_playback(robot_traj, door_traj, length=1000)
+    robot_traj, door_traj, robot_traj_d, door_traj_d, key_indices = collocate_and_playback(robot_traj, door_traj, key_idx_in_key_indices, length=1000)
     print(robot_traj.shape)
     print(door_traj.shape)
     print(robot_traj_d.shape)
@@ -542,10 +573,11 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path):
         "robot_body_quat_traj": robot_body_quat_traj,
         "robot_joint_pos_traj": robot_traj,
         "robot_joint_vel_traj": robot_traj_d,
-        "key_indices": torch.tensor(key_indices, dtype=torch.int32)[key_idx_in_key_indices]
-        # "key_indices": key_indices
+        # "key_indices": torch.tensor(key_indices, dtype=torch.int32)[key_idx_in_key_indices]
+        "key_indices": key_indices
     }
-    print(torch.tensor(key_indices, dtype=torch.int32)[key_idx_in_key_indices])
+    print(key_indices)
+    # print(torch.tensor(key_indices, dtype=torch.int32)[key_idx_in_key_indices])
     with open(os.path.join(dir_path, "traj.pkl"), "wb") as f:
         pkl.dump(data, f)
         print("Trajectory saved to " + os.path.join(dir_path, "traj.pkl"))
