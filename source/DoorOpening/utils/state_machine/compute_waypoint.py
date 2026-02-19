@@ -108,7 +108,7 @@ def state_machine_offline(
     palm_target_pos = handle_pos.clone()
     palm_target_pos[:, 0] += 0.05
     palm_target_pos[:, 1] -= 0.1
-    palm_target_pos[:, 2] += 0.05
+    palm_target_pos[:, 2] += 0.08
     palm_target_rot = get_rotation_quat(0.0 + torch.pi, 0.0 + torch.pi, torch.pi, device)
     palm_target_pose = torch.cat([palm_target_pos, palm_target_rot], dim=-1)
 
@@ -133,7 +133,8 @@ def state_machine_offline(
     q_door = torch.tensor([0.0, 1.0], device=device)
     palm_target_pose[:, 2] -= 0.08
     palm_target_pose[:, 1] -= 0.02
-    palm_target_pose[:, 3:] = get_rotation_quat(0.0 + torch.pi, 0.0 + torch.pi, torch.pi + 1.0, device)
+    # palm_target_pose[:, 3:] = get_rotation_quat(0.0 + torch.pi, 0.0 + torch.pi, torch.pi + 1.0, device)
+    palm_target_pose[:, 3:] = get_rotation_quat(0.0 + torch.pi, 0.0 + torch.pi, torch.pi + 0.2, device)
     q_robot[:10] = solve_ik(
         robot_urdf_path,
         q_robot[:10],
@@ -149,7 +150,7 @@ def state_machine_offline(
     # -------------------------
     # Step 4: Pull door open
     # -------------------------
-    for theta in torch.arange(0.25, 1.16, 0.1):
+    for theta in torch.arange(0.25, 1.36, 0.1):
         q_door = torch.tensor([theta, 0], device=device)
 
         new_handle_pos = get_hinge_pos(
@@ -163,11 +164,11 @@ def state_machine_offline(
         base_target_pos[:, 1] = theta / 1.45 * 0.25
         base_target_pose = torch.cat([base_target_pos, base_target_rot], dim=-1)
 
-        palm_target_rot = get_rotation_quat(-min(theta.item(), 0.8) + torch.pi, 0.0 + torch.pi, torch.pi, device)
+        palm_target_rot = get_rotation_quat(-theta.item() + torch.pi, 0.0 + torch.pi, torch.pi, device)
 
         new_handle_pos[:, 0] += (0.05 * torch.cos(theta) - 0.1 * torch.sin(theta))
         new_handle_pos[:, 1] -= (0.1 * torch.cos(theta) + 0.05 * torch.sin(theta))
-        new_handle_pos[:, 2] += 0.05
+        new_handle_pos[:, 2] += 0.08
         palm_target_pose = torch.cat([new_handle_pos, palm_target_rot], dim=-1)
 
         q_robot[:10] = solve_ik(
@@ -186,29 +187,43 @@ def state_machine_offline(
     # -------------------------
     # Step 5 : Base forward
     # -------------------------
+
+    base_target_pos[:, 0] -= 0.12
+    base_target_pos[:, 1] = 0.15
+    base_target_pose = torch.cat([base_target_pos, base_target_rot], dim=-1)
+
+    q_robot[:10] = solve_ik(
+        robot_urdf_path,
+        q_robot[:10],
+        palm_pose=palm_target_pose,
+        base_pose=base_target_pose,
+        robot_initial_pose=robot_initial_pose,
+    )[0]
+
+    robot_traj.append(q_robot.clone())
+    door_traj.append(q_door.clone())
+
     palm_target_pose[:, 0] += 0.45
-    palm_target_pose[:, 1] += 0.08
-    # palm_target_pose[:, 2] -= 0.1
+    palm_target_pose[:, 1] += 0.2
     palm_target_pose[:, 3:] = get_rotation_quat(0.0 + torch.pi, 0.0 + torch.pi, torch.pi, device)
 
+    base_target_pos[:, 0] -= 0.18
+    base_target_pos[:, 1] = 0.15
+    base_target_pose = torch.cat([base_target_pos, base_target_rot], dim=-1)
+
+    q_robot[:10] = solve_ik(
+        robot_urdf_path,
+        q_robot[:10],
+        palm_pose=palm_target_pose,
+        base_pose=base_target_pose,
+        robot_initial_pose=robot_initial_pose,
+    )[0]
+
     q_robot[10:10+16] = open_hand(1.0)
-    q_door = torch.tensor([1.5, 0.0], device=device)
+    q_door = torch.tensor([1.35, 0.0], device=device)
 
-    for _ in range(1):
-        base_target_pos[:, 0] -= 0.25
-        base_target_pos[:, 1] = 0.1
-        base_target_pose = torch.cat([base_target_pos, base_target_rot], dim=-1)
-
-        q_robot[:10] = solve_ik(
-            robot_urdf_path,
-            q_robot[:10],
-            palm_pose=palm_target_pose,
-            base_pose=base_target_pose,
-            robot_initial_pose=robot_initial_pose,
-        )[0]
-
-        robot_traj.append(q_robot.clone())
-        door_traj.append(q_door.clone())
+    robot_traj.append(q_robot.clone())
+    door_traj.append(q_door.clone())
 
     key_idx_in_key_indices.append(len(robot_traj) - 1)
 
@@ -217,7 +232,7 @@ def state_machine_offline(
     # -------------------------
     delta_palm_pos = palm_target_pos - base_target_pos
     base_target_pos[:, 0] = 0.0
-    base_target_pos[:, 1] = 0.0
+    base_target_pos[:, 1] = -0.05
     base_target_pose = torch.cat([base_target_pos, base_target_rot], dim=-1)
 
     # palm_pose = base_target_pos.clone()
