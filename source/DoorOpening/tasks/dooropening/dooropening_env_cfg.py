@@ -148,7 +148,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         ),
     )
 
-    twist_indices = [1, 5, 50]
+    twist_indices = [1, 5, 20, 100]
 
     # door(s)
     door_cfg: ArticulationCfg = ALL_DOOR_CONFIGS.replace(prim_path="/World/envs/env_.*/Door")
