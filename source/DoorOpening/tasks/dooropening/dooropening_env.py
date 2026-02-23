@@ -118,6 +118,11 @@ class DooropeningEnv(DirectRLEnv):
         self.reset_door_joint_pos_delta_min = self.cfg.reset_door_joint_pos_delta_min
         self.reset_door_joint_pos_delta_max = self.cfg.reset_door_joint_pos_delta_max
 
+        self.last_actions = torch.zeros(
+            (self.num_envs, len(self._robot_dof_idx)),
+            device=self.device
+        )
+
         self.twist_indices = self.cfg.twist_indices
 
         # self.ref_motion_lib = ReferenceMotionManager(self.cfg.motion_file, self.num_envs, self.device, velocity=self.cfg.velocity, reset_from_start = True)
@@ -176,6 +181,7 @@ class DooropeningEnv(DirectRLEnv):
         self.scene.sensors["contact_forces_robot_palm_center"].update(self.cfg.sim_dt, force_recompute=True)
 
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
+        self.last_actions[:] = self.scaled_actions
 
     def _apply_action(self):
         edit_door_articulation(self.door)
@@ -217,6 +223,7 @@ class DooropeningEnv(DirectRLEnv):
             (
                 self.joint_pos[:, self._robot_dof_idx].unsqueeze(dim = 1),
                 self.joint_vel[:, self._robot_dof_idx].unsqueeze(dim = 1),
+                self.last_actions.unsqueeze(dim = 1),
                 key_pos_err,
                 door_to_base_link_pos,
                 rel_robot_key_body_pos,
@@ -458,6 +465,8 @@ class DooropeningEnv(DirectRLEnv):
 
         self.door.write_joint_position_to_sim(door_joint_pos, None, env_ids)
         self.door.set_joint_position_target(torch.zeros_like(door_joint_pos), None, env_ids)
+
+        self.last_actions[env_ids] = 0.0
 
         super()._reset_idx(env_ids)
 
