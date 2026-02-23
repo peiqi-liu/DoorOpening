@@ -53,7 +53,7 @@ def state_machine_offline(
 ):
     """
     Keypoints:
-    0. Start
+    # 0. Start
     1. Pregrasp
     2. Actual Grasp
     3. Rotate hinge (unlatch)
@@ -95,7 +95,7 @@ def state_machine_offline(
     base_target_pose = torch.cat([base_target_pos, base_target_rot], dim=-1)
 
     palm_target_pos = handle_pos.clone()
-    palm_target_pos[:, 0] += 0.25
+    palm_target_pos[:, 0] += 0.4
     palm_target_pos[:, 1] -= 0.1
     palm_target_pos[:, 2] += 0.25
     palm_target_rot = get_rotation_quat(0.0 + torch.pi, 0.0 + torch.pi, torch.pi, device)
@@ -598,7 +598,7 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path):
 
     mask = torch.zeros(len(robot_traj), dtype=torch.int8)
     # Contact with hinge should happen between keyframe 2 and 4
-    mask[key_indices[2]:key_indices[4]] = 1
+    mask[key_indices[1]:key_indices[3]] = 1
 
     data = {
         "door_traj": door_traj, 
