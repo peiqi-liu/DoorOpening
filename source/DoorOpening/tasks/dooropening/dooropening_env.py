@@ -11,10 +11,11 @@ from DoorOpening.motion.motion_lib import ReferenceMotionManager
 from DoorOpening.assets.door.door_cfg import edit_door_articulation
 from DoorOpening.utils.finger_utils import joint_angle_to_tendon_utils, tendon_to_joint_angle_utils, leap_joints_to_tendon
 from .dooropening_env_cfg import DooropeningEnvCfg
-from DoorOpening.assets.door.door_cfg import motion_traj_paths
+from DoorOpening.assets.door.door_cfg import motion_traj_paths, handle_offsets, board_offsets
 from isaaclab.sensors import ContactSensor
 from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES, ROBOT_KEY_BODY_NAMES
 from DoorOpening.utils.pose_utils import normalize_to_center_frame
+from isaaclab.utils.math import quat_apply
 
 import pickle as pkl
 import math
@@ -57,8 +58,8 @@ class DooropeningEnv(DirectRLEnv):
         self.open_finger_joints = torch.tensor([self.cfg.open_finger_joints[name] for name in finger_joint_names], device=self.device)
 
         self._robot_base_link_idx, self.robot_base_link_name = self.robot.find_bodies(self.cfg.base_link_name)
-        self._door_body_idx, _ = self.door.find_bodies(self.cfg.door_body_names)
-        self._door_joint_idx, _ = self.door.find_joints(self.cfg.door_joint_names)
+        self._door_body_idx, self.door_body_names = self.door.find_bodies(self.cfg.door_body_names)
+        self._door_joint_idx, self.door_joint_names = self.door.find_joints(self.cfg.door_joint_names)
 
         self._robot_palm_link_idx, self.robot_palm_link_name = self.robot.find_bodies(self.cfg.robot_palm_link_name)
         self._robot_base_body_link_idx, self.robot_base_body_link_name = self.robot.find_bodies(self.cfg.robot_base_body_link_name)
@@ -102,13 +103,6 @@ class DooropeningEnv(DirectRLEnv):
         # self.reset_base_pos_delta = (self.cfg.reset_base_pos_delta ** 2) * len(self.cfg.base_joints)
         # self.reset_key_body_pos_delta = (self.cfg.reset_key_body_pos_delta ** 2) * len(self.cfg.robot_reset_key_bodies)
         # self.reset_key_body_quat_delta = (self.cfg.reset_key_body_quat_delta ** 2) * len(self.cfg.robot_reset_key_bodies)
-
-        # self.reset_base_pos_delta_min = (self.cfg.reset_base_pos_delta_min ** 2) * len(self.cfg.base_joints)
-        # self.reset_key_body_pos_delta_min = (self.cfg.reset_key_body_pos_delta_min ** 2) * len(self.cfg.robot_reset_key_bodies)
-        # self.reset_key_body_quat_delta_min = (self.cfg.reset_key_body_quat_delta_min ** 2) * len(self.cfg.robot_reset_key_bodies)
-        # self.reset_base_pos_delta_max = (self.cfg.reset_base_pos_delta_max ** 2) * len(self.cfg.base_joints)
-        # self.reset_key_body_pos_delta_max = (self.cfg.reset_key_body_pos_delta_max ** 2) * len(self.cfg.robot_reset_key_bodies)
-        # self.reset_key_body_quat_delta_max = (self.cfg.reset_key_body_quat_delta_max ** 2) * len(self.cfg.robot_reset_key_bodies)
         self.reset_base_pos_delta_min = self.cfg.reset_base_pos_delta_min
         self.reset_key_body_pos_delta_min = self.cfg.reset_key_body_pos_delta_min
         self.reset_key_body_quat_delta_min = self.cfg.reset_key_body_quat_delta_min
@@ -126,6 +120,10 @@ class DooropeningEnv(DirectRLEnv):
         self.twist_indices = self.cfg.twist_indices
 
         # self.ref_motion_lib = ReferenceMotionManager(self.cfg.motion_file, self.num_envs, self.device, velocity=self.cfg.velocity, reset_from_start = True)
+        self.handle_offsets = [handle_offsets[i] for i in range(self.num_envs)]
+        self.board_offsets = [board_offsets[i] for i in range(self.num_envs)]
+        self.handle_offsets = torch.stack(self.handle_offsets).to(self.device)
+        self.board_offsets = torch.stack(self.board_offsets).to(self.device)
         env_to_file_map = [i % len(motion_traj_paths) for i in range(self.num_envs)]
         self.ref_motion_lib = ReferenceMotionManager(num_envs=self.num_envs, device=self.device, velocity=self.cfg.velocity, reset_from_start = False, env_to_file_map=env_to_file_map, twist_indices=self.twist_indices)
         self.max_trial_steps = self.ref_motion_lib.num_frames * torch.ones_like(self.episode_length_buf, device=self.device)
@@ -202,7 +200,8 @@ class DooropeningEnv(DirectRLEnv):
         base_link_pos -= self.scene.env_origins.repeat((1, 1
             )).reshape(self.num_envs, 1, 3) 
         
-        door_to_base_link_pos = (self.door_link_pos - base_link_pos).reshape(self.num_envs, 1, -1)
+        # door_to_base_link_pos = (self.door_link_pos - base_link_pos).reshape(self.num_envs, 1, -1)
+        door_to_base_link_pos = (self.door_keypoints - base_link_pos).reshape(self.num_envs, 1, -1)
 
         rel_robot_key_body_pos = (self.robot_key_body_pos - base_link_pos).reshape(self.num_envs, 1, -1)
 
@@ -243,6 +242,48 @@ class DooropeningEnv(DirectRLEnv):
         observations = {"policy": obs.squeeze()}
         return observations
 
+    def compute_door_keypoints(
+        self,
+    ) -> torch.Tensor:
+        """
+        Compute 5 keypoints:
+            - 2 from joint 0 (handle offsets)
+            - 3 from joint 1 (board offsets)
+
+        Returns:
+            keypoints_w: [B, 5, 3]
+        """
+
+        # ---- Joint 0 (handle) ----
+        pos0 = self.door_link_pos[:, self.door_body_names.index("link_2"), :]         # [B, 3]
+        quat0 = self.door_link_quat[:, self.door_body_names.index("link_2"), :]       # [B, 4]
+
+        # reshape for batched quat_apply
+        handle_offsets_flat = self.handle_offsets.reshape(-1, 3)           # [B*2, 3]
+        quat0_rep = quat0.unsqueeze(1).repeat(1, 2, 1).reshape(-1, 4) # [B*2, 4]
+
+        handle_rot = quat_apply(quat0_rep.float(), handle_offsets_flat.float())       # [B*2, 3]
+        handle_rot = handle_rot.reshape(self.num_envs, 2, 3)
+
+        handle_kpts = pos0.unsqueeze(1) + handle_rot                  # [B, 2, 3]
+
+        # ---- Joint 1 (board) ----
+        pos1 = self.door_link_pos[:, self.door_body_names.index("link_1"), :]
+        quat1 = self.door_link_quat[:, self.door_body_names.index("link_1"), :]
+
+        board_offsets_flat = self.board_offsets.reshape(-1, 3)             # [B*3, 3]
+        quat1_rep = quat1.unsqueeze(1).repeat(1, 3, 1).reshape(-1, 4) # [B*3, 4]
+
+        board_rot = quat_apply(quat1_rep.float(), board_offsets_flat.float())         # [B*3, 3]
+        board_rot = board_rot.reshape(self.num_envs, 3, 3)
+
+        board_kpts = pos1.unsqueeze(1) + board_rot                    # [B, 3, 3]
+
+        # ---- Concatenate ----
+        keypoints_w = torch.cat([handle_kpts, board_kpts], dim=1)     # [self.num_envs, 5, 3]
+
+        return keypoints_w
+
     def _get_intermediate_values(self):
         self.robot_key_body_pos = self.robot.data.body_pos_w[:, self._robot_key_body_idx]\
              - self.scene.env_origins.repeat((1, 1)).reshape(self.num_envs, 1, 3)
@@ -258,6 +299,10 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_finger_joint_vel = self.robot.data.joint_vel[:, self._robot_finger_dof_idx]
         self.door_link_pos = self.door.data.body_pos_w[:, self._door_body_idx]
         self.door_link_pos -= self.scene.env_origins.repeat((1, 1)).reshape(self.num_envs, 1, 3)
+        self.door_link_quat = self.door.data.body_quat_w[:, self._door_body_idx]
+        self.door_keypoints = self.compute_door_keypoints()
+        # print("door keypoints: ", self.compute_door_keypoints())
+        # print("door link pos: ", self.door_link_pos)
 
         self.ref_robot_key_body_pos_twist = self.ref_motion_lib.get_robot_body_pos_twist()[:, :, self.ref_key_body_idx]
         self.ref_robot_key_body_quat_twist = self.ref_motion_lib.get_robot_body_quat_twist()[:, :, self.ref_key_body_idx]
