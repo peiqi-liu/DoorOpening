@@ -111,7 +111,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         update_period=0.0,
         history_length=6,
         debug_vis=True,
-        filter_prim_paths_expr=["/World/envs/env_.*/Robot"],
+        filter_prim_paths_expr=["/World/envs/env_.*/Robot/palm_center", "/World/envs/env_.*/Robot/palm_lower"],
     )
 
     contact_forces_robot_palm_center = ContactSensorCfg(
@@ -119,7 +119,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         update_period=0.0,
         history_length=6,
         debug_vis=True,
-        filter_prim_paths_expr=["/World/envs/env_.*/Door"],
+        filter_prim_paths_expr=["/World/envs/env_.*/Door/link_2"],
     )
 
     contact_sensor_names = ["contact_forces_door1", "contact_forces_door2", "contact_forces_robot_palm_center"]
@@ -181,6 +181,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_arm_joint_vel_w = 2.0
     robot_finger_joint_vel_w = 0.5
     door_joint_pos_w = 4.0
+    hinge_contact_reward_w = 5.0
 
     robot_body_quat_scale = 1.0
     robot_key_body_pos_scale = 3.0
