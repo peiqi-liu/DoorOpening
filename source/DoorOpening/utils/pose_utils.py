@@ -273,78 +273,70 @@ def quat_apply_batch(q, v):
     return rotated[..., 1:]  # return vector part
 
 
-def normalize_to_center_frame(poses, quats):
+def normalize_to_center_frame(p_center, q_center, poses, quats):
     """
-    Normalize 2N+1 poses and quaternions to the center frame.
-
-    Accepts:
-        poses: (..., M, 3)
-        quats: (..., M, 4)
-
-    Returns:
-        poses_rel: (..., M, 3)
-        quats_rel: (..., M, 4)
+    Works for:
+        p_center: (..., M, 3)
+        q_center: (..., M, 4)
+        poses:    (..., M, 3) OR (..., K, M, 3)
+        quats:    (..., M, 4) OR (..., K, M, 4)
     """
+
     assert poses.shape[:-1] == quats.shape[:-1]
     assert quats.shape[-1] == 4
 
-    *batch_dims, M, _ = poses.shape
-    center_idx = M // 2
+    # If poses has extra twist dimension
+    if poses.ndim == p_center.ndim + 1:
+        p_center = p_center.unsqueeze(-3)
+        q_center = q_center.unsqueeze(-3)
 
-    # Flatten all leading dims
-    poses_flat = poses.reshape(-1, M, 3)
-    quats_flat = quats.reshape(-1, M, 4)
+    # Invert center rotation
+    q_center_inv = quat_inv_batch(q_center)
 
-    # Center pose
-    p_center = poses_flat[:, center_idx, :]      # (B*, 3)
-    q_center = quats_flat[:, center_idx, :]      # (B*, 4)
+    # Relative rotations (broadcast automatically)
+    quats_rel = quat_mul_batch(q_center_inv, quats)
 
-    q_center_inv = quat_inv_batch(q_center)      # (B*, 4)
-
-    # ----- Relative orientations -----
-    q_center_inv_exp = q_center_inv.unsqueeze(1)  # (B*, 1, 4)
-    quats_rel = quat_mul_batch(q_center_inv_exp, quats_flat)
-
-    # ----- Relative positions -----
-    delta_p = poses_flat - p_center.unsqueeze(1)
-
-    poses_rel = quat_apply_batch(
-        q_center_inv.unsqueeze(1).expand(-1, M, -1),
-        delta_p
-    )
-
-    # Restore original shape
-    poses_rel = poses_rel.reshape(*batch_dims, M, 3)
-    quats_rel = quats_rel.reshape(*batch_dims, M, 4)
+    # Relative positions
+    delta_p = poses - p_center
+    poses_rel = quat_apply_batch(q_center_inv, delta_p)
 
     return poses_rel, quats_rel
 
 
 if __name__ == "__main__":
 
-    # Batch size 2, sequence length 3 (2N+1), 3D positions
     poses = torch.tensor([
-        [[1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [3.0, 0.0, 0.0]],  # Batch 0: moves along x
-        [[0.0, 1.0, 0.0], [0.0, 2.0, 0.0], [0.0, 3.0, 0.0]]   # Batch 1: moves along y
-    ])
+        [[1.0, 0.0, 0.0],
+         [2.0, 0.0, 0.0],
+         [3.0, 0.0, 0.0]],
 
-    # Simple rotations: identity at center, 90 deg z rotation at ends
-    from math import sqrt
-
-    quats = torch.tensor([
-        [[1.0, 0.0, 0.0, 0.0],      # 0° identity
-        [1.0, 0.0, 0.0, 0.0],      # center (reference)
-        [0.0, 0.0, 0.0, 1.0]],     # 180° around z
-        [[1.0, 0.0, 0.0, 0.0],
-        [1.0, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0]]
+        [[0.0, 1.0, 0.0],
+         [0.0, 2.0, 0.0],
+         [0.0, 3.0, 0.0]]
     ], dtype=torch.float32)
 
-    # Expected results (roughly):
-    # - Center pose should be at [0,0,0] in relative coordinates
-    # - Center rotation should be identity in quats_rel
+    quats = torch.tensor([
+        [[1.0, 0.0, 0.0, 0.0],
+         [1.0, 0.0, 0.0, 0.0],
+         [0.0, 0.0, 0.0, 1.0]],
 
-    poses_rel, quats_rel = normalize_to_center_frame(poses, quats)
+        [[1.0, 0.0, 0.0, 0.0],
+         [1.0, 0.0, 0.0, 0.0],
+         [0.0, 0.0, 0.0, 1.0]]
+    ], dtype=torch.float32)
+
+    center_idx = 1
+
+    # Keep body dimension!
+    p_center = poses[:, center_idx:center_idx+1, :]   # (B,1,3)
+    q_center = quats[:, center_idx:center_idx+1, :]   # (B,1,4)
+
+    poses_rel, quats_rel = normalize_to_center_frame(
+        p_center,
+        q_center,
+        poses,
+        quats
+    )
 
     print("Relative positions:\n", poses_rel)
     print("Relative quaternions:\n", quats_rel)
