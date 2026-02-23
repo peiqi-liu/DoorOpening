@@ -177,8 +177,37 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     print("robot body pos: ", scene["robot"].data.body_pos_w[:, body_idx])
     print("robot body quat: ", scene["robot"].data.body_quat_w[:, body_idx])
     
-
+    count = 0
+    handle_cfg = FRAME_MARKER_CFG.replace(prim_path="/World/HandleFrame")
+    handle_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)
+    # board_cfg = FRAME_MARKER_CFG.replace(prim_path="/World/BoardFrame")
+    # board_cfg.markers["frame"].scale = (0.3, 0.3, 0.3)
     while simulation_app.is_running():
+        
+        if count % 20 == 0:
+            from DoorOpening.assets.door.door_cfg import handle_offset, board_offset
+            from isaaclab.utils.math import quat_apply
+            handle_offset = handle_offset.to(scene["door"].data.body_pos_w)
+            board_offset = board_offset.to(scene["door"].data.body_pos_w)
+            # print("handle_offsets: ", handle_offset)
+            # print("board_offsets: ", board_offset)
+            translation = scene["door"].data.body_pos_w[:, scene["door"].find_bodies("link_2")[0]].squeeze(0)
+            quaternion = scene["door"].data.body_quat_w[:, scene["door"].find_bodies("link_2")[0]].squeeze(0)
+            keypoint_pos_w = translation + quat_apply(quaternion, handle_offset[1]).squeeze(0)
+            # translation = scene["door"].data.body_pos_w[:, scene["door"].find_bodies("link_1")[0]].squeeze(0)
+            # quaternion = scene["door"].data.body_quat_w[:, scene["door"].find_bodies("link_1")[0]].squeeze(0)
+            # keypoint_pos_w = translation + quat_apply(quaternion, board_offset[1]).squeeze(0)
+            # board_marker = VisualizationMarkers(board_cfg)
+            # board_marker.visualize(
+            #     translations=keypoint_pos_w,
+            #     orientations=quaternion,
+            # )
+            handle_marker = VisualizationMarkers(handle_cfg)
+            handle_marker.visualize(
+                translations=keypoint_pos_w,
+                orientations=quaternion,
+            )
+        count += 1
         slider_pos = controller.q_slider.clone()
         joint_pos = scene["robot"].data.default_joint_pos.clone()
         joint_pos[..., :] = slider_pos

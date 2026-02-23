@@ -1,6 +1,8 @@
 import torch
 import pickle as pkl
 from typing import Optional, Sequence
+from DoorOpening.utils.pose_utils import normalize_to_center_frame
+import os
 
 class ReferenceMotionManager:
     def __init__(
@@ -11,11 +13,14 @@ class ReferenceMotionManager:
         velocity=0.6,
         reset_from_start=False,
         env_to_file_map: Optional[list] = None,
+        twist_indices: Optional[list] = None,
     ):
         self.device = device
         self.num_envs = num_envs
         self.velocity = velocity
         self.reset_from_start = reset_from_start
+        # Named as twist indices because we borrow the idea from Twist paper
+        self.twist_indices = twist_indices
 
         if motion_file is not None:
             self._load_motion_pkl_from_one_file(motion_file)
@@ -25,6 +30,8 @@ class ReferenceMotionManager:
             self.env_to_file_map = torch.tensor(env_to_file_map, device=self.device)
             self.one_file_loaded = False
         self._init_env_buffers()
+        if self.twist_indices is not None:
+            self._precompute_twist()
 
     # --------------------------------------------------
     # Load motion data (moved from Env)
@@ -131,6 +138,91 @@ class ReferenceMotionManager:
         self.ref_robot_body_pos = None
         self.ref_robot_body_quat = None
 
+    def _precompute_twist(self):
+        """
+        Precompute the twist indices per frame.
+        For each frame, add the frame index to all twist indices
+        Input: twist indices: list of length 2N+1
+        Output: set twist frames (robot_joint_pos_traj, door_traj, robot_body_pos_traj, robot_body_quat_traj, robot_joint_vel_traj) per frame: (traj_len, twist_len, ...) for each frame
+        """
+        device = self.device
+        T = self.num_frames
+        twist_offsets = torch.tensor(
+            self.twist_indices, device=device, dtype=torch.long
+        )  # (K,)
+        K = twist_offsets.shape[0]
+
+        # --------------------------------------------------
+        # Compute all twist frame indices
+        # --------------------------------------------------
+
+        base_frames = torch.arange(T, device=device).unsqueeze(1)  # (T,1)
+
+        twist_frames = base_frames + twist_offsets.unsqueeze(0)  # (T,K)
+        twist_frames = twist_frames.clamp(0, T - 1)  # clamp boundary
+
+        # --------------------------------------------------
+        # Helper for one-file case
+        # --------------------------------------------------
+
+        def precompute_single(traj):
+            # traj: (T, dim)
+            # output: (T, K, dim)
+            return traj[twist_frames]  # advanced indexing
+
+        # --------------------------------------------------
+        # Helper for multi-file case
+        # --------------------------------------------------
+
+        def precompute_multi(traj):
+            """
+            traj:
+                (F, T, ...)
+            returns:
+                (F, T, K, ...)
+            """
+
+            F, T = traj.shape[:2]
+            K = twist_frames.shape[1]
+
+            # (F, T, K)
+            index = twist_frames.unsqueeze(0).expand(F, -1, -1)
+
+            # reshape index to match traj for gather
+            # make index shape (F, T, K, 1, 1, ..., 1)
+            extra_dims = traj.dim() - 2
+            index = index.view(F, T, K, *([1] * extra_dims))
+
+            # expand to full feature size
+            index = index.expand(F, T, K, *traj.shape[2:])
+
+            # expand traj to insert K dimension
+            traj_expanded = traj.unsqueeze(2).expand(F, T, K, *traj.shape[2:])
+
+            return torch.gather(traj_expanded, 1, index)
+
+        # --------------------------------------------------
+        # Apply
+        # --------------------------------------------------
+
+        if self.one_file_loaded:
+
+            self.robot_joint_pos_twist = precompute_single(self.robot_joint_pos_traj)
+            self.robot_joint_vel_twist = precompute_single(self.robot_joint_vel_traj)
+            self.door_joint_pos_twist  = precompute_single(self.door_traj)
+            self.robot_body_pos_twist  = precompute_single(self.robot_body_pos_traj)
+            self.robot_body_quat_twist = precompute_single(self.robot_body_quat_traj)
+            self.robot_joint_pos_twist, self.robot_body_quat_twist = normalize_to_center_frame(self.robot_body_pos_twist, self.robot_body_quat_twist)
+
+        else:
+
+            self.robot_joint_pos_twist = precompute_multi(self.robot_joint_pos_traj)
+            self.robot_joint_vel_twist = precompute_multi(self.robot_joint_vel_traj)
+            self.door_joint_pos_twist  = precompute_multi(self.door_traj)
+            self.robot_body_pos_twist  = precompute_multi(self.robot_body_pos_traj)
+            self.robot_body_quat_twist = precompute_multi(self.robot_body_quat_traj)
+            self.robot_joint_pos_twist, self.robot_body_quat_twist = normalize_to_center_frame(self.robot_body_pos_twist, self.robot_body_quat_twist)
+
     # --------------------------------------------------
     # Reset logic
     # --------------------------------------------------
@@ -198,6 +290,13 @@ class ReferenceMotionManager:
             self.ref_door_joint_pos = self._lerp(self.door_traj[floor_idx], self.door_traj[ceil_idx], interp_ratio)
             self.ref_robot_body_pos = self._lerp(self.robot_body_pos_traj[floor_idx], self.robot_body_pos_traj[ceil_idx], interp_ratio)
             self.ref_robot_body_quat = self._lerp(self.robot_body_quat_traj[floor_idx], self.robot_body_quat_traj[ceil_idx], interp_ratio)
+
+            if self.twist_indices is not None:
+                self.ref_robot_joint_pos_twist = self._lerp(self.robot_joint_pos_twist[floor_idx], self.robot_joint_pos_twist[ceil_idx], interp_ratio)
+                self.ref_robot_joint_vel_twist = self._lerp(self.robot_joint_vel_twist[floor_idx], self.robot_joint_vel_twist[ceil_idx], interp_ratio)
+                self.ref_door_joint_pos_twist = self._lerp(self.door_joint_pos_twist[floor_idx], self.door_joint_pos_twist[ceil_idx], interp_ratio)
+                self.ref_robot_body_pos_twist = self._lerp(self.robot_body_pos_twist[floor_idx], self.robot_body_pos_twist[ceil_idx], interp_ratio)
+                self.ref_robot_body_quat_twist = self._lerp(self.robot_body_quat_twist[floor_idx], self.robot_body_quat_twist[ceil_idx], interp_ratio)
         else:
             env_ids = torch.arange(self.num_envs, device=self.device)
             indices = torch.arange(len(env_ids), device=self.device)
@@ -206,6 +305,13 @@ class ReferenceMotionManager:
             self.ref_door_joint_pos = self._lerp(self.door_traj[self.env_to_file_map[env_ids]][indices, floor_idx], self.door_traj[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
             self.ref_robot_body_pos = self._lerp(self.robot_body_pos_traj[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_body_pos_traj[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
             self.ref_robot_body_quat = self._lerp(self.robot_body_quat_traj[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_body_quat_traj[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
+
+            if self.twist_indices is not None:
+                self.ref_robot_joint_pos_twist = self._lerp(self.robot_joint_pos_twist[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_joint_pos_twist[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
+                self.ref_robot_joint_vel_twist = self._lerp(self.robot_joint_vel_twist[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_joint_vel_twist[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
+                self.ref_door_joint_pos_twist = self._lerp(self.door_joint_pos_twist[self.env_to_file_map[env_ids]][indices, floor_idx], self.door_joint_pos_twist[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
+                self.ref_robot_body_pos_twist = self._lerp(self.robot_body_pos_twist[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_body_pos_twist[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
+                self.ref_robot_body_quat_twist = self._lerp(self.robot_body_quat_twist[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_body_quat_twist[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
 
     # --------------------------------------------------
     # Getters (explicit, readable)
@@ -239,3 +345,66 @@ class ReferenceMotionManager:
             return self.ref_robot_joint_vel / self.velocity
         else:
             return self.ref_robot_joint_vel[env_ids] / self.velocity
+
+
+    def get_robot_joint_pos_twist(self, env_ids: Optional[Sequence[int]] = None):
+        if env_ids is None:
+            # print("self.robot_joint_pos_traj.shape: ", self.robot_joint_pos_traj.shape)
+            # print("self.robot_joint_pos.shape: ", self.ref_robot_joint_pos.shape)
+            # print("self.robot_joint_pos_twist.shape: ", self.robot_joint_pos_twist.shape)
+            # twist_arr = self.robot_joint_pos_twist[10, 100]
+            # for idx, i in enumerate(self.twist_indices):
+            #     print((self.robot_joint_pos_traj[10, 100 + i] - twist_arr[idx]).abs().max())
+            return self.ref_robot_joint_pos_twist
+        else:
+            return self.ref_robot_joint_pos_twist[env_ids]
+
+    def get_door_joint_pos_twist(self, env_ids: Optional[Sequence[int]] = None):
+        if env_ids is None:
+            return self.ref_door_joint_pos_twist
+        else:
+            return self.ref_door_joint_pos_twist[env_ids]
+
+    def get_robot_body_pos_twist(self, env_ids: Optional[Sequence[int]] = None):
+        if env_ids is None:
+            return self.ref_robot_body_pos_twist
+        else:
+            return self.ref_robot_body_pos_twist[env_ids]
+
+    def get_robot_body_quat_twist(self, env_ids: Optional[Sequence[int]] = None):
+        if env_ids is None:
+            return self.ref_robot_body_quat_twist
+        else:
+            return self.ref_robot_body_quat_twist[env_ids]
+
+    def get_robot_joint_vel_twist(self, env_ids: Optional[Sequence[int]] = None):
+        if env_ids is None:
+            return self.ref_robot_joint_vel_twist / self.velocity
+        else:
+            return self.ref_robot_joint_vel_twist[env_ids] / self.velocity
+
+
+if __name__ == "__main__":
+    import glob
+    root_path = os.path.dirname(os.path.dirname(__file__))
+    asset_base_folder = os.path.join(root_path, "assets/door/PartNetv4")
+    print("asset_base_folder: ", asset_base_folder)
+    motion_traj_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/traj.pkl"), recursive=True))
+    num_envs = 200
+    device = torch.device("cpu")
+    velocity = 1.0
+    env_to_file_map = [i % len(motion_traj_paths) for i in range(num_envs)]
+    twist_indices = [-50, -20, 0, 20, 50]
+    ref_motion_lib = ReferenceMotionManager(num_envs=num_envs, device=device, velocity=velocity, reset_from_start = False, env_to_file_map=env_to_file_map, twist_indices=twist_indices)
+    ref_motion_lib.reset(torch.arange(num_envs, device=device))
+    ref_motion_lib.step()
+    # print(ref_motion_lib.get_robot_joint_pos())
+    # print(ref_motion_lib.get_door_joint_pos())
+    # print(ref_motion_lib.get_robot_body_pos())
+    # print(ref_motion_lib.get_robot_body_quat())
+    # print(ref_motion_lib.get_robot_joint_vel())
+    print(ref_motion_lib.get_robot_joint_pos_twist().shape)
+    print(ref_motion_lib.get_door_joint_pos_twist().shape)
+    print(ref_motion_lib.get_robot_body_pos_twist().shape)
+    print(ref_motion_lib.get_robot_body_quat_twist().shape)
+    print(ref_motion_lib.get_robot_joint_vel_twist().shape)

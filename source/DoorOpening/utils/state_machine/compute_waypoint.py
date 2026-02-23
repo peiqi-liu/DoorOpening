@@ -52,6 +52,18 @@ def state_machine_offline(
     device="cpu",
 ):
     """
+    Keypoints:
+    0. Start
+    1. Pregrasp
+    2. Actual Grasp
+    3. Rotate hinge (unlatch)
+    4. Pull door open
+    5. Base forward
+    6. Move base completely through the door
+    7. Move base completely through the door
+
+    So contact with hinge should be between 2 and 4, contact with board should be between 5 and 6.
+
     Returns:
         robot_traj: list[Tensor(ndof)]
         door_traj:  list[Tensor(2)]
@@ -512,7 +524,9 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path):
     door_initial_pose = torch.tensor([[DOOR_INITIAL_POS[0], DOOR_INITIAL_POS[1], DOOR_INITIAL_POS[2], DOOR_INITIAL_ROT[0], DOOR_INITIAL_ROT[1], DOOR_INITIAL_ROT[2], DOOR_INITIAL_ROT[3]]], device="cpu")
     robot_constants, robot_initial_q = get_robot_constants()
     door_initial_q = torch.tensor([0.0, 0.0], device="cpu")
+    start_time = time.time()
     robot_traj, door_traj, key_idx_in_key_indices = state_machine_offline(robot_urdf_path, door_urdf_path, robot_initial_pose, door_initial_pose, robot_initial_q, door_initial_q, device="cpu")
+    print(f"Time taken: {time.time() - start_time} seconds")
     torch.set_printoptions(precision=4, sci_mode=False)
     # new_robot_traj = []
     # new_door_traj = []
