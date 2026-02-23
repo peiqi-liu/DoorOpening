@@ -148,7 +148,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         ),
     )
 
-    twist_indices = [5, 30]
+    twist_indices = [1, 5, 20, 100]
 
     # door(s)
     door_cfg: ArticulationCfg = ALL_DOOR_CONFIGS.replace(prim_path="/World/envs/env_.*/Door")
@@ -173,7 +173,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     finger_action_scale = 0.5
 
     # Deep Mimic Reward Parameters
-    robot_body_quat_w = 0.0
+    robot_body_quat_w = 1.0
     robot_key_body_pos_w = 1.0
     robot_base_joint_pos_w = 3.0
     robot_arm_joint_pos_w = 5.0
@@ -182,7 +182,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_arm_joint_vel_w = 2.0
     robot_finger_joint_vel_w = 0.5
     door_joint_pos_w = 4.0
-    hinge_contact_reward_w = 5.0
+    hinge_contact_reward_w = 1.0
 
     robot_body_quat_scale = 1.0
     robot_key_body_pos_scale = 3.0
@@ -197,9 +197,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     reset_base_pos_delta_min = 0.35
     reset_key_body_pos_delta_min = 0.6
     reset_key_body_quat_delta_min = 0.8
-    reset_base_pos_delta_max = 0.5
-    reset_key_body_pos_delta_max = 0.8
-    reset_key_body_quat_delta_max = 1.0
+    reset_base_pos_delta_max = 1.0
+    reset_key_body_pos_delta_max = 1.5
+    reset_key_body_quat_delta_max = 3.0
     reset_door_joint_pos_delta_min = 0.5
     reset_door_joint_pos_delta_max = 0.8
     # We are slowly increasing our tolerance on base position drift and slowly only resettting the env from the first key frame
