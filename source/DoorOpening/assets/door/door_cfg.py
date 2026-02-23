@@ -18,6 +18,46 @@ import isaaclab.sim as sim_utils
 from isaaclab.actuators.actuator_cfg import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg, Articulation
 from DoorOpening.constants.env_constants import DOOR_INITIAL_POS, DOOR_INITIAL_ROT
+import json
+from DoorOpening.utils.urdf_utils import compute_exact_door_keypoints
+
+def load_meta_data(board_meta_data_paths: str, handle_meta_data_paths: str, device: str = "cuda" if torch.cuda.is_available() else "cpu"):
+    """
+    Load the meta data from the json files.
+    """
+    handle_bboxes = []
+    board_bboxes = []
+
+    for handle_path, board_path in zip(handle_meta_data_paths, board_meta_data_paths):
+
+        # ----- Handle -----
+        with open(handle_path, "r") as f:
+            handle_data = json.load(f)
+
+        handle_min = handle_data["handle_min"]
+        handle_max = handle_data["handle_max"]
+
+        # xyzxyz format
+        handle_bbox = torch.tensor(handle_min + handle_max,
+                                dtype=torch.float32,
+                                device=device)
+
+        handle_bboxes.append(handle_bbox)
+
+        # ----- Board -----
+        with open(board_path, "r") as f:
+            board_data = json.load(f)
+
+        board_min = board_data["min"]
+        board_max = board_data["max"]
+
+        board_bbox = torch.tensor(board_min + board_max,
+                                dtype=torch.float32,
+                                device=device)
+
+        board_bboxes.append(board_bbox)
+    
+    return handle_bboxes, board_bboxes
 
 def create_initial_state():
     return ArticulationCfg.InitialStateCfg(
@@ -77,13 +117,22 @@ def create_door_cfg(asset_path: str, training_mode: bool = False) -> Articulatio
 root_path = os.path.dirname(os.path.dirname(__file__))
 asset_base_folder = os.path.join(root_path, "door/PartNetv4")
 asset_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/mobility.urdf"), recursive=True))
+board_offsets = []
+handle_offsets = []
+
+for asset_path in asset_paths:
+    keypoints = compute_exact_door_keypoints(asset_path)
+    board_offsets.append(keypoints["link_1"])
+    handle_offsets.append(keypoints["link_2"])
+
+board_offsets = torch.tensor(board_offsets)
+handle_offsets = torch.tensor(handle_offsets)
 
 motion_traj_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/traj.pkl"), recursive=True))
 
-# for i in [7, 10, 13, 20, 25, 27, 28, 29]:
-#     print(asset_paths[i - 1])
-# An example of door urdf
 door_asset_path = asset_paths[0]
+board_offset = board_offsets[0]
+handle_offset = handle_offsets[0]
 print("door_asset_path: ", door_asset_path)
 
 DOOR_CONFIG = create_door_cfg(door_asset_path, training_mode=False)

@@ -5,6 +5,7 @@ from isaaclab.utils.math import (
     quat_conjugate,
     quat_apply_inverse,
     quat_apply,
+    quat_inv,
 )
 
 def world_to_base_frame(base_pos, base_quat, palm_pos_w, palm_quat_w):
@@ -220,3 +221,130 @@ def compute_base_joint(articulation, abs_pos):
         theta_r = torch.zeros(abs_pos.shape[0], device=abs_pos.device)
 
     return torch.cat([x_r, y_r, theta_r], dim=-1)
+
+
+def quat_mul_batch(q, r):
+    """
+    Multiply two quaternions: q * r
+    Both in wxyz format.
+    q: (B, M, 4) or (B, 1, 4)
+    r: (B, M, 4)
+    Returns:
+        (B, M, 4)
+    """
+    w1, x1, y1, z1 = q.unbind(-1)
+    w2, x2, y2, z2 = r.unbind(-1)
+
+    w = w1*w2 - x1*x2 - y1*y2 - z1*z2
+    x = w1*x2 + x1*w2 + y1*z2 - z1*y2
+    y = w1*y2 - x1*z2 + y1*w2 + z1*x2
+    z = w1*z2 + x1*y2 - y1*x2 + z1*w2
+
+    return torch.stack((w, x, y, z), dim=-1)
+
+
+def quat_inv_batch(q):
+    """
+    Inverse of quaternion in wxyz format.
+    For unit quaternions, inverse is conjugate.
+    q: (B, 4)
+    Returns:
+        (B, 4)
+    """
+    w, x, y, z = q.unbind(-1)
+    return torch.stack((w, -x, -y, -z), dim=-1)
+
+
+def quat_apply_batch(q, v):
+    """
+    Rotate vector(s) v by quaternion(s) q.
+    q: (B, M, 4) or (B, 1, 4)  (wxyz)
+    v: (B, M, 3)
+    Returns:
+        rotated vectors: (B, M, 3)
+    """
+    # Convert vector to quaternion with w=0
+    qv = torch.cat([torch.zeros_like(v[..., :1]), v], dim=-1)  # (B, M, 4)
+
+    # q * v * q_inv
+    q_inv = quat_inv_batch(q)
+    rotated = quat_mul_batch(quat_mul_batch(q, qv), q_inv)
+
+    return rotated[..., 1:]  # return vector part
+
+
+def normalize_to_center_frame(poses, quats):
+    """
+    Normalize 2N+1 poses and quaternions to the center frame.
+
+    Accepts:
+        poses: (..., M, 3)
+        quats: (..., M, 4)
+
+    Returns:
+        poses_rel: (..., M, 3)
+        quats_rel: (..., M, 4)
+    """
+    assert poses.shape[:-1] == quats.shape[:-1]
+    assert quats.shape[-1] == 4
+
+    *batch_dims, M, _ = poses.shape
+    center_idx = M // 2
+
+    # Flatten all leading dims
+    poses_flat = poses.reshape(-1, M, 3)
+    quats_flat = quats.reshape(-1, M, 4)
+
+    # Center pose
+    p_center = poses_flat[:, center_idx, :]      # (B*, 3)
+    q_center = quats_flat[:, center_idx, :]      # (B*, 4)
+
+    q_center_inv = quat_inv_batch(q_center)      # (B*, 4)
+
+    # ----- Relative orientations -----
+    q_center_inv_exp = q_center_inv.unsqueeze(1)  # (B*, 1, 4)
+    quats_rel = quat_mul_batch(q_center_inv_exp, quats_flat)
+
+    # ----- Relative positions -----
+    delta_p = poses_flat - p_center.unsqueeze(1)
+
+    poses_rel = quat_apply_batch(
+        q_center_inv.unsqueeze(1).expand(-1, M, -1),
+        delta_p
+    )
+
+    # Restore original shape
+    poses_rel = poses_rel.reshape(*batch_dims, M, 3)
+    quats_rel = quats_rel.reshape(*batch_dims, M, 4)
+
+    return poses_rel, quats_rel
+
+
+if __name__ == "__main__":
+
+    # Batch size 2, sequence length 3 (2N+1), 3D positions
+    poses = torch.tensor([
+        [[1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [3.0, 0.0, 0.0]],  # Batch 0: moves along x
+        [[0.0, 1.0, 0.0], [0.0, 2.0, 0.0], [0.0, 3.0, 0.0]]   # Batch 1: moves along y
+    ])
+
+    # Simple rotations: identity at center, 90 deg z rotation at ends
+    from math import sqrt
+
+    quats = torch.tensor([
+        [[1.0, 0.0, 0.0, 0.0],      # 0° identity
+        [1.0, 0.0, 0.0, 0.0],      # center (reference)
+        [0.0, 0.0, 0.0, 1.0]],     # 180° around z
+        [[1.0, 0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0]]
+    ], dtype=torch.float32)
+
+    # Expected results (roughly):
+    # - Center pose should be at [0,0,0] in relative coordinates
+    # - Center rotation should be identity in quats_rel
+
+    poses_rel, quats_rel = normalize_to_center_frame(poses, quats)
+
+    print("Relative positions:\n", poses_rel)
+    print("Relative quaternions:\n", quats_rel)
