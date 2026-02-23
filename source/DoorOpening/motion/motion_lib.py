@@ -225,7 +225,7 @@ class ReferenceMotionManager:
             self.door_joint_pos_twist  = precompute_single(self.door_traj)
             self.robot_body_pos_twist  = precompute_single(self.robot_body_pos_traj)
             self.robot_body_quat_twist = precompute_single(self.robot_body_quat_traj)
-            self.robot_joint_pos_twist, self.robot_body_quat_twist = normalize_to_center_frame(self.robot_body_pos_twist, self.robot_body_quat_twist)
+            self.robot_joint_pos_twist, self.robot_body_quat_twist = normalize_to_center_frame(self.robot_body_pos_traj, self.robot_body_quat_traj, self.robot_body_pos_twist, self.robot_body_quat_twist)
 
         else:
 
@@ -234,7 +234,11 @@ class ReferenceMotionManager:
             self.door_joint_pos_twist  = precompute_multi(self.door_traj)
             self.robot_body_pos_twist  = precompute_multi(self.robot_body_pos_traj)
             self.robot_body_quat_twist = precompute_multi(self.robot_body_quat_traj)
-            self.robot_joint_pos_twist, self.robot_body_quat_twist = normalize_to_center_frame(self.robot_body_pos_twist, self.robot_body_quat_twist)
+            print("self.robot_body_pos_traj.shape: ", self.robot_body_pos_traj.shape)
+            print("self.robot_body_quat_traj.shape: ", self.robot_body_quat_traj.shape)
+            print("self.robot_body_pos_twist.shape: ", self.robot_body_pos_twist.shape)
+            print("self.robot_body_quat_twist.shape: ", self.robot_body_quat_twist.shape)
+            self.robot_joint_pos_twist, self.robot_body_quat_twist = normalize_to_center_frame(self.robot_body_pos_traj, self.robot_body_quat_traj, self.robot_body_pos_twist, self.robot_body_quat_twist)
 
     # --------------------------------------------------
     # Reset logic
