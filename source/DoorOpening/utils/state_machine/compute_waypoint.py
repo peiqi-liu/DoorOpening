@@ -596,6 +596,10 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path):
     # for i in torch.arange(0, robot_body_pos_traj.shape[0], 100):
     #     print(i, robot_body_pos_traj[i], robot_body_quat_traj[i])
 
+    mask = torch.zeros(len(robot_traj), dtype=torch.int8)
+    # Contact with hinge should happen between keyframe 2 and 4
+    mask[key_indices[2]:key_indices[4]] = 1
+
     data = {
         "door_traj": door_traj, 
         "robot_body_pos_traj": robot_body_pos_traj,
@@ -603,6 +607,7 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path):
         "robot_joint_pos_traj": robot_traj,
         "robot_joint_vel_traj": robot_traj_d,
         # "key_indices": torch.tensor(key_indices, dtype=torch.int32)[key_idx_in_key_indices]
+        "hinge_contact_mask": mask,
         "key_indices": key_indices
     }
     print(key_indices)

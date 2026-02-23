@@ -97,6 +97,7 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_base_joint_vel_w = self.cfg.robot_base_joint_vel_w
         self.robot_arm_joint_vel_w = self.cfg.robot_arm_joint_vel_w
         self.robot_finger_joint_vel_w = self.cfg.robot_finger_joint_vel_w
+        self.hinge_contact_reward_w = self.cfg.hinge_contact_reward_w
 
         # self.reset_base_pos_delta = (self.cfg.reset_base_pos_delta ** 2) * len(self.cfg.base_joints)
         # self.reset_key_body_pos_delta = (self.cfg.reset_key_body_pos_delta ** 2) * len(self.cfg.robot_reset_key_bodies)
@@ -271,6 +272,7 @@ class DooropeningEnv(DirectRLEnv):
         self.ref_robot_arm_joint_vel = self.ref_joint_vel[:, self.ref_arm_joint_idx]
         self.ref_robot_finger_joint_vel = self.ref_joint_vel[:, self.ref_finger_joint_idx]
         self.ref_door_joint_pos = self.ref_motion_lib.get_door_joint_pos()
+        self.ref_hinge_contact_mask = self.ref_motion_lib.get_hinge_contact_mask()
 
     def _get_rewards(self) -> torch.Tensor:
         self._get_intermediate_values()
@@ -319,6 +321,9 @@ class DooropeningEnv(DirectRLEnv):
         # probs = probs / probs.sum()
         # self.extras["reset/prob_get_first_key_frame"] = probs[0]
 
+        # contact_forces_robot_palm_center = self.scene.sensors["contact_forces_robot_palm_center"].data.net_forces_w
+        contact_forces_door2 = self.scene.sensors["contact_forces_door2"].data.net_forces_w
+
         return compute_deep_mimic_rewards(
             robot_key_body_pos = self.robot_key_body_pos, 
             robot_key_body_quat = self.robot_key_body_quat, 
@@ -360,6 +365,9 @@ class DooropeningEnv(DirectRLEnv):
             robot_base_joint_vel_w = self.robot_base_joint_vel_w,
             robot_arm_joint_vel_w = self.robot_arm_joint_vel_w,
             robot_finger_joint_vel_w = self.robot_finger_joint_vel_w,
+
+            contact_forces = contact_forces_door2,
+            contact_force_w = self.hinge_contact_reward_w * self.ref_hinge_contact_mask,
         )
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -495,6 +503,9 @@ def compute_deep_mimic_rewards(
     robot_base_joint_vel_w: float,
     robot_arm_joint_vel_w: float,
     robot_finger_joint_vel_w: float,
+
+    contact_force_w: torch.Tensor,
+    contact_forces: torch.Tensor,
 ) -> torch.Tensor:
     # ----------------------------------
     # Robot body position error
@@ -544,6 +555,11 @@ def compute_deep_mimic_rewards(
     base_joint_vel_r = torch.exp(-robot_base_joint_vel_scale * base_joint_vel_err)
     arm_joint_vel_r = torch.exp(-robot_arm_joint_vel_scale * arm_joint_vel_err)
     finger_joint_vel_r = torch.exp(-robot_finger_joint_vel_scale * finger_joint_vel_err)
+
+    contact_reward = torch.where(torch.norm(contact_forces, dim=-1) > 1, 1.0, 0.0).squeeze()
+    # print("contact_forces: ", contact_forces)
+    # print("contact_reward: ", contact_reward)
+    # print("contact_force_w: ", contact_force_w)
     # ----------------------------------
     # Final reward
     # ----------------------------------
@@ -555,7 +571,8 @@ def compute_deep_mimic_rewards(
          + robot_finger_joint_pos_w * finger_joint_pos_r\
          + robot_base_joint_vel_w * base_joint_vel_r\
          + robot_arm_joint_vel_w * arm_joint_vel_r\
-         + robot_finger_joint_vel_w * finger_joint_vel_r
+         + robot_finger_joint_vel_w * finger_joint_vel_r\
+         + contact_force_w * contact_reward
 
     # restricted_reward = (
     #     robot_key_body_pos_w * key_body_pos_r\

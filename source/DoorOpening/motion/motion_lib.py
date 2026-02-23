@@ -37,7 +37,11 @@ class ReferenceMotionManager:
     # Load motion data (moved from Env)
     # --------------------------------------------------
     def _load_motion_pkl_from_list(self):
-        from DoorOpening.assets.door.door_cfg import motion_traj_paths
+        # from DoorOpening.assets.door.door_cfg import motion_traj_paths
+        import glob
+        root_path = os.path.dirname(os.path.dirname(__file__))
+        asset_base_folder = os.path.join(root_path, "assets/door/PartNetv4")
+        motion_traj_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/traj.pkl"), recursive=True))
 
         robot_joint_pos_trajs = []
         door_trajs = []
@@ -45,9 +49,9 @@ class ReferenceMotionManager:
         robot_body_quat_trajs = []
         robot_joint_vel_trajs = []
         key_indices_list = []
-
+        hinge_contact_masks_list = []
         for motion_file in motion_traj_paths:
-            (robot_joint_pos_traj, door_traj, robot_body_pos_traj, robot_body_quat_traj, robot_joint_vel_traj, key_indices, self.num_frames) = self._load_motion_pkl(motion_file)
+            (robot_joint_pos_traj, door_traj, robot_body_pos_traj, robot_body_quat_traj, robot_joint_vel_traj, key_indices, self.num_frames, hinge_contact_mask) = self._load_motion_pkl(motion_file)
             robot_joint_pos_trajs.append(robot_joint_pos_traj)
             door_trajs.append(door_traj)
             robot_body_pos_trajs.append(robot_body_pos_traj)
@@ -56,6 +60,7 @@ class ReferenceMotionManager:
             if isinstance(key_indices, list):
                 key_indices = torch.tensor(key_indices, device=self.device)
             key_indices_list.append(key_indices)
+            hinge_contact_masks_list.append(hinge_contact_mask)
 
         # stack motions: [M, T, ...]
         self.robot_joint_pos_traj = torch.stack(robot_joint_pos_trajs, dim=0)
@@ -64,8 +69,8 @@ class ReferenceMotionManager:
         self.robot_body_quat_traj = torch.stack(robot_body_quat_trajs, dim=0)
         self.door_traj = torch.stack(door_trajs, dim=0)
         self.key_indices = torch.stack(key_indices_list, dim=0).to(self.device)
-        # self.key_indices = self.key_indices[..., :-1] # remove the last key index
-
+        self.key_indices = self.key_indices[..., :-1] # remove the last key index
+        self.hinge_contact_mask = torch.stack(hinge_contact_masks_list, dim=0).to(self.device)
         self.num_motions = self.robot_joint_pos_traj.shape[0]
 
 
@@ -100,7 +105,11 @@ class ReferenceMotionManager:
         robot_body_quat_traj = motions["robot_body_quat_traj"]
         robot_joint_vel_traj = motions["robot_joint_vel_traj"]
         key_indices = motions["key_indices"]
-
+        if "hinge_contact_mask" in motions:
+            hinge_contact_mask = motions["hinge_contact_mask"]
+        else:
+            hinge_contact_mask = None
+        
         if isinstance(robot_joint_pos_traj, list):
             robot_joint_pos_traj = torch.stack(robot_joint_pos_traj, dim = 0)
         if isinstance(door_traj, list):
@@ -117,10 +126,14 @@ class ReferenceMotionManager:
         robot_body_pos_traj = robot_body_pos_traj.to(self.device).squeeze()
         robot_body_quat_traj = robot_body_quat_traj.to(self.device).squeeze()
         robot_joint_vel_traj = robot_joint_vel_traj.to(self.device).squeeze()
+        hinge_contact_mask = hinge_contact_mask.to(self.device).squeeze()
 
         num_frames = robot_joint_pos_traj.shape[0]
 
-        return robot_joint_pos_traj, door_traj, robot_body_pos_traj, robot_body_quat_traj, robot_joint_vel_traj, key_indices, num_frames
+        if hinge_contact_mask is not None:
+            return robot_joint_pos_traj, door_traj, robot_body_pos_traj, robot_body_quat_traj, robot_joint_vel_traj, key_indices, num_frames, hinge_contact_mask
+        else:
+            return robot_joint_pos_traj, door_traj, robot_body_pos_traj, robot_body_quat_traj, robot_joint_vel_traj, key_indices, num_frames
 
     # --------------------------------------------------
     # Per-env buffers
@@ -305,6 +318,9 @@ class ReferenceMotionManager:
             self.ref_door_joint_pos = self._lerp(self.door_traj[self.env_to_file_map[env_ids]][indices, floor_idx], self.door_traj[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
             self.ref_robot_body_pos = self._lerp(self.robot_body_pos_traj[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_body_pos_traj[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
             self.ref_robot_body_quat = self._lerp(self.robot_body_quat_traj[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_body_quat_traj[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
+            # print("self.hinge_contact_mask.shape: ", self.hinge_contact_mask.shape)
+            self.ref_hinge_contact_mask = self.hinge_contact_mask[self.env_to_file_map[env_ids]][indices, floor_idx]
+            # print("self.ref_hinge_contact_mask.shape: ", self.ref_hinge_contact_mask.shape)
 
             if self.twist_indices is not None:
                 self.ref_robot_joint_pos_twist = self._lerp(self.robot_joint_pos_twist[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_joint_pos_twist[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
@@ -382,6 +398,12 @@ class ReferenceMotionManager:
             return self.ref_robot_joint_vel_twist / self.velocity
         else:
             return self.ref_robot_joint_vel_twist[env_ids] / self.velocity
+
+    def get_hinge_contact_mask(self, env_ids: Optional[Sequence[int]] = None):
+        if env_ids is None:
+            return self.ref_hinge_contact_mask
+        else:
+            return self.ref_hinge_contact_mask[env_ids]
 
 
 if __name__ == "__main__":
