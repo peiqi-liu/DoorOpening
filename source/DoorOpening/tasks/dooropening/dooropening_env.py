@@ -182,6 +182,13 @@ class DooropeningEnv(DirectRLEnv):
         self.scene.sensors["contact_forces_door2"].update(self.cfg.sim_dt, force_recompute=True)
         self.scene.sensors["contact_forces_robot_palm_center"].update(self.cfg.sim_dt, force_recompute=True)
 
+        # print("robot body lin vel: ", self.robot.data.body_link_lin_vel_w[0, self._robot_key_body_idx])
+        # print("robot body ang vel: ", self.robot.data.body_link_ang_vel_w[0, self._robot_key_body_idx])
+        # print("ref robot body lin vel: ", self.ref_robot_body_lin_vel[0, self.ref_key_body_idx] / self.cfg.sim_dt)
+        # print("ref robot body ang vel: ", self.ref_robot_body_ang_vel[0, self.ref_key_body_idx] / self.cfg.sim_dt)
+        # print("joint_vel: ", self.robot.data.joint_vel[:, self._robot_base_dof_idx])
+        # print("ref joint vel: ", self.ref_robot_base_joint_vel)
+
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
         self.last_actions[:] = self.scaled_actions
 
