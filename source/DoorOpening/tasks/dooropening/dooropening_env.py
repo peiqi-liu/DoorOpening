@@ -120,8 +120,8 @@ class DooropeningEnv(DirectRLEnv):
         self.twist_indices = self.cfg.twist_indices
 
         # self.ref_motion_lib = ReferenceMotionManager(self.cfg.motion_file, self.num_envs, self.device, velocity=self.cfg.velocity, reset_from_start = True)
-        self.handle_offsets = [handle_offsets[i] for i in range(self.num_envs)]
-        self.board_offsets = [board_offsets[i] for i in range(self.num_envs)]
+        self.handle_offsets = [handle_offsets[i % len(handle_offsets)] for i in range(self.num_envs)]
+        self.board_offsets = [board_offsets[i % len(board_offsets)] for i in range(self.num_envs)]
         self.handle_offsets = torch.stack(self.handle_offsets).to(self.device)
         self.board_offsets = torch.stack(self.board_offsets).to(self.device)
         env_to_file_map = [i % len(motion_traj_paths) for i in range(self.num_envs)]
