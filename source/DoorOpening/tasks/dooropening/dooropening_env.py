@@ -182,6 +182,13 @@ class DooropeningEnv(DirectRLEnv):
         self.scene.sensors["contact_forces_door2"].update(self.cfg.sim_dt)
         # self.scene.sensors["contact_forces_robot_palm_center"].update(self.cfg.sim_dt, force_recompute=True)
 
+        # print("robot body lin vel: ", self.robot.data.body_link_lin_vel_w[0, self._robot_key_body_idx])
+        # print("robot body ang vel: ", self.robot.data.body_link_ang_vel_w[0, self._robot_key_body_idx])
+        # print("ref robot body lin vel: ", self.ref_robot_body_lin_vel[0, self.ref_key_body_idx] / self.cfg.sim_dt)
+        # print("ref robot body ang vel: ", self.ref_robot_body_ang_vel[0, self.ref_key_body_idx] / self.cfg.sim_dt)
+        # print("joint_vel: ", self.robot.data.joint_vel[:, self._robot_base_dof_idx])
+        # print("ref joint vel: ", self.ref_robot_base_joint_vel)
+
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
         self.last_actions[:] = self.scaled_actions
 
@@ -206,6 +213,7 @@ class DooropeningEnv(DirectRLEnv):
         
         door_to_base_link_pos = (self.door_link_pos - base_link_pos).reshape(self.num_envs, 1, -1)
         # door_to_base_link_pos = (self.door_keypoints - base_link_pos).reshape(self.num_envs, 1, -1)
+        door_twist_base_link_pos = (self.ref_door_body_pos_twist - base_link_pos).reshape(self.num_envs, 1, -1)
 
         rel_robot_key_body_pos = (self.robot_key_body_pos - base_link_pos).reshape(self.num_envs, 1, -1)
 
@@ -232,10 +240,12 @@ class DooropeningEnv(DirectRLEnv):
                 rel_robot_key_body_pos,
                 # ref_joint_vel.unsqueeze(dim = 1),
                 self.door_joint_pos[:, self._door_joint_idx].unsqueeze(dim = 1),
-                door_joint_err.unsqueeze(dim = 1),
+                # door_joint_err.unsqueeze(dim = 1),
+                self.ref_door_joint_pos[:, self._door_joint_idx].to(self.door_joint_pos).unsqueeze(dim = 1),
                 self.ref_robot_key_body_pos_twist.reshape(self.num_envs, 1, -1),
                 self.ref_robot_key_body_quat_twist.reshape(self.num_envs, 1, -1),
                 self.ref_door_joint_pos_twist.reshape(self.num_envs, 1, -1),
+                door_twist_base_link_pos,
                 # frame_idx.unsqueeze(dim = -1),
                 # contact_forces_door1,
                 # contact_forces_door2,
@@ -304,7 +314,7 @@ class DooropeningEnv(DirectRLEnv):
         self.door_link_pos = self.door.data.body_pos_w[:, self._door_body_idx]
         self.door_link_pos -= self.scene.env_origins.repeat((1, 1)).reshape(self.num_envs, 1, 3)
         self.door_link_quat = self.door.data.body_quat_w[:, self._door_body_idx]
-        self.door_keypoints = self.compute_door_keypoints()
+        # self.door_keypoints = self.compute_door_keypoints()
         self.robot_body_lin_vel = self.robot.data.body_link_lin_vel_w[:, self._robot_key_body_idx]
         self.robot_body_ang_vel = self.robot.data.body_link_ang_vel_w[:, self._robot_key_body_idx]
         # print("door keypoints: ", self.compute_door_keypoints())
@@ -331,6 +341,7 @@ class DooropeningEnv(DirectRLEnv):
         self.ref_robot_finger_joint_vel = self.ref_joint_vel[:, self.ref_finger_joint_idx]
         self.ref_door_joint_pos = self.ref_motion_lib.get_door_joint_pos()
         self.ref_hinge_contact_mask = self.ref_motion_lib.get_hinge_contact_mask()
+        self.ref_door_body_pos_twist = self.ref_motion_lib.get_door_body_pos_twist()
         self.ref_robot_body_lin_vel = self.ref_motion_lib.get_robot_body_lin_vel()[:, self.ref_key_body_idx] / self.cfg.sim_dt
         self.ref_robot_body_ang_vel = self.ref_motion_lib.get_robot_body_ang_vel()[:, self.ref_key_body_idx] / self.cfg.sim_dt
 

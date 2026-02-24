@@ -127,48 +127,61 @@ def get_hinge_pos(door_urdf_path, door_initial_pose, joint_angles):
 
     # Transform to world frame
     door_pointcloud = quat_apply(door_initial_quat, pointcloud) + door_initial_pos
-    P = door_pointcloud.squeeze()
+    P = door_pointcloud
 
-    # ----------------------------
-    # 1. Estimate rotation axis via PCA
-    # ----------------------------
-    centroid = P.mean(dim=0)
-    centered = P - centroid
+    # --------------------------------------------------
+    # 1. Estimate rotation axis via PCA (per batch)
+    # --------------------------------------------------
+    centroid = P.mean(dim=1)               # (B, 3)
 
-    cov = centered.T @ centered / P.shape[0]
+    centered = P - centroid.unsqueeze(1)   # (B, N, 3)
+
+    # covariance: (B, 3, 3)
+    cov = torch.matmul(centered.transpose(1, 2), centered) / P.shape[1]
+
     eigvals, eigvecs = torch.linalg.eigh(cov)
 
-    # Smallest eigenvalue → axis direction
-    axis_dir = eigvecs[:, 0]
-    axis_dir = axis_dir / axis_dir.norm()
+    # smallest eigenvalue → axis direction
+    axis_dir = eigvecs[:, :, 0]            # (B, 3)
+    axis_dir = axis_dir / axis_dir.norm(dim=1, keepdim=True)
 
-    # ----------------------------
+    # --------------------------------------------------
     # 2. Estimate axis origin
-    # ----------------------------
-    # Project centroid onto axis
-    axis_origin = centroid - (centroid @ axis_dir) * axis_dir
+    # --------------------------------------------------
+    # project centroid onto axis
+    dot = (centroid * axis_dir).sum(dim=1, keepdim=True)   # (B,1)
+    axis_origin = centroid - dot * axis_dir                # (B,3)
 
-    # ----------------------------
+    # --------------------------------------------------
     # 3. Compute radial distances
-    # ----------------------------
-    v = P - axis_origin
-    proj = (v @ axis_dir)[:, None] * axis_dir
-    radial = v - proj
-    radial_dist = radial.norm(dim=1)
+    # --------------------------------------------------
+    v = P - axis_origin.unsqueeze(1)       # (B, N, 3)
 
-    # ----------------------------
+    proj = (v * axis_dir.unsqueeze(1)).sum(dim=2, keepdim=True) \
+           * axis_dir.unsqueeze(1)
+
+    radial = v - proj                      # (B, N, 3)
+    radial_dist = radial.norm(dim=2)       # (B, N)
+
+    # --------------------------------------------------
     # 4. Extract lever points
-    # ----------------------------
-    threshold = 0.6 * radial_dist.max()
-    lever_points = P[radial_dist > threshold]
+    # --------------------------------------------------
+    threshold = 0.6 * radial_dist.max(dim=1, keepdim=True).values  # (B,1)
 
-    if lever_points.shape[0] < 10:
-        lever_points = P
+    mask = radial_dist > threshold         # (B, N)
 
-    hinge_pos = lever_points.mean(dim=0)
+    hinge_pos = []
 
-    if hinge_pos.ndim == 1:
-        hinge_pos = hinge_pos.unsqueeze(0)
+    for b in range(P.shape[0]):
+        lever_points = P[b][mask[b]]
+
+        if lever_points.shape[0] < 10:
+            lever_points = P[b]
+
+        hinge_pos.append(lever_points.mean(dim=0))
+
+    hinge_pos = torch.stack(hinge_pos, dim=0)   # (B, 3)
+
     return hinge_pos.cpu()
 
 def sample_pointcloud(urdf_path, joint_angles, initial_pose):

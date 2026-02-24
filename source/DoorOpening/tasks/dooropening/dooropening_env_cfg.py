@@ -7,6 +7,7 @@ from DoorOpening.constants.robot_constants import CAMERA_JOINT_DEFAULT_VALUES, C
 from DoorOpening.assets.door.door_cfg import DOOR_CONFIG, ALL_DOOR_CONFIGS
 from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
+from DoorOpening.constants.door_constants import DOOR_BODY_NAMES, DOOR_JOINT_NAMES
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
@@ -151,9 +152,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     open_finger_joints = OPEN_FINGER_JOINT_VALUES
 
-    door_body_names = ["link_1", "link_2"]
+    door_body_names = DOOR_BODY_NAMES
 
-    door_joint_names = ["joint_1", "joint_2"]
+    door_joint_names = DOOR_JOINT_NAMES
 
     robot_key_bodies = ROBOT_KEY_BODY_NAMES
     robot_reset_key_bodies = ROBOT_RESET_KEY_BODY_NAMES
@@ -185,7 +186,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         len(door_body_names) * 3 +\
         len(robot_key_bodies) * 3 * 2 +\
         len(door_joint_names) * 2 +\
-        len(twist_indices) * (len(robot_key_bodies) * 3 + len(robot_key_bodies) * 4 + len(door_joint_names)) +\
+        len(twist_indices) * (len(robot_key_bodies) * 3 + len(robot_key_bodies) * 4 + 3 + len(door_joint_names)) +\
         actuated_joints_num
     #  5 * 3 +\
     
