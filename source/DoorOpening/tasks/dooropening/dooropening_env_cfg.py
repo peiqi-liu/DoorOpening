@@ -108,10 +108,21 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     contact_forces_door2 = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Door/link_2",
-        update_period=0.0,
-        history_length=6,
-        debug_vis=True,
-        filter_prim_paths_expr=["/World/envs/env_.*/Robot"],
+        update_period=0.02,
+        history_length=1,
+        debug_vis=False,
+        filter_prim_paths_expr=[
+            "/World/envs/env_.*/Robot/palm_center", 
+            "/World/envs/env_.*/Robot/palm_lower", 
+            "/World/envs/env_.*/Robot/mcp_joint_1", 
+            "/World/envs/env_.*/Robot/pip_1", 
+            "/World/envs/env_.*/Robot/dip_1", 
+            "/World/envs/env_.*/Robot/mcp_joint_2", 
+            "/World/envs/env_.*/Robot/pip_2", 
+            "/World/envs/env_.*/Robot/dip_2", 
+            "/World/envs/env_.*/Robot/mcp_joint_3", 
+            "/World/envs/env_.*/Robot/pip_3", 
+            "/World/envs/env_.*/Robot/dip_3", ],
     )
 
     contact_forces_robot_palm_center = ContactSensorCfg(

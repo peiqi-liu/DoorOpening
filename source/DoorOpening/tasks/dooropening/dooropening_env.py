@@ -179,7 +179,7 @@ class DooropeningEnv(DirectRLEnv):
         # targets[..., self.num_base_joints + self.num_arm_joints:] = tendon_to_joint_angle_utils(self.robot, tendon_actions)[..., self._robot_finger_dof_idx]
 
         # self.scene.sensors["contact_forces_door1"].update(self.cfg.sim_dt, force_recompute=True)
-        self.scene.sensors["contact_forces_door2"].update(self.cfg.sim_dt, force_recompute=True)
+        self.scene.sensors["contact_forces_door2"].update(self.cfg.sim_dt)
         # self.scene.sensors["contact_forces_robot_palm_center"].update(self.cfg.sim_dt, force_recompute=True)
 
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
