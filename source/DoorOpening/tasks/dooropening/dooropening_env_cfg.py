@@ -111,7 +111,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         update_period=0.0,
         history_length=6,
         debug_vis=True,
-        filter_prim_paths_expr=["/World/envs/env_.*/Robot/palm_center", "/World/envs/env_.*/Robot/palm_lower"],
+        filter_prim_paths_expr=["/World/envs/env_.*/Robot"],
     )
 
     contact_forces_robot_palm_center = ContactSensorCfg(
@@ -122,7 +122,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         filter_prim_paths_expr=["/World/envs/env_.*/Door/link_2"],
     )
 
-    contact_sensor_names = ["contact_forces_door1", "contact_forces_door2", "contact_forces_robot_palm_center"]
+    # contact_sensor_names = ["contact_forces_door1", "contact_forces_door2", "contact_forces_robot_palm_center"]
+    contact_sensor_names = ["contact_forces_door2"]
 
     close_finger_joints = CLOSE_FINGER_JOINT_VALUES
 
@@ -175,9 +176,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     # Deep Mimic Reward Parameters
     robot_body_quat_w = 1.0
-    robot_key_body_pos_w = 1.0
+    robot_key_body_pos_w = 2.0
     robot_base_joint_pos_w = 3.0
-    robot_arm_joint_pos_w = 5.0
+    robot_arm_joint_pos_w = 3.0
     robot_finger_joint_pos_w = 1.0
     robot_base_joint_vel_w = 1.0
     robot_arm_joint_vel_w = 2.0
@@ -185,7 +186,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     door_joint_pos_w = 4.0
     hinge_contact_reward_w = 1.0
     robot_body_lin_vel_w = 1.0
-    robot_body_ang_vel_w = 1.0
+    robot_body_ang_vel_w = 0.5
 
     robot_body_quat_scale = 1.0
     robot_key_body_pos_scale = 3.0
@@ -196,8 +197,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_arm_joint_vel_scale = 0.5
     robot_finger_joint_vel_scale = 0.5
     door_joint_pos_scale = 5.0
-    robot_body_lin_vel_scale = 1.0
-    robot_body_ang_vel_scale = 1.0
+    robot_body_lin_vel_scale = 10.0
+    robot_body_ang_vel_scale = 10.0
 
     reset_base_pos_delta_min = 0.35
     reset_key_body_pos_delta_min = 0.6
