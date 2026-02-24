@@ -50,8 +50,9 @@ class ReferenceMotionManager:
         robot_joint_vel_trajs = []
         key_indices_list = []
         hinge_contact_masks_list = []
+        robot_body_pos_vel_list = []
         for motion_file in motion_traj_paths:
-            (robot_joint_pos_traj, door_traj, robot_body_pos_traj, robot_body_quat_traj, robot_joint_vel_traj, key_indices, self.num_frames, hinge_contact_mask) = self._load_motion_pkl(motion_file)
+            (robot_joint_pos_traj, door_traj, robot_body_pos_traj, robot_body_quat_traj, robot_joint_vel_traj, key_indices, self.num_frames, hinge_contact_mask, robot_body_pos_vel) = self._load_motion_pkl(motion_file)
             robot_joint_pos_trajs.append(robot_joint_pos_traj)
             door_trajs.append(door_traj)
             robot_body_pos_trajs.append(robot_body_pos_traj)
@@ -61,7 +62,7 @@ class ReferenceMotionManager:
                 key_indices = torch.tensor(key_indices, device=self.device)
             key_indices_list.append(key_indices)
             hinge_contact_masks_list.append(hinge_contact_mask)
-
+            robot_body_pos_vel_list.append(robot_body_pos_vel)
         # stack motions: [M, T, ...]
         self.robot_joint_pos_traj = torch.stack(robot_joint_pos_trajs, dim=0)
         self.robot_joint_vel_traj = torch.stack(robot_joint_vel_trajs, dim=0)
@@ -72,7 +73,7 @@ class ReferenceMotionManager:
         self.key_indices = self.key_indices[..., :-1] # remove the last key index
         self.hinge_contact_mask = torch.stack(hinge_contact_masks_list, dim=0).to(self.device)
         self.num_motions = self.robot_joint_pos_traj.shape[0]
-
+        self.robot_body_pos_vel = torch.stack(robot_body_pos_vel_list, dim=0).to(self.device)
 
     def _load_motion_pkl_from_one_file(self, motion_file: str):
         (self.robot_joint_pos_traj,\
@@ -81,7 +82,8 @@ class ReferenceMotionManager:
             self.robot_body_quat_traj, \
             self.robot_joint_vel_traj, \
             key_indices, \
-            self.num_frames)\
+            self.num_frames, \
+            robot_body_pos_vel)\
         = self._load_motion_pkl(motion_file)
         self.key_indices = torch.tensor(key_indices, device=self.device).unsqueeze(0)
 
@@ -109,7 +111,8 @@ class ReferenceMotionManager:
             hinge_contact_mask = motions["hinge_contact_mask"]
         else:
             hinge_contact_mask = None
-        
+        robot_body_pos_vel = motions["robot_body_pos_twist"]
+
         if isinstance(robot_joint_pos_traj, list):
             robot_joint_pos_traj = torch.stack(robot_joint_pos_traj, dim = 0)
         if isinstance(door_traj, list):
@@ -120,6 +123,8 @@ class ReferenceMotionManager:
             robot_body_quat_traj = torch.stack(robot_body_quat_traj, dim = 0)
         if isinstance(robot_joint_vel_traj, list):
             robot_joint_vel_traj = torch.stack(robot_joint_vel_traj, dim = 0)
+        if isinstance(robot_body_pos_vel, list):
+            robot_body_pos_vel = torch.stack(robot_body_pos_vel, dim = 0)
 
         robot_joint_pos_traj = robot_joint_pos_traj.to(self.device).squeeze()
         door_traj = door_traj.to(self.device).squeeze()
@@ -127,13 +132,13 @@ class ReferenceMotionManager:
         robot_body_quat_traj = robot_body_quat_traj.to(self.device).squeeze()
         robot_joint_vel_traj = robot_joint_vel_traj.to(self.device).squeeze()
         hinge_contact_mask = hinge_contact_mask.to(self.device).squeeze()
-
+        robot_body_pos_vel = robot_body_pos_vel.to(self.device).squeeze()
         num_frames = robot_joint_pos_traj.shape[0]
 
         if hinge_contact_mask is not None:
-            return robot_joint_pos_traj, door_traj, robot_body_pos_traj, robot_body_quat_traj, robot_joint_vel_traj, key_indices, num_frames, hinge_contact_mask
+            return robot_joint_pos_traj, door_traj, robot_body_pos_traj, robot_body_quat_traj, robot_joint_vel_traj, key_indices, num_frames, hinge_contact_mask, robot_body_pos_vel
         else:
-            return robot_joint_pos_traj, door_traj, robot_body_pos_traj, robot_body_quat_traj, robot_joint_vel_traj, key_indices, num_frames
+            return robot_joint_pos_traj, door_traj, robot_body_pos_traj, robot_body_quat_traj, robot_joint_vel_traj, key_indices, num_frames, robot_body_pos_vel
 
     # --------------------------------------------------
     # Per-env buffers
@@ -307,6 +312,7 @@ class ReferenceMotionManager:
             self.ref_door_joint_pos = self._lerp(self.door_traj[floor_idx], self.door_traj[ceil_idx], interp_ratio)
             self.ref_robot_body_pos = self._lerp(self.robot_body_pos_traj[floor_idx], self.robot_body_pos_traj[ceil_idx], interp_ratio)
             self.ref_robot_body_quat = self._lerp(self.robot_body_quat_traj[floor_idx], self.robot_body_quat_traj[ceil_idx], interp_ratio)
+            self.ref_robot_body_pos_vel = self._lerp(self.robot_body_pos_vel[floor_idx], self.robot_body_pos_vel[ceil_idx], interp_ratio)
 
             if self.twist_indices is not None:
                 self.ref_robot_joint_pos_twist = self._lerp(self.robot_joint_pos_twist[floor_idx], self.robot_joint_pos_twist[ceil_idx], interp_ratio)
@@ -325,7 +331,7 @@ class ReferenceMotionManager:
             # print("self.hinge_contact_mask.shape: ", self.hinge_contact_mask.shape)
             self.ref_hinge_contact_mask = self.hinge_contact_mask[self.env_to_file_map[env_ids]][indices, floor_idx]
             # print("self.ref_hinge_contact_mask.shape: ", self.ref_hinge_contact_mask.shape)
-
+            self.ref_robot_body_pos_vel = self._lerp(self.robot_body_pos_vel[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_body_pos_vel[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
             if self.twist_indices is not None:
                 self.ref_robot_joint_pos_twist = self._lerp(self.robot_joint_pos_twist[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_joint_pos_twist[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
                 self.ref_robot_joint_vel_twist = self._lerp(self.robot_joint_vel_twist[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_joint_vel_twist[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
@@ -365,6 +371,18 @@ class ReferenceMotionManager:
             return self.ref_robot_joint_vel / self.velocity
         else:
             return self.ref_robot_joint_vel[env_ids] / self.velocity
+
+    def get_robot_body_lin_vel(self, env_ids: Optional[Sequence[int]] = None):
+        if env_ids is None:
+            return self.ref_robot_body_pos_vel[:, :, :3]
+        else:
+            return self.ref_robot_body_pos_vel[env_ids, :, :3]
+
+    def get_robot_body_ang_vel(self, env_ids: Optional[Sequence[int]] = None):
+        if env_ids is None:
+            return self.ref_robot_body_pos_vel[:, :, 3:]
+        else:
+            return self.ref_robot_body_pos_vel[env_ids, :, 3:]
 
 
     def get_robot_joint_pos_twist(self, env_ids: Optional[Sequence[int]] = None):

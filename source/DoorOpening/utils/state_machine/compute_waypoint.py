@@ -1,6 +1,6 @@
 from DoorOpening.utils.state_machine.api import solve_ik, get_hinge_pos, open_hand
 import torch
-from isaaclab.utils.math import quat_from_euler_xyz, quat_from_matrix, combine_frame_transforms
+from isaaclab.utils.math import quat_from_euler_xyz, quat_from_matrix, combine_frame_transforms, quat_mul, quat_inv
 from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES, CAMERA_JOINT_DEFAULT_VALUES, DEFAULT_JOINT_POS, OPEN_FINGER_JOINT_VALUES, ROBOT_KEY_BODY_NAMES, DM_JOINT_NAMES
 import numpy as np
 import time
@@ -517,6 +517,49 @@ def play_trajectories_in_viser(
         time.sleep(1.0 / (hz * speed_slider.value))
     server.stop()
 
+def compute_link_twist(pos_traj: torch.Tensor,
+                       quat_traj: torch.Tensor) -> torch.Tensor:
+    """
+    Compute per-timestep link twist from position and quaternion trajectory in world frame.
+
+    Args:
+        pos_traj:  (T, B, 3) positions
+        quat_traj: (T, B, 4) quaternions in (w, x, y, z)
+
+    Returns:
+        twist: (T, B, 6) tensor
+               [vx, vy, vz, wx, wy, wz] per timestep
+    """
+
+    assert pos_traj.shape[:2] == quat_traj.shape[:2]
+    assert quat_traj.shape[-1] == 4
+
+    # ---------- Linear velocity (per step) ----------
+    linear_vel = pos_traj[1:] - pos_traj[:-1]  # (T-1, B, 3)
+
+    # ---------- Angular velocity ----------
+    q_t = quat_traj[:-1]      # (T-1, B, 4)
+    q_next = quat_traj[1:]    # (T-1, B, 4)
+
+    # Fix quaternion sign discontinuity
+    sign = torch.sign((q_t * q_next).sum(dim=-1, keepdim=True))
+    q_next = q_next * sign
+
+    # Relative rotation
+    q_rel = quat_mul(quat_inv(q_t), q_next)
+
+    # Small-angle approximation:
+    # rotation vector ≈ 2 * imaginary part
+    angular_vel = 2.0 * q_rel[..., 1:]  # (T-1, B, 3)
+
+    # ---------- Combine ----------
+    twist = torch.cat([linear_vel, angular_vel], dim=-1)  # (T-1, B, 6)
+
+    # Pad last step to keep same length T
+    twist = torch.cat([twist, twist[-1:].clone()], dim=0)
+
+    return twist
+
 
 def play_and_save_traj(robot_urdf_path, door_urdf_path):
     dir_path = os.path.dirname(door_urdf_path)
@@ -592,6 +635,8 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path):
     print(robot_body_pos_traj.shape)
     print(robot_body_quat_traj.shape)
 
+    robot_body_pos_twist = compute_link_twist(robot_body_pos_traj, robot_body_quat_traj)
+
     # print(robot_key_bodies)
     # for i in torch.arange(0, robot_body_pos_traj.shape[0], 100):
     #     print(i, robot_body_pos_traj[i], robot_body_quat_traj[i])
@@ -608,7 +653,8 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path):
         "robot_joint_vel_traj": robot_traj_d,
         # "key_indices": torch.tensor(key_indices, dtype=torch.int32)[key_idx_in_key_indices]
         "hinge_contact_mask": mask,
-        "key_indices": key_indices
+        "key_indices": key_indices,
+        "robot_body_pos_twist": robot_body_pos_twist
     }
     print(key_indices)
     # print(torch.tensor(key_indices, dtype=torch.int32)[key_idx_in_key_indices])
