@@ -321,43 +321,76 @@ class ReferenceMotionManager:
     def _update_current(self):
         idx = self.frame_idx
         floor_idx = torch.floor(idx).int().clamp(min=0, max=self.num_frames - 1)
-        ceil_idx = torch.ceil(idx).int().clamp(min=0, max=self.num_frames - 1)
-        interp_ratio = (idx - floor_idx).unsqueeze(-1)
-        if self.one_file_loaded:
-            self.ref_robot_joint_pos = self._lerp(self.robot_joint_pos_traj[floor_idx], self.robot_joint_pos_traj[ceil_idx], interp_ratio)
-            self.ref_robot_joint_vel = self._lerp(self.robot_joint_vel_traj[floor_idx], self.robot_joint_vel_traj[ceil_idx], interp_ratio)
-            self.ref_door_joint_pos = self._lerp(self.door_traj[floor_idx], self.door_traj[ceil_idx], interp_ratio)
-            self.ref_robot_body_pos = self._lerp(self.robot_body_pos_traj[floor_idx], self.robot_body_pos_traj[ceil_idx], interp_ratio)
-            self.ref_robot_body_quat = self._lerp(self.robot_body_quat_traj[floor_idx], self.robot_body_quat_traj[ceil_idx], interp_ratio)
-            self.ref_robot_body_pos_vel = self._lerp(self.robot_body_pos_vel[floor_idx], self.robot_body_pos_vel[ceil_idx], interp_ratio)
+        # ceil_idx = torch.ceil(idx).int().clamp(min=0, max=self.num_frames - 1)
+        # interp_ratio = (idx - floor_idx).unsqueeze(-1)
+        # if self.one_file_loaded:
+        #     self.ref_robot_joint_pos = self._lerp(self.robot_joint_pos_traj[floor_idx], self.robot_joint_pos_traj[ceil_idx], interp_ratio)
+        #     self.ref_robot_joint_vel = self._lerp(self.robot_joint_vel_traj[floor_idx], self.robot_joint_vel_traj[ceil_idx], interp_ratio)
+        #     self.ref_door_joint_pos = self._lerp(self.door_traj[floor_idx], self.door_traj[ceil_idx], interp_ratio)
+        #     self.ref_robot_body_pos = self._lerp(self.robot_body_pos_traj[floor_idx], self.robot_body_pos_traj[ceil_idx], interp_ratio)
+        #     self.ref_robot_body_quat = self._lerp(self.robot_body_quat_traj[floor_idx], self.robot_body_quat_traj[ceil_idx], interp_ratio)
+        #     self.ref_robot_body_pos_vel = self._lerp(self.robot_body_pos_vel[floor_idx], self.robot_body_pos_vel[ceil_idx], interp_ratio)
 
+        #     if self.twist_indices is not None:
+        #         self.ref_robot_joint_pos_twist = self._lerp(self.robot_joint_pos_twist[floor_idx], self.robot_joint_pos_twist[ceil_idx], interp_ratio)
+        #         self.ref_robot_joint_vel_twist = self._lerp(self.robot_joint_vel_twist[floor_idx], self.robot_joint_vel_twist[ceil_idx], interp_ratio)
+        #         self.ref_door_joint_pos_twist = self._lerp(self.door_joint_pos_twist[floor_idx], self.door_joint_pos_twist[ceil_idx], interp_ratio)
+        #         self.ref_robot_body_pos_twist = self._lerp(self.robot_body_pos_twist[floor_idx], self.robot_body_pos_twist[ceil_idx], interp_ratio)
+        #         self.ref_robot_body_quat_twist = self._lerp(self.robot_body_quat_twist[floor_idx], self.robot_body_quat_twist[ceil_idx], interp_ratio)
+        # else:
+        #     env_ids = torch.arange(self.num_envs, device=self.device)
+        #     indices = torch.arange(len(env_ids), device=self.device)
+        #     self.ref_robot_joint_pos = self._lerp(self.robot_joint_pos_traj[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_joint_pos_traj[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
+        #     self.ref_robot_joint_vel = self._lerp(self.robot_joint_vel_traj[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_joint_vel_traj[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
+        #     self.ref_door_joint_pos = self._lerp(self.door_traj[self.env_to_file_map[env_ids]][indices, floor_idx], self.door_traj[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
+        #     self.ref_robot_body_pos = self._lerp(self.robot_body_pos_traj[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_body_pos_traj[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
+        #     self.ref_robot_body_quat = self._lerp(self.robot_body_quat_traj[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_body_quat_traj[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
+        #     # print("self.hinge_contact_mask.shape: ", self.hinge_contact_mask.shape)
+        #     self.ref_hinge_contact_mask = self.hinge_contact_mask[self.env_to_file_map[env_ids]][indices, floor_idx]
+        #     # print("self.ref_hinge_contact_mask.shape: ", self.ref_hinge_contact_mask.shape)
+        #     self.ref_robot_body_pos_vel = self._lerp(self.robot_body_pos_vel[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_body_pos_vel[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
+        #     if self.twist_indices is not None:
+        #         self.ref_robot_joint_pos_twist = self._lerp(self.robot_joint_pos_twist[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_joint_pos_twist[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
+        #         self.ref_robot_joint_vel_twist = self._lerp(self.robot_joint_vel_twist[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_joint_vel_twist[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
+        #         self.ref_door_joint_pos_twist = self._lerp(self.door_joint_pos_twist[self.env_to_file_map[env_ids]][indices, floor_idx], self.door_joint_pos_twist[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
+        #         self.ref_robot_body_pos_twist = self._lerp(self.robot_body_pos_twist[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_body_pos_twist[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
+        #         self.ref_robot_body_quat_twist = self._lerp(self.robot_body_quat_twist[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_body_quat_twist[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
+        if self.one_file_loaded:
+            self.ref_robot_joint_pos = self.robot_joint_pos_traj[floor_idx]
+            self.ref_robot_joint_vel = self.robot_joint_vel_traj[floor_idx]
+            self.ref_door_joint_pos = self.door_traj[floor_idx]
+            self.ref_robot_body_pos = self.robot_body_pos_traj[floor_idx]
+            self.ref_robot_body_quat = self.robot_body_quat_traj[floor_idx]
+            self.ref_robot_body_pos_vel = self.robot_body_pos_vel[floor_idx]
+            self.ref_door_body_pos = self.door_body_pos_traj[floor_idx]
             if self.twist_indices is not None:
-                self.ref_robot_joint_pos_twist = self._lerp(self.robot_joint_pos_twist[floor_idx], self.robot_joint_pos_twist[ceil_idx], interp_ratio)
-                self.ref_robot_joint_vel_twist = self._lerp(self.robot_joint_vel_twist[floor_idx], self.robot_joint_vel_twist[ceil_idx], interp_ratio)
-                self.ref_door_joint_pos_twist = self._lerp(self.door_joint_pos_twist[floor_idx], self.door_joint_pos_twist[ceil_idx], interp_ratio)
-                self.ref_robot_body_pos_twist = self._lerp(self.robot_body_pos_twist[floor_idx], self.robot_body_pos_twist[ceil_idx], interp_ratio)
-                self.ref_robot_body_quat_twist = self._lerp(self.robot_body_quat_twist[floor_idx], self.robot_body_quat_twist[ceil_idx], interp_ratio)
-                self.ref_door_body_pos_twist = self._lerp(self.door_body_pos_twist[floor_idx], self.door_body_pos_twist[ceil_idx], interp_ratio)
+                self.ref_robot_joint_pos_twist = self.robot_joint_pos_twist[floor_idx]
+                self.ref_robot_joint_vel_twist = self.robot_joint_vel_twist[floor_idx]
+                self.ref_door_joint_pos_twist = self.door_joint_pos_twist[floor_idx]
+                self.ref_robot_body_pos_twist = self.robot_body_pos_twist[floor_idx]
+                self.ref_robot_body_quat_twist = self.robot_body_quat_twist[floor_idx]
+                self.ref_door_body_pos_twist = self.door_body_pos_twist[floor_idx]
         else:
             env_ids = torch.arange(self.num_envs, device=self.device)
             indices = torch.arange(len(env_ids), device=self.device)
-            self.ref_robot_joint_pos = self._lerp(self.robot_joint_pos_traj[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_joint_pos_traj[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
-            self.ref_robot_joint_vel = self._lerp(self.robot_joint_vel_traj[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_joint_vel_traj[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
-            self.ref_door_joint_pos = self._lerp(self.door_traj[self.env_to_file_map[env_ids]][indices, floor_idx], self.door_traj[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
-            self.ref_robot_body_pos = self._lerp(self.robot_body_pos_traj[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_body_pos_traj[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
-            self.ref_robot_body_quat = self._lerp(self.robot_body_quat_traj[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_body_quat_traj[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
+            self.ref_robot_joint_pos = self.robot_joint_pos_traj[self.env_to_file_map[env_ids]][indices, floor_idx]
+            self.ref_robot_joint_vel = self.robot_joint_vel_traj[self.env_to_file_map[env_ids]][indices, floor_idx]
+            self.ref_door_joint_pos = self.door_traj[self.env_to_file_map[env_ids]][indices, floor_idx]
+            self.ref_robot_body_pos = self.robot_body_pos_traj[self.env_to_file_map[env_ids]][indices, floor_idx]
+            self.ref_robot_body_quat = self.robot_body_quat_traj[self.env_to_file_map[env_ids]][indices, floor_idx]
             # print("self.hinge_contact_mask.shape: ", self.hinge_contact_mask.shape)
             self.ref_hinge_contact_mask = self.hinge_contact_mask[self.env_to_file_map[env_ids]][indices, floor_idx]
             # print("self.ref_hinge_contact_mask.shape: ", self.ref_hinge_contact_mask.shape)
-            self.ref_robot_body_pos_vel = self._lerp(self.robot_body_pos_vel[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_body_pos_vel[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
+            self.ref_robot_body_pos_vel = self.robot_body_pos_vel[self.env_to_file_map[env_ids]][indices, floor_idx]
+            self.ref_door_body_pos = self.door_body_pos_traj[self.env_to_file_map[env_ids]][indices, floor_idx]
             if self.twist_indices is not None:
-                self.ref_robot_joint_pos_twist = self._lerp(self.robot_joint_pos_twist[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_joint_pos_twist[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
-                self.ref_robot_joint_vel_twist = self._lerp(self.robot_joint_vel_twist[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_joint_vel_twist[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
-                self.ref_door_joint_pos_twist = self._lerp(self.door_joint_pos_twist[self.env_to_file_map[env_ids]][indices, floor_idx], self.door_joint_pos_twist[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
-                self.ref_robot_body_pos_twist = self._lerp(self.robot_body_pos_twist[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_body_pos_twist[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
-                self.ref_robot_body_quat_twist = self._lerp(self.robot_body_quat_twist[self.env_to_file_map[env_ids]][indices, floor_idx], self.robot_body_quat_twist[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
-                self.ref_door_body_pos_twist = self._lerp(self.door_body_pos_twist[self.env_to_file_map[env_ids]][indices, floor_idx], self.door_body_pos_twist[self.env_to_file_map[env_ids]][indices, ceil_idx], interp_ratio)
-
+                self.ref_robot_joint_pos_twist = self.robot_joint_pos_twist[self.env_to_file_map[env_ids]][indices, floor_idx]
+                self.ref_robot_joint_vel_twist = self.robot_joint_vel_twist[self.env_to_file_map[env_ids]][indices, floor_idx]
+                self.ref_door_joint_pos_twist = self.door_joint_pos_twist[self.env_to_file_map[env_ids]][indices, floor_idx]
+                self.ref_robot_body_pos_twist = self.robot_body_pos_twist[self.env_to_file_map[env_ids]][indices, floor_idx]
+                self.ref_robot_body_quat_twist = self.robot_body_quat_twist[self.env_to_file_map[env_ids]][indices, floor_idx]
+                self.ref_door_body_pos_twist = self.door_body_pos_twist[self.env_to_file_map[env_ids]][indices, floor_idx]
+                
     # --------------------------------------------------
     # Getters (explicit, readable)
     # --------------------------------------------------
@@ -403,11 +436,11 @@ class ReferenceMotionManager:
         else:
             return self.ref_robot_body_pos_vel[env_ids, :, 3:]
         
-    def get_door_body_pos_twist(self, env_ids: Optional[Sequence[int]] = None):
+    def get_door_body_pos(self, env_ids: Optional[Sequence[int]] = None):
         if env_ids is None:
-            return self.ref_door_body_pos_twist
+            return self.ref_door_body_pos
         else:
-            return self.ref_door_body_pos_twist[env_ids]
+            return self.ref_door_body_pos[env_ids]
 
 
     def get_robot_joint_pos_twist(self, env_ids: Optional[Sequence[int]] = None):
