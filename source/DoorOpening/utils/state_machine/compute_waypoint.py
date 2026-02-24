@@ -2,6 +2,7 @@ from DoorOpening.utils.state_machine.api import solve_ik, get_hinge_pos, open_ha
 import torch
 from isaaclab.utils.math import quat_from_euler_xyz, quat_from_matrix, combine_frame_transforms, quat_mul, quat_inv
 from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES, CAMERA_JOINT_DEFAULT_VALUES, DEFAULT_JOINT_POS, OPEN_FINGER_JOINT_VALUES, ROBOT_KEY_BODY_NAMES, DM_JOINT_NAMES
+from DoorOpening.constants.door_constants import DOOR_BODY_NAMES, DOOR_JOINT_NAMES
 import numpy as np
 import time
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT, DOOR_INITIAL_POS, DOOR_INITIAL_ROT
@@ -615,7 +616,7 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path):
     robot_key_bodies = ROBOT_KEY_BODY_NAMES
     robot_body_pos_traj = []
     robot_body_quat_traj = []
-    
+
     for robot_point in robot_traj:
         body_poses = []
         body_quats = []
@@ -632,8 +633,20 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path):
     robot_body_pos_traj = torch.stack(robot_body_pos_traj, dim=0)
     robot_body_quat_traj = torch.stack(robot_body_quat_traj, dim=0)
 
+    # for door_point in door_traj:
+    #     translation = get_hinge_pos(door_urdf_path, door_initial_pose, door_point)
+    #     print(translation, door_point)
+    #     body_world_pos, _ = combine_frame_transforms(t01 = torch.tensor(door_world_pos).unsqueeze(0).float(), q01 = torch.tensor(door_world_quat).unsqueeze(0).float(), t12 = translation, q12 = None)
+    #     door_body_pos_traj.append(body_world_pos.squeeze())
+    translation = get_hinge_pos(door_urdf_path, door_initial_pose, door_traj)
+    body_world_pos, _ = combine_frame_transforms(t01 = torch.tensor(door_world_pos).unsqueeze(0).float(), q01 = torch.tensor(door_world_quat).unsqueeze(0).float(), t12 = translation, q12 = None)
+    door_body_pos_traj = body_world_pos.squeeze()
+
+    # door_body_pos_traj = torch.stack(door_body_pos_traj, dim=0)
+
     print(robot_body_pos_traj.shape)
     print(robot_body_quat_traj.shape)
+    print(door_body_pos_traj.shape)
 
     robot_body_pos_twist = compute_link_twist(robot_body_pos_traj, robot_body_quat_traj)
 
@@ -654,7 +667,8 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path):
         # "key_indices": torch.tensor(key_indices, dtype=torch.int32)[key_idx_in_key_indices]
         "hinge_contact_mask": mask,
         "key_indices": key_indices,
-        "robot_body_pos_twist": robot_body_pos_twist
+        "robot_body_pos_twist": robot_body_pos_twist,
+        "door_body_pos_traj": door_body_pos_traj
     }
     print(key_indices)
     # print(torch.tensor(key_indices, dtype=torch.int32)[key_idx_in_key_indices])
