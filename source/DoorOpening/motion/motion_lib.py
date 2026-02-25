@@ -33,86 +33,6 @@ class ReferenceMotionManager:
         if self.twist_indices is not None:
             self._precompute_twist()
 
-        self.num_bins = self.key_indices.shape[1]
-        self.num_motions = self.robot_joint_pos_traj.shape[0]
-
-        # EMA statistics
-        self.bin_fail_ema = torch.zeros(
-            self.num_motions, self.num_bins, device=self.device
-        )
-
-        self.bin_visit_ema = torch.zeros(
-            self.num_motions, self.num_bins, device=self.device
-        )
-
-        # Sampling distribution
-        self.curriculum_probs = torch.ones(
-            self.num_motions, self.num_bins, device=self.device
-        ) / self.num_bins
-
-    def frame_to_bin(self, motion_ids, frame_idx):
-        """
-        motion_ids: (B,)
-        frame_idx:  (B,)
-        returns:    (B,)
-        """
-
-        key = self.key_indices[motion_ids]  # (B, S)
-
-        # Compare each frame against all bin starts
-        # key:      (B, S)
-        # frame:    (B, 1)
-        # result:   (B, S)
-        mask = frame_idx.unsqueeze(1) >= key
-
-        # Count how many boundaries it passed
-        bin_ids = mask.sum(dim=1) - 1
-
-        return bin_ids.clamp(0, self.num_bins - 1)
-
-    def update_failure_stats(self, env_ids, frame_idx):
-        motion_ids = self.env_to_file_map[env_ids]
-
-        bin_ids = self.frame_to_bin(motion_ids, frame_idx)
-
-        decay = 0.99
-
-        # decay EMA
-        self.bin_fail_ema *= decay
-        self.bin_visit_ema *= decay
-
-        # severity weighting (optional but recommended)
-        severity = 1.0 - (frame_idx / self.num_frames)
-
-        self.bin_fail_ema[motion_ids, bin_ids] += severity
-        self.bin_visit_ema[motion_ids, bin_ids] += 1.0
-
-    def update_curriculum(self, gamma=0.9, beta=2.0, alpha=0.7):
-        eps = 1e-6
-
-        # raw failure rate
-        fail_rate = self.bin_fail_ema / (self.bin_visit_ema + eps)
-
-        # backward smoothing
-        S = self.num_bins
-        idx = torch.arange(S, device=self.device)
-
-        weight = gamma ** (idx[None, :] - idx[:, None])
-        weight = torch.triu(weight)
-
-        smoothed = torch.matmul(fail_rate, weight)
-
-        # cap
-        mean_fail = smoothed.mean(dim=1, keepdim=True)
-        capped = torch.minimum(smoothed, beta * mean_fail)
-
-        # normalize
-        norm = capped / (capped.sum(dim=1, keepdim=True) + eps)
-
-        uniform = torch.ones_like(norm) / self.num_bins
-
-        self.curriculum_probs = alpha * norm + (1 - alpha) * uniform
-
     # --------------------------------------------------
     # Load motion data (moved from Env)
     # --------------------------------------------------
@@ -356,10 +276,7 @@ class ReferenceMotionManager:
                 )
                 probs = probs / probs.sum()
 
-                motion_ids = self.env_to_file_map[env_ids]
-                probs = self.curriculum_probs[motion_ids]  # (B, S)
-
-                idx = torch.multinomial(probs, 1).squeeze(-1)
+                idx = torch.multinomial(probs, env_ids.shape[0], replacement=True)
             else:
                 idx = torch.randint(
                     low=0,

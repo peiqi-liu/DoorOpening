@@ -190,6 +190,7 @@ class DooropeningEnv(DirectRLEnv):
         # print("ref joint vel: ", self.ref_robot_base_joint_vel)
 
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
+        self.last_actions[:] = self.scaled_actions
 
     def _apply_action(self):
         edit_door_articulation(self.door)
@@ -394,14 +395,6 @@ class DooropeningEnv(DirectRLEnv):
         # contact_forces_robot_palm_center = self.scene.sensors["contact_forces_robot_palm_center"].data.net_forces_w
         contact_forces_door2 = self.scene.sensors["contact_forces_door2"].data.net_forces_w
 
-        action_rate = self.scaled_actions - self.last_actions
-        action_rate_penalty = torch.sum(action_rate ** 2, dim=-1)
-        # print("action_rate_penalty: ", action_rate_penalty)
-        action_rate_w = self.cfg.action_rate_w
-        action_rate_penalty = action_rate_w * action_rate_penalty
-
-        self.last_actions[:] = self.scaled_actions
-
         return compute_deep_mimic_rewards(
             robot_key_body_pos = self.robot_key_body_pos, 
             robot_key_body_quat = self.robot_key_body_quat, 
@@ -453,7 +446,7 @@ class DooropeningEnv(DirectRLEnv):
 
             contact_forces = contact_forces_door2,
             contact_force_w = self.hinge_contact_reward_w * self.ref_hinge_contact_mask,
-        ) - action_rate_penalty
+        )
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_trial_steps - 1
@@ -519,34 +512,6 @@ class DooropeningEnv(DirectRLEnv):
             props[..., 1] = 2.5
             self.robot.root_physx_view.set_material_properties(props.cpu(), torch.arange(self.num_envs, device="cpu"))
             self._initialized_materials = True
-
-        # update failure before resetting
-        self.ref_motion_lib.update_failure_stats(
-            env_ids,
-            self.ref_motion_lib.frame_idx[env_ids]
-        )
-
-        # periodically update curriculum
-        if self.step_count % 1000 == 0:
-            self.ref_motion_lib.update_curriculum()
-        
-        mean_probs = self.ref_motion_lib.curriculum_probs.mean(dim=0)
-
-        # Most likely bin (mode)
-        mode_bin = torch.argmax(mean_probs)
-
-        # Probability of that bin
-        mode_prob = mean_probs[mode_bin]
-
-        self.extras["curriculum/mode_bin"] = mode_bin.float()
-        self.extras["curriculum/mode_prob"] = mode_prob
-
-        # fail_rate = self.ref_motion_lib.bin_fail_ema / (self.ref_motion_lib.bin_visit_ema + 1e-6)
-        # self.extras["curriculum/mean_fail_rate"] = fail_rate.mean()
-
-        # probs = self.ref_motion_lib.curriculum_probs.mean(dim=0)
-        # entropy = -(probs * torch.log(probs + 1e-8)).sum()
-        # self.extras["curriculum/sampling_entropy"] = entropy
 
         reset_frame_idx = self.ref_motion_lib.reset(env_ids, step_count=self.step_count, reset_progress_total=self.reset_progress_total)
         self.max_trial_steps[env_ids] = ((self.ref_motion_lib.num_frames - reset_frame_idx) // self.ref_motion_lib.velocity).long()
