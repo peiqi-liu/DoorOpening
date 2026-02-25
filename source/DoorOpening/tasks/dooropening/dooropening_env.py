@@ -190,7 +190,6 @@ class DooropeningEnv(DirectRLEnv):
         # print("ref joint vel: ", self.ref_robot_base_joint_vel)
 
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
-        self.last_actions[:] = self.scaled_actions
 
     def _apply_action(self):
         edit_door_articulation(self.door)
@@ -395,6 +394,14 @@ class DooropeningEnv(DirectRLEnv):
         # contact_forces_robot_palm_center = self.scene.sensors["contact_forces_robot_palm_center"].data.net_forces_w
         contact_forces_door2 = self.scene.sensors["contact_forces_door2"].data.net_forces_w
 
+        action_rate = self.scaled_actions - self.last_actions
+        action_rate_penalty = torch.sum(action_rate ** 2, dim=-1)
+        # print("action_rate_penalty: ", action_rate_penalty)
+        action_rate_w = self.cfg.action_rate_w
+        action_rate_penalty = action_rate_w * action_rate_penalty
+
+        self.last_actions[:] = self.scaled_actions
+
         return compute_deep_mimic_rewards(
             robot_key_body_pos = self.robot_key_body_pos, 
             robot_key_body_quat = self.robot_key_body_quat, 
@@ -446,7 +453,7 @@ class DooropeningEnv(DirectRLEnv):
 
             contact_forces = contact_forces_door2,
             contact_force_w = self.hinge_contact_reward_w * self.ref_hinge_contact_mask,
-        )
+        ) - action_rate_penalty
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_trial_steps - 1
