@@ -513,6 +513,34 @@ class DooropeningEnv(DirectRLEnv):
             self.robot.root_physx_view.set_material_properties(props.cpu(), torch.arange(self.num_envs, device="cpu"))
             self._initialized_materials = True
 
+        # update failure before resetting
+        self.ref_motion_lib.update_failure_stats(
+            env_ids,
+            self.ref_motion_lib.frame_idx[env_ids]
+        )
+
+        # periodically update curriculum
+        if self.step_count % 1000 == 0:
+            self.ref_motion_lib.update_curriculum()
+        
+        mean_probs = self.ref_motion_lib.curriculum_probs.mean(dim=0)
+
+        # Most likely bin (mode)
+        mode_bin = torch.argmax(mean_probs)
+
+        # Probability of that bin
+        mode_prob = mean_probs[mode_bin]
+
+        self.extras["curriculum/mode_bin"] = mode_bin.float()
+        self.extras["curriculum/mode_prob"] = mode_prob
+
+        # fail_rate = self.ref_motion_lib.bin_fail_ema / (self.ref_motion_lib.bin_visit_ema + 1e-6)
+        # self.extras["curriculum/mean_fail_rate"] = fail_rate.mean()
+
+        # probs = self.ref_motion_lib.curriculum_probs.mean(dim=0)
+        # entropy = -(probs * torch.log(probs + 1e-8)).sum()
+        # self.extras["curriculum/sampling_entropy"] = entropy
+
         reset_frame_idx = self.ref_motion_lib.reset(env_ids, step_count=self.step_count, reset_progress_total=self.reset_progress_total)
         self.max_trial_steps[env_ids] = ((self.ref_motion_lib.num_frames - reset_frame_idx) // self.ref_motion_lib.velocity).long()
 
