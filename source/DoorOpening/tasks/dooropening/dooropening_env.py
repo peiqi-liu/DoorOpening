@@ -602,13 +602,18 @@ def compute_deep_mimic_rewards(
     key_body_pos_err = torch.sum(key_body_pos_diff * key_body_pos_diff, dim=-1)  # [B, N]
     key_body_pos_err = torch.sum(key_body_pos_err, dim=-1)
 
-    robot_body_lin_vel_diff = ref_robot_body_lin_vel - robot_body_lin_vel
-    robot_body_lin_vel_err = torch.sum(robot_body_lin_vel_diff * robot_body_lin_vel_diff, dim=-1)  # [B, N]
-    robot_body_lin_vel_err = torch.sum(robot_body_lin_vel_err, dim=-1)
-    robot_body_ang_vel_diff = ref_robot_body_ang_vel - robot_body_ang_vel
-    robot_body_ang_vel_err = torch.sum(robot_body_ang_vel_diff * robot_body_ang_vel_diff, dim=-1)  # [B, N]
-    robot_body_ang_vel_err = torch.sum(robot_body_ang_vel_err, dim=-1)
-
+    if robot_body_lin_vel_w != 0:
+        robot_body_lin_vel_diff = ref_robot_body_lin_vel - robot_body_lin_vel
+        robot_body_lin_vel_err = torch.sum(robot_body_lin_vel_diff * robot_body_lin_vel_diff, dim=-1)  # [B, N]
+        robot_body_lin_vel_err = torch.sum(robot_body_lin_vel_err, dim=-1)
+    else:
+        robot_body_lin_vel_err = None
+    if robot_body_ang_vel_w != 0:
+        robot_body_ang_vel_diff = ref_robot_body_ang_vel - robot_body_ang_vel
+        robot_body_ang_vel_err = torch.sum(robot_body_ang_vel_diff * robot_body_ang_vel_diff, dim=-1)  # [B, N]
+        robot_body_ang_vel_err = torch.sum(robot_body_ang_vel_err, dim=-1)
+    else:
+        robot_body_ang_vel_err = None
     # ----------------------------------
     # Robot body orientation error
     # ----------------------------------
@@ -649,8 +654,14 @@ def compute_deep_mimic_rewards(
     base_joint_vel_r = torch.exp(-robot_base_joint_vel_scale * base_joint_vel_err)
     arm_joint_vel_r = torch.exp(-robot_arm_joint_vel_scale * arm_joint_vel_err)
     finger_joint_vel_r = torch.exp(-robot_finger_joint_vel_scale * finger_joint_vel_err)
-    robot_body_lin_vel_r = torch.exp(-robot_body_lin_vel_scale * robot_body_lin_vel_err)
-    robot_body_ang_vel_r = torch.exp(-robot_body_ang_vel_scale * robot_body_ang_vel_err)
+    if robot_body_lin_vel_err is not None:
+        robot_body_lin_vel_r = torch.exp(-robot_body_lin_vel_scale * robot_body_lin_vel_err)
+    else:
+        robot_body_lin_vel_r = torch.zeros_like(key_body_pos_r)
+    if robot_body_ang_vel_err is not None:
+        robot_body_ang_vel_r = torch.exp(-robot_body_ang_vel_scale * robot_body_ang_vel_err)
+    else:
+        robot_body_ang_vel_r = torch.zeros_like(key_body_pos_r)
 
     contact_reward = torch.where(torch.norm(contact_forces, dim=-1) > 1, 1.0, 0.0).squeeze()
     # print("contact_forces: ", contact_forces)
