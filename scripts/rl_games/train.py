@@ -140,6 +140,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # update env config device
         env_cfg.sim.device = f"cuda:{app_launcher.local_rank}"
 
+    global_rank = int(os.getenv("RANK", "0"))
+    local_rank = int(os.getenv("LOCAL_RANK", "0"))
+
     # set the environment seed (after multi-gpu config for updated rank from agent seed)
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg["params"]["seed"]
@@ -193,7 +196,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env = multi_agent_to_single_agent(env)
 
     # wrap for video recording
-    if args_cli.video:
+    if args_cli.video and global_rank == 0:
         video_kwargs = {
             "video_folder": os.path.join(log_root_path, log_dir, "videos", "train"),
             "step_trigger": lambda step: step % args_cli.video_interval == 0,
