@@ -89,6 +89,9 @@ ROBOT_RESET_KEY_BODY_NAMES = [
     "palm_lower",
 ]
 
+ROBOT_PALM_LINK_NAME = "palm_lower"
+ROBOT_BASE_BODY_LINK_NAME = "tidybot2_base_link"
+
 CLOSE_FINGER_JOINT_VALUES = {
     "finger_joint_0": 0.0,
     "finger_joint_1": torch.pi / 2,

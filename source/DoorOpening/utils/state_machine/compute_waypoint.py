@@ -633,20 +633,16 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path):
     robot_body_pos_traj = torch.stack(robot_body_pos_traj, dim=0)
     robot_body_quat_traj = torch.stack(robot_body_quat_traj, dim=0)
 
-    # for door_point in door_traj:
-    #     translation = get_hinge_pos(door_urdf_path, door_initial_pose, door_point)
-    #     print(translation, door_point)
-    #     body_world_pos, _ = combine_frame_transforms(t01 = torch.tensor(door_world_pos).unsqueeze(0).float(), q01 = torch.tensor(door_world_quat).unsqueeze(0).float(), t12 = translation, q12 = None)
-    #     door_body_pos_traj.append(body_world_pos.squeeze())
-    translation = get_hinge_pos(door_urdf_path, door_initial_pose, door_traj)
-    body_world_pos, _ = combine_frame_transforms(t01 = torch.tensor(door_world_pos).unsqueeze(0).float(), q01 = torch.tensor(door_world_quat).unsqueeze(0).float(), t12 = translation, q12 = None)
-    door_body_pos_traj = body_world_pos.squeeze()
+    # translation = get_hinge_pos(door_urdf_path, door_initial_pose, door_traj)
+    # body_world_pos, _ = combine_frame_transforms(t01 = torch.tensor(door_world_pos).unsqueeze(0).float(), q01 = torch.tensor(door_world_quat).unsqueeze(0).float(), t12 = translation, q12 = None)
+    # door_body_pos_traj = body_world_pos.squeeze()
+    door_body_pos_traj = get_hinge_pos(door_urdf_path, door_initial_pose, door_traj)
 
     # door_body_pos_traj = torch.stack(door_body_pos_traj, dim=0)
 
-    print(robot_body_pos_traj.shape)
-    print(robot_body_quat_traj.shape)
-    print(door_body_pos_traj.shape)
+    print("robot_body_pos_traj.shape: ", robot_body_pos_traj.shape)
+    print("robot_body_quat_traj.shape: ", robot_body_quat_traj.shape)
+    print("door_body_pos_traj.shape: ", door_body_pos_traj.shape)
 
     robot_body_pos_twist = compute_link_twist(robot_body_pos_traj, robot_body_quat_traj)
 

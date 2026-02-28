@@ -3,11 +3,19 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-from DoorOpening.constants.robot_constants import CAMERA_JOINT_DEFAULT_VALUES, CLOSE_FINGER_JOINT_VALUES, OPEN_FINGER_JOINT_VALUES, ROBOT_KEY_BODY_NAMES, ROBOT_RESET_KEY_BODY_NAMES    
 from DoorOpening.assets.door.door_cfg import DOOR_CONFIG, ALL_DOOR_CONFIGS
 from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
 from DoorOpening.constants.door_constants import DOOR_BODY_NAMES, DOOR_JOINT_NAMES
+from DoorOpening.constants.robot_constants import (
+    CAMERA_JOINT_DEFAULT_VALUES,
+    CLOSE_FINGER_JOINT_VALUES,
+    OPEN_FINGER_JOINT_VALUES,
+    ROBOT_KEY_BODY_NAMES,
+    ROBOT_RESET_KEY_BODY_NAMES,
+    ROBOT_PALM_LINK_NAME,
+    ROBOT_BASE_BODY_LINK_NAME,
+)
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
@@ -159,8 +167,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_key_bodies = ROBOT_KEY_BODY_NAMES
     robot_reset_key_bodies = ROBOT_RESET_KEY_BODY_NAMES
 
-    robot_palm_link_name = "palm_center"
-    robot_base_body_link_name = "tidybot2_base_link"
+    robot_palm_link_name = ROBOT_PALM_LINK_NAME
+    robot_base_body_link_name = ROBOT_BASE_BODY_LINK_NAME
 
     # robot(s)
     robot_cfg: ArticulationCfg = GLORBOT_CONFIG.replace(
@@ -183,10 +191,11 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # observation_space = actuated_joints_num * 2 + len(door_body_names) * 3 + len(robot_key_bodies) * 3 * 2 + len(door_joint_names) + len(door_joint_names) + len(contact_sensor_names) * 3
     observation_space = \
         actuated_joints_num * 2 +\
-        len(door_body_names) * 3 +\
-        len(robot_key_bodies) * 3 * 2 +\
+        len(door_body_names) * 3 * 2 +\
+        len(robot_key_bodies) * 3 * 2 * 2 +\
+        len(robot_key_bodies) * 3 +\
         len(door_joint_names) * 2 +\
-        len(twist_indices) * (len(robot_key_bodies) * 3 + len(robot_key_bodies) * 4 + 3 + len(door_joint_names)) +\
+        len(twist_indices) * (len(robot_key_bodies) * 3 + len(robot_key_bodies) * 3 + 3 + len(door_joint_names)) +\
         actuated_joints_num
     #  5 * 3 +\
     

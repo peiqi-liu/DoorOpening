@@ -40,27 +40,26 @@ def base_to_world_frame(base_pos, base_quat, palm_pos_b, palm_quat_b):
 
     return palm_pos_w, palm_quat_w
 
-def world_to_local(points, pos, quat):
-    """
-    Convert world-frame (N,3) points into local frame defined by pos+quat.
-    quat: (w,x,y,z) rotation of frame in world
-    """
+@torch.jit.script
+def world_to_local(
+    points: torch.Tensor,   # (E, N, 3)
+    pos: torch.Tensor,      # (E, 3)
+    quat: torch.Tensor      # (E, 4)
+) -> torch.Tensor:
 
-    if quat.ndim != 1:
-        quat = quat.squeeze()
-    if pos.ndim != 1:
-        pos = pos.squeeze()
+    E, N, _ = points.shape
 
-    # Convert quaternion to rotation matrix
-    w, x, y, z = quat
-    R = torch.tensor([
-        [1 - 2*(y**2 + z**2),     2*(x*y - z*w),         2*(x*z + y*w)],
-        [    2*(x*y + z*w),   1 - 2*(x**2 + z**2),       2*(y*z - x*w)],
-        [    2*(x*z - y*w),       2*(y*z + x*w),     1 - 2*(x**2 + y**2)]
-    ], dtype=points.dtype, device=points.device)
+    # 1. subtract translation
+    rel = points - pos.unsqueeze(1)            # (E, N, 3)
 
-    # Translate then rotate by inverse (R^T)
-    return (points - pos) @ R
+    # 2. invert quaternion
+    quat_inv = quat_conjugate(quat)            # (E, 4)
+
+    # 3. expand to match N
+    quat_inv = quat_inv.unsqueeze(1).expand(-1, N, -1)  # (E, N, 4)
+
+    # 4. rotate
+    return quat_apply(quat_inv, rel)
 
 def unbase_goal(abs_pos, orig_pos, orig_quat, velocity=False):
     """
