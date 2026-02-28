@@ -218,13 +218,16 @@ class DooropeningEnv(DirectRLEnv):
         # door_to_base_link_pos = world_to_local(self.door_link_pos, self.robot_base_body_pos, self.robot_base_body_quat).reshape(self.num_envs, 1, -1)
         # door_twist_palm_link_pos = world_to_local(self.ref_door_body_pos_twist, self.robot_palm_body_pos, self.robot_palm_body_quat).reshape(self.num_envs, 1, -1)
         # door_to_palm_link_pos = world_to_local(self.door_link_pos, self.robot_palm_body_pos, self.robot_palm_body_quat).reshape(self.num_envs, 1, -1)
-
+        door_to_base_link_pos = (self.door_link_pos - self.robot_base_body_pos).reshape(self.num_envs, 1, -1)
+        door_twist_palm_link_pos = (self.ref_door_body_pos_twist - self.robot_palm_body_pos).reshape(self.num_envs, 1, -1)
+        door_to_palm_link_pos = (self.door_link_pos - self.robot_palm_body_pos).reshape(self.num_envs, 1, -1)
+        
         # rel_robot_key_body_pos = (self.robot_key_body_pos - base_link_pos).reshape(self.num_envs, 1, -1)
 
         key_pos_err = self.robot_key_body_pos - (self.ref_robot_key_body_pos).to(self.robot_key_body_pos)
         key_pos_err = key_pos_err.reshape(self.num_envs, 1, -1)
 
-        door_joint_err = self.door_joint_pos[:, self._door_joint_idx] - (self.ref_door_joint_pos[:, self._door_joint_idx]).to(self.door_joint_pos)
+        # door_joint_err = self.door_joint_pos[:, self._door_joint_idx] - (self.ref_door_joint_pos[:, self._door_joint_idx]).to(self.door_joint_pos)
 
         # contact_forces_door1 = self.scene.sensors["contact_forces_door1"].data.net_forces_w
         # contact_forces_door2 = self.scene.sensors["contact_forces_door2"].data.net_forces_w
@@ -247,9 +250,9 @@ class DooropeningEnv(DirectRLEnv):
                 self.robot_body_lin_vel.reshape(self.num_envs, 1, -1),
                 self.robot_body_ang_vel.reshape(self.num_envs, 1, -1),
 
-                # door_to_base_link_pos,
-                # door_to_palm_link_pos,
-                self.door_link_pos.reshape(self.num_envs, 1, -1),
+                door_to_base_link_pos,
+                door_to_palm_link_pos,
+                # self.door_link_pos.reshape(self.num_envs, 1, -1),
                 self.door_joint_pos[:, self._door_joint_idx].unsqueeze(dim = 1),
 
                 # door_joint_err.unsqueeze(dim = 1),
@@ -257,8 +260,8 @@ class DooropeningEnv(DirectRLEnv):
                 self.ref_robot_key_body_pos_twist.reshape(self.num_envs, 1, -1),
                 self.ref_robot_key_body_quat_twist.reshape(self.num_envs, 1, -1),
                 self.ref_door_joint_pos_twist.reshape(self.num_envs, 1, -1),
-                # door_twist_palm_link_pos,
-                self.ref_door_body_pos_twist.reshape(self.num_envs, 1, -1),
+                door_twist_palm_link_pos,
+                # self.ref_door_body_pos_twist.reshape(self.num_envs, 1, -1),
                 # frame_idx.unsqueeze(dim = -1),
                 # contact_forces_door1,
                 # contact_forces_door2,
