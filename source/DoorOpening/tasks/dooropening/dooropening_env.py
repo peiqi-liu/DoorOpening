@@ -218,12 +218,17 @@ class DooropeningEnv(DirectRLEnv):
         # door_to_base_link_pos = world_to_local(self.door_link_pos, self.robot_base_body_pos, self.robot_base_body_quat).reshape(self.num_envs, 1, -1)
         # door_twist_palm_link_pos = world_to_local(self.ref_door_body_pos_twist, self.robot_palm_body_pos, self.robot_palm_body_quat).reshape(self.num_envs, 1, -1)
         # door_to_palm_link_pos = world_to_local(self.door_link_pos, self.robot_palm_body_pos, self.robot_palm_body_quat).reshape(self.num_envs, 1, -1)
-        door_to_base_link_pos = (self.door_link_pos - self.robot_base_body_pos).reshape(self.num_envs, 1, -1)
-        door_twist_palm_link_pos = (self.ref_door_body_pos_twist - self.robot_palm_body_pos).reshape(self.num_envs, 1, -1)
-        door_to_palm_link_pos = (self.door_link_pos - self.robot_palm_body_pos).reshape(self.num_envs, 1, -1)
-        
-        # rel_robot_key_body_pos = (self.robot_key_body_pos - base_link_pos).reshape(self.num_envs, 1, -1)
+        door_to_base_link_pos = (self.door_link_pos - self.robot_base_body_pos)
+        door_to_base_link_pos = world_to_local(door_to_base_link_pos, self.robot_base_body_pos, self.robot_base_body_quat)
+        door_to_base_link_pos = door_to_base_link_pos.reshape(self.num_envs, 1, -1)
+        door_twist_palm_link_pos = (self.ref_door_body_pos_twist - self.robot_palm_body_pos)
+        door_twist_palm_link_pos = world_to_local(door_twist_palm_link_pos, self.robot_palm_body_pos, self.robot_palm_body_quat)
+        door_twist_palm_link_pos = door_twist_palm_link_pos.reshape(self.num_envs, 1, -1)
+        door_to_palm_link_pos = (self.door_link_pos - self.robot_palm_body_pos)
+        door_to_palm_link_pos = world_to_local(door_to_palm_link_pos, self.robot_palm_body_pos, self.robot_palm_body_quat)
+        door_to_palm_link_pos = door_to_palm_link_pos.reshape(self.num_envs, 1, -1)
 
+        # rel_robot_key_body_pos = (self.robot_key_body_pos - base_link_pos).reshape(self.num_envs, 1, -1)
         key_pos_err = self.robot_key_body_pos - (self.ref_robot_key_body_pos).to(self.robot_key_body_pos)
         key_pos_err = key_pos_err.reshape(self.num_envs, 1, -1)
 
