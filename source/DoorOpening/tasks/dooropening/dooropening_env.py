@@ -64,9 +64,7 @@ class DooropeningEnv(DirectRLEnv):
         self._door_body_idx, self.door_body_names = self.door.find_bodies(self.cfg.door_body_names)
         self._door_joint_idx, self.door_joint_names = self.door.find_joints(self.cfg.door_joint_names)
 
-        self._robot_palm_link_idx, self.robot_palm_link_name = self.robot.find_bodies(self.cfg.robot_palm_link_name)
         self._robot_base_body_link_idx, self.robot_base_body_link_name = self.robot.find_bodies(self.cfg.robot_base_body_link_name)
-        self._robot_palm_link_idx = self._robot_palm_link_idx[0]
         self._robot_base_body_link_idx = self._robot_base_body_link_idx[0]
 
         self.joint_pos = self.robot.data.joint_pos
@@ -218,7 +216,7 @@ class DooropeningEnv(DirectRLEnv):
         # door_to_base_link_pos = (self.door_keypoints - base_link_pos).reshape(self.num_envs, 1, -1)
         # door_twist_base_link_pos = (self.ref_door_body_pos_twist - base_link_pos).reshape(self.num_envs, 1, -1)
         # door_to_base_link_pos = world_to_local(self.door_link_pos, self.robot_base_body_pos, self.robot_base_body_quat).reshape(self.num_envs, 1, -1)
-        door_twist_palm_link_pos = world_to_local(self.ref_door_body_pos_twist, self.robot_palm_body_pos, self.robot_palm_body_quat).reshape(self.num_envs, 1, -1)
+        # door_twist_palm_link_pos = world_to_local(self.ref_door_body_pos_twist, self.robot_palm_body_pos, self.robot_palm_body_quat).reshape(self.num_envs, 1, -1)
         # door_to_palm_link_pos = world_to_local(self.door_link_pos, self.robot_palm_body_pos, self.robot_palm_body_quat).reshape(self.num_envs, 1, -1)
 
         # rel_robot_key_body_pos = (self.robot_key_body_pos - base_link_pos).reshape(self.num_envs, 1, -1)
@@ -259,7 +257,8 @@ class DooropeningEnv(DirectRLEnv):
                 self.ref_robot_key_body_pos_twist.reshape(self.num_envs, 1, -1),
                 self.ref_robot_key_body_quat_twist.reshape(self.num_envs, 1, -1),
                 self.ref_door_joint_pos_twist.reshape(self.num_envs, 1, -1),
-                door_twist_palm_link_pos,
+                # door_twist_palm_link_pos,
+                self.ref_door_body_pos_twist.reshape(self.num_envs, 1, -1),
                 # frame_idx.unsqueeze(dim = -1),
                 # contact_forces_door1,
                 # contact_forces_door2,
