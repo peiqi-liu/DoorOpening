@@ -162,7 +162,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     door_body_names = DOOR_BODY_NAMES
 
-    door_base_frame_name = "link_0"
+    door_base_frame_name = "base"
 
     door_joint_names = DOOR_JOINT_NAMES
 
@@ -193,8 +193,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # observation_space = actuated_joints_num * 2 + len(door_body_names) * 3 + len(robot_key_bodies) * 3 * 2 + len(door_joint_names) + len(door_joint_names) + len(contact_sensor_names) * 3
     observation_space = \
         actuated_joints_num * 2 +\
-        len(door_body_names) * 3 * 2 +\
-        len(robot_key_bodies) * 3 * 2 * 2 +\
+        len(door_body_names) * 3 +\
+        (len(robot_key_bodies) - 1) * 3 * 2 + 12 +\
         len(robot_key_bodies) * 3 +\
         len(door_joint_names) * 2 +\
         len(twist_indices) * (len(robot_key_bodies) * 3 + len(robot_key_bodies) * 3 + 3 + len(door_joint_names)) +\

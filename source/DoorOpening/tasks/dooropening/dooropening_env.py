@@ -15,8 +15,9 @@ from DoorOpening.assets.door.door_cfg import motion_traj_paths, handle_offsets, 
 from isaaclab.sensors import ContactSensor
 from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES, ROBOT_KEY_BODY_NAMES
 from DoorOpening.utils.pose_utils import normalize_to_center_frame, world_to_local
-from isaaclab.utils.math import quat_apply
+from isaaclab.utils.math import quat_conjugate, quat_apply, quat_mul
 from DoorOpening.utils.quat_utils import quat_to_euler
+from typing import Tuple
 
 import pickle as pkl
 import math
@@ -63,6 +64,7 @@ class DooropeningEnv(DirectRLEnv):
         self._robot_base_link_idx, self.robot_base_link_name = self.robot.find_bodies(self.cfg.base_link_name)
         self._door_body_idx, self.door_body_names = self.door.find_bodies(self.cfg.door_body_names)
         self._door_base_link_idx, self.door_base_link_name = self.door.find_bodies(self.cfg.door_base_frame_name)
+        self._door_base_link_idx = self._door_base_link_idx[0]
         self._door_joint_idx, self.door_joint_names = self.door.find_joints(self.cfg.door_joint_names)
 
         self._robot_base_body_link_idx, self.robot_base_body_link_name = self.robot.find_bodies(self.cfg.robot_base_body_link_name)
@@ -230,6 +232,7 @@ class DooropeningEnv(DirectRLEnv):
         # door_to_palm_link_pos = door_to_palm_link_pos.reshape(self.num_envs, 1, -1)
 
         # rel_robot_key_body_pos = (self.robot_key_body_pos - base_link_pos).reshape(self.num_envs, 1, -1)
+        robot_key_body_pos, robot_key_body_euler, base_lin_vel_local, base_ang_vel_local = self.transform_key_bodies_to_base_frame(self.robot_key_body_pos, self.robot_key_body_quat, self.robot_body_lin_vel, self.robot_body_ang_vel, self._robot_base_body_link_idx)
         key_pos_err = self.robot_key_body_pos - (self.ref_robot_key_body_pos).to(self.robot_key_body_pos)
         key_pos_err = key_pos_err.reshape(self.num_envs, 1, -1)
 
@@ -251,13 +254,15 @@ class DooropeningEnv(DirectRLEnv):
 
                 key_pos_err,
                 # rel_robot_key_body_pos,
-                self.robot_key_body_pos.reshape(self.num_envs, 1, -1),
-                self.robot_key_body_euler.reshape(self.num_envs, 1, -1),
-                self.robot_body_lin_vel.reshape(self.num_envs, 1, -1),
-                self.robot_body_ang_vel.reshape(self.num_envs, 1, -1),
+                robot_key_body_pos.reshape(self.num_envs, 1, -1),
+                robot_key_body_euler.reshape(self.num_envs, 1, -1),
+                base_lin_vel_local.reshape(self.num_envs, 1, -1),
+                base_ang_vel_local.reshape(self.num_envs, 1, -1),
+                self.robot_base_body_pos.reshape(self.num_envs, 1, -1),
+                quat_to_euler(self.robot_base_body_quat).reshape(self.num_envs, 1, -1),
 
                 door_to_base_link_pos,
-                door_to_palm_link_pos,
+                # door_to_palm_link_pos,
                 # self.door_link_pos.reshape(self.num_envs, 1, -1),
                 self.door_joint_pos[:, self._door_joint_idx].unsqueeze(dim = 1),
 
@@ -266,7 +271,7 @@ class DooropeningEnv(DirectRLEnv):
                 self.ref_robot_key_body_pos_twist.reshape(self.num_envs, 1, -1),
                 self.ref_robot_key_body_quat_twist.reshape(self.num_envs, 1, -1),
                 self.ref_door_joint_pos_twist.reshape(self.num_envs, 1, -1),
-                door_twist_palm_link_pos,
+                door_twist_in_door_frame,
                 # self.ref_door_body_pos_twist.reshape(self.num_envs, 1, -1),
                 # frame_idx.unsqueeze(dim = -1),
                 # contact_forces_door1,
@@ -277,6 +282,82 @@ class DooropeningEnv(DirectRLEnv):
         )
         observations = {"policy": obs.squeeze()}
         return observations
+
+    def transform_key_bodies_to_base_frame(
+        self,
+        robot_key_body_pos: torch.Tensor,       # (num_envs, num_bodies, 3)
+        robot_key_body_quat: torch.Tensor,      # (num_envs, num_bodies, 4)
+        robot_body_lin_vel: torch.Tensor,       # (num_envs, num_bodies, 3)
+        robot_body_ang_vel: torch.Tensor,       # (num_envs, num_bodies, 3)
+        robot_base_id_in_key_body_idx: int,     # index of tidybot_base_link
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Transform robot key body observations from World Frame to Robot Base Frame.
+        
+        Args:
+            robot_key_body_pos: World frame positions of key bodies
+            robot_key_body_quat: World frame orientations (quaternions, xyzw)
+            robot_body_lin_vel: World frame linear velocities
+            robot_body_ang_vel: World frame angular velocities
+            robot_base_id_in_key_body_idx: Index of base link in key body list
+        
+        Returns:
+            Tuple containing:
+                - body_pos_rel: (num_envs, num_bodies, 3) Positions in Base Frame
+                - body_euler_rel: (num_envs, num_bodies, 3) Orientations in Base Frame
+                - base_lin_vel_local: (num_envs, 3) Base linear velocity in Base Frame
+                - base_ang_vel_local: (num_envs, 3) Base angular velocity in Base Frame
+        """
+        N = robot_key_body_pos.shape[0]
+        B = robot_key_body_pos.shape[1]
+
+        # ---------------------------------------------------
+        # 1. Extract base pose
+        # ---------------------------------------------------
+        base_pos = robot_key_body_pos[:, robot_base_id_in_key_body_idx, :]        # (N,3)
+        base_quat = robot_key_body_quat[:, robot_base_id_in_key_body_idx, :]      # (N,4)
+
+        base_quat_inv = quat_conjugate(base_quat)                        # (N,4)
+
+        # ---------------------------------------------------
+        # 2. Position transform
+        # P_local = R^T (P_world - P_base)
+        # ---------------------------------------------------
+        pos_diff = robot_key_body_pos - base_pos.unsqueeze(1)      # (N,B,3)
+
+        base_quat_inv_exp = base_quat_inv.unsqueeze(1).expand(-1, B, -1)
+        body_pos_rel = quat_apply(base_quat_inv_exp, pos_diff)
+
+        # ---------------------------------------------------
+        # 3. Orientation transform
+        # Q_local = Q_base_inv * Q_body
+        # ---------------------------------------------------
+        body_quat_rel = quat_mul(base_quat_inv_exp, robot_key_body_quat)
+
+        # ---------------------------------------------------
+        # 4. Base velocities (express in base frame)
+        # ---------------------------------------------------
+        base_lin_vel_world = robot_body_lin_vel[:, robot_base_id_in_key_body_idx, :]
+        base_ang_vel_world = robot_body_ang_vel[:, robot_base_id_in_key_body_idx, :]
+
+        base_lin_vel_local = quat_apply(base_quat_inv, base_lin_vel_world)
+        base_ang_vel_local = quat_apply(base_quat_inv, base_ang_vel_world)
+
+        # ---------------------------------------------------
+        # 5. Remove base link from outputs
+        # ---------------------------------------------------
+        keep_mask = torch.ones(B, dtype=torch.bool, device=robot_key_body_pos.device)
+        keep_mask[robot_base_id_in_key_body_idx] = False
+
+        body_pos_rel = body_pos_rel[:, keep_mask, :]
+        body_quat_rel = body_quat_rel[:, keep_mask, :]
+
+        return (
+            body_pos_rel,          # (N, B-1, 3)
+            quat_to_euler(body_quat_rel),         # (N, B-1, 3)
+            base_lin_vel_local,    # (N, 3)
+            base_ang_vel_local,    # (N, 3)
+        )
 
     def compute_door_keypoints(
         self,
@@ -331,7 +412,6 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_palm_body_pos = self.robot_key_body_pos[:, self._robot_palm_id_in_key_body_idx]
         self.robot_palm_body_quat = self.robot_key_body_quat[:, self._robot_palm_id_in_key_body_idx]
 
-        self.robot_key_body_euler = quat_to_euler(self.robot_key_body_quat)
         self.robot_reset_key_body_pos = self.robot.data.body_pos_w[:, self._robot_reset_key_body_idx]\
              - self.scene.env_origins.repeat((1, 1)).reshape(self.num_envs, 1, 3)
 
