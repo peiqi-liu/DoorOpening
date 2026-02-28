@@ -62,6 +62,7 @@ class DooropeningEnv(DirectRLEnv):
 
         self._robot_base_link_idx, self.robot_base_link_name = self.robot.find_bodies(self.cfg.base_link_name)
         self._door_body_idx, self.door_body_names = self.door.find_bodies(self.cfg.door_body_names)
+        self._door_base_link_idx, self.door_base_link_name = self.door.find_bodies(self.cfg.door_base_frame_name)
         self._door_joint_idx, self.door_joint_names = self.door.find_joints(self.cfg.door_joint_names)
 
         self._robot_base_body_link_idx, self.robot_base_body_link_name = self.robot.find_bodies(self.cfg.robot_base_body_link_name)
@@ -215,18 +216,18 @@ class DooropeningEnv(DirectRLEnv):
         # door_to_base_link_pos = (self.door_link_pos - base_link_pos).reshape(self.num_envs, 1, -1)
         # door_to_base_link_pos = (self.door_keypoints - base_link_pos).reshape(self.num_envs, 1, -1)
         # door_twist_base_link_pos = (self.ref_door_body_pos_twist - base_link_pos).reshape(self.num_envs, 1, -1)
-        # door_to_base_link_pos = world_to_local(self.door_link_pos, self.robot_base_body_pos, self.robot_base_body_quat).reshape(self.num_envs, 1, -1)
-        # door_twist_palm_link_pos = world_to_local(self.ref_door_body_pos_twist, self.robot_palm_body_pos, self.robot_palm_body_quat).reshape(self.num_envs, 1, -1)
+        door_to_base_link_pos = world_to_local(self.door_link_pos, self.robot_base_body_pos, self.robot_base_body_quat).reshape(self.num_envs, 1, -1)
+        door_twist_in_door_frame = world_to_local(self.ref_door_body_pos_twist, self.door_base_link_pos, self.door_base_link_quat).reshape(self.num_envs, 1, -1)
         # door_to_palm_link_pos = world_to_local(self.door_link_pos, self.robot_palm_body_pos, self.robot_palm_body_quat).reshape(self.num_envs, 1, -1)
-        door_to_base_link_pos = (self.door_link_pos - self.robot_base_body_pos.unsqueeze(1))
+        # door_to_base_link_pos = (self.door_link_pos - self.robot_base_body_pos.unsqueeze(1))
         # door_to_base_link_pos = world_to_local(door_to_base_link_pos, self.robot_base_body_pos, self.robot_base_body_quat)
-        door_to_base_link_pos = door_to_base_link_pos.reshape(self.num_envs, 1, -1)
-        door_twist_palm_link_pos = (self.ref_door_body_pos_twist - self.robot_palm_body_pos.unsqueeze(1))
+        # door_to_base_link_pos = door_to_base_link_pos.reshape(self.num_envs, 1, -1)
+        # door_twist_palm_link_pos = (self.ref_door_body_pos_twist - self.robot_palm_body_pos.unsqueeze(1))
         # door_twist_palm_link_pos = world_to_local(door_twist_palm_link_pos, self.robot_base_body_pos, self.robot_base_body_quat)
-        door_twist_palm_link_pos = door_twist_palm_link_pos.reshape(self.num_envs, 1, -1)
-        door_to_palm_link_pos = (self.door_link_pos - self.robot_palm_body_pos.unsqueeze(1))
+        # door_twist_palm_link_pos = door_twist_palm_link_pos.reshape(self.num_envs, 1, -1)
+        # door_to_palm_link_pos = (self.door_link_pos - self.robot_palm_body_pos.unsqueeze(1))
         # door_to_palm_link_pos = world_to_local(door_to_palm_link_pos, self.robot_base_body_pos, self.robot_base_body_quat)
-        door_to_palm_link_pos = door_to_palm_link_pos.reshape(self.num_envs, 1, -1)
+        # door_to_palm_link_pos = door_to_palm_link_pos.reshape(self.num_envs, 1, -1)
 
         # rel_robot_key_body_pos = (self.robot_key_body_pos - base_link_pos).reshape(self.num_envs, 1, -1)
         key_pos_err = self.robot_key_body_pos - (self.ref_robot_key_body_pos).to(self.robot_key_body_pos)
@@ -341,6 +342,9 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_base_joint_vel = self.robot.data.joint_vel[:, self._robot_base_dof_idx]
         self.robot_arm_joint_vel = self.robot.data.joint_vel[:, self._robot_arm_dof_idx]
         self.robot_finger_joint_vel = self.robot.data.joint_vel[:, self._robot_finger_dof_idx]
+
+        self.door_base_link_pos = self.door.data.body_pos_w[:, self._door_base_link_idx]
+        self.door_base_link_quat = self.door.data.body_quat_w[:, self._door_base_link_idx]
         self.door_link_pos = self.door.data.body_pos_w[:, self._door_body_idx]
         self.door_link_pos -= self.scene.env_origins.repeat((1, 1)).reshape(self.num_envs, 1, 3)
         self.door_link_quat = self.door.data.body_quat_w[:, self._door_body_idx]

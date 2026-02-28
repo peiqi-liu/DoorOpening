@@ -162,6 +162,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     door_body_names = DOOR_BODY_NAMES
 
+    door_base_frame_name = "link_0"
+
     door_joint_names = DOOR_JOINT_NAMES
 
     robot_key_bodies = ROBOT_KEY_BODY_NAMES

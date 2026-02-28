@@ -280,8 +280,6 @@ class ReferenceMotionManager:
                 probs = probs / probs.sum()
 
                 idx = torch.multinomial(probs, env_ids.shape[0], replacement=True)
-                idx = idx + torch.randint(low=-20, high=20, size=idx.shape, device=self.key_indices.device)
-                idx = idx.clamp(min=0, max=self.key_indices.shape[1] - 1)
             else:
                 idx = torch.randint(
                     low=0,
