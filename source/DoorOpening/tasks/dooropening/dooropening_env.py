@@ -251,6 +251,8 @@ class DooropeningEnv(DirectRLEnv):
                 self.joint_pos[:, self._robot_dof_idx].unsqueeze(dim = 1),
                 self.joint_vel[:, self._robot_dof_idx].unsqueeze(dim = 1),
                 self.last_actions.unsqueeze(dim = 1),
+                self.ref_robot_base_joint_pos.unsqueeze(dim = 1),
+                self.ref_robot_arm_joint_pos.unsqueeze(dim = 1),
 
                 key_pos_err,
                 # rel_robot_key_body_pos,
@@ -270,6 +272,8 @@ class DooropeningEnv(DirectRLEnv):
                 self.ref_robot_key_body_pos_twist.reshape(self.num_envs, 1, -1),
                 self.ref_robot_key_body_quat_twist.reshape(self.num_envs, 1, -1),
                 self.ref_door_joint_pos_twist.reshape(self.num_envs, 1, -1),
+                self.ref_robot_base_joint_pos_twist.reshape(self.num_envs, 1, -1),
+                self.ref_robot_arm_joint_pos_twist.reshape(self.num_envs, 1, -1),
                 door_twist_in_door_frame,
                 # self.ref_door_body_pos_twist.reshape(self.num_envs, 1, -1),
                 # frame_idx.unsqueeze(dim = -1),
@@ -437,6 +441,8 @@ class DooropeningEnv(DirectRLEnv):
         # It is a minomer, we are actually sending euler angles as it might be more friendly to MLP
         self.ref_robot_key_body_quat_twist = self.ref_motion_lib.get_robot_body_quat_twist()[:, :, self.ref_key_body_idx]
         self.ref_robot_joint_pos_twist = self.ref_motion_lib.get_robot_joint_pos_twist()
+        self.ref_robot_base_joint_pos_twist = self.ref_robot_joint_pos_twist[:, :, self.ref_base_joint_idx]
+        self.ref_robot_arm_joint_pos_twist = self.ref_robot_joint_pos_twist[:, :, self.ref_arm_joint_idx]
         self.ref_door_joint_pos_twist = self.ref_motion_lib.get_door_joint_pos_twist()
 
         # self.ref_robot_key_body_pos = self.ref_motion_lib.get_robot_body_pos()[:, self._robot_key_body_idx]

@@ -242,7 +242,7 @@ class ReferenceMotionManager:
 
         if self.one_file_loaded:
 
-            self.robot_joint_pos_twist = precompute_single(self.robot_joint_pos_traj)
+            self.robot_joint_angles_twist = precompute_single(self.robot_joint_pos_traj)
             self.robot_joint_vel_twist = precompute_single(self.robot_joint_vel_traj)
             self.door_joint_pos_twist  = precompute_single(self.door_traj)
             self.robot_body_pos_twist  = precompute_single(self.robot_body_pos_traj)
@@ -252,7 +252,7 @@ class ReferenceMotionManager:
 
         else:
 
-            self.robot_joint_pos_twist = precompute_multi(self.robot_joint_pos_traj)
+            self.robot_joint_angles_twist = precompute_multi(self.robot_joint_pos_traj)
             self.robot_joint_vel_twist = precompute_multi(self.robot_joint_vel_traj)
             self.door_joint_pos_twist  = precompute_multi(self.door_traj)
             self.robot_body_pos_twist  = precompute_multi(self.robot_body_pos_traj)
@@ -367,7 +367,7 @@ class ReferenceMotionManager:
             self.ref_robot_body_pos_vel = self.robot_body_pos_vel[floor_idx]
             self.ref_door_body_pos = self.door_body_pos_traj[floor_idx]
             if self.twist_indices is not None:
-                self.ref_robot_joint_pos_twist = self.robot_joint_pos_twist[floor_idx]
+                self.ref_robot_joint_angles_twist = self.robot_joint_angles_twist[floor_idx]
                 self.ref_robot_joint_vel_twist = self.robot_joint_vel_twist[floor_idx]
                 self.ref_door_joint_pos_twist = self.door_joint_pos_twist[floor_idx]
                 self.ref_robot_body_pos_twist = self.robot_body_pos_twist[floor_idx]
@@ -387,7 +387,7 @@ class ReferenceMotionManager:
             self.ref_robot_body_pos_vel = self.robot_body_pos_vel[self.env_to_file_map[env_ids]][indices, floor_idx]
             self.ref_door_body_pos = self.door_body_pos_traj[self.env_to_file_map[env_ids]][indices, floor_idx]
             if self.twist_indices is not None:
-                self.ref_robot_joint_pos_twist = self.robot_joint_pos_twist[self.env_to_file_map[env_ids]][indices, floor_idx]
+                self.ref_robot_joint_angles_twist = self.robot_joint_angles_twist[self.env_to_file_map[env_ids]][indices, floor_idx]
                 self.ref_robot_joint_vel_twist = self.robot_joint_vel_twist[self.env_to_file_map[env_ids]][indices, floor_idx]
                 self.ref_door_joint_pos_twist = self.door_joint_pos_twist[self.env_to_file_map[env_ids]][indices, floor_idx]
                 self.ref_robot_body_pos_twist = self.robot_body_pos_twist[self.env_to_file_map[env_ids]][indices, floor_idx]
@@ -454,9 +454,9 @@ class ReferenceMotionManager:
             # twist_arr = self.robot_joint_pos_twist[10, 100]
             # for idx, i in enumerate(self.twist_indices):
             #     print((self.robot_joint_pos_traj[10, 100 + i] - twist_arr[idx]).abs().max())
-            return self.ref_robot_joint_pos_twist
+            return self.ref_robot_joint_angles_twist
         else:
-            return self.ref_robot_joint_pos_twist[env_ids]
+            return self.ref_robot_joint_angles_twist[env_ids]
 
     def get_door_joint_pos_twist(self, env_ids: Optional[Sequence[int]] = None):
         if env_ids is None:
