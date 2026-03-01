@@ -194,10 +194,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     observation_space = \
         actuated_joints_num * 2 +\
         len(door_body_names) * 3 +\
-        (len(robot_key_bodies) - 1) * 3 * 2 + 12 +\
-        len(robot_key_bodies) * 3 +\
+        len(robot_key_bodies) * 3 * 2 +\
         len(door_joint_names) * 2 +\
-        len(twist_indices) * (len(robot_key_bodies) * 3 + len(robot_key_bodies) * 3 + 3 + len(door_joint_names)) +\
+        len(twist_indices) * (len(robot_key_bodies) * 3 + len(robot_key_bodies) * 4 + 3 + len(door_joint_names)) +\
         actuated_joints_num
     #  5 * 3 +\
     
