@@ -204,7 +204,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         len(base_joints) +\
         len(arm_joints) +\
         len(door_body_names) * 3 +\
-        (len(robot_key_bodies) - 1) * 3 * 2 +\
+        (len(robot_key_bodies) - 1) * 3 * 2 + 12 +\
         len(robot_key_bodies) * 3 +\
         len(door_joint_names) * 2 +\
         len(twist_indices) * (len(robot_key_bodies) * 3 + len(robot_key_bodies) * 3 + 3 + len(door_joint_names) + len(base_joints) + len(arm_joints)) +\
@@ -229,8 +229,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_finger_joint_vel_w = 0.5
     door_joint_pos_w = 4.0
     hinge_contact_reward_w = 1.0
-    robot_body_lin_vel_w = 1.0
-    robot_body_ang_vel_w = 0.5
+    robot_body_lin_vel_w = 0.0
+    robot_body_ang_vel_w = 0.0
 
     robot_body_quat_scale = 1.0
     robot_key_body_pos_scale = 3.0
