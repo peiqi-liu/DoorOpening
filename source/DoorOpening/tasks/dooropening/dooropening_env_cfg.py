@@ -190,7 +190,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         ),
     )
 
-    twist_indices = [1, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+    twist_indices = [1, 5, 10, 15, 20]
 
     # door(s)
     door_cfg: ArticulationCfg = ALL_DOOR_CONFIGS.replace(prim_path="/World/envs/env_.*/Door")
@@ -201,13 +201,11 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # observation_space = actuated_joints_num * 2 + len(door_body_names) * 3 + len(robot_key_bodies) * 3 * 2 + len(door_joint_names) + len(door_joint_names) + len(contact_sensor_names) * 3
     observation_space = \
         actuated_joints_num * 2 +\
-        len(base_joints) +\
-        len(arm_joints) +\
         len(door_body_names) * 3 +\
         (len(robot_key_bodies) - 1) * 3 * 2 + 12 +\
         len(robot_key_bodies) * 3 +\
         len(door_joint_names) * 2 +\
-        len(twist_indices) * (len(robot_key_bodies) * 3 + len(robot_key_bodies) * 3 + 3 + len(door_joint_names) + len(base_joints) + len(arm_joints)) +\
+        len(twist_indices) * (len(robot_key_bodies) * 3 + len(robot_key_bodies) * 3 + 3 + len(door_joint_names)) +\
         actuated_joints_num
     #  5 * 3 +\
     
