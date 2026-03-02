@@ -150,11 +150,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "/World/envs/env_.*/Robot/dip_3", 
             "/World/envs/env_.*/Robot/realtip_3", 
             "/World/envs/env_.*/Robot/fingertip_3",
-            "/World/envs/env_.*/Robot/mcp_joint_4",
-            "/World/envs/env_.*/Robot/pip_4",
-            "/World/envs/env_.*/Robot/dip_4",
-            "/World/envs/env_.*/Robot/realtip_4",
-            "/World/envs/env_.*/Robot/fingertip_4", ],
+        ],
     )
 
     contact_forces_robot_palm_center = ContactSensorCfg(
@@ -208,7 +204,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         len(base_joints) +\
         len(arm_joints) +\
         len(door_body_names) * 3 +\
-        (len(robot_key_bodies) - 1) * 3 * 2 + 12 +\
+        (len(robot_key_bodies) - 1) * 3 * 2 +\
         len(robot_key_bodies) * 3 +\
         len(door_joint_names) * 2 +\
         len(twist_indices) * (len(robot_key_bodies) * 3 + len(robot_key_bodies) * 3 + 3 + len(door_joint_names) + len(base_joints) + len(arm_joints)) +\
