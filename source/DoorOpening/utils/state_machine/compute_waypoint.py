@@ -96,9 +96,9 @@ def state_machine_offline(
     base_target_pose = torch.cat([base_target_pos, base_target_rot], dim=-1)
 
     palm_target_pos = handle_pos.clone()
-    palm_target_pos[:, 0] += (0.4 + random.uniform(-0.05, 0.05))
-    palm_target_pos[:, 1] -= (0.1 + random.uniform(-0.02, 0.02))
-    palm_target_pos[:, 2] += (0.3 + random.uniform(-0.03, 0.03))
+    palm_target_pos[:, 0] += 0.25
+    palm_target_pos[:, 1] -= 0.1
+    palm_target_pos[:, 2] +=0.25
     palm_target_rot = get_rotation_quat(0.0 + torch.pi, 0.0 + torch.pi, torch.pi, device)
     palm_target_pose = torch.cat([palm_target_pos, palm_target_rot], dim=-1)
 

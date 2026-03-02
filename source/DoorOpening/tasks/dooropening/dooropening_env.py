@@ -57,9 +57,9 @@ class DooropeningEnv(DirectRLEnv):
         robot_abduction_dof_idx, abduction_joint_names = self.robot.find_joints(self.cfg.abduction_joints)
         self.robot_abduction_default_pos = self.robot.data.default_joint_pos[..., robot_abduction_dof_idx]
         self.finger_dof_names_to_id = {name: idx for idx, name in enumerate(finger_joint_names)}
-        self.robot_abduction_dof_idx_in_targets = [self.finger_dof_names_to_id[name] + self.num_base_joints + self.num_arm_joints for name in self.cfg.abduction_joints]
-        self.close_finger_joints = torch.tensor([self.cfg.close_finger_joints[name] for name in finger_joint_names], device=self.device)
-        self.open_finger_joints = torch.tensor([self.cfg.open_finger_joints[name] for name in finger_joint_names], device=self.device)
+        # self.robot_abduction_dof_idx_in_targets = [self.finger_dof_names_to_id[name] + self.num_base_joints + self.num_arm_joints for name in self.cfg.abduction_joints]
+        # self.close_finger_joints = torch.tensor([self.cfg.close_finger_joints[name] for name in finger_joint_names], device=self.device)
+        # self.open_finger_joints = torch.tensor([self.cfg.open_finger_joints[name] for name in finger_joint_names], device=self.device)
 
         self._robot_base_link_idx, self.robot_base_link_name = self.robot.find_bodies(self.cfg.base_link_name)
         self._door_body_idx, self.door_body_names = self.door.find_bodies(self.cfg.door_body_names)
