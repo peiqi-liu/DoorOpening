@@ -219,7 +219,7 @@ class DooropeningEnv(DirectRLEnv):
         # door_to_base_link_pos = (self.door_keypoints - base_link_pos).reshape(self.num_envs, 1, -1)
         # door_twist_base_link_pos = (self.ref_door_body_pos_twist - base_link_pos).reshape(self.num_envs, 1, -1)
         door_to_base_link_pos = world_to_local(self.door_link_pos, self.robot_base_body_pos, self.robot_base_body_quat).reshape(self.num_envs, 1, -1)
-        door_twist_in_door_frame = world_to_local(self.ref_door_body_pos_twist, self.door_base_link_pos, self.door_base_link_quat).reshape(self.num_envs, 1, -1)
+        door_twist_in_robot_base_frame = world_to_local(self.ref_door_body_pos_twist, self.robot_base_body_pos, self.robot_base_body_quat).reshape(self.num_envs, 1, -1)
         # door_to_palm_link_pos = world_to_local(self.door_link_pos, self.robot_palm_body_pos, self.robot_palm_body_quat).reshape(self.num_envs, 1, -1)
         # door_to_base_link_pos = (self.door_link_pos - self.robot_base_body_pos.unsqueeze(1))
         # door_to_base_link_pos = world_to_local(door_to_base_link_pos, self.robot_base_body_pos, self.robot_base_body_quat)
@@ -274,7 +274,7 @@ class DooropeningEnv(DirectRLEnv):
                 self.ref_door_joint_pos_twist.reshape(self.num_envs, 1, -1),
                 self.ref_robot_base_joint_pos_twist.reshape(self.num_envs, 1, -1),
                 self.ref_robot_arm_joint_pos_twist.reshape(self.num_envs, 1, -1),
-                door_twist_in_door_frame,
+                door_twist_in_robot_base_frame,
                 # self.ref_door_body_pos_twist.reshape(self.num_envs, 1, -1),
                 # frame_idx.unsqueeze(dim = -1),
                 # contact_forces_door1,
