@@ -438,8 +438,10 @@ class DooropeningEnv(DirectRLEnv):
         # print("door link pos: ", self.door_link_pos)
 
         self.ref_robot_key_body_pos_twist = self.ref_motion_lib.get_robot_body_pos_twist()[:, :, self.ref_key_body_idx]
-        # It is a minomer, we are actually sending euler angles as it might be more friendly to MLP
+        # It is a misnomer, we are actually sending euler angles as it might be more friendly to MLP
         self.ref_robot_key_body_quat_twist = self.ref_motion_lib.get_robot_body_quat_twist()[:, :, self.ref_key_body_idx]
+        self.ref_robot_key_body_pos_twist, self.ref_robot_key_body_quat_twist = normalize_to_center_frame(self.robot_key_body_pos, self.robot_key_body_quat, self.ref_robot_key_body_pos_twist, self.ref_robot_key_body_quat_twist)
+        self.ref_robot_key_body_quat_twist = quat_to_euler(self.ref_robot_key_body_quat_twist)
         self.ref_robot_joint_pos_twist = self.ref_motion_lib.get_robot_joint_pos_twist()
         self.ref_robot_base_joint_pos_twist = self.ref_robot_joint_pos_twist[:, :, self.ref_base_joint_idx]
         self.ref_robot_arm_joint_pos_twist = self.ref_robot_joint_pos_twist[:, :, self.ref_arm_joint_idx]
