@@ -73,36 +73,36 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         'panda_joint7',
     ]
 
-    # finger_joints = [
-    #     'finger_joint_0',
-    #     'finger_joint_1',
-    #     'finger_joint_2',
-    #     'finger_joint_3',
-    #     'finger_joint_4',
-    #     'finger_joint_5',
-    #     'finger_joint_6',
-    #     'finger_joint_7',
-    #     'finger_joint_8',
-    #     'finger_joint_9',
-    #     'finger_joint_10',
-    #     'finger_joint_11',
-    #     'finger_joint_12',
-    #     'finger_joint_13',
-    #     'finger_joint_14',
-    #     'finger_joint_15',
-    # ]
-
     finger_joints = [
+        'finger_joint_0',
         'finger_joint_1',
         'finger_joint_2',
         'finger_joint_3',
+        'finger_joint_4',
         'finger_joint_5',
         'finger_joint_6',
         'finger_joint_7',
+        'finger_joint_8',
         'finger_joint_9',
         'finger_joint_10',
         'finger_joint_11',
+        'finger_joint_12',
+        'finger_joint_13',
+        'finger_joint_14',
+        'finger_joint_15',
     ]
+
+    # finger_joints = [
+    #     'finger_joint_1',
+    #     'finger_joint_2',
+    #     'finger_joint_3',
+    #     'finger_joint_5',
+    #     'finger_joint_6',
+    #     'finger_joint_7',
+    #     'finger_joint_9',
+    #     'finger_joint_10',
+    #     'finger_joint_11',
+    # ]
 
     abduction_joints = [
         # actual abduction joints
@@ -150,6 +150,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "/World/envs/env_.*/Robot/dip_3", 
             "/World/envs/env_.*/Robot/realtip_3", 
             "/World/envs/env_.*/Robot/fingertip_3",
+            "/World/envs/env_.*/Robot/mcp_joint_4", 
+            "/World/envs/env_.*/Robot/pip_4", 
+            "/World/envs/env_.*/Robot/dip_4", 
+            "/World/envs/env_.*/Robot/realtip_4", 
         ],
     )
 
@@ -190,7 +194,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         ),
     )
 
-    twist_indices = [1, 5, 10, 15, 20]
+    twist_indices = [1, 5, 10, 20, 30, 40]
 
     # door(s)
     door_cfg: ArticulationCfg = ALL_DOOR_CONFIGS.replace(prim_path="/World/envs/env_.*/Door")
