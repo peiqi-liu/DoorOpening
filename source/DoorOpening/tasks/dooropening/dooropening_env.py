@@ -16,7 +16,7 @@ from isaaclab.sensors import ContactSensor
 from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES, ROBOT_KEY_BODY_NAMES
 from DoorOpening.utils.pose_utils import normalize_to_center_frame, world_to_local
 from isaaclab.utils.math import quat_conjugate, quat_apply, quat_mul
-from DoorOpening.utils.quat_utils import quat_to_euler
+from DoorOpening.utils.quat_utils import quat_to_6d
 from typing import Tuple
 
 import pickle as pkl
@@ -262,7 +262,7 @@ class DooropeningEnv(DirectRLEnv):
                 base_lin_vel_local.reshape(self.num_envs, 1, -1),
                 base_ang_vel_local.reshape(self.num_envs, 1, -1),
                 self.robot_base_body_pos.reshape(self.num_envs, 1, -1),
-                quat_to_euler(self.robot_base_body_quat).reshape(self.num_envs, 1, -1),
+                quat_to_6d(self.robot_base_body_quat).reshape(self.num_envs, 1, -1),
 
                 door_to_base_link_pos,
                 # door_to_palm_link_pos,
@@ -394,7 +394,7 @@ class DooropeningEnv(DirectRLEnv):
 
         return (
             body_pos_rel,          # (N, B-1, 3)
-            quat_to_euler(body_quat_rel),         # (N, B-1, 3)
+            quat_to_6d(body_quat_rel),         # (N, B-1, 3)
             base_lin_vel_local,    # (N, 3)
             base_ang_vel_local,    # (N, 3)
         )
@@ -479,7 +479,7 @@ class DooropeningEnv(DirectRLEnv):
         self.ref_robot_key_body_quat_twist = self.ref_motion_lib.get_robot_body_quat_twist()[:, :, self.ref_key_body_idx]
         # self.ref_robot_key_body_pos_twist, self.ref_robot_key_body_quat_twist = normalize_to_center_frame(self.robot_key_body_pos, self.robot_key_body_quat, self.ref_robot_key_body_pos_twist, self.ref_robot_key_body_quat_twist)
         self.ref_robot_key_body_pos_twist, self.ref_robot_key_body_quat_twist = self.normalize_to_base_frame(self.robot_base_body_pos, self.robot_base_body_quat, self.ref_robot_key_body_pos_twist, self.ref_robot_key_body_quat_twist)
-        self.ref_robot_key_body_quat_twist = quat_to_euler(self.ref_robot_key_body_quat_twist)
+        self.ref_robot_key_body_quat_twist = quat_to_6d(self.ref_robot_key_body_quat_twist)
         self.ref_robot_joint_pos_twist = self.ref_motion_lib.get_robot_joint_pos_twist()
         self.ref_robot_base_joint_pos_twist = self.ref_robot_joint_pos_twist[:, :, self.ref_base_joint_idx]
         self.ref_robot_arm_joint_pos_twist = self.ref_robot_joint_pos_twist[:, :, self.ref_arm_joint_idx]

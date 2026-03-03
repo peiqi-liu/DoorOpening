@@ -3,7 +3,6 @@ import pickle as pkl
 from typing import Optional, Sequence
 from DoorOpening.utils.pose_utils import normalize_to_center_frame
 import os
-from DoorOpening.utils.quat_utils import quat_to_euler
 
 class ReferenceMotionManager:
     def __init__(
@@ -263,8 +262,6 @@ class ReferenceMotionManager:
             print("self.robot_body_quat_twist.shape: ", self.robot_body_quat_twist.shape)
             # self.robot_body_pos_twist, self.robot_body_quat_twist = normalize_to_center_frame(self.robot_body_pos_traj, self.robot_body_quat_traj, self.robot_body_pos_twist, self.robot_body_quat_twist)
             self.door_body_pos_twist = precompute_multi(self.door_body_pos_traj)
-
-        # self.robot_body_quat_twist = quat_to_euler(self.robot_body_quat_twist)
     # --------------------------------------------------
     # Reset logic
     # --------------------------------------------------

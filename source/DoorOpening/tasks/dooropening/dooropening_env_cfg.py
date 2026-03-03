@@ -207,10 +207,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         actuated_joints_num * 2 +\
         len(door_body_names) * 3 +\
         len(arm_joints) + len(base_joints) +\
-        (len(robot_key_bodies) - 1) * 3 * 2 + 12 +\
+        (len(robot_key_bodies) - 1) * (3 + 6) + 15 +\
         len(robot_key_bodies) * 3 +\
         len(door_joint_names) * 2 +\
-        len(twist_indices) * (len(robot_key_bodies) * 3 + len(robot_key_bodies) * 3 + 3 + len(door_joint_names) + len(arm_joints) + len(base_joints)) +\
+        len(twist_indices) * (len(robot_key_bodies) * 3 + len(robot_key_bodies) * 6 + 3 + len(door_joint_names) + len(arm_joints) + len(base_joints)) +\
         actuated_joints_num
     #  5 * 3 +\
     
