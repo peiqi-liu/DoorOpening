@@ -247,17 +247,15 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_body_lin_vel_scale = 10.0
     robot_body_ang_vel_scale = 10.0
 
-    reset_base_pos_delta_min = 0.35
     reset_key_body_pos_delta_min = 0.6
     reset_key_body_quat_delta_min = 0.8
-    reset_base_pos_delta_max = 1.0
     reset_key_body_pos_delta_max = 1.5
     reset_key_body_quat_delta_max = 3.0
     reset_door_joint_pos_delta_min = 0.5
     reset_door_joint_pos_delta_max = 0.8
     # We are slowly increasing our tolerance on base position drift and slowly only resettting the env from the first key frame
     # This variable is used to indicate when we stop increasing the tolerance and reset the env from the first key frame for the greatest probability
-    reset_progress_total = 1e6
+    reset_progress_total = 7e5
 
     velocity = 1.0
 
