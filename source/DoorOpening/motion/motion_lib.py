@@ -252,7 +252,7 @@ class ReferenceMotionManager:
 
         else:
 
-            self.robot_joint_angles_twist = precompute_multi(self.robot_joint_pos_traj)
+            self.robot_joint_pos_twist = precompute_multi(self.robot_joint_pos_traj)
             self.robot_joint_vel_twist = precompute_multi(self.robot_joint_vel_traj)
             self.door_joint_pos_twist  = precompute_multi(self.door_traj)
             self.robot_body_pos_twist  = precompute_multi(self.robot_body_pos_traj)
@@ -261,7 +261,7 @@ class ReferenceMotionManager:
             print("self.robot_body_quat_traj.shape: ", self.robot_body_quat_traj.shape)
             print("self.robot_body_pos_twist.shape: ", self.robot_body_pos_twist.shape)
             print("self.robot_body_quat_twist.shape: ", self.robot_body_quat_twist.shape)
-            self.robot_joint_pos_twist, self.robot_body_quat_twist = normalize_to_center_frame(self.robot_body_pos_traj, self.robot_body_quat_traj, self.robot_body_pos_twist, self.robot_body_quat_twist)
+            self.robot_body_pos_twist, self.robot_body_quat_twist = normalize_to_center_frame(self.robot_body_pos_traj, self.robot_body_quat_traj, self.robot_body_pos_twist, self.robot_body_quat_twist)
             self.door_body_pos_twist = precompute_multi(self.door_body_pos_traj)
 
         self.robot_body_quat_twist = quat_to_euler(self.robot_body_quat_twist)
@@ -367,7 +367,7 @@ class ReferenceMotionManager:
             self.ref_robot_body_pos_vel = self.robot_body_pos_vel[floor_idx]
             self.ref_door_body_pos = self.door_body_pos_traj[floor_idx]
             if self.twist_indices is not None:
-                self.ref_robot_joint_angles_twist = self.robot_joint_angles_twist[floor_idx]
+                self.ref_robot_joint_pos_twist = self.robot_joint_pos_twist[floor_idx]
                 self.ref_robot_joint_vel_twist = self.robot_joint_vel_twist[floor_idx]
                 self.ref_door_joint_pos_twist = self.door_joint_pos_twist[floor_idx]
                 self.ref_robot_body_pos_twist = self.robot_body_pos_twist[floor_idx]
@@ -387,7 +387,7 @@ class ReferenceMotionManager:
             self.ref_robot_body_pos_vel = self.robot_body_pos_vel[self.env_to_file_map[env_ids]][indices, floor_idx]
             self.ref_door_body_pos = self.door_body_pos_traj[self.env_to_file_map[env_ids]][indices, floor_idx]
             if self.twist_indices is not None:
-                self.ref_robot_joint_angles_twist = self.robot_joint_angles_twist[self.env_to_file_map[env_ids]][indices, floor_idx]
+                self.ref_robot_joint_pos_twist = self.robot_joint_pos_twist[self.env_to_file_map[env_ids]][indices, floor_idx]
                 self.ref_robot_joint_vel_twist = self.robot_joint_vel_twist[self.env_to_file_map[env_ids]][indices, floor_idx]
                 self.ref_door_joint_pos_twist = self.door_joint_pos_twist[self.env_to_file_map[env_ids]][indices, floor_idx]
                 self.ref_robot_body_pos_twist = self.robot_body_pos_twist[self.env_to_file_map[env_ids]][indices, floor_idx]
@@ -447,18 +447,14 @@ class ReferenceMotionManager:
 
 
     def get_robot_joint_pos_twist(self, env_ids: Optional[Sequence[int]] = None):
+        assert self.ref_robot_joint_pos_twist.shape[-1] == 32 and self.ref_robot_joint_pos_twist.ndim == 3
         if env_ids is None:
-            # print("self.robot_joint_pos_traj.shape: ", self.robot_joint_pos_traj.shape)
-            # print("self.robot_joint_pos.shape: ", self.ref_robot_joint_pos.shape)
-            # print("self.robot_joint_pos_twist.shape: ", self.robot_joint_pos_twist.shape)
-            # twist_arr = self.robot_joint_pos_twist[10, 100]
-            # for idx, i in enumerate(self.twist_indices):
-            #     print((self.robot_joint_pos_traj[10, 100 + i] - twist_arr[idx]).abs().max())
-            return self.ref_robot_joint_angles_twist
+            return self.ref_robot_joint_pos_twist
         else:
-            return self.ref_robot_joint_angles_twist[env_ids]
+            return self.ref_robot_joint_pos_twist[env_ids]
 
     def get_door_joint_pos_twist(self, env_ids: Optional[Sequence[int]] = None):
+        assert self.ref_door_joint_pos_twist.shape[-1] == 2 and self.ref_door_joint_pos_twist.ndim == 3
         if env_ids is None:
             return self.ref_door_joint_pos_twist
         else:
