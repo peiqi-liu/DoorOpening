@@ -287,6 +287,42 @@ class DooropeningEnv(DirectRLEnv):
         observations = {"policy": obs.squeeze()}
         return observations
 
+
+    def normalize_to_base_frame(self, base_pos, base_quat, target_pos, target_quat):
+        """
+        Transforms target positions and orientations into the local frame of the base.
+        
+        Args:
+            base_pos:   (N, 3) Current world-frame position of the robot base.
+            base_quat:  (N, 4) Current world-frame orientation of the robot base (xyzw).
+            target_pos:  (N, T, B, 3) World-frame positions to transform (T=time/twist, B=bodies).
+            target_quat: (N, T, B, 4) World-frame orientations to transform.
+            
+        Returns:
+            pos_rel:    (N, T, B, 3) Target positions in base-local coordinates.
+            quat_rel:   (N, T, B, 4) Target orientations in base-local coordinates.
+        """
+        # 1. Prepare dimensions for broadcasting
+        # base_pos: (N, 3) -> (N, 1, 1, 3)
+        # base_quat_inv: (N, 4) -> (N, 1, 1, 4)
+        N, T, B, _ = target_pos.shape
+        base_pos_expanded = base_pos.view(N, 1, 1, 3)
+        
+        base_quat_inv = quat_conjugate(base_quat).view(N, 1, 1, 4)
+        base_quat_inv_exp = base_quat_inv.expand(N, T, B, 4)
+
+        # 2. Position Transform: P_local = R_base_inv * (P_target_world - P_base_world)
+        pos_diff = target_pos - base_pos_expanded
+        # Flatten for quat_apply, then reshape back
+        pos_rel = quat_apply(base_quat_inv_exp.reshape(-1, 4), pos_diff.reshape(-1, 3))
+        pos_rel = pos_rel.view(N, T, B, 3)
+
+        # 3. Orientation Transform: Q_local = Q_base_inv * Q_target_world
+        quat_rel = quat_mul(base_quat_inv_exp.reshape(-1, 4), target_quat.reshape(-1, 4))
+        quat_rel = quat_rel.view(N, T, B, 4)
+
+        return pos_rel, quat_rel
+
     def transform_key_bodies_to_base_frame(
         self,
         robot_key_body_pos: torch.Tensor,       # (num_envs, num_bodies, 3)
@@ -441,7 +477,8 @@ class DooropeningEnv(DirectRLEnv):
         self.ref_robot_key_body_pos_twist = self.ref_motion_lib.get_robot_body_pos_twist()[:, :, self.ref_key_body_idx]
         # It is a misnomer, we are actually sending euler angles as it might be more friendly to MLP
         self.ref_robot_key_body_quat_twist = self.ref_motion_lib.get_robot_body_quat_twist()[:, :, self.ref_key_body_idx]
-        self.ref_robot_key_body_pos_twist, self.ref_robot_key_body_quat_twist = normalize_to_center_frame(self.robot_key_body_pos, self.robot_key_body_quat, self.ref_robot_key_body_pos_twist, self.ref_robot_key_body_quat_twist)
+        # self.ref_robot_key_body_pos_twist, self.ref_robot_key_body_quat_twist = normalize_to_center_frame(self.robot_key_body_pos, self.robot_key_body_quat, self.ref_robot_key_body_pos_twist, self.ref_robot_key_body_quat_twist)
+        self.ref_robot_key_body_pos_twist, self.ref_robot_key_body_quat_twist = self.normalize_to_base_frame(self.robot_base_body_pos, self.robot_base_body_quat, self.ref_robot_key_body_pos_twist, self.ref_robot_key_body_quat_twist)
         self.ref_robot_key_body_quat_twist = quat_to_euler(self.ref_robot_key_body_quat_twist)
         self.ref_robot_joint_pos_twist = self.ref_motion_lib.get_robot_joint_pos_twist()
         self.ref_robot_base_joint_pos_twist = self.ref_robot_joint_pos_twist[:, :, self.ref_base_joint_idx]
