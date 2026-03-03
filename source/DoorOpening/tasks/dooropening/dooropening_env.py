@@ -234,7 +234,7 @@ class DooropeningEnv(DirectRLEnv):
         # rel_robot_key_body_pos = (self.robot_key_body_pos - base_link_pos).reshape(self.num_envs, 1, -1)
         robot_key_body_pos, robot_key_body_euler, base_lin_vel_local, base_ang_vel_local = self.transform_key_bodies_to_base_frame(self.robot_key_body_pos, self.robot_key_body_quat, self.robot_body_lin_vel, self.robot_body_ang_vel, self._robot_base_body_link_idx)
         key_pos_err = (self.ref_robot_key_body_pos).to(self.robot_key_body_pos) - self.robot_key_body_pos
-        key_pos_err = world_to_local(key_pos_err, self.robot_base_body_pos, self.robot_base_body_quat)
+        key_pos_err = world_to_local(key_pos_err, None, self.robot_base_body_quat)
         key_pos_err = key_pos_err.reshape(self.num_envs, 1, -1)
 
         # door_joint_err = self.door_joint_pos[:, self._door_joint_idx] - (self.ref_door_joint_pos[:, self._door_joint_idx]).to(self.door_joint_pos)

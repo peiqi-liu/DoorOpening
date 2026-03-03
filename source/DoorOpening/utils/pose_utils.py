@@ -7,6 +7,7 @@ from isaaclab.utils.math import (
     quat_apply,
     quat_inv,
 )
+from typing import Optional
 
 def world_to_base_frame(base_pos, base_quat, palm_pos_w, palm_quat_w):
     """
@@ -43,14 +44,17 @@ def base_to_world_frame(base_pos, base_quat, palm_pos_b, palm_quat_b):
 @torch.jit.script
 def world_to_local(
     points: torch.Tensor,   # (E, N, 3)
-    pos: torch.Tensor,      # (E, 3)
+    pos: Optional[torch.Tensor],      # (E, 3)
     quat: torch.Tensor      # (E, 4)
 ) -> torch.Tensor:
 
     E, N, _ = points.shape
 
     # 1. subtract translation
-    rel = points - pos.unsqueeze(1)            # (E, N, 3)
+    if pos is not None:
+        rel = points - pos.unsqueeze(1)            # (E, N, 3)
+    else:
+        rel = points
 
     # 2. invert quaternion
     quat_inv = quat_conjugate(quat)            # (E, 4)
