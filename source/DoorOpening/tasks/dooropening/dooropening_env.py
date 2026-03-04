@@ -256,8 +256,8 @@ class DooropeningEnv(DirectRLEnv):
                 robot_key_body_euler.reshape(self.num_envs, 1, -1),
                 base_lin_vel_local.reshape(self.num_envs, 1, -1),
                 base_ang_vel_local.reshape(self.num_envs, 1, -1),
-                self.robot_base_body_pos.reshape(self.num_envs, 1, -1),
-                quat_to_6d(self.robot_base_body_quat).reshape(self.num_envs, 1, -1),
+                # self.robot_base_body_pos.reshape(self.num_envs, 1, -1),
+                # quat_to_6d(self.robot_base_body_quat).reshape(self.num_envs, 1, -1),
 
                 door_to_base_link_pos,
                 # door_to_palm_link_pos,
@@ -402,7 +402,7 @@ class DooropeningEnv(DirectRLEnv):
 
         return (
             body_pos_rel,          # (N, B-1, 3)
-            quat_to_6d(body_quat_rel),         # (N, B-1, 3)
+            quat_to_6d(body_quat_rel),         # (N, B-1, 6)
             base_lin_vel_local,    # (N, 3)
             base_ang_vel_local,    # (N, 3)
         )
