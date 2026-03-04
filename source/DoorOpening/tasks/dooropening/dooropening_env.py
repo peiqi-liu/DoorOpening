@@ -263,6 +263,7 @@ class DooropeningEnv(DirectRLEnv):
                 # door_to_palm_link_pos,
                 # self.door_link_pos.reshape(self.num_envs, 1, -1),
                 self.door_joint_pos[:, self._door_joint_idx].unsqueeze(dim = 1),
+                self.door_joint_vel[:, self._door_joint_idx].unsqueeze(dim = 1),
                 self.ref_door_joint_pos[:, self._door_joint_idx].to(self.door_joint_pos).unsqueeze(dim = 1),
 
                 self.ref_robot_key_body_pos_twist.reshape(self.num_envs, 1, -1),
@@ -467,6 +468,7 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_arm_joint_pos = self.robot.data.joint_pos[:, self._robot_arm_dof_idx]
         self.robot_finger_joint_pos = self.robot.data.joint_pos[:, self._robot_finger_dof_idx]
         self.door_joint_pos = self.door.data.joint_pos
+        self.door_joint_vel = self.door.data.joint_vel
         self.robot_base_joint_vel = self.robot.data.joint_vel[:, self._robot_base_dof_idx]
         self.robot_arm_joint_vel = self.robot.data.joint_vel[:, self._robot_arm_dof_idx]
         self.robot_finger_joint_vel = self.robot.data.joint_vel[:, self._robot_finger_dof_idx]
