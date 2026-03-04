@@ -136,6 +136,10 @@ class DooropeningEnv(DirectRLEnv):
         self.step_count = 0
         self.reset_progress_total = self.cfg.reset_progress_total
 
+        self.alive_base = self.cfg.alive_base
+        self.alive_bonus = self.cfg.alive_bonus
+        self.termination_penalty = self.cfg.termination_penalty
+
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
         self.door = Articulation(self.cfg.door_cfg)
@@ -623,17 +627,17 @@ class DooropeningEnv(DirectRLEnv):
         )
 
         # 1. Base Alive Reward: Small constant for staying in the safety tunnel
-        alive_base = 10.0 
+        alive_base = self.alive_base 
         
         # 2. Difficulty Bonus: Extra points for staying alive during contact
         # self.ref_hinge_contact_mask is 1.0 when grasping/pulling
-        alive_bonus = 20.0 * self.ref_hinge_contact_mask.squeeze()
+        alive_bonus = self.alive_bonus * self.ref_hinge_contact_mask.squeeze()
         
         total_alive_reward = alive_base + alive_bonus
 
         # 3. Combine with tracking reward and termination penalty
         is_killed, _ = self._get_dones()
-        termination_penalty = -100.0
+        termination_penalty = self.termination_penalty
         
         final_reward = deep_mimic_reward + total_alive_reward
         final_reward = torch.where(is_killed, final_reward + termination_penalty, final_reward)

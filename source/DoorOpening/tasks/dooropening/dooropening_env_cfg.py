@@ -253,6 +253,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # This variable is used to indicate when we stop increasing the tolerance and reset the env from the first key frame for the greatest probability
     reset_progress_total = 7e5
 
+    alive_base = 10.0
+    alive_bonus = 20.0
+    termination_penalty = -100.0
+
     velocity = 1.0
 
     # Change this to where you store your motions
