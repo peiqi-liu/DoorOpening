@@ -627,7 +627,7 @@ class DooropeningEnv(DirectRLEnv):
         
         # 2. Difficulty Bonus: Extra points for staying alive during contact
         # self.ref_hinge_contact_mask is 1.0 when grasping/pulling
-        alive_bonus = 50.0 * self.ref_hinge_contact_mask.squeeze()
+        alive_bonus = 20.0 * self.ref_hinge_contact_mask.squeeze()
         
         total_alive_reward = alive_base + alive_bonus
 
@@ -635,7 +635,7 @@ class DooropeningEnv(DirectRLEnv):
         is_killed, _ = self._get_dones()
         termination_penalty = -100.0
         
-        final_reward = reward + total_alive_reward
+        final_reward = deep_mimic_reward + total_alive_reward
         final_reward = torch.where(is_killed, final_reward + termination_penalty, final_reward)
 
         return final_reward
