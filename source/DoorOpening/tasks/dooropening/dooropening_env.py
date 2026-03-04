@@ -263,7 +263,7 @@ class DooropeningEnv(DirectRLEnv):
                 # door_to_palm_link_pos,
                 # self.door_link_pos.reshape(self.num_envs, 1, -1),
                 self.door_joint_pos[:, self._door_joint_idx].unsqueeze(dim = 1),
-                self.door_joint_vel[:, self._door_joint_idx].unsqueeze(dim = 1),
+                # self.door_joint_vel[:, self._door_joint_idx].unsqueeze(dim = 1),
                 self.ref_door_joint_pos[:, self._door_joint_idx].to(self.door_joint_pos).unsqueeze(dim = 1),
 
                 self.ref_robot_key_body_pos_twist.reshape(self.num_envs, 1, -1),
@@ -468,7 +468,7 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_arm_joint_pos = self.robot.data.joint_pos[:, self._robot_arm_dof_idx]
         self.robot_finger_joint_pos = self.robot.data.joint_pos[:, self._robot_finger_dof_idx]
         self.door_joint_pos = self.door.data.joint_pos
-        self.door_joint_vel = self.door.data.joint_vel
+        # self.door_joint_vel = self.door.data.joint_vel
         self.robot_base_joint_vel = self.robot.data.joint_vel[:, self._robot_base_dof_idx]
         self.robot_arm_joint_vel = self.robot.data.joint_vel[:, self._robot_arm_dof_idx]
         self.robot_finger_joint_vel = self.robot.data.joint_vel[:, self._robot_finger_dof_idx]
@@ -552,11 +552,8 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["error/key_body_quat_err"] = math.sqrt(key_body_quat_err.mean().item() / len(self.cfg.robot_reset_key_bodies))
         self.extras["error/door_err"] = math.sqrt(door_err.mean().item() / len(self.cfg.door_body_names))
         self.extras["error/base_joint_pos_err"] = math.sqrt(base_joint_pos_err.mean().item() / len(self.cfg.base_joints))
-        # self.extras["error/root_pos_err"] = math.sqrt(root_pos_err.mean().item())
-        # self.extras["error/root_rot_err"] = math.sqrt(root_rot_err.mean().item())
         self.extras["error/arm_joint_pos_err"] = math.sqrt(arm_joint_pos_err.mean().item() / len(self.cfg.arm_joints))
         self.extras["error/finger_joint_pos_err"] = math.sqrt(finger_joint_pos_err.mean().item() / len(self.cfg.finger_joints))
-        # self.extras["error/door_pos_err"] = math.sqrt(door_pos_err.max() / len(self.cfg.door_body_names))
         # self.extras["error/base_joint_vel_err"] = base_joint_vel_err.mean()
         # self.extras["error/arm_joint_vel_err"] = arm_joint_vel_err.mean()
         # self.extras["error/finger_joint_vel_err"] = finger_joint_vel_err.mean()
@@ -572,7 +569,7 @@ class DooropeningEnv(DirectRLEnv):
         # contact_forces_robot_palm_center = self.scene.sensors["contact_forces_robot_palm_center"].data.net_forces_w
         contact_forces_door2 = self.scene.sensors["contact_forces_door2"].data.net_forces_w
 
-        return compute_deep_mimic_rewards(
+        deep_mimic_reward = compute_deep_mimic_rewards(
             robot_key_body_pos = self.robot_key_body_pos, 
             robot_key_body_quat = self.robot_key_body_quat, 
             door_joint_pos = self.door_joint_pos,
@@ -624,6 +621,24 @@ class DooropeningEnv(DirectRLEnv):
             contact_forces = contact_forces_door2,
             contact_force_w = self.hinge_contact_reward_w * self.ref_hinge_contact_mask,
         )
+
+        # 1. Base Alive Reward: Small constant for staying in the safety tunnel
+        alive_base = 10.0 
+        
+        # 2. Difficulty Bonus: Extra points for staying alive during contact
+        # self.ref_hinge_contact_mask is 1.0 when grasping/pulling
+        alive_bonus = 50.0 * self.ref_hinge_contact_mask.squeeze()
+        
+        total_alive_reward = alive_base + alive_bonus
+
+        # 3. Combine with tracking reward and termination penalty
+        is_killed, _ = self._get_dones()
+        termination_penalty = -100.0
+        
+        final_reward = reward + total_alive_reward
+        final_reward = torch.where(is_killed, final_reward + termination_penalty, final_reward)
+
+        return final_reward
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_trial_steps - 1
@@ -831,9 +846,6 @@ def compute_deep_mimic_rewards(
         robot_body_ang_vel_r = torch.zeros_like(key_body_pos_r)
 
     contact_reward = torch.where(torch.norm(contact_forces, dim=-1) > 1, 1.0, 0.0).squeeze()
-    # print("contact_forces: ", contact_forces)
-    # print("contact_reward: ", contact_reward)
-    # print("contact_force_w: ", contact_force_w)
     # ----------------------------------
     # Final reward
     # ----------------------------------
@@ -849,21 +861,6 @@ def compute_deep_mimic_rewards(
          + robot_body_lin_vel_w * robot_body_lin_vel_r\
          + robot_body_ang_vel_w * robot_body_ang_vel_r\
          + contact_force_w * contact_reward
-
-    # restricted_reward = (
-    #     robot_key_body_pos_w * key_body_pos_r\
-    #     + door_joint_pos_w * door_r\
-    # ) * (robot_key_body_pos_w + door_joint_pos_w + robot_base_joint_pos_w + robot_arm_joint_pos_w + robot_finger_joint_pos_w + robot_base_joint_vel_w + robot_arm_joint_vel_w + robot_finger_joint_vel_w) / \
-    # (robot_key_body_pos_w + door_joint_pos_w)
-
-    # # special_env_mask = (ref_door_joint_pos[:, 1] > 0) & (ref_door_joint_pos[:, 0] < 0)
-    # special_env_mask = torch.linalg.norm(door_body_pos[:, 1] - robot_key_body_pos[:, -1], dim=-1) < 0.2
-
-    # reward = torch.where(
-    #     special_env_mask,
-    #     restricted_reward,
-    #     reward
-    # )
     return reward
 
 def compute_tracking_error(
