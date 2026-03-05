@@ -80,8 +80,9 @@ class ReferenceMotionManager:
         self.robot_body_pos_traj = torch.stack(robot_body_pos_trajs, dim=0)
         self.robot_body_quat_traj = torch.stack(robot_body_quat_trajs, dim=0)
         self.door_traj = torch.stack(door_trajs, dim=0)
-        self.key_indices = torch.stack(key_indices_list, dim=0).to(self.device)
-        self.key_indices = self.key_indices[..., :-1] # remove the last key index
+        # self.key_indices = torch.stack(key_indices_list, dim=0).to(self.device)
+        # self.key_indices = self.key_indices[..., :-1] # remove the last key index
+        self.key_indices = torch.arange(self.num_frames).repeat(len(key_indices_list), 1).to(self.device).int()
         self.hinge_contact_mask = torch.stack(hinge_contact_masks_list, dim=0).to(self.device)
         self.num_motions = self.robot_joint_pos_traj.shape[0]
         self.robot_body_pos_vel = torch.stack(robot_body_pos_vel_list, dim=0).to(self.device)
@@ -99,6 +100,7 @@ class ReferenceMotionManager:
             door_body_pos_traj)\
         = self._load_motion_pkl(motion_file)
         self.key_indices = torch.tensor(key_indices, device=self.device).unsqueeze(0)
+        # self.key_indices = torch.arange(self.num_frames, device=self.device).unsqueeze(0)
         self.door_body_pos_traj = torch.tensor(door_body_pos_traj, device=self.device).unsqueeze(0)
 
 
@@ -268,8 +270,10 @@ class ReferenceMotionManager:
     def reset(self, env_ids: Sequence[int], step_count: Optional[int] = None, reset_progress_total: Optional[int] = None):
         if not self.reset_from_start:
             if step_count is not None and reset_progress_total is not None:
+                reset_progress_total = 100
                 progress = min(step_count / reset_progress_total, 1.0)
-                alpha = 0.9 - 0.7 * progress  # from 0.9 → 0.2
+                # alpha = 0.9 - 0.7 * progress
+                alpha = 1 - 0.1**(2 * (2.5 - 2.5 * progress))
                 probs = torch.tensor(
                     [(1 - alpha) * (alpha ** i) for i in range(self.key_indices.shape[1])],
                     device=self.key_indices.device
