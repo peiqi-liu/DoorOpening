@@ -563,7 +563,7 @@ class DooropeningEnv(DirectRLEnv):
         # self.extras["error/finger_joint_vel_err"] = finger_joint_vel_err.mean()
 
         progress = min(self.step_count / self.reset_progress_total, 1.0)
-        alpha = 1 - 0.1**(2 ** (2.5 - 2.5 * progress))
+        alpha = 1 - 0.1**(2 ** (2.0 - 4.0 * progress))
         probs = torch.tensor(
             [(1 - alpha) * (alpha ** i) for i in range(self.ref_motion_lib.key_indices.shape[1])],
             device=self.ref_motion_lib.key_indices.device
