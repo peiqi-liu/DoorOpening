@@ -552,9 +552,9 @@ class DooropeningEnv(DirectRLEnv):
             ref_robot_finger_joint_vel = self.ref_robot_finger_joint_vel,
         )
 
-        self.extras["error/key_body_pos_err"] = math.sqrt(key_body_pos_err.mean().item() / len(self.cfg.robot_reset_key_bodies))
-        self.extras["error/key_body_quat_err"] = math.sqrt(key_body_quat_err.mean().item() / len(self.cfg.robot_reset_key_bodies))
-        self.extras["error/door_err"] = math.sqrt(door_err.mean().item() / len(self.cfg.door_body_names))
+        self.extras["error/key_body_pos_err"] = math.sqrt(key_body_pos_err.mean().item())
+        self.extras["error/key_body_quat_err"] = math.sqrt(key_body_quat_err.mean().item())
+        self.extras["error/door_err"] = math.sqrt(door_err.mean().item())
         self.extras["error/base_joint_pos_err"] = math.sqrt(base_joint_pos_err.mean().item() / len(self.cfg.base_joints))
         self.extras["error/arm_joint_pos_err"] = math.sqrt(arm_joint_pos_err.mean().item() / len(self.cfg.arm_joints))
         self.extras["error/finger_joint_pos_err"] = math.sqrt(finger_joint_pos_err.mean().item() / len(self.cfg.finger_joints))
@@ -656,9 +656,12 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["reset/reset_key_body_pos_delta"] = reset_key_body_pos_delta
         self.extras["reset/reset_key_body_quat_delta"] = reset_key_body_quat_delta
         self.extras["reset/reset_door_joint_pos_delta"] = reset_door_joint_pos_delta
-        reset_key_body_pos_delta = reset_key_body_pos_delta ** 2 * len(self.cfg.robot_reset_key_bodies)
-        reset_key_body_quat_delta = reset_key_body_quat_delta ** 2 * len(self.cfg.robot_reset_key_bodies)
-        reset_door_joint_pos_delta = reset_door_joint_pos_delta ** 2 * len(self.cfg.door_joint_names)
+        # reset_key_body_pos_delta = reset_key_body_pos_delta ** 2 * len(self.cfg.robot_reset_key_bodies)
+        # reset_key_body_quat_delta = reset_key_body_quat_delta ** 2 * len(self.cfg.robot_reset_key_bodies)
+        # reset_door_joint_pos_delta = reset_door_joint_pos_delta ** 2 * len(self.cfg.door_joint_names)
+        reset_key_body_pos_delta = reset_key_body_pos_delta ** 2
+        reset_key_body_quat_delta = reset_key_body_quat_delta ** 2
+        reset_door_joint_pos_delta = reset_door_joint_pos_delta ** 2
         # key_body_pos_err, key_body_quat_err, door_err, root_pos_err, root_rot_err, arm_joint_pos_err, finger_joint_pos_err, base_joint_vel_err, arm_joint_vel_err, finger_joint_vel_err, door_pos_err = compute_tracking_error(
         key_body_pos_err, key_body_quat_err, door_err, base_joint_pos_err, arm_joint_pos_err, finger_joint_pos_err, base_joint_vel_err, arm_joint_vel_err, finger_joint_vel_err = compute_tracking_error(
             robot_key_body_pos = self.robot_reset_key_body_pos,
@@ -895,18 +898,26 @@ def compute_tracking_error(
     # [B, N, 3]
     key_body_pos_diff = ref_robot_key_body_pos - robot_key_body_pos
     key_body_pos_err = torch.sum(key_body_pos_diff * key_body_pos_diff, dim=-1)  # [B, N]
-    key_body_pos_err = torch.sum(key_body_pos_err, dim=-1)
+    # print("key_body_pos_diff: ", key_body_pos_err)
+    key_body_pos_err = torch.max(key_body_pos_err, dim=-1).values
+    # print("key_body_pos_err: ", key_body_pos_err)
     # ----------------------------------
     # Robot body orientation error
     # ----------------------------------
     # [B, N]
     key_body_quat_diff = quat_diff_angle(robot_key_body_quat, ref_robot_key_body_quat)
-    key_body_quat_err = torch.sum(key_body_quat_diff * key_body_quat_diff, dim=-1)  # [B]
+    # print("key_body_quat_diff: ", key_body_quat_diff)
+    # key_body_quat_err = torch.sum(key_body_quat_diff * key_body_quat_diff, dim=-1)  # [B]
+    key_body_quat_err = torch.max(key_body_quat_diff * key_body_quat_diff, dim=-1).values
+    # print("key_body_quat_err: ", key_body_quat_err)
     # ----------------------------------
     # Door joint error
     # ----------------------------------
     door_diff = ref_door_joint_pos - door_joint_pos
-    door_err = torch.sum(door_diff * door_diff, dim=-1)  # [B]
+    # print("door_diff: ", door_diff)
+    # door_err = torch.sum(door_diff * door_diff, dim=-1)  # [B]
+    door_err = torch.max(door_diff * door_diff, dim=-1).values
+    # print("door_err: ", door_err)
     # ----------------------------------
     # Robot joint position error
     # ----------------------------------
