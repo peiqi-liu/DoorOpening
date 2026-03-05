@@ -407,7 +407,7 @@ class DooropeningEnv(DirectRLEnv):
 
         return (
             body_pos_rel,          # (N, B-1, 3)
-            quat_to_6d(body_quat_rel),         # (N, B-1, 3)
+            quat_to_6d(body_quat_rel),         # (N, B-1, 6)
             base_lin_vel_local,    # (N, 3)
             base_ang_vel_local,    # (N, 3)
         )
