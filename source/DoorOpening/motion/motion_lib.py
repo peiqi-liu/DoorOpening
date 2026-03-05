@@ -270,7 +270,6 @@ class ReferenceMotionManager:
     def reset(self, env_ids: Sequence[int], step_count: Optional[int] = None, reset_progress_total: Optional[int] = None):
         if not self.reset_from_start:
             if step_count is not None and reset_progress_total is not None:
-                reset_progress_total = 100
                 progress = min(step_count / reset_progress_total, 1.0)
                 # alpha = 0.9 - 0.7 * progress
                 alpha = 1 - 0.1**(2 * (2.5 - 2.5 * progress))
