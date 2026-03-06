@@ -243,9 +243,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_body_lin_vel_scale = 10.0
     robot_body_ang_vel_scale = 10.0
 
-    reset_key_body_pos_delta_min = 0.6
+    reset_key_body_pos_delta_min = 0.3
     reset_key_body_quat_delta_min = 1.5
-    reset_key_body_pos_delta_max = 1.5
+    reset_key_body_pos_delta_max = 0.9
     reset_key_body_quat_delta_max = 3.0
     reset_door_joint_pos_delta_min = 0.5
     reset_door_joint_pos_delta_max = 0.8
