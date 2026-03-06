@@ -190,7 +190,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         ),
     )
 
-    twist_indices = [1, 5, 10, 20, 30, 40]
+    twist_indices = [1, 5, 10]
 
     # door(s)
     door_cfg: ArticulationCfg = ALL_DOOR_CONFIGS.replace(prim_path="/World/envs/env_.*/Door")
@@ -228,8 +228,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_finger_joint_vel_w = 0.5
     door_joint_pos_w = 4.0
     hinge_contact_reward_w = 1.0
-    robot_body_lin_vel_w = 1.0
-    robot_body_ang_vel_w = 0.5
+    robot_body_lin_vel_w = 0.0
+    robot_body_ang_vel_w = 0.0
 
     robot_body_quat_scale = 1.0
     robot_key_body_pos_scale = 3.0
@@ -244,7 +244,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_body_ang_vel_scale = 10.0
 
     reset_key_body_pos_delta_min = 0.6
-    reset_key_body_quat_delta_min = 0.8
+    reset_key_body_quat_delta_min = 1.5
     reset_key_body_pos_delta_max = 1.5
     reset_key_body_quat_delta_max = 3.0
     reset_door_joint_pos_delta_min = 0.5
@@ -254,7 +254,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     reset_progress_total = 7e5
 
     alive_base = 10.0
-    alive_bonus = 20.0
+    alive_bonus = 0.0
     termination_penalty = -100.0
 
     velocity = 1.0
