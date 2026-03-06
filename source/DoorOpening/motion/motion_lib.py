@@ -82,7 +82,7 @@ class ReferenceMotionManager:
         self.door_traj = torch.stack(door_trajs, dim=0)
         # self.key_indices = torch.stack(key_indices_list, dim=0).to(self.device)
         # self.key_indices = self.key_indices[..., :-1] # remove the last key index
-        self.key_indices = torch.arange(0, self.num_frames, 20).repeat(len(key_indices_list), 1).to(self.device).int()
+        self.key_indices = torch.arange(0, self.num_frames, 1).repeat(len(key_indices_list), 1).to(self.device).int()
         self.hinge_contact_mask = torch.stack(hinge_contact_masks_list, dim=0).to(self.device)
         self.num_motions = self.robot_joint_pos_traj.shape[0]
         self.robot_body_pos_vel = torch.stack(robot_body_pos_vel_list, dim=0).to(self.device)
@@ -272,7 +272,7 @@ class ReferenceMotionManager:
             if step_count is not None and reset_progress_total is not None:
                 progress = min(step_count / reset_progress_total, 1.0)
                 # alpha = 0.9 - 0.7 * progress
-                alpha = 1 - 0.1**(2 ** (3.0 - 4.0 * progress))
+                alpha = 1 - 0.1**(2 ** (2.0 - 3.0 * progress))
                 probs = torch.tensor(
                     [(1 - alpha) * (alpha ** i) for i in range(self.key_indices.shape[1])],
                     device=self.key_indices.device
