@@ -729,7 +729,7 @@ class DooropeningEnv(DirectRLEnv):
         self.door.set_joint_position_target(torch.zeros_like(door_joint_pos), None, env_ids)
 
         self.last_actions[env_ids] = 0.0
-
+        self.robot_dof_targets[env_ids, :] = self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]]
         super()._reset_idx(env_ids)
 
 @torch.jit.script
