@@ -115,10 +115,10 @@ class DooropeningEnv(DirectRLEnv):
         self.reset_door_joint_pos_delta_min = self.cfg.reset_door_joint_pos_delta_min
         self.reset_door_joint_pos_delta_max = self.cfg.reset_door_joint_pos_delta_max
 
-        self.last_actions = torch.zeros(
-            (self.num_envs, len(self._robot_dof_idx)),
-            device=self.device
-        )
+        # self.last_actions = torch.zeros(
+        #     (self.num_envs, len(self._robot_dof_idx)),
+        #     device=self.device
+        # )
 
         self.twist_indices = self.cfg.twist_indices
 
@@ -164,7 +164,6 @@ class DooropeningEnv(DirectRLEnv):
         self.step_count = self._sim_step_counter
         # delta actions
         self.scaled_actions = actions.clone().clamp(-1.0, 1.0)
-        # targets = self.robot_dof_targets + self.dt * self.actions * self.cfg.action_scale
         self.scaled_actions[:, :self.num_base_joints] = self.scaled_actions[:, :self.num_base_joints] * self.cfg.base_action_scale
         self.scaled_actions[:, self.num_base_joints:self.num_base_joints + self.num_arm_joints] = self.scaled_actions[:, self.num_base_joints:self.num_base_joints + self.num_arm_joints] * self.cfg.arm_action_scale
         self.scaled_actions[:, self.num_base_joints + self.num_arm_joints:] = self.scaled_actions[:, self.num_base_joints + self.num_arm_joints:] * self.cfg.finger_action_scale
@@ -193,7 +192,7 @@ class DooropeningEnv(DirectRLEnv):
         # print("ref joint vel: ", self.ref_robot_base_joint_vel)
 
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
-        self.last_actions[:] = self.scaled_actions
+        # self.last_actions[:] = self.scaled_actions
 
     def _apply_action(self):
         edit_door_articulation(self.door)
@@ -250,7 +249,8 @@ class DooropeningEnv(DirectRLEnv):
             (
                 self.joint_pos[:, self._robot_dof_idx].unsqueeze(dim = 1),
                 self.joint_vel[:, self._robot_dof_idx].unsqueeze(dim = 1),
-                self.last_actions.unsqueeze(dim = 1),
+                # self.last_actions.unsqueeze(dim = 1),
+                self.robot_dof_targets.unsqueeze(dim = 1),
                 (self.ref_robot_base_joint_pos - self.joint_pos[:,self._robot_base_dof_idx]).unsqueeze(dim = 1),
                 (self.ref_robot_arm_joint_pos - self.joint_pos[:,self._robot_arm_dof_idx]).unsqueeze(dim = 1),
 
@@ -728,7 +728,7 @@ class DooropeningEnv(DirectRLEnv):
         self.door.write_joint_position_to_sim(door_joint_pos, None, env_ids)
         self.door.set_joint_position_target(torch.zeros_like(door_joint_pos), None, env_ids)
 
-        self.last_actions[env_ids] = 0.0
+        # self.last_actions[env_ids] = 0.0
         self.robot_dof_targets[env_ids, :] = self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]]
         super()._reset_idx(env_ids)
 
