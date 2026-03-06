@@ -228,8 +228,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_finger_joint_vel_w = 0.5
     door_joint_pos_w = 4.0
     hinge_contact_reward_w = 1.0
-    robot_body_lin_vel_w = 0.0
-    robot_body_ang_vel_w = 0.0
+    robot_body_lin_vel_w = 1.0
+    robot_body_ang_vel_w = 0.5
 
     robot_body_quat_scale = 1.0
     robot_key_body_pos_scale = 3.0
