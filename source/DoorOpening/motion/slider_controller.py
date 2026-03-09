@@ -6,7 +6,8 @@ from isaaclab.scene import InteractiveScene
 from isaaclab.controllers import DifferentialIKController, DifferentialIKControllerCfg
 from isaaclab.utils.math import euler_xyz_from_quat, quat_from_euler_xyz
 from scipy.interpolate import CubicSpline
-import numpy as np
+import numpy as np  
+from DoorOpening.utils.finger_utils import tendon_to_joint_angle_utils, joint_angle_to_tendon_utils
 
 class OmniJointController:
     def __init__(self, scene: InteractiveScene, joint_names):
@@ -28,8 +29,12 @@ class OmniJointController:
         self.key_pose_idx = self.key_pose_idx[0]
         self.pose_names = ['x', 'y', 'z', 'roll', 'pitch', 'yaw']
 
-        self.q_slider = scene["robot"].data.default_joint_pos.clone()
-        self.door_q_slider = scene["door"].data.default_joint_pos.clone()
+        self.q_slider = scene["robot"].data.joint_pos.clone()
+        self.door_q_slider = scene["door"].data.joint_pos.clone()
+        self.finger_q_slider = torch.zeros(4)
+        finger_joint_names = [f"finger_joint_{i}" for i in range(15)]
+        self.finger_joint_ids, finger_joint_names = scene["robot"].find_joints(finger_joint_names)
+
         self.xyz = scene["robot"].data.body_pos_w[:, self.key_pose_idx].clone()
         quat = scene["robot"].data.body_quat_w[:, self.key_pose_idx].clone()
         self.euler_angles = torch.stack(euler_xyz_from_quat(quat), dim = -1)
@@ -37,11 +42,12 @@ class OmniJointController:
         # ===== Keyframe + playback state =====
         self.key_poses = []          # list[Tensor (1, num_joints)]
         self.door_key_joint_angles = []     # list[Tensor (1, num_door_joints)]
+        self.door_pos_traj = []            # list[Tensor (1, num_door_joints)]
         self.traj = None             # Tensor (T, num_joints)
         self.playback = False
         self.play_idx = 0
 
-        self.total_steps = 500
+        self.total_steps = 1000
 
         self.pose_sliders = []
         self.joint_sliders = []
@@ -60,7 +66,7 @@ class OmniJointController:
             ik_params={"lambda_val": 0.05}
         )
         self.ik_controller = DifferentialIKController(
-            ik_cfg, num_envs=self.scene.num_envs, device="cuda"
+            ik_cfg, num_envs=self.scene.num_envs, device=self.scene["robot"].data.joint_pos.device
         )
         self.ik_controller.reset()
         self.joint_pos_des = None
@@ -98,6 +104,8 @@ class OmniJointController:
 
                 # robot joint position sliders
                 for i, name in enumerate(self.joint_names):
+                    if name.startswith("finger_joint_"):
+                        continue
                     ui.Label(name)
 
                     if name.startswith("base_"):
@@ -116,6 +124,17 @@ class OmniJointController:
                         partial(self._on_slider_changed, i)
                     )
                     self.joint_sliders.append(slider)
+
+                for i in range(4):
+                    ui.Label(f"finger_joint_{i}")
+                    slider = ui.FloatSlider(
+                        min=0.0,
+                        max=3.14,
+                        step=0.01,
+                        height=18,
+                    )
+                    slider.model.set_value(0.0)
+                    slider.model.add_value_changed_fn(partial(self._on_finger_slider_changed, i))
 
                 # door joint position sliders
                 for i, name in enumerate(self.door_joint_names):
@@ -146,8 +165,15 @@ class OmniJointController:
                     max=1000,
                     step=1,
                     width=120,
+                ) 
+                length_field.model.add_value_changed_fn(
+                    partial(self._on_length_changed)
                 )
-                length_field.model.set_value(self.total_steps)
+
+                ui.Separator(height=10)
+
+    def _on_length_changed(self, model):
+        self.total_steps = model.get_value_as_int()
 
     def _record_key_pose(self):
         # q = self.q_slider.clone()
@@ -162,16 +188,6 @@ class OmniJointController:
         assert len(self.key_poses) >= 2, "Need at least 2 key poses"
         assert len(self.door_key_joint_angles) >= 2, "Need at least 2 door key poses"
 
-        # traj = []
-        # for i in range(len(self.key_poses) - 1):
-        #     q0 = self.key_poses[i][0]
-        #     q1 = self.key_poses[i + 1][0]
-        #     steps = self.steps_per_segments[i]
-
-        #     for a in torch.linspace(0, 1, steps):
-        #         traj.append((1 - a) * q0 + a * q1)
-
-        # self.traj = torch.stack(traj)   # (T, num_joints)
         num_key_poses = self.key_poses[0].shape[-1]
         num_door_poses = self.door_key_joint_angles[0].shape[-1]
 
@@ -186,6 +202,7 @@ class OmniJointController:
 
         cs = CubicSpline(t_key, qs, axis=0, bc_type="clamped")
 
+        print("self.total_steps: ", self.total_steps)
         t = np.linspace(0, 1, self.total_steps)
         self.traj = torch.tensor(cs(t))
         self.qd = torch.tensor(cs(t, 1))
@@ -194,22 +211,11 @@ class OmniJointController:
         key_indices = np.searchsorted(t, t_key)
         key_indices = np.clip(key_indices, 0, len(t) - 1)
 
-
         self.door_traj = self.traj[:, num_key_poses:]
         self.traj = self.traj[:, :num_key_poses]
         self.qd = self.qd[:, :num_key_poses]
         self.qdd = self.qdd[:, :num_key_poses]
 
-        # door_traj = []
-        # for i in range(len(self.door_key_joint_angles) - 1):
-        #     q0 = self.door_key_joint_angles[i][0]
-        #     q1 = self.door_key_joint_angles[i + 1][0]
-        #     steps = self.steps_per_segments[i]
-
-        #     for a in torch.linspace(0, 1, steps):
-        #         door_traj.append((1 - a) * q0 + a * q1)
-
-        # self.door_traj = torch.stack(door_traj)   # (T, num_joints)
         self.key_indices = torch.from_numpy(key_indices)
 
         self.play_idx = 0
@@ -217,6 +223,7 @@ class OmniJointController:
     def _initialize_trajectory(self):
         self.robot_body_pos_traj = []
         self.robot_body_quat_traj = []
+        self.door_pos_traj = []
 
     def _start_playback(self):
         self._initialize_trajectory()
@@ -240,6 +247,9 @@ class OmniJointController:
         if len(self.robot_body_quat_traj) > 0:
             self.robot_body_quat_traj = torch.stack(self.robot_body_quat_traj, dim = 0)
             data["robot_body_quat_traj"] = self.robot_body_quat_traj
+        if len(self.door_pos_traj) > 0:
+            self.door_pos_traj = torch.stack(self.door_pos_traj, dim = 0)
+            data["door_pos_traj"] = self.door_pos_traj
 
         self._initialize_trajectory()
 
@@ -247,6 +257,15 @@ class OmniJointController:
             pkl.dump(data, f)
 
         print(f"[SAVE] Trajectory saved to {path}")
+
+    def _on_finger_slider_changed(self, idx, model):
+        self._initialize_trajectory()
+        value = model.get_value_as_float()
+        self.finger_q_slider[idx] = value
+        new_q_value = tendon_to_joint_angle_utils(self.scene["robot"], self.finger_q_slider)
+        self.q_slider[..., self.finger_joint_ids] = new_q_value[..., self.finger_joint_ids]
+
+        test_tendon_value =joint_angle_to_tendon_utils(self.scene["robot"])
 
     def _on_slider_changed(self, idx, model):
         self._initialize_trajectory()

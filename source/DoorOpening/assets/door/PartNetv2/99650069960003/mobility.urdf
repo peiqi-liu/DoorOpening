@@ -16,7 +16,6 @@
 				<mesh filename="texture_dae/frame.obj" scale="0.8200447754284704 0.8200447754284704 0.8200447754284704" />
 			</geometry>
 		</collision>
-		
 	</link>
 	<joint name="joint_0" type="fixed">
 		<origin rpy="1.570796326794897 0 -1.570796326794897" xyz="0 0 0" />
@@ -63,7 +62,8 @@
 		</collision>
 	</link>
 	<joint name="joint_2" type="revolute">
-		<origin xyz="0.6698489351830481 -0.9444402274483152 0.04279544730454047" />
+		<!-- <origin xyz="0.6698489351830481 -0.9444402274483152 0.04279544730454047" /> -->
+		<origin xyz="0.6698489351830481 -0.9444402274483152 0.0" />
 		<child link="link_2" />
 		<parent link="link_1" />
 		<axis xyz="0 0 1" />

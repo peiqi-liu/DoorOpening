@@ -17,7 +17,7 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser(description="Train an RL agent with RL-Games.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
 parser.add_argument("--video_length", type=int, default=600, help="Length of the recorded video (in steps).")
-parser.add_argument("--video_interval", type=int, default=7500, help="Interval between video recordings (in steps).")
+parser.add_argument("--video_interval", type=int, default=10000, help="Interval between video recordings (in steps).")
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
@@ -140,6 +140,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # update env config device
         env_cfg.sim.device = f"cuda:{app_launcher.local_rank}"
 
+    global_rank = int(os.getenv("RANK", "0"))
+    local_rank = int(os.getenv("LOCAL_RANK", "0"))
+
     # set the environment seed (after multi-gpu config for updated rank from agent seed)
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg["params"]["seed"]
@@ -193,7 +196,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env = multi_agent_to_single_agent(env)
 
     # wrap for video recording
-    if args_cli.video:
+    if args_cli.video and global_rank == 0:
         video_kwargs = {
             "video_folder": os.path.join(log_root_path, log_dir, "videos", "train"),
             "step_trigger": lambda step: step % args_cli.video_interval == 0,

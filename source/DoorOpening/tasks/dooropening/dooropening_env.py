@@ -1,10 +1,3 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
-# All rights reserved.
-#
-# SPDX-License-Identifier: BSD-3-Clause
-
-from __future__ import annotations
-
 import math
 import torch
 from collections.abc import Sequence
@@ -13,12 +6,21 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
-from DoorOpening.utils.quat_utils import quat_diff_angle
+from DoorOpening.utils.quat_utils import quat_diff_angle, hinge_angle_diff
 from DoorOpening.motion.motion_lib import ReferenceMotionManager
 from DoorOpening.assets.door.door_cfg import edit_door_articulation
+from DoorOpening.utils.finger_utils import joint_angle_to_tendon_utils, tendon_to_joint_angle_utils, leap_joints_to_tendon
 from .dooropening_env_cfg import DooropeningEnvCfg
+from DoorOpening.assets.door.door_cfg import motion_traj_paths, handle_offsets, board_offsets
+from isaaclab.sensors import ContactSensor
+from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES, ROBOT_KEY_BODY_NAMES
+from DoorOpening.utils.pose_utils import normalize_to_center_frame, world_to_local
+from isaaclab.utils.math import quat_conjugate, quat_apply, quat_mul
+from DoorOpening.utils.quat_utils import quat_to_euler, quat_to_6d
+from typing import Tuple
 
 import pickle as pkl
+import math
 
 
 class DooropeningEnv(DirectRLEnv):
@@ -26,26 +28,47 @@ class DooropeningEnv(DirectRLEnv):
 
     def __init__(self, cfg: DooropeningEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
+        self.early_stopping = True
 
         self.num_base_joints = len(self.cfg.base_joints)
         self.num_arm_joints = len(self.cfg.arm_joints)
 
         actuated_joints = self.cfg.base_joints + self.cfg.arm_joints + self.cfg.finger_joints
         self._robot_dof_idx, joint_names = self.robot.find_joints(actuated_joints)
+        self._robot_dof_idx = torch.tensor(self._robot_dof_idx, device=self.device)
+        self.ref_robot_dof_idx = torch.tensor([FULL_JOINT_NAMES.index(name) for name in joint_names], device=self.device)
 
-        deep_mimic_joints = self.cfg.base_joints + self.cfg.arm_joints
-        self._robot_deep_mimic_dof_idx, _ = self.robot.find_joints(deep_mimic_joints)
+        self._robot_key_body_idx, robot_key_body_names = self.robot.find_bodies(self.cfg.robot_key_bodies)
+        self._robot_reset_key_body_idx, robot_reset_key_body_names = self.robot.find_bodies(self.cfg.robot_reset_key_bodies)
+        self._robot_base_id_in_key_body_idx = robot_key_body_names.index(self.cfg.robot_base_body_link_name)
+        self._robot_palm_id_in_key_body_idx = robot_key_body_names.index(self.cfg.robot_palm_link_name)
 
-        self._robot_key_body_idx, _ = self.robot.find_bodies(self.cfg.robot_key_bodies)
-        self._robot_reset_key_body_idx, _ = self.robot.find_bodies(self.cfg.robot_reset_key_bodies)
+        self.ref_key_body_idx = [ROBOT_KEY_BODY_NAMES.index(name) for name in robot_key_body_names]
+        self.ref_reset_key_body_idx = [ROBOT_KEY_BODY_NAMES.index(name) for name in robot_reset_key_body_names]
 
         self._robot_base_dof_idx, base_joint_names = self.robot.find_joints(self.cfg.base_joints)
         self._robot_arm_dof_idx, arm_joint_names = self.robot.find_joints(self.cfg.arm_joints)
         self._robot_finger_dof_idx, finger_joint_names = self.robot.find_joints(self.cfg.finger_joints)
 
+        self.ref_base_joint_idx = [FULL_JOINT_NAMES.index(name) for name in base_joint_names]
+        self.ref_arm_joint_idx = [FULL_JOINT_NAMES.index(name) for name in arm_joint_names]
+        self.ref_finger_joint_idx = [FULL_JOINT_NAMES.index(name) for name in finger_joint_names]
+
+        robot_abduction_dof_idx, abduction_joint_names = self.robot.find_joints(self.cfg.abduction_joints)
+        self.robot_abduction_default_pos = self.robot.data.default_joint_pos[..., robot_abduction_dof_idx]
+        self.finger_dof_names_to_id = {name: idx for idx, name in enumerate(finger_joint_names)}
+        # self.robot_abduction_dof_idx_in_targets = [self.finger_dof_names_to_id[name] + self.num_base_joints + self.num_arm_joints for name in self.cfg.abduction_joints]
+        # self.close_finger_joints = torch.tensor([self.cfg.close_finger_joints[name] for name in finger_joint_names], device=self.device)
+        # self.open_finger_joints = torch.tensor([self.cfg.open_finger_joints[name] for name in finger_joint_names], device=self.device)
+
         self._robot_base_link_idx, self.robot_base_link_name = self.robot.find_bodies(self.cfg.base_link_name)
-        self._door_body_idx, _ = self.door.find_bodies(self.cfg.door_body_names)
-        self._door_joint_idx, _ = self.door.find_joints(self.cfg.door_joint_names)
+        self._door_body_idx, self.door_body_names = self.door.find_bodies(self.cfg.door_body_names)
+        self._door_base_link_idx, self.door_base_link_name = self.door.find_bodies(self.cfg.door_base_frame_name)
+        self._door_base_link_idx = self._door_base_link_idx[0]
+        self._door_joint_idx, self.door_joint_names = self.door.find_joints(self.cfg.door_joint_names)
+
+        self._robot_base_body_link_idx, self.robot_base_body_link_name = self.robot.find_bodies(self.cfg.robot_base_body_link_name)
+        self._robot_base_body_link_idx = self._robot_base_body_link_idx[0]
 
         self.joint_pos = self.robot.data.joint_pos
         self.joint_vel = self.robot.data.joint_vel
@@ -69,6 +92,8 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_base_joint_vel_scale = self.cfg.robot_base_joint_vel_scale
         self.robot_arm_joint_vel_scale = self.cfg.robot_arm_joint_vel_scale
         self.robot_finger_joint_vel_scale = self.cfg.robot_finger_joint_vel_scale
+        self.robot_body_lin_vel_scale = self.cfg.robot_body_lin_vel_scale
+        self.robot_body_ang_vel_scale = self.cfg.robot_body_ang_vel_scale
 
         self.robot_key_body_pos_w = self.cfg.robot_key_body_pos_w
         self.robot_body_quat_w = self.cfg.robot_body_quat_w
@@ -79,15 +104,41 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_base_joint_vel_w = self.cfg.robot_base_joint_vel_w
         self.robot_arm_joint_vel_w = self.cfg.robot_arm_joint_vel_w
         self.robot_finger_joint_vel_w = self.cfg.robot_finger_joint_vel_w
+        self.hinge_contact_reward_w = self.cfg.hinge_contact_reward_w
+        self.robot_body_lin_vel_w = self.cfg.robot_body_lin_vel_w
+        self.robot_body_ang_vel_w = self.cfg.robot_body_ang_vel_w
 
-        self.reset_base_pos_delta = (self.cfg.reset_base_pos_delta ** 2) * len(self.cfg.base_joints)
-        self.reset_key_body_pos_delta = (self.cfg.reset_key_body_pos_delta ** 2) * len(self.cfg.robot_reset_key_bodies)
-        self.reset_key_body_quat_delta = (self.cfg.reset_key_body_quat_delta ** 2) * len(self.cfg.robot_reset_key_bodies)
+        self.reset_key_body_pos_delta_min = self.cfg.reset_key_body_pos_delta_min
+        self.reset_key_body_quat_delta_min = self.cfg.reset_key_body_quat_delta_min
+        self.reset_key_body_pos_delta_max = self.cfg.reset_key_body_pos_delta_max
+        self.reset_key_body_quat_delta_max = self.cfg.reset_key_body_quat_delta_max
+        self.reset_door_joint_pos_delta_min = self.cfg.reset_door_joint_pos_delta_min
+        self.reset_door_joint_pos_delta_max = self.cfg.reset_door_joint_pos_delta_max
 
-        self.ref_motion_lib = ReferenceMotionManager(self.cfg.motion_file, self.num_envs, self.device, velocity=self.cfg.velocity, reset_from_start = False)
+        # self.last_actions = torch.zeros(
+        #     (self.num_envs, len(self._robot_dof_idx)),
+        #     device=self.device
+        # )
+
+        self.twist_indices = self.cfg.twist_indices
+
+        # self.ref_motion_lib = ReferenceMotionManager(self.cfg.motion_file, self.num_envs, self.device, velocity=self.cfg.velocity, reset_from_start = True)
+        self.handle_offsets = [handle_offsets[i % len(handle_offsets)] for i in range(self.num_envs)]
+        self.board_offsets = [board_offsets[i % len(board_offsets)] for i in range(self.num_envs)]
+        self.handle_offsets = torch.stack(self.handle_offsets).to(self.device)
+        self.board_offsets = torch.stack(self.board_offsets).to(self.device)
+        env_to_file_map = [i % len(motion_traj_paths) for i in range(self.num_envs)]
+        self.ref_motion_lib = ReferenceMotionManager(num_envs=self.num_envs, device=self.device, velocity=self.cfg.velocity, reset_from_start = False, env_to_file_map=env_to_file_map, twist_indices=self.twist_indices)
         self.max_trial_steps = self.ref_motion_lib.num_frames * torch.ones_like(self.episode_length_buf, device=self.device)
 
         torch.set_printoptions(precision=4, sci_mode=False)
+
+        self.step_count = 0
+        self.reset_progress_total = self.cfg.reset_progress_total
+
+        self.alive_base = self.cfg.alive_base
+        self.alive_bonus = self.cfg.alive_bonus
+        self.termination_penalty = self.cfg.termination_penalty
 
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
@@ -102,25 +153,52 @@ class DooropeningEnv(DirectRLEnv):
         # add articulation to scene
         self.scene.articulations["robot"] = self.robot
         self.scene.articulations["door"] = self.door
+        # self.scene.sensors["contact_forces_door1"] = ContactSensor(self.cfg.contact_forces_door1)
+        self.scene.sensors["contact_forces_door2"] = ContactSensor(self.cfg.contact_forces_door2)
+        # self.scene.sensors["contact_forces_robot_palm_center"] = ContactSensor(self.cfg.contact_forces_robot_palm_center)
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)    
 
     def _pre_physics_step(self, actions: torch.Tensor):
+        self.step_count = self._sim_step_counter
         # delta actions
         self.scaled_actions = actions.clone().clamp(-1.0, 1.0)
-        # targets = self.robot_dof_targets + self.dt * self.actions * self.cfg.action_scale
         self.scaled_actions[:, :self.num_base_joints] = self.scaled_actions[:, :self.num_base_joints] * self.cfg.base_action_scale
         self.scaled_actions[:, self.num_base_joints:self.num_base_joints + self.num_arm_joints] = self.scaled_actions[:, self.num_base_joints:self.num_base_joints + self.num_arm_joints] * self.cfg.arm_action_scale
         self.scaled_actions[:, self.num_base_joints + self.num_arm_joints:] = self.scaled_actions[:, self.num_base_joints + self.num_arm_joints:] * self.cfg.finger_action_scale
         targets = self.robot_dof_targets + self.dt * self.scaled_actions
+        # Optional: lock the abduction joints
+        # targets[..., self.robot_abduction_dof_idx_in_targets] = self.robot_abduction_default_pos
+        # targets[..., self.num_base_joints + self.num_arm_joints:] = torch.where( \
+        #     (torch.linalg.norm(targets[..., self.num_base_joints + self.num_arm_joints:] - self.close_finger_joints, dim=-1) < \
+        #     torch.linalg.norm(targets[..., self.num_base_joints + self.num_arm_joints:] - self.open_finger_joints, dim=-1)).unsqueeze(-1), \
+        #     self.close_finger_joints[None, :], \
+        #     self.open_finger_joints[None, :] \
+        # )
+        # Optional: use tendon actions to control the finger joints
+        # tendon_actions = leap_joints_to_tendon(targets[..., self.num_base_joints + self.num_arm_joints:], self.finger_dof_names_to_id, device=self.device)
+        # targets[..., self.num_base_joints + self.num_arm_joints:] = tendon_to_joint_angle_utils(self.robot, tendon_actions)[..., self._robot_finger_dof_idx]
+
+        # self.scene.sensors["contact_forces_door1"].update(self.cfg.sim_dt, force_recompute=True)
+        self.scene.sensors["contact_forces_door2"].update(self.cfg.sim_dt)
+        # self.scene.sensors["contact_forces_robot_palm_center"].update(self.cfg.sim_dt, force_recompute=True)
+
+        # print("robot body lin vel: ", self.robot.data.body_link_lin_vel_w[0, self._robot_key_body_idx])
+        # print("robot body ang vel: ", self.robot.data.body_link_ang_vel_w[0, self._robot_key_body_idx])
+        # print("ref robot body lin vel: ", self.ref_robot_body_lin_vel[0, self.ref_key_body_idx] / self.cfg.sim_dt)
+        # print("ref robot body ang vel: ", self.ref_robot_body_ang_vel[0, self.ref_key_body_idx] / self.cfg.sim_dt)
+        # print("joint_vel: ", self.robot.data.joint_vel[:, self._robot_base_dof_idx])
+        # print("ref joint vel: ", self.ref_robot_base_joint_vel)
+
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
+        # self.last_actions[:] = self.scaled_actions
 
     def _apply_action(self):
         edit_door_articulation(self.door)
         self.ref_motion_lib.step()
         self.robot.set_joint_position_target(self.robot_dof_targets, joint_ids=self._robot_dof_idx)
-        # joint_pos = self.robot.data.joint_pos.clone()
+        # joint_pos = self.robot.data.default_joint_pos.clone()
         # joint_pos[:] = self.ref_motion_lib.get_robot_joint_pos()
         # self.robot.write_joint_position_to_sim(joint_pos)
         # door_pos = self.door.data.joint_pos.clone()
@@ -128,67 +206,330 @@ class DooropeningEnv(DirectRLEnv):
         # self.door.write_joint_position_to_sim(door_pos)
 
     def _get_observations(self) -> dict:
+        self._get_intermediate_values()
         self.joint_pos = self.robot.data.joint_pos
         self.joint_vel = self.robot.data.joint_vel
-        self.door_joint_pos = self.door.data.joint_pos
-        self.door_joint_vel = self.door.data.joint_vel
         base_link_pos = self.robot.data.body_pos_w[:, self._robot_base_link_idx]
         base_link_pos -= self.scene.env_origins.repeat((1, 1
             )).reshape(self.num_envs, 1, 3) 
-
-        door_link_pos = self.door.data.body_pos_w[:, self._door_body_idx]
-        door_link_pos -= self.scene.env_origins.repeat((1, 1
-            )).reshape(self.num_envs, 1, 3)
         
-        door_to_base_link_pos = (door_link_pos - base_link_pos).reshape(self.num_envs, 1, -1)
+        # door_to_base_link_pos = (self.door_link_pos - base_link_pos).reshape(self.num_envs, 1, -1)
+        # door_to_base_link_pos = (self.door_keypoints - base_link_pos).reshape(self.num_envs, 1, -1)
+        # door_twist_base_link_pos = (self.ref_door_body_pos_twist - base_link_pos).reshape(self.num_envs, 1, -1)
+        door_to_base_link_pos = world_to_local(self.door_link_pos, self.robot_base_body_pos, self.robot_base_body_quat).reshape(self.num_envs, 1, -1)
+        door_twist_in_robot_base_frame = world_to_local(self.ref_door_body_pos_twist, self.robot_base_body_pos, self.robot_base_body_quat).reshape(self.num_envs, 1, -1)
+        # door_to_palm_link_pos = world_to_local(self.door_link_pos, self.robot_palm_body_pos, self.robot_palm_body_quat).reshape(self.num_envs, 1, -1)
+        # door_to_base_link_pos = (self.door_link_pos - self.robot_base_body_pos.unsqueeze(1))
+        # door_to_base_link_pos = world_to_local(door_to_base_link_pos, self.robot_base_body_pos, self.robot_base_body_quat)
+        # door_to_base_link_pos = door_to_base_link_pos.reshape(self.num_envs, 1, -1)
+        # door_twist_palm_link_pos = (self.ref_door_body_pos_twist - self.robot_palm_body_pos.unsqueeze(1))
+        # door_twist_palm_link_pos = world_to_local(door_twist_palm_link_pos, self.robot_base_body_pos, self.robot_base_body_quat)
+        # door_twist_palm_link_pos = door_twist_palm_link_pos.reshape(self.num_envs, 1, -1)
+        # door_to_palm_link_pos = (self.door_link_pos - self.robot_palm_body_pos.unsqueeze(1))
+        # door_to_palm_link_pos = world_to_local(door_to_palm_link_pos, self.robot_base_body_pos, self.robot_base_body_quat)
+        # door_to_palm_link_pos = door_to_palm_link_pos.reshape(self.num_envs, 1, -1)
 
-        robot_key_body_pos = self.robot.data.body_pos_w[:, self._robot_key_body_idx]
-        robot_key_body_pos -= self.scene.env_origins.repeat((1, 1)).reshape(self.num_envs, 1, 3)
-        rel_robot_key_body_pos = (robot_key_body_pos - base_link_pos).reshape(self.num_envs, 1, -1)
+        # rel_robot_key_body_pos = (self.robot_key_body_pos - base_link_pos).reshape(self.num_envs, 1, -1)
+        robot_key_body_pos, robot_key_body_euler, base_lin_vel_local, base_ang_vel_local = self.transform_key_bodies_to_base_frame(self.robot_key_body_pos, self.robot_key_body_quat, self.robot_body_lin_vel, self.robot_body_ang_vel, self._robot_base_body_link_idx)
+        key_pos_err = (self.ref_robot_key_body_pos).to(self.robot_key_body_pos) - self.robot_key_body_pos
+        key_pos_err = world_to_local(key_pos_err, None, self.robot_base_body_quat)
+        key_pos_err = key_pos_err.reshape(self.num_envs, 1, -1)
 
+        # door_joint_err = self.door_joint_pos[:, self._door_joint_idx] - (self.ref_door_joint_pos[:, self._door_joint_idx]).to(self.door_joint_pos)
+
+        # contact_forces_door1 = self.scene.sensors["contact_forces_door1"].data.net_forces_w
+        # contact_forces_door2 = self.scene.sensors["contact_forces_door2"].data.net_forces_w
+        # contact_forces_robot_palm_center = self.scene.sensors["contact_forces_robot_palm_center"].data.net_forces_w
+        # contact_forces_door1 = contact_forces_door1.reshape(self.num_envs, 1, -1)
+        # contact_forces_door2 = contact_forces_door2.reshape(self.num_envs, 1, -1)
+        # contact_forces_robot_palm_center = contact_forces_robot_palm_center.reshape(self.num_envs, 1, -1)
+
+        # frame_idx = torch.ceil(self.ref_motion_lib.frame_idx).unsqueeze(dim = -1).to(self.device) // (self.ref_motion_lib.num_frames // 10)
         obs = torch.cat(
             (
                 self.joint_pos[:, self._robot_dof_idx].unsqueeze(dim = 1),
                 self.joint_vel[:, self._robot_dof_idx].unsqueeze(dim = 1),
+                # self.last_actions.unsqueeze(dim = 1),
+                self.robot_dof_targets.unsqueeze(dim = 1),
+                (self.ref_robot_base_joint_pos - self.joint_pos[:,self._robot_base_dof_idx]).unsqueeze(dim = 1),
+                (self.ref_robot_arm_joint_pos - self.joint_pos[:,self._robot_arm_dof_idx]).unsqueeze(dim = 1),
+
+                key_pos_err,
+                # rel_robot_key_body_pos,
+                robot_key_body_pos.reshape(self.num_envs, 1, -1),
+                robot_key_body_euler.reshape(self.num_envs, 1, -1),
+                base_lin_vel_local.reshape(self.num_envs, 1, -1),
+                base_ang_vel_local.reshape(self.num_envs, 1, -1),
+                # self.robot_base_body_pos.reshape(self.num_envs, 1, -1),
+                # quat_to_6d(self.robot_base_body_quat).reshape(self.num_envs, 1, -1),
+
                 door_to_base_link_pos,
-                rel_robot_key_body_pos,
+                # door_to_palm_link_pos,
+                # self.door_link_pos.reshape(self.num_envs, 1, -1),
                 self.door_joint_pos[:, self._door_joint_idx].unsqueeze(dim = 1),
-                self.door_joint_vel[:, self._door_joint_idx].unsqueeze(dim = 1),
+                # self.door_joint_vel[:, self._door_joint_idx].unsqueeze(dim = 1),
+                self.ref_door_joint_pos[:, self._door_joint_idx].to(self.door_joint_pos).unsqueeze(dim = 1),
+
+                self.ref_robot_key_body_pos_twist.reshape(self.num_envs, 1, -1),
+                self.ref_robot_key_body_quat_twist.reshape(self.num_envs, 1, -1),
+                self.ref_door_joint_pos_twist.reshape(self.num_envs, 1, -1),
+                (self.ref_robot_base_joint_pos_twist - self.joint_pos[:,self._robot_base_dof_idx].unsqueeze(dim = 1)).reshape(self.num_envs, 1, -1),
+                (self.ref_robot_arm_joint_pos_twist - self.joint_pos[:,self._robot_arm_dof_idx].unsqueeze(dim = 1)).reshape(self.num_envs, 1, -1),
+                door_twist_in_robot_base_frame,
+                # self.ref_door_body_pos_twist.reshape(self.num_envs, 1, -1),
+                # frame_idx.unsqueeze(dim = -1),
+                # contact_forces_door1,
+                # contact_forces_door2,
+                # contact_forces_robot_palm_center,
             ),
             dim=-1,
         )
         observations = {"policy": obs.squeeze()}
         return observations
 
+
+    def normalize_to_base_frame(
+        self, 
+        base_pos: torch.Tensor,       # (N, 3) Current base position
+        base_quat: torch.Tensor,      # (N, 4) Current base orientation
+        current_pos: torch.Tensor,    # (N, B, 3) Current key link positions
+        current_quat: torch.Tensor,   # (N, B, 4) Current key link orientations
+        target_pos: torch.Tensor,     # (N, T, B, 3) Future target positions (Twist)
+        target_quat: torch.Tensor     # (N, T, B, 4) Future target orientations (Twist)
+    ):
+        """
+        Calculates the positional and rotational errors between future targets 
+        and current link states, expressed in the robot's base frame.
+        """
+        N, T, B, _ = target_pos.shape
+
+        # ==========================================
+        # 1. POSITION ERROR (Expressed in Base Frame)
+        # ==========================================
+        # World-space error: P_err_world = P_target - P_current
+        curr_pos_exp = current_pos.unsqueeze(1)            # (N, 1, B, 3)
+        pos_err_world = target_pos - curr_pos_exp          # (N, T, B, 3)
+
+        # Rotate the world-space error vector into the base frame
+        base_quat_inv = quat_conjugate(base_quat).view(N, 1, 1, 4)
+        base_quat_inv_exp = base_quat_inv.expand(N, T, B, 4)
+
+        pos_err_base = quat_apply(
+            base_quat_inv_exp.reshape(-1, 4), 
+            pos_err_world.reshape(-1, 3)
+        )
+        pos_err_base = pos_err_base.view(N, T, B, 3)
+
+        # ==========================================
+        # 2. ORIENTATION ERROR
+        # ==========================================
+        # The relative rotation required to get from current_quat to target_quat.
+        # Q_err = Q_current_inv * Q_target
+        curr_quat_inv = quat_conjugate(current_quat).unsqueeze(1) # (N, 1, B, 4)
+        curr_quat_inv_exp = curr_quat_inv.expand(N, T, B, 4)
+
+        quat_err = quat_mul(
+            curr_quat_inv_exp.reshape(-1, 4),
+            target_quat.reshape(-1, 4)
+        )
+        quat_err = quat_err.view(N, T, B, 4)
+
+        return pos_err_base, quat_err
+
+    def transform_key_bodies_to_base_frame(
+        self,
+        robot_key_body_pos: torch.Tensor,       # (num_envs, num_bodies, 3)
+        robot_key_body_quat: torch.Tensor,      # (num_envs, num_bodies, 4)
+        robot_body_lin_vel: torch.Tensor,       # (num_envs, num_bodies, 3)
+        robot_body_ang_vel: torch.Tensor,       # (num_envs, num_bodies, 3)
+        robot_base_id_in_key_body_idx: int,     # index of tidybot_base_link
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Transform robot key body observations from World Frame to Robot Base Frame.
+        
+        Args:
+            robot_key_body_pos: World frame positions of key bodies
+            robot_key_body_quat: World frame orientations (quaternions, xyzw)
+            robot_body_lin_vel: World frame linear velocities
+            robot_body_ang_vel: World frame angular velocities
+            robot_base_id_in_key_body_idx: Index of base link in key body list
+        
+        Returns:
+            Tuple containing:
+                - body_pos_rel: (num_envs, num_bodies, 3) Positions in Base Frame
+                - body_euler_rel: (num_envs, num_bodies, 3) Orientations in Base Frame
+                - base_lin_vel_local: (num_envs, 3) Base linear velocity in Base Frame
+                - base_ang_vel_local: (num_envs, 3) Base angular velocity in Base Frame
+        """
+        N = robot_key_body_pos.shape[0]
+        B = robot_key_body_pos.shape[1]
+
+        # ---------------------------------------------------
+        # 1. Extract base pose
+        # ---------------------------------------------------
+        base_pos = robot_key_body_pos[:, robot_base_id_in_key_body_idx, :]        # (N,3)
+        base_quat = robot_key_body_quat[:, robot_base_id_in_key_body_idx, :]      # (N,4)
+
+        base_quat_inv = quat_conjugate(base_quat)                        # (N,4)
+
+        # ---------------------------------------------------
+        # 2. Position transform
+        # P_local = R^T (P_world - P_base)
+        # ---------------------------------------------------
+        pos_diff = robot_key_body_pos - base_pos.unsqueeze(1)      # (N,B,3)
+
+        base_quat_inv_exp = base_quat_inv.unsqueeze(1).expand(-1, B, -1)
+        body_pos_rel = quat_apply(base_quat_inv_exp, pos_diff)
+
+        # ---------------------------------------------------
+        # 3. Orientation transform
+        # Q_local = Q_base_inv * Q_body
+        # ---------------------------------------------------
+        body_quat_rel = quat_mul(base_quat_inv_exp, robot_key_body_quat)
+
+        # ---------------------------------------------------
+        # 4. Base velocities (express in base frame)
+        # ---------------------------------------------------
+        base_lin_vel_world = robot_body_lin_vel[:, robot_base_id_in_key_body_idx, :]
+        base_ang_vel_world = robot_body_ang_vel[:, robot_base_id_in_key_body_idx, :]
+
+        base_lin_vel_local = quat_apply(base_quat_inv, base_lin_vel_world)
+        base_ang_vel_local = quat_apply(base_quat_inv, base_ang_vel_world)
+
+        # ---------------------------------------------------
+        # 5. Remove base link from outputs
+        # ---------------------------------------------------
+        keep_mask = torch.ones(B, dtype=torch.bool, device=robot_key_body_pos.device)
+        keep_mask[robot_base_id_in_key_body_idx] = False
+
+        body_pos_rel = body_pos_rel[:, keep_mask, :]
+        body_quat_rel = body_quat_rel[:, keep_mask, :]
+
+        return (
+            body_pos_rel,          # (N, B-1, 3)
+            quat_to_6d(body_quat_rel),         # (N, B-1, 6)
+            base_lin_vel_local,    # (N, 3)
+            base_ang_vel_local,    # (N, 3)
+        )
+
+    def compute_door_keypoints(
+        self,
+    ) -> torch.Tensor:
+        """
+        Compute 5 keypoints:
+            - 2 from joint 0 (handle offsets)
+            - 3 from joint 1 (board offsets)
+
+        Returns:
+            keypoints_w: [B, 5, 3]
+        """
+
+        # ---- Joint 0 (handle) ----
+        pos0 = self.door_link_pos[:, self.door_body_names.index("link_2"), :]         # [B, 3]
+        quat0 = self.door_link_quat[:, self.door_body_names.index("link_2"), :]       # [B, 4]
+
+        # reshape for batched quat_apply
+        handle_offsets_flat = self.handle_offsets.reshape(-1, 3)           # [B*2, 3]
+        quat0_rep = quat0.unsqueeze(1).repeat(1, 2, 1).reshape(-1, 4) # [B*2, 4]
+
+        handle_rot = quat_apply(quat0_rep.float(), handle_offsets_flat.float())       # [B*2, 3]
+        handle_rot = handle_rot.reshape(self.num_envs, 2, 3)
+
+        handle_kpts = pos0.unsqueeze(1) + handle_rot                  # [B, 2, 3]
+
+        # ---- Joint 1 (board) ----
+        pos1 = self.door_link_pos[:, self.door_body_names.index("link_1"), :]
+        quat1 = self.door_link_quat[:, self.door_body_names.index("link_1"), :]
+
+        board_offsets_flat = self.board_offsets.reshape(-1, 3)             # [B*3, 3]
+        quat1_rep = quat1.unsqueeze(1).repeat(1, 3, 1).reshape(-1, 4) # [B*3, 4]
+
+        board_rot = quat_apply(quat1_rep.float(), board_offsets_flat.float())         # [B*3, 3]
+        board_rot = board_rot.reshape(self.num_envs, 3, 3)
+
+        board_kpts = pos1.unsqueeze(1) + board_rot                    # [B, 3, 3]
+
+        # ---- Concatenate ----
+        keypoints_w = torch.cat([handle_kpts, board_kpts], dim=1)     # [self.num_envs, 5, 3]
+
+        return keypoints_w
+
     def _get_intermediate_values(self):
         self.robot_key_body_pos = self.robot.data.body_pos_w[:, self._robot_key_body_idx]\
              - self.scene.env_origins.repeat((1, 1)).reshape(self.num_envs, 1, 3)
         self.robot_key_body_quat = self.robot.data.body_quat_w[:, self._robot_key_body_idx]
+
+        self.robot_base_body_pos = self.robot_key_body_pos[:, self._robot_base_id_in_key_body_idx]
+        self.robot_base_body_quat = self.robot_key_body_quat[:, self._robot_base_id_in_key_body_idx]
+
+        self.robot_palm_body_pos = self.robot_key_body_pos[:, self._robot_palm_id_in_key_body_idx]
+        self.robot_palm_body_quat = self.robot_key_body_quat[:, self._robot_palm_id_in_key_body_idx]
+
         self.robot_reset_key_body_pos = self.robot.data.body_pos_w[:, self._robot_reset_key_body_idx]\
              - self.scene.env_origins.repeat((1, 1)).reshape(self.num_envs, 1, 3)
+
         self.robot_base_joint_pos = self.robot.data.joint_pos[:, self._robot_base_dof_idx]
         self.robot_arm_joint_pos = self.robot.data.joint_pos[:, self._robot_arm_dof_idx]
         self.robot_finger_joint_pos = self.robot.data.joint_pos[:, self._robot_finger_dof_idx]
         self.door_joint_pos = self.door.data.joint_pos
+        # self.door_joint_vel = self.door.data.joint_vel
         self.robot_base_joint_vel = self.robot.data.joint_vel[:, self._robot_base_dof_idx]
         self.robot_arm_joint_vel = self.robot.data.joint_vel[:, self._robot_arm_dof_idx]
         self.robot_finger_joint_vel = self.robot.data.joint_vel[:, self._robot_finger_dof_idx]
 
-        self.ref_robot_key_body_pos = self.ref_motion_lib.get_robot_body_pos()[:, self._robot_key_body_idx]
-        self.ref_robot_key_body_quat = self.ref_motion_lib.get_robot_body_quat()[:, self._robot_key_body_idx]
-        self.ref_robot_reset_key_body_pos = self.ref_motion_lib.get_robot_body_pos()[:, self._robot_reset_key_body_idx]
+        self.door_base_link_pos = self.door.data.body_pos_w[:, self._door_base_link_idx]
+        self.door_base_link_quat = self.door.data.body_quat_w[:, self._door_base_link_idx]
+        self.door_link_pos = self.door.data.body_pos_w[:, self._door_body_idx]
+        self.door_link_pos -= self.scene.env_origins.repeat((1, 1)).reshape(self.num_envs, 1, 3)
+        self.door_link_quat = self.door.data.body_quat_w[:, self._door_body_idx]
+        # self.door_keypoints = self.compute_door_keypoints()
+        self.robot_body_lin_vel = self.robot.data.body_link_lin_vel_w[:, self._robot_key_body_idx]
+        self.robot_body_ang_vel = self.robot.data.body_link_ang_vel_w[:, self._robot_key_body_idx]
+        # print("door keypoints: ", self.compute_door_keypoints())
+        # print("door link pos: ", self.door_link_pos)
+
+        self.ref_robot_key_body_pos_twist = self.ref_motion_lib.get_robot_body_pos_twist()[:, :, self.ref_key_body_idx]
+        # It is a misnomer, we are actually sending euler angles as it might be more friendly to MLP
+        self.ref_robot_key_body_quat_twist = self.ref_motion_lib.get_robot_body_quat_twist()[:, :, self.ref_key_body_idx]
+        self.ref_robot_key_body_pos_twist, self.ref_robot_key_body_quat_twist = self.normalize_to_base_frame(
+            self.robot_base_body_pos.squeeze(),
+            self.robot_base_body_quat.squeeze(),
+            self.robot_key_body_pos, 
+            self.robot_key_body_quat, 
+            self.ref_robot_key_body_pos_twist, 
+            self.ref_robot_key_body_quat_twist
+        )
+        # self.ref_robot_key_body_pos_twist, self.ref_robot_key_body_quat_twist = self.normalize_to_base_frame(self.robot_base_body_pos, self.robot_base_body_quat, self.ref_robot_key_body_pos_twist, self.ref_robot_key_body_quat_twist)
+        self.ref_robot_key_body_quat_twist = quat_to_6d(self.ref_robot_key_body_quat_twist)
+        self.ref_robot_joint_pos_twist = self.ref_motion_lib.get_robot_joint_pos_twist()
+        self.ref_robot_base_joint_pos_twist = self.ref_robot_joint_pos_twist[:, :, self.ref_base_joint_idx]
+        self.ref_robot_arm_joint_pos_twist = self.ref_robot_joint_pos_twist[:, :, self.ref_arm_joint_idx]
+        self.ref_door_joint_pos_twist = self.ref_motion_lib.get_door_joint_pos_twist()
+
+        # self.ref_robot_key_body_pos = self.ref_motion_lib.get_robot_body_pos()[:, self._robot_key_body_idx]
+        # self.ref_robot_key_body_quat = self.ref_motion_lib.get_robot_body_quat()[:, self._robot_key_body_idx]
+        # self.ref_robot_reset_key_body_pos = self.ref_motion_lib.get_robot_body_pos()[:, self._robot_reset_key_body_idx]
+        self.ref_robot_key_body_pos = self.ref_motion_lib.get_robot_body_pos()[:, self.ref_key_body_idx]
+        self.ref_robot_key_body_quat = self.ref_motion_lib.get_robot_body_quat()[:, self.ref_key_body_idx]
+        self.ref_robot_reset_key_body_pos = self.ref_motion_lib.get_robot_body_pos()[:, self.ref_reset_key_body_idx]
         self.ref_robot_joint_pos = self.ref_motion_lib.get_robot_joint_pos()
-        self.ref_robot_base_joint_pos = self.ref_robot_joint_pos[:, self._robot_base_dof_idx]
-        self.ref_robot_arm_joint_pos = self.ref_robot_joint_pos[:, self._robot_arm_dof_idx]
-        self.ref_robot_finger_joint_pos = self.ref_robot_joint_pos[:, self._robot_finger_dof_idx]
+        self.ref_robot_base_joint_pos = self.ref_robot_joint_pos[:, self.ref_base_joint_idx]
+        self.ref_robot_arm_joint_pos = self.ref_robot_joint_pos[:, self.ref_arm_joint_idx]
+        self.ref_robot_finger_joint_pos = self.ref_robot_joint_pos[:, self.ref_finger_joint_idx]
+        self.ref_joint_vel = self.ref_motion_lib.get_robot_joint_vel()
+        self.ref_robot_base_joint_vel = self.ref_joint_vel[:, self.ref_base_joint_idx]
+        self.ref_robot_arm_joint_vel = self.ref_joint_vel[:, self.ref_arm_joint_idx]
+        self.ref_robot_finger_joint_vel = self.ref_joint_vel[:, self.ref_finger_joint_idx]
         self.ref_door_joint_pos = self.ref_motion_lib.get_door_joint_pos()
-        self.ref_robot_base_joint_vel = self.ref_motion_lib.get_robot_joint_vel()[:, self._robot_base_dof_idx]
-        self.ref_robot_arm_joint_vel = self.ref_motion_lib.get_robot_joint_vel()[:, self._robot_arm_dof_idx]
-        self.ref_robot_finger_joint_vel = self.ref_motion_lib.get_robot_joint_vel()[:, self._robot_finger_dof_idx]
+        self.ref_hinge_contact_mask = self.ref_motion_lib.get_hinge_contact_mask()
+        self.ref_door_body_pos_twist = self.ref_motion_lib.get_door_body_pos_twist()
+        self.ref_robot_body_lin_vel = self.ref_motion_lib.get_robot_body_lin_vel()[:, self.ref_key_body_idx] / self.cfg.sim_dt
+        self.ref_robot_body_ang_vel = self.ref_motion_lib.get_robot_body_ang_vel()[:, self.ref_key_body_idx] / self.cfg.sim_dt
 
     def _get_rewards(self) -> torch.Tensor:
         self._get_intermediate_values()
 
+        # key_body_pos_err, key_body_quat_err, door_err, root_pos_err, root_rot_err, arm_joint_pos_err, finger_joint_pos_err, base_joint_vel_err, arm_joint_vel_err, finger_joint_vel_err, door_pos_err = compute_tracking_error(
         key_body_pos_err, key_body_quat_err, door_err, base_joint_pos_err, arm_joint_pos_err, finger_joint_pos_err, base_joint_vel_err, arm_joint_vel_err, finger_joint_vel_err = compute_tracking_error(
             robot_key_body_pos = self.robot_key_body_pos,
             robot_key_body_quat = self.robot_key_body_quat,
@@ -211,17 +552,29 @@ class DooropeningEnv(DirectRLEnv):
             ref_robot_finger_joint_vel = self.ref_robot_finger_joint_vel,
         )
 
-        self.extras["error/key_body_pos_err"] = key_body_pos_err.mean()
-        self.extras["error/key_body_quat_err"] = key_body_quat_err.mean()
-        self.extras["error/door_err"] = door_err.mean()
-        self.extras["error/base_joint_pos_err"] = base_joint_pos_err.mean()
-        self.extras["error/arm_joint_pos_err"] = arm_joint_pos_err.mean()
-        self.extras["error/finger_joint_pos_err"] = finger_joint_pos_err.mean()
+        self.extras["error/key_body_pos_err"] = math.sqrt(key_body_pos_err.mean().item())
+        self.extras["error/key_body_quat_err"] = math.sqrt(key_body_quat_err.mean().item())
+        self.extras["error/door_err"] = math.sqrt(door_err.mean().item())
+        self.extras["error/base_joint_pos_err"] = math.sqrt(base_joint_pos_err.mean().item() / len(self.cfg.base_joints))
+        self.extras["error/arm_joint_pos_err"] = math.sqrt(arm_joint_pos_err.mean().item() / len(self.cfg.arm_joints))
+        self.extras["error/finger_joint_pos_err"] = math.sqrt(finger_joint_pos_err.mean().item() / len(self.cfg.finger_joints))
         # self.extras["error/base_joint_vel_err"] = base_joint_vel_err.mean()
         # self.extras["error/arm_joint_vel_err"] = arm_joint_vel_err.mean()
         # self.extras["error/finger_joint_vel_err"] = finger_joint_vel_err.mean()
 
-        return compute_deep_mimic_rewards(
+        progress = min(self.step_count / self.reset_progress_total, 1.0)
+        alpha = 1 - 0.1**(2 ** (2.0 - 4.0 * progress))
+        probs = torch.tensor(
+            [(1 - alpha) * (alpha ** i) for i in range(self.ref_motion_lib.key_indices.shape[1])],
+            device=self.ref_motion_lib.key_indices.device
+        )
+        probs = probs / probs.sum()
+        self.extras["reset/prob_get_first_key_frame"] = probs[0]
+
+        # contact_forces_robot_palm_center = self.scene.sensors["contact_forces_robot_palm_center"].data.net_forces_w
+        contact_forces_door2 = self.scene.sensors["contact_forces_door2"].data.net_forces_w
+
+        deep_mimic_reward = compute_deep_mimic_rewards(
             robot_key_body_pos = self.robot_key_body_pos, 
             robot_key_body_quat = self.robot_key_body_quat, 
             door_joint_pos = self.door_joint_pos,
@@ -231,6 +584,8 @@ class DooropeningEnv(DirectRLEnv):
             robot_base_joint_vel = self.robot_base_joint_vel,
             robot_arm_joint_vel = self.robot_arm_joint_vel,
             robot_finger_joint_vel = self.robot_finger_joint_vel,
+            robot_body_lin_vel = self.robot_body_lin_vel,
+            robot_body_ang_vel = self.robot_body_ang_vel,
 
             ref_robot_key_body_pos = self.ref_robot_key_body_pos, 
             ref_robot_key_body_quat = self.ref_robot_key_body_quat, 
@@ -241,6 +596,8 @@ class DooropeningEnv(DirectRLEnv):
             ref_robot_base_joint_vel = self.ref_robot_base_joint_vel,
             ref_robot_arm_joint_vel = self.ref_robot_arm_joint_vel,
             ref_robot_finger_joint_vel = self.ref_robot_finger_joint_vel,
+            ref_robot_body_lin_vel = self.ref_robot_body_lin_vel,
+            ref_robot_body_ang_vel = self.ref_robot_body_ang_vel,
 
             robot_key_body_pos_scale = self.robot_key_body_pos_scale, 
             robot_key_body_quat_scale = self.robot_body_quat_scale,
@@ -251,6 +608,8 @@ class DooropeningEnv(DirectRLEnv):
             robot_base_joint_vel_scale = self.robot_base_joint_vel_scale,
             robot_arm_joint_vel_scale = self.robot_arm_joint_vel_scale,
             robot_finger_joint_vel_scale = self.robot_finger_joint_vel_scale,
+            robot_body_lin_vel_scale = self.robot_body_lin_vel_scale,
+            robot_body_ang_vel_scale = self.robot_body_ang_vel_scale,
 
             robot_key_body_pos_w = self.robot_key_body_pos_w, 
             robot_key_body_quat_w = self.robot_body_quat_w,
@@ -261,11 +620,51 @@ class DooropeningEnv(DirectRLEnv):
             robot_base_joint_vel_w = self.robot_base_joint_vel_w,
             robot_arm_joint_vel_w = self.robot_arm_joint_vel_w,
             robot_finger_joint_vel_w = self.robot_finger_joint_vel_w,
+            robot_body_lin_vel_w = self.robot_body_lin_vel_w,
+            robot_body_ang_vel_w = self.robot_body_ang_vel_w,
+
+            contact_forces = contact_forces_door2,
+            contact_force_w = self.hinge_contact_reward_w * self.ref_hinge_contact_mask,
         )
 
+        # 1. Base Alive Reward: Small constant for staying in the safety tunnel
+        alive_base = self.alive_base 
+        
+        # 2. Difficulty Bonus: Extra points for staying alive during contact
+        # self.ref_hinge_contact_mask is 1.0 when grasping/pulling
+        alive_bonus = self.alive_bonus * self.ref_hinge_contact_mask.squeeze()
+        
+        total_alive_reward = alive_base + alive_bonus
+
+        # 3. Combine with tracking reward and termination penalty
+        is_killed, _ = self._get_dones()
+        termination_penalty = self.termination_penalty
+        
+        final_reward = deep_mimic_reward + total_alive_reward
+        final_reward = torch.where(is_killed, final_reward + termination_penalty, final_reward)
+
+        return final_reward
+
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        time_out = self.episode_length_buf >= self.max_trial_steps - 1
+        if not self.early_stopping:
+            return False, time_out
         self._get_intermediate_values()
-        key_body_pos_err, key_body_quat_err, door_err, base_joint_pos_err, arm_joint_pos_err, finger_joint_pos_err, _, _, _ = compute_tracking_error(
+        progress = min(self.step_count / self.reset_progress_total, 1.0)
+        reset_key_body_pos_delta = self.reset_key_body_pos_delta_min + (self.reset_key_body_pos_delta_max - self.reset_key_body_pos_delta_min) * progress
+        reset_key_body_quat_delta = self.reset_key_body_quat_delta_min + (self.reset_key_body_quat_delta_max - self.reset_key_body_quat_delta_min) * progress
+        reset_door_joint_pos_delta = self.reset_door_joint_pos_delta_min + (self.reset_door_joint_pos_delta_max - self.reset_door_joint_pos_delta_min) * progress
+        self.extras["reset/reset_key_body_pos_delta"] = reset_key_body_pos_delta
+        self.extras["reset/reset_key_body_quat_delta"] = reset_key_body_quat_delta
+        self.extras["reset/reset_door_joint_pos_delta"] = reset_door_joint_pos_delta
+        # reset_key_body_pos_delta = reset_key_body_pos_delta ** 2 * len(self.cfg.robot_reset_key_bodies)
+        # reset_key_body_quat_delta = reset_key_body_quat_delta ** 2 * len(self.cfg.robot_reset_key_bodies)
+        # reset_door_joint_pos_delta = reset_door_joint_pos_delta ** 2 * len(self.cfg.door_joint_names)
+        reset_key_body_pos_delta = reset_key_body_pos_delta ** 2
+        reset_key_body_quat_delta = reset_key_body_quat_delta ** 2
+        reset_door_joint_pos_delta = reset_door_joint_pos_delta ** 2
+        # key_body_pos_err, key_body_quat_err, door_err, root_pos_err, root_rot_err, arm_joint_pos_err, finger_joint_pos_err, base_joint_vel_err, arm_joint_vel_err, finger_joint_vel_err, door_pos_err = compute_tracking_error(
+        key_body_pos_err, key_body_quat_err, door_err, base_joint_pos_err, arm_joint_pos_err, finger_joint_pos_err, base_joint_vel_err, arm_joint_vel_err, finger_joint_vel_err = compute_tracking_error(
             robot_key_body_pos = self.robot_reset_key_body_pos,
             robot_key_body_quat = self.robot_key_body_quat,
             door_joint_pos = self.door_joint_pos,
@@ -286,20 +685,25 @@ class DooropeningEnv(DirectRLEnv):
             ref_robot_arm_joint_vel = self.ref_robot_arm_joint_vel,
             ref_robot_finger_joint_vel = self.ref_robot_finger_joint_vel,
         )
-        time_out = self.episode_length_buf >= self.max_trial_steps - 1
-        # print(arm_joint_pos_err, finger_joint_pos_err, base_joint_pos_err)
-        # warm_up = self.episode_length_buf >= 20
         return \
-            (base_joint_pos_err > self.reset_base_pos_delta) | \
-            (key_body_pos_err > self.reset_key_body_pos_delta) | \
-            (key_body_quat_err > self.reset_key_body_quat_delta), \
+            (key_body_pos_err > reset_key_body_pos_delta) | \
+            (key_body_quat_err > reset_key_body_quat_delta) | \
+            (door_err > reset_door_joint_pos_delta), \
             time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
 
-        reset_frame_idx = self.ref_motion_lib.reset(env_ids)
+        # Optional: change static friction and dynamic friction of the robot
+        if not hasattr(self, "_initialized_materials"):
+            props = self.robot.root_physx_view.get_material_properties().to(self.device)
+            props[..., 0] = 3.0
+            props[..., 1] = 1.5
+            self.robot.root_physx_view.set_material_properties(props.cpu(), torch.arange(self.num_envs, device="cpu"))
+            self._initialized_materials = True
+
+        reset_frame_idx = self.ref_motion_lib.reset(env_ids, step_count=self.step_count, reset_progress_total=self.reset_progress_total)
         self.max_trial_steps[env_ids] = ((self.ref_motion_lib.num_frames - reset_frame_idx) // self.ref_motion_lib.velocity).long()
 
         deep_mimic_initial_joint_pos = self.ref_motion_lib.get_robot_joint_pos(env_ids)
@@ -308,20 +712,24 @@ class DooropeningEnv(DirectRLEnv):
         default_root_state = self.robot.data.default_root_state[env_ids]
         default_root_state[:, :3] += self.scene.env_origins[env_ids]
 
-        # self.joint_pos[env_ids] = self.robot.data.default_joint_pos[env_ids]
-        self.joint_vel[env_ids] = deep_mimic_initial_joint_vel.to(self.joint_vel)
-        # print(deep_mimic_initial_joint_pos.shape)
-        self.joint_pos[env_ids] = deep_mimic_initial_joint_pos.to(self.joint_pos)
+        self.joint_pos[env_ids] = self.robot.data.default_joint_pos[env_ids]
+        self.joint_vel[env_ids] = self.robot.data.default_joint_vel[env_ids]
+        self.joint_vel[env_ids[:, None], self._robot_dof_idx[None, :]] = deep_mimic_initial_joint_vel.to(self.joint_vel)[..., self.ref_robot_dof_idx]
+        self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]] = deep_mimic_initial_joint_pos.to(self.joint_pos)[..., self.ref_robot_dof_idx]
 
         self.robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
-        self.robot.write_joint_state_to_sim(self.joint_pos[env_ids], self.joint_vel[env_ids], None, env_ids)
+        # self.robot.write_joint_state_to_sim(self.joint_pos[env_ids], self.joint_vel[env_ids], None, env_ids,)
+        self.robot.write_joint_position_to_sim(self.joint_pos[env_ids], None, env_ids)
         self.robot.set_joint_position_target(self.joint_pos[env_ids], env_ids=env_ids)
 
         door_joint_pos = self.ref_motion_lib.get_door_joint_pos(env_ids).to(self.door.data.joint_pos)
 
         self.door.write_joint_position_to_sim(door_joint_pos, None, env_ids)
+        self.door.set_joint_position_target(torch.zeros_like(door_joint_pos), None, env_ids)
 
+        # self.last_actions[env_ids] = 0.0
+        self.robot_dof_targets[env_ids, :] = self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]]
         super()._reset_idx(env_ids)
 
 @torch.jit.script
@@ -335,6 +743,8 @@ def compute_deep_mimic_rewards(
     robot_base_joint_vel: torch.Tensor,
     robot_arm_joint_vel: torch.Tensor,
     robot_finger_joint_vel: torch.Tensor,
+    robot_body_lin_vel: torch.Tensor,
+    robot_body_ang_vel: torch.Tensor,
 
     ref_robot_key_body_pos: torch.Tensor,
     ref_robot_key_body_quat: torch.Tensor,
@@ -345,6 +755,8 @@ def compute_deep_mimic_rewards(
     ref_robot_base_joint_vel: torch.Tensor,
     ref_robot_arm_joint_vel: torch.Tensor,
     ref_robot_finger_joint_vel: torch.Tensor,
+    ref_robot_body_lin_vel: torch.Tensor,
+    ref_robot_body_ang_vel: torch.Tensor,
 
     robot_key_body_pos_scale: float,
     robot_key_body_quat_scale: float,
@@ -355,6 +767,8 @@ def compute_deep_mimic_rewards(
     robot_base_joint_vel_scale: float,
     robot_arm_joint_vel_scale: float,
     robot_finger_joint_vel_scale: float,
+    robot_body_lin_vel_scale: float,
+    robot_body_ang_vel_scale: float,
 
     robot_key_body_pos_w: float,
     robot_key_body_quat_w: float,
@@ -365,6 +779,11 @@ def compute_deep_mimic_rewards(
     robot_base_joint_vel_w: float,
     robot_arm_joint_vel_w: float,
     robot_finger_joint_vel_w: float,
+    robot_body_lin_vel_w: float,
+    robot_body_ang_vel_w: float,
+
+    contact_force_w: torch.Tensor,
+    contact_forces: torch.Tensor,
 ) -> torch.Tensor:
     # ----------------------------------
     # Robot body position error
@@ -374,6 +793,18 @@ def compute_deep_mimic_rewards(
     key_body_pos_err = torch.sum(key_body_pos_diff * key_body_pos_diff, dim=-1)  # [B, N]
     key_body_pos_err = torch.sum(key_body_pos_err, dim=-1)
 
+    if robot_body_lin_vel_w != 0:
+        robot_body_lin_vel_diff = ref_robot_body_lin_vel - robot_body_lin_vel
+        robot_body_lin_vel_err = torch.sum(robot_body_lin_vel_diff * robot_body_lin_vel_diff, dim=-1)  # [B, N]
+        robot_body_lin_vel_err = torch.sum(robot_body_lin_vel_err, dim=-1)
+    else:
+        robot_body_lin_vel_err = None
+    if robot_body_ang_vel_w != 0:
+        robot_body_ang_vel_diff = ref_robot_body_ang_vel - robot_body_ang_vel
+        robot_body_ang_vel_err = torch.sum(robot_body_ang_vel_diff * robot_body_ang_vel_diff, dim=-1)  # [B, N]
+        robot_body_ang_vel_err = torch.sum(robot_body_ang_vel_err, dim=-1)
+    else:
+        robot_body_ang_vel_err = None
     # ----------------------------------
     # Robot body orientation error
     # ----------------------------------
@@ -383,16 +814,16 @@ def compute_deep_mimic_rewards(
     # ----------------------------------
     # Door joint error
     # ----------------------------------
-    door_diff = ref_door_joint_pos - door_joint_pos
+    door_diff = hinge_angle_diff(ref_door_joint_pos, door_joint_pos)
     door_err = torch.sum(door_diff * door_diff, dim=-1)  # [B]
     # ----------------------------------
     # Robot joint position error
     # ----------------------------------
     base_joint_pos_diff = ref_robot_base_joint_pos - robot_base_joint_pos
-    arm_joint_pos_diff = ref_robot_arm_joint_pos - robot_arm_joint_pos
     base_joint_pos_err = torch.sum(base_joint_pos_diff * base_joint_pos_diff, dim=-1)  # [B]
+    arm_joint_pos_diff = hinge_angle_diff(ref_robot_arm_joint_pos, robot_arm_joint_pos)
     arm_joint_pos_err = torch.sum(arm_joint_pos_diff * arm_joint_pos_diff, dim=-1)  # [B]
-    finger_joint_pos_diff = ref_robot_finger_joint_pos - robot_finger_joint_pos
+    finger_joint_pos_diff = hinge_angle_diff(ref_robot_finger_joint_pos, robot_finger_joint_pos)
     finger_joint_pos_err = torch.sum(finger_joint_pos_diff * finger_joint_pos_diff, dim=-1)  # [B]
 
     base_joint_vel_diff = ref_robot_base_joint_vel - robot_base_joint_vel
@@ -414,6 +845,16 @@ def compute_deep_mimic_rewards(
     base_joint_vel_r = torch.exp(-robot_base_joint_vel_scale * base_joint_vel_err)
     arm_joint_vel_r = torch.exp(-robot_arm_joint_vel_scale * arm_joint_vel_err)
     finger_joint_vel_r = torch.exp(-robot_finger_joint_vel_scale * finger_joint_vel_err)
+    if robot_body_lin_vel_err is not None:
+        robot_body_lin_vel_r = torch.exp(-robot_body_lin_vel_scale * robot_body_lin_vel_err)
+    else:
+        robot_body_lin_vel_r = torch.zeros_like(key_body_pos_r)
+    if robot_body_ang_vel_err is not None:
+        robot_body_ang_vel_r = torch.exp(-robot_body_ang_vel_scale * robot_body_ang_vel_err)
+    else:
+        robot_body_ang_vel_r = torch.zeros_like(key_body_pos_r)
+
+    contact_reward = torch.where(torch.norm(contact_forces, dim=-1) > 1, 1.0, 0.0).squeeze()
     # ----------------------------------
     # Final reward
     # ----------------------------------
@@ -425,7 +866,10 @@ def compute_deep_mimic_rewards(
          + robot_finger_joint_pos_w * finger_joint_pos_r\
          + robot_base_joint_vel_w * base_joint_vel_r\
          + robot_arm_joint_vel_w * arm_joint_vel_r\
-         + robot_finger_joint_vel_w * finger_joint_vel_r
+         + robot_finger_joint_vel_w * finger_joint_vel_r\
+         + robot_body_lin_vel_w * robot_body_lin_vel_r\
+         + robot_body_ang_vel_w * robot_body_ang_vel_r\
+         + contact_force_w * contact_reward
     return reward
 
 def compute_tracking_error(
@@ -455,24 +899,36 @@ def compute_tracking_error(
     # [B, N, 3]
     key_body_pos_diff = ref_robot_key_body_pos - robot_key_body_pos
     key_body_pos_err = torch.sum(key_body_pos_diff * key_body_pos_diff, dim=-1)  # [B, N]
-    key_body_pos_err = torch.sum(key_body_pos_err, dim=-1)
+    # print("key_body_pos_diff: ", key_body_pos_err)
+    key_body_pos_err = torch.max(key_body_pos_err, dim=-1).values
+    # print("key_body_pos_err: ", key_body_pos_err)
     # ----------------------------------
     # Robot body orientation error
     # ----------------------------------
     # [B, N]
     key_body_quat_diff = quat_diff_angle(robot_key_body_quat, ref_robot_key_body_quat)
-    key_body_quat_err = torch.sum(key_body_quat_diff * key_body_quat_diff, dim=-1)  # [B]
+    # print("key_body_quat_diff: ", key_body_quat_diff)
+    # key_body_quat_err = torch.sum(key_body_quat_diff * key_body_quat_diff, dim=-1)  # [B]
+    key_body_quat_err = torch.max(key_body_quat_diff * key_body_quat_diff, dim=-1).values
+    # print("key_body_quat_err: ", key_body_quat_err)
     # ----------------------------------
     # Door joint error
     # ----------------------------------
     door_diff = ref_door_joint_pos - door_joint_pos
-    door_err = torch.sum(door_diff * door_diff, dim=-1)  # [B]
+    # print("door_diff: ", door_diff)
+    # door_err = torch.sum(door_diff * door_diff, dim=-1)  # [B]
+    door_err = torch.max(door_diff * door_diff, dim=-1).values
+    # print("door_err: ", door_err)
     # ----------------------------------
     # Robot joint position error
     # ----------------------------------
     base_joint_pos_diff = ref_robot_base_joint_pos - robot_base_joint_pos
-    arm_joint_pos_diff = ref_robot_arm_joint_pos - robot_arm_joint_pos
     base_joint_pos_err = torch.sum(base_joint_pos_diff * base_joint_pos_diff, dim=-1)  # [B]
+    # root_pos_diff = ref_robot_base_joint_pos[:, :2] - robot_base_joint_pos[:, :2]
+    # root_pos_err = torch.sum(root_pos_diff * root_pos_diff, dim=-1)  # [B]
+    # root_rot_diff = hinge_angle_diff(ref_robot_base_joint_pos[:, 2:], robot_base_joint_pos[:, 2:])
+    # root_rot_err = torch.sum(root_rot_diff * root_rot_diff, dim=-1)  # [B]
+    arm_joint_pos_diff = ref_robot_arm_joint_pos - robot_arm_joint_pos
     arm_joint_pos_err = torch.sum(arm_joint_pos_diff * arm_joint_pos_diff, dim=-1)  # [B]
     finger_joint_pos_diff = ref_robot_finger_joint_pos - robot_finger_joint_pos
     finger_joint_pos_err = torch.sum(finger_joint_pos_diff * finger_joint_pos_diff, dim=-1)  # [B]

@@ -17,15 +17,77 @@ import torch
 import isaaclab.sim as sim_utils
 from isaaclab.actuators.actuator_cfg import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg, Articulation
+from DoorOpening.constants.env_constants import DOOR_INITIAL_POS, DOOR_INITIAL_ROT
+import json
+from DoorOpening.utils.urdf_utils import compute_exact_door_keypoints
 
-def create_door_cfg(asset_path: str, training_mode: bool = False) -> ArticulationCfg:
-    """Helper to create an ArticulationCfg from a URDF path."""
-    return ArticulationCfg(
-        spawn=sim_utils.UrdfFileCfg(
+def load_meta_data(board_meta_data_paths: str, handle_meta_data_paths: str, device: str = "cuda" if torch.cuda.is_available() else "cpu"):
+    """
+    Load the meta data from the json files.
+    """
+    handle_bboxes = []
+    board_bboxes = []
+
+    for handle_path, board_path in zip(handle_meta_data_paths, board_meta_data_paths):
+
+        # ----- Handle -----
+        with open(handle_path, "r") as f:
+            handle_data = json.load(f)
+
+        handle_min = handle_data["handle_min"]
+        handle_max = handle_data["handle_max"]
+
+        # xyzxyz format
+        handle_bbox = torch.tensor(handle_min + handle_max,
+                                dtype=torch.float32,
+                                device=device)
+
+        handle_bboxes.append(handle_bbox)
+
+        # ----- Board -----
+        with open(board_path, "r") as f:
+            board_data = json.load(f)
+
+        board_min = board_data["min"]
+        board_max = board_data["max"]
+
+        board_bbox = torch.tensor(board_min + board_max,
+                                dtype=torch.float32,
+                                device=device)
+
+        board_bboxes.append(board_bbox)
+    
+    return handle_bboxes, board_bboxes
+
+def create_initial_state():
+    return ArticulationCfg.InitialStateCfg(
+        pos=DOOR_INITIAL_POS,
+        rot=DOOR_INITIAL_ROT
+    )
+
+def create_actuators():
+    return {
+        "joint_1": ImplicitActuatorCfg(
+            joint_names_expr=["joint_1"],
+            stiffness=5,
+            damping=1,
+        ),
+        "joint_2": ImplicitActuatorCfg(
+            joint_names_expr=["joint_2"],
+            stiffness=2.5,
+            damping=1,
+        ),
+    }
+
+def create_urdf_door_cfg(asset_path: str, training_mode: bool = False):
+    return sim_utils.UrdfFileCfg(
             fix_base=True,
-            merge_fixed_joints=False,
+            merge_fixed_joints=True,
             make_instanceable=False,
             asset_path=asset_path,
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                max_depenetration_velocity=1.0,
+            ),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 enabled_self_collisions=False,
                 solver_position_iteration_count=8,
@@ -35,52 +97,67 @@ def create_door_cfg(asset_path: str, training_mode: bool = False) -> Articulatio
                 gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
             ),
             # Note: joint_drive is usually not needed for URDF; PD gains can be in actuators
-            scale = (1.0, 1.2, 0.95),
+            # scale = (1.0, 1.2, 1.1),
             activate_contact_sensors=True,
-            collider_type = "convex_hull" if training_mode else "convex_decomposition"
-        ),
+            collider_type = "convex_hull" if training_mode else "convex_decomposition",
+            collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.03, rest_offset=0.0),
+    )
+
+def create_door_cfg(asset_path: str, training_mode: bool = False) -> ArticulationCfg:
+    """Helper to create an ArticulationCfg from a URDF path."""
+    return ArticulationCfg(
+        spawn=create_urdf_door_cfg(asset_path, training_mode),
         # spawn=sim_utils.UsdFileCfg(
         #     usd_path=asset_path,
         #     scale = (1.0, 1.2, 0.95),
         #     activate_contact_sensors=True,
         # ),
-        init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 1.0),
-            rot=(0, 0, 0, 1)
-            # rot=(0, -0.7071, 0, 0.7071)
-        ),
-        actuators={
-            "joint_1": ImplicitActuatorCfg(
-                joint_names_expr=["joint_1"],
-                stiffness=100,
-                damping=10,
-            ),
-            "joint_2": ImplicitActuatorCfg(
-                joint_names_expr=["joint_2"],
-                stiffness=2.5,
-                damping=1,
-            ),
-        },
+        init_state=create_initial_state(),
+        actuators=create_actuators(),
     )
 
 
 root_path = os.path.dirname(os.path.dirname(__file__))
-asset_base_folder = os.path.join(root_path, "door/PartNetv2")
+asset_base_folder = os.path.join(root_path, "door/PartNetv4")
 asset_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/mobility.urdf"), recursive=True))
+board_offsets = []
+handle_offsets = []
 
-# An example of door urdf
+for asset_path in asset_paths:
+    keypoints = compute_exact_door_keypoints(asset_path)
+    board_offsets.append(keypoints["link_1"])
+    handle_offsets.append(keypoints["link_2"])
+
+board_offsets = torch.tensor(board_offsets)
+handle_offsets = torch.tensor(handle_offsets)
+
+motion_traj_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/traj.pkl"), recursive=True))
+
 door_asset_path = asset_paths[0]
-
+board_offset = board_offsets[0]
+handle_offset = handle_offsets[0]
 print("door_asset_path: ", door_asset_path)
 
 DOOR_CONFIG = create_door_cfg(door_asset_path, training_mode=False)
 
-def setup_doors():
+DOOR_CONFIGS = []
+for asset_path in asset_paths:
+    DOOR_CONFIGS.append(create_door_cfg(asset_path, training_mode=False))
+
+def setup_doors(training_mode: bool = False):
     """Load all door cfg"""
-    door_configs = []
+    door_urdf_configs = []
     for asset_path in asset_paths:
-        door_configs.append(create_door_cfg(asset_path))
-    return door_configs
+        door_urdf_configs.append(create_urdf_door_cfg(asset_path, training_mode=training_mode))
+    return ArticulationCfg(
+        spawn=sim_utils.MultiAssetSpawnerCfg(
+            assets_cfg=door_urdf_configs,
+            random_choice=False,
+            activate_contact_sensors=True,
+        ),
+        init_state=create_initial_state(),
+        actuators=create_actuators(),
+    )
 
 ALL_DOOR_CONFIGS = setup_doors()
 
@@ -89,6 +166,8 @@ def edit_door_articulation(
     door: Articulation, 
     door_closed_range = 0.01,     # radians
     hinge_range = 0.4,
+    # Optional: disable the latching behavior by setting the hinge range to a negative value
+    # hinge_range = -0.1,
 ):
     joint_idx, joint_names = door.find_joints(["joint_1", "joint_2"])
     j1 = joint_idx[joint_names.index("joint_1")]

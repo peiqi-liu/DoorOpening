@@ -1,4 +1,5 @@
 import torch
+from isaaclab.utils.math import matrix_from_quat, euler_xyz_from_quat
 
 @torch.jit.script
 def quat_pos(x):
@@ -66,7 +67,49 @@ def quat_diff_angle(q0, q1):
     _, angle = quat_to_axis_angle(dq)
     return angle
 
-if __name__ == "__main__":
-    q0 = torch.randn(10, 4)
-    q1 = torch.randn(10, 4)
-    print(quat_diff_angle(q0, q1))
+def hinge_angle_diff(theta_a, theta_b):
+    diff = theta_b - theta_a
+    err = torch.remainder(diff + torch.pi, 2 * torch.pi) - torch.pi
+    return torch.abs(err)
+
+def quat_to_6d(quat_twist):
+    """
+    Convert quaternion to 6d representation
+    Input: quaternion: (..., 4)
+    Output: 6d: (..., 6)
+    """
+    quat = quat_twist  # (..., 4)
+
+    # Flatten batch dims
+    orig_shape = quat.shape[:-1]
+    quat_flat = quat.reshape(-1, 4)
+
+    # Convert
+    matrix = matrix_from_quat(quat_flat)
+    
+    representation = matrix[..., :, :2].reshape(*matrix.shape[:-2], 6)
+
+    return representation
+
+def quat_to_euler(quat_twist):
+    """
+    Convert quaternion to euler
+    Input: quaternion: (..., 4)
+    Output: euler: (..., 3)
+    """
+    quat = quat_twist  # (..., 4)
+
+    # Flatten batch dims
+    orig_shape = quat.shape[:-1]
+    quat_flat = quat.reshape(-1, 4)
+
+    # Convert
+    roll, pitch, yaw = euler_xyz_from_quat(quat_flat)
+
+    # Stack to (..., 3)
+    euler = torch.stack((roll, pitch, yaw), dim=-1)
+
+    # Restore original batch shape
+    euler = euler.view(*orig_shape, 3)
+
+    return euler

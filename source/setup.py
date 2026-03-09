@@ -24,7 +24,11 @@ INSTALL_REQUIRES = [
     "open3d",
     "geometrout",
     "trimesh",
-    "usd_core"
+    "usd_core",
+    "bpy",
+    "scipy",
+    "viser",
+    "yourdfpy"
 ]
 
 # Installation operation

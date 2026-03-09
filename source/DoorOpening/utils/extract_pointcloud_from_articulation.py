@@ -1044,12 +1044,42 @@ class FrankaLeapSampler:
         idx = np.random.choice(pc.shape[1], num_points, replace=False)
         return pc[:, idx, :]
 
-sampler = None
+    def sample_link_set(self, joint_angles, link_names, joint_mapping_list=None, num_points=None):
+        """
+        joint_angles: (B, 23) joint config
+        joint_mapping_list: list[int], optional mapping to torch_urdf ordering
+        link_names: list[str], optional list of link names to sample from
+        returns: (B, num_points, 3) world-frame pointcloud
+        """
+        if isinstance(link_names, str):
+            link_names = [link_names]
+        link_set = [l for l in self.links if l.name in link_names]
+
+        if joint_angles.ndim == 1:
+            joint_angles = joint_angles.unsqueeze(0)
+
+        if joint_mapping_list is not None:
+            joint_angles = joint_angles[:, joint_mapping_list]
+
+        fk = self.robot.visual_geometry_fk_batch(joint_angles)  # dict[geom] -> (B,4,4)
+        pcs = []
+
+        for l in link_set:
+            T = fk[l.visuals[0].geometry]  # (B,4,4)
+            pc = self.points[l.name].repeat(joint_angles.shape[0], 1, 1)  # (B,Ni,3)
+            pcs.append(transform_pointcloud(pc, T))
+
+        pc = torch.cat(pcs, dim=1)  # (B, totalN, 3)
+        if num_points is None:
+            return pc
+        idx = np.random.choice(pc.shape[1], num_points, replace=False)
+        return pc[:, idx, :]
 
 def sample_pointcloud(urdf_path, joint_angles, device = "cuda", verbose = False):
-    global sampler
-    if sampler is None or sampler.urdf_path != urdf_path:
-        sampler = FrankaLeapSampler(urdf_path, device)
+    if not isinstance(joint_angles, torch.Tensor):
+        joint_angles = torch.tensor(joint_angles, dtype=torch.float32)
+    joint_angles = joint_angles.to(device)
+    sampler = FrankaLeapSampler(urdf_path, device)
     pcd = sampler.sample(joint_angles)
 
     if verbose:
@@ -1057,9 +1087,20 @@ def sample_pointcloud(urdf_path, joint_angles, device = "cuda", verbose = False)
         print(f"Saved {pcd[0].shape[0]} points to pointcloud.ply")
     return pcd
 
+def sample_pointcloud_from_link_name(urdf_path, joint_angles, link_name, device = "cuda", verbose = False):
+    if not isinstance(joint_angles, torch.Tensor):
+        joint_angles = torch.tensor(joint_angles, dtype=torch.float32)
+    joint_angles = joint_angles.to(device)
+    sampler = FrankaLeapSampler(urdf_path, device)
+    pcd = sampler.sample_link_set(joint_angles, link_name)
+    if verbose:
+        tensor_to_ply(pcd[0], "pointcloud.ply")
+        print(f"Saved {pcd[0].shape[0]} points to pointcloud.ply")
+    return pcd
+
 if __name__ == "__main__":
-    urdf_path = "/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/door/PartNet/8893/mobility.urdf"
-    # urdf_path = "/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/glorbot/glorbot.urdf"
+    # urdf_path = "/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/door/PartNet/8893/mobility.urdf"
+    urdf_path = "/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/glorbot/glorbot.urdf"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     sampler = FrankaLeapSampler(urdf_path, device)
     joint_angles = torch.randn(1, 32, device=device)
@@ -1067,5 +1108,5 @@ if __name__ == "__main__":
     verbose = True
     if verbose:
         from DoorOpening.utils.point_utils import tensor_to_ply
-        tensor_to_ply(pcd[0], "points.ply")
+        tensor_to_ply(pcd[0], "points.pcd")
     print(pcd.shape)

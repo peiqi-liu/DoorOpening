@@ -61,7 +61,8 @@ from isaaclab.assets import ArticulationCfg
 from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, DEFAULT_JOINT_POS
 from DoorOpening.assets.door.door_cfg import DOOR_CONFIG, edit_door_articulation
 
-from DoorOpening.assets.glorbot.glorbot_cfg import FULL_JOINT_NAMES
+from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES
+from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
 
 from DoorOpening.motion.slider_controller import OmniJointController
 
@@ -90,8 +91,8 @@ class SensorsSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
             joint_pos=DEFAULT_JOINT_POS,
-            pos=(1.5, 0.0, 0.0),
-            rot=(0.0, 0.0, 0.0, 1.0)
+            pos=ROBOT_INITIAL_POS,
+            rot=ROBOT_INITIAL_ROT
         ),
     )
 
@@ -131,7 +132,6 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     # if this is not done, then the robots will be spawned at the (0, 0, 0) of the simulation world
     root_state = scene["robot"].data.default_root_state.clone()
     root_state[:, :3] += scene.env_origins
-    print("root state: ", root_state)
     scene["robot"].write_root_pose_to_sim(root_state[:, :7])
     scene["robot"].write_root_velocity_to_sim(root_state[:, 7:])
     joint_pos, joint_vel = (
@@ -169,9 +169,46 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
 
     # give controller access to marker
     controller.goal_marker = goal_marker
-    
 
+    body_idx, body_name = scene["robot"].find_bodies(["tidybot2_base_link", "panda_link2", "panda_link4", "panda_link6", "palm_center"])
+    print("body idx: ", body_idx)
+    print("body name: ", body_name)
+
+    print("robot body pos: ", scene["robot"].data.body_pos_w[:, body_idx])
+    print("robot body quat: ", scene["robot"].data.body_quat_w[:, body_idx])
+    
+    count = 0
+    # handle_cfg = FRAME_MARKER_CFG.replace(prim_path="/World/HandleFrame")
+    # handle_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)
+    # board_cfg = FRAME_MARKER_CFG.replace(prim_path="/World/BoardFrame")
+    # board_cfg.markers["frame"].scale = (0.3, 0.3, 0.3)
     while simulation_app.is_running():
+        print(scene["robot"].data.body_link_vel_w[:, body_idx])
+        
+        # if count % 20 == 0:
+        #     from DoorOpening.assets.door.door_cfg import handle_offset, board_offset
+        #     from isaaclab.utils.math import quat_apply
+        #     handle_offset = handle_offset.to(scene["door"].data.body_pos_w)
+        #     board_offset = board_offset.to(scene["door"].data.body_pos_w)
+        #     # print("handle_offsets: ", handle_offset)
+        #     # print("board_offsets: ", board_offset)
+        #     translation = scene["door"].data.body_pos_w[:, scene["door"].find_bodies("link_2")[0]].squeeze(0)
+        #     quaternion = scene["door"].data.body_quat_w[:, scene["door"].find_bodies("link_2")[0]].squeeze(0)
+        #     keypoint_pos_w = translation + quat_apply(quaternion, handle_offset[1]).squeeze(0)
+        #     # translation = scene["door"].data.body_pos_w[:, scene["door"].find_bodies("link_1")[0]].squeeze(0)
+        #     # quaternion = scene["door"].data.body_quat_w[:, scene["door"].find_bodies("link_1")[0]].squeeze(0)
+        #     # keypoint_pos_w = translation + quat_apply(quaternion, board_offset[1]).squeeze(0)
+        #     # board_marker = VisualizationMarkers(board_cfg)
+        #     # board_marker.visualize(
+        #     #     translations=keypoint_pos_w,
+        #     #     orientations=quaternion,
+        #     # )
+        #     handle_marker = VisualizationMarkers(handle_cfg)
+        #     handle_marker.visualize(
+        #         translations=keypoint_pos_w,
+        #         orientations=quaternion,
+        #     )
+        count += 1
         slider_pos = controller.q_slider.clone()
         joint_pos = scene["robot"].data.default_joint_pos.clone()
         joint_pos[..., :] = slider_pos
@@ -208,18 +245,24 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             qd = controller.qd[controller.play_idx]
             joint_vel = scene["robot"].data.default_joint_vel.clone()
             joint_vel[..., :] = qd
+            # if controller.play_idx == 0:
+            #     scene["robot"].write_joint_state_to_sim(joint_pos, joint_vel)
+            # else:
+            #     scene["robot"].set_joint_velocity_target(joint_vel)
+            #     scene["robot"].set_joint_position_target(joint_pos)
             scene["robot"].write_joint_state_to_sim(joint_pos, joint_vel)
-            # scene["robot"].write_joint_velocity_to_sim(joint_vel)
-            # scene["robot"].write_joint_position_to_sim(joint_pos)
 
             door_q = controller.door_traj[controller.play_idx]
             door_joint_pos = scene["door"].data.default_joint_pos.clone()
             door_joint_pos[..., :] = door_q
+            # scene["door"].write_joint_position_to_sim(door_joint_pos)
+            # scene["door"].set_joint_position_target(door_joint_pos)
             scene["door"].write_joint_position_to_sim(door_joint_pos)
 
-            # controller.door_joint_pos_traj.append(scene["door"].data.joint_pos.squeeze().cpu().clone())
+            # Write these poses data to the controller so it can be saved to pickle later
             controller.robot_body_pos_traj.append(scene["robot"].data.body_pos_w.squeeze().cpu().clone())
             controller.robot_body_quat_traj.append(scene["robot"].data.body_quat_w.squeeze().cpu().clone())
+            controller.door_pos_traj.append(scene["door"].data.body_pos_w.squeeze().cpu().clone())
 
             controller.play_idx += 1
             if controller.play_idx >= len(controller.traj):
@@ -249,6 +292,13 @@ def main():
     scene = InteractiveScene(scene_cfg)
     # Play the simulator
     sim.reset()
+    print("material properties: ", scene["robot"].root_physx_view.get_material_properties())
+    material_properties = scene["robot"].root_physx_view.get_material_properties()
+    print("material properties: ", material_properties.shape)
+    material_properties[..., 0] = 2.0
+    material_properties[..., 1] = 1.5
+    env_ids = torch.arange(scene.num_envs, device="cpu")
+    scene["robot"].root_physx_view.set_material_properties(material_properties, env_ids)
     # Now we are ready!
     print("[INFO]: Setup complete...")
     # Run the simulator

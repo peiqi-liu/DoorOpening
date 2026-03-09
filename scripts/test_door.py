@@ -3,30 +3,9 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""
-This script demonstrates how to add and simulate on-board sensors for a robot.
-
-We add the following sensors on the quadruped robot, ANYmal-C (ANYbotics):
-
-* USD-Camera: This is a camera sensor that is attached to the robot's base.
-* Height Scanner: This is a height scanner sensor that is attached to the robot's base.
-* Contact Sensor: This is a contact sensor that is attached to the robot's feet.
-
-.. code-block:: bash
-
-    # Usage
-    ./isaaclab.sh -p scripts/tutorials/04_sensors/add_sensors_on_robot.py --enable_cameras
-
-"""
-
-"""Launch Isaac Sim Simulator first."""
-
-from operator import truediv
-import os
 import argparse
 
 from isaaclab.app import AppLauncher
-import numpy as np
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Tutorial on adding sensors on a robot.")
@@ -57,8 +36,7 @@ from isaaclab.utils import configclass
 
 from isaaclab.assets import ArticulationCfg
 
-from DoorOpening.assets.door.door_cfg import DOOR_CONFIG
-from DoorOpening.assets.door.create_door_cfg import BASIC_DOOR_CFG
+from DoorOpening.assets.door.door_cfg import ALL_DOOR_CONFIGS
 
 
 torch.set_printoptions(precision=4, sci_mode=False)
@@ -75,8 +53,8 @@ class SensorsSceneCfg(InteractiveSceneCfg):
         spawn=sim_utils.DomeLightCfg(intensity=3000.0),
     )
 
-    door : ArticulationCfg = BASIC_DOOR_CFG.replace(
-        prim_path="/World/envs/env_0/Door",
+    door : ArticulationCfg = ALL_DOOR_CONFIGS.replace(
+        prim_path="{ENV_REGEX_NS}/Door",
     )
 
 def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
@@ -122,18 +100,17 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             scene.reset()
             # print("joint_pos: ", scene["door"].data.joint_pos)
 
-        door_target_pos = scene["door"].data.joint_pos_limits[..., 1]
-        # scene["door"].set_joint_position_target(door_target_pos)
-        scene["door"].write_joint_position_to_sim(door_target_pos)
-        if count % 100 == 0:
-            print("joint_pos: ", scene["door"].data.joint_pos)
-            # print("door pos: ", scene["door"].data.body_pos_w)
-            # print("effort_limit_sim: ", scene["door"].data.effort_limit_sim)
-            # print("velocity_limit_sim: ", scene["door"].data.velocity_limit_sim)
-            # print("position_limit_sim: ", scene["door"].data.position_limit_sim)
-            # print("velocity_limit_sim: ", scene["door"].data.velocity_limit_sim)
-            # print("velocity_limit_sim: ", scene["door"].data.velocity_limit_sim)
-            print("joint_pos_target: ", door_target_pos)
+        # door_target_pos = (scene["door"].data.joint_pos_limits[..., 1] - scene["door"].data.soft_joint_pos_limits[..., 0]) * ((count % 500) / 500) + scene["door"].data.soft_joint_pos_limits[..., 0]
+        # scene["door"].write_joint_position_to_sim(door_target_pos)
+        # if count % 100 == 0:
+        #     print("joint_pos: ", scene["door"].data.joint_pos)
+        #     print("door pos: ", scene["door"].data.body_pos_w)
+        #     print("effort_limit_sim: ", scene["door"].data.effort_limit_sim)
+        #     print("velocity_limit_sim: ", scene["door"].data.velocity_limit_sim)
+        #     print("position_limit_sim: ", scene["door"].data.position_limit_sim)
+        #     print("velocity_limit_sim: ", scene["door"].data.velocity_limit_sim)
+        #     print("velocity_limit_sim: ", scene["door"].data.velocity_limit_sim)
+        #     print("joint_pos_target: ", door_target_pos)
         scene.write_data_to_sim()
 
 
@@ -155,7 +132,7 @@ def main():
     # Set main camera
     sim.set_camera_view(eye=[3.0, 0.0, 3.0], target=[0.0, 0.0, 0.5])
     # Design scene
-    scene_cfg = SensorsSceneCfg(num_envs=args_cli.num_envs, env_spacing=2.0)
+    scene_cfg = SensorsSceneCfg(num_envs=args_cli.num_envs, env_spacing=2.0, replicate_physics=False)
     scene = InteractiveScene(scene_cfg)
     # Play the simulator
     sim.reset()

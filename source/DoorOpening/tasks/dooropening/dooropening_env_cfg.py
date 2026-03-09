@@ -3,9 +3,19 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, CAMERA_JOINT_DEFAULT_VALUES
-from DoorOpening.assets.door.door_cfg import DOOR_CONFIG
-
+from DoorOpening.assets.door.door_cfg import DOOR_CONFIG, ALL_DOOR_CONFIGS
+from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG
+from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
+from DoorOpening.constants.door_constants import DOOR_BODY_NAMES, DOOR_JOINT_NAMES
+from DoorOpening.constants.robot_constants import (
+    CAMERA_JOINT_DEFAULT_VALUES,
+    CLOSE_FINGER_JOINT_VALUES,
+    OPEN_FINGER_JOINT_VALUES,
+    ROBOT_KEY_BODY_NAMES,
+    ROBOT_RESET_KEY_BODY_NAMES,
+    ROBOT_PALM_LINK_NAME,
+    ROBOT_BASE_BODY_LINK_NAME,
+)
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
@@ -15,17 +25,19 @@ from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMater
 
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.envs.common import ViewerCfg
+import torch
+from isaaclab.sensors import ContactSensorCfg
 
 @configclass
 class DooropeningEnvCfg(DirectRLEnvCfg):
-    sim_dt = 1/120.
-    decimation = 2
+    sim_dt = 1/60.
+    decimation = 1
     episode_length_s = 10.
     num_sim_steps_to_render=2
     # - spaces definition
     state_space = 0
 
-    viewer: ViewerCfg = ViewerCfg(eye=(1.5, 1.5, 1.0), lookat=(0.0, 0.0, 0.7), origin_type="env")
+    viewer: ViewerCfg = ViewerCfg(eye=(1.5, -2.0, 1.0), lookat=(0.4, 0.0, 0.7), origin_type="env")
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
@@ -61,85 +73,191 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         'panda_joint7',
     ]
 
+    # finger_joints = [
+    #     'finger_joint_0',
+    #     'finger_joint_1',
+    #     'finger_joint_2',
+    #     'finger_joint_3',
+    #     'finger_joint_4',
+    #     'finger_joint_5',
+    #     'finger_joint_6',
+    #     'finger_joint_7',
+    #     'finger_joint_8',
+    #     'finger_joint_9',
+    #     'finger_joint_10',
+    #     'finger_joint_11',
+    #     'finger_joint_12',
+    #     'finger_joint_13',
+    #     'finger_joint_14',
+    #     'finger_joint_15',
+    # ]
+
     finger_joints = [
-        'finger_joint_0',
         'finger_joint_1',
         'finger_joint_2',
         'finger_joint_3',
-        'finger_joint_4',
         'finger_joint_5',
         'finger_joint_6',
         'finger_joint_7',
-        'finger_joint_8',
         'finger_joint_9',
         'finger_joint_10',
         'finger_joint_11',
+    ]
+
+    abduction_joints = [
+        # actual abduction joints
+        'finger_joint_0',
         'finger_joint_12',
+        'finger_joint_4',
+        'finger_joint_8',
+        # additional joints we want to fix at default position
+        'finger_joint_3',
+        'finger_joint_7',
+        'finger_joint_11',
         'finger_joint_13',
         'finger_joint_14',
         'finger_joint_15',
     ]
 
-    door_body_names = ["link_1", "link_2"]
+    contact_forces_door1 = ContactSensorCfg(
+        prim_path="/World/envs/env_.*/Door/link_1",
+        update_period=0.0,
+        history_length=6,
+        debug_vis=True,
+        filter_prim_paths_expr=["/World/envs/env_.*/Robot", "/World/envs/env_.*/Door/link_2"],
+    )
 
-    door_joint_names = ["joint_1", "joint_2"]
+    contact_forces_door2 = ContactSensorCfg(
+        prim_path="/World/envs/env_.*/Door/link_2",
+        update_period=0.02,
+        history_length=1,
+        debug_vis=False,
+        filter_prim_paths_expr=[
+            "/World/envs/env_.*/Robot/palm_center", 
+            "/World/envs/env_.*/Robot/palm_lower", 
+            "/World/envs/env_.*/Robot/mcp_joint_1", 
+            "/World/envs/env_.*/Robot/pip_1", 
+            "/World/envs/env_.*/Robot/dip_1", 
+            "/World/envs/env_.*/Robot/realtip_1",
+            "/World/envs/env_.*/Robot/fingertip_1",
+            "/World/envs/env_.*/Robot/mcp_joint_2", 
+            "/World/envs/env_.*/Robot/pip_2", 
+            "/World/envs/env_.*/Robot/dip_2", 
+            "/World/envs/env_.*/Robot/realtip_2", 
+            "/World/envs/env_.*/Robot/fingertip_2",
+            "/World/envs/env_.*/Robot/mcp_joint_3", 
+            "/World/envs/env_.*/Robot/pip_3", 
+            "/World/envs/env_.*/Robot/dip_3", 
+            "/World/envs/env_.*/Robot/realtip_3", 
+            "/World/envs/env_.*/Robot/fingertip_3",
+        ],
+    )
 
-    robot_key_bodies = ["base_x_link", "panda_link4", "panda_link6", "palm_center"]
-    robot_reset_key_bodies = ["base_x_link", "panda_link4", "palm_center"]
+    contact_forces_robot_palm_center = ContactSensorCfg(
+        prim_path="/World/envs/env_.*/Robot/palm_center",
+        update_period=0.0,
+        history_length=6,
+        debug_vis=True,
+        filter_prim_paths_expr=["/World/envs/env_.*/Door/link_2"],
+    )
+
+    # contact_sensor_names = ["contact_forces_door1", "contact_forces_door2", "contact_forces_robot_palm_center"]
+    contact_sensor_names = ["contact_forces_door2"]
+
+    close_finger_joints = CLOSE_FINGER_JOINT_VALUES
+
+    open_finger_joints = OPEN_FINGER_JOINT_VALUES
+
+    door_body_names = DOOR_BODY_NAMES
+
+    door_base_frame_name = "base"
+
+    door_joint_names = DOOR_JOINT_NAMES
+
+    robot_key_bodies = ROBOT_KEY_BODY_NAMES
+    robot_reset_key_bodies = ROBOT_RESET_KEY_BODY_NAMES
+
+    robot_palm_link_name = ROBOT_PALM_LINK_NAME
+    robot_base_body_link_name = ROBOT_BASE_BODY_LINK_NAME
 
     # robot(s)
     robot_cfg: ArticulationCfg = GLORBOT_CONFIG.replace(
         prim_path="/World/envs/env_.*/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
             joint_pos=CAMERA_JOINT_DEFAULT_VALUES,
-            pos=(1.5, 0.0, 0.0),
-            rot=(0.0, 0.0, 0.0, 1.0)
+            pos=ROBOT_INITIAL_POS,
+            rot=ROBOT_INITIAL_ROT
         ),
     )
 
+    twist_indices = [1, 5, 20]
+
     # door(s)
-    door_cfg: ArticulationCfg = DOOR_CONFIG.replace(prim_path="/World/envs/env_.*/Door")
+    door_cfg: ArticulationCfg = ALL_DOOR_CONFIGS.replace(prim_path="/World/envs/env_.*/Door")
 
     actuated_joints_num = len(arm_joints) + len(base_joints) + len(finger_joints)
     action_space = actuated_joints_num * 1
-    observation_space = actuated_joints_num * 2 + len(door_body_names) * 3 + len(robot_key_bodies) * 3 + len(door_joint_names) * 2
-
+    # action_space = len(arm_joints) + len(base_joints) + 4
+    # observation_space = actuated_joints_num * 2 + len(door_body_names) * 3 + len(robot_key_bodies) * 3 * 2 + len(door_joint_names) + len(door_joint_names) + len(contact_sensor_names) * 3
+    observation_space = \
+        actuated_joints_num * 2 +\
+        len(door_body_names) * 3 +\
+        len(arm_joints) + len(base_joints) +\
+        (len(robot_key_bodies) - 1) * (3 + 6) + 6 +\
+        len(robot_key_bodies) * 3 +\
+        len(door_joint_names) * 2 +\
+        len(twist_indices) * (len(robot_key_bodies) * 3 + len(robot_key_bodies) * 6 + 3 + len(door_joint_names) + len(arm_joints) + len(base_joints)) +\
+        actuated_joints_num
+    #  5 * 3 +\
+    
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=6.0, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=False)
 
     base_action_scale = 1.0
     arm_action_scale = 0.6
     finger_action_scale = 0.5
 
     # Deep Mimic Reward Parameters
-    robot_body_quat_w = 3.0
+    robot_body_quat_w = 1.0
     robot_key_body_pos_w = 2.0
-    robot_base_joint_pos_w = 2.0
-    robot_arm_joint_pos_w = 5.0
+    robot_base_joint_pos_w = 3.0
+    robot_arm_joint_pos_w = 3.0
     robot_finger_joint_pos_w = 1.0
     robot_base_joint_vel_w = 1.0
     robot_arm_joint_vel_w = 2.0
     robot_finger_joint_vel_w = 0.5
-    # robot_base_joint_vel_w = 0.0
-    # robot_arm_joint_vel_w = 0.0
-    # robot_finger_joint_vel_w = 0.0
     door_joint_pos_w = 4.0
+    hinge_contact_reward_w = 1.0
+    robot_body_lin_vel_w = 1.0
+    robot_body_ang_vel_w = 0.5
 
     robot_body_quat_scale = 1.0
     robot_key_body_pos_scale = 3.0
     robot_base_joint_pos_scale = 0.5
-    robot_arm_joint_pos_scale = 0.01
-    robot_finger_joint_pos_scale = 0.05
+    robot_arm_joint_pos_scale = 0.2
+    robot_finger_joint_pos_scale = 1.0
     robot_base_joint_vel_scale = 0.5
     robot_arm_joint_vel_scale = 0.5
     robot_finger_joint_vel_scale = 0.5
     door_joint_pos_scale = 5.0
+    robot_body_lin_vel_scale = 10.0
+    robot_body_ang_vel_scale = 10.0
 
-    reset_base_pos_delta = 0.1
-    reset_key_body_pos_delta = 0.2
-    reset_key_body_quat_delta = 1.0
+    reset_key_body_pos_delta_min = 0.3
+    reset_key_body_quat_delta_min = 1.5
+    reset_key_body_pos_delta_max = 0.9
+    reset_key_body_quat_delta_max = 3.0
+    reset_door_joint_pos_delta_min = 0.5
+    reset_door_joint_pos_delta_max = 0.8
+    # We are slowly increasing our tolerance on base position drift and slowly only resettting the env from the first key frame
+    # This variable is used to indicate when we stop increasing the tolerance and reset the env from the first key frame for the greatest probability
+    reset_progress_total = 7e5
 
-    velocity = 0.4
+    alive_base = 10.0
+    alive_bonus = 20.0
+    termination_penalty = -100.0
+
+    velocity = 1.0
 
     # Change this to where you store your motions
     motion_file = "trajectory.pkl"

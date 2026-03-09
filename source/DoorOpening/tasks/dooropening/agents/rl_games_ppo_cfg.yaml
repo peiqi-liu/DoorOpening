@@ -4,7 +4,7 @@ params:
   # environment wrapper clipping
   env:
     # added to the wrapper
-    clip_observations: 1.0
+    clip_observations: 3.0
     # can make custom wrapper?
     clip_actions: 1.0
 
@@ -30,7 +30,7 @@ params:
           val: 0
         fixed_sigma: True
     mlp:
-      units: [1024, 512, 256]
+      units: [512, 512, 256, 128]
       activation: elu
       d2rl: False
 
@@ -60,18 +60,18 @@ params:
     tau : 0.95
     learning_rate: 5e-4
     lr_schedule: adaptive
-    kl_threshold: 0.008
-    score_to_win: 20000
+    kl_threshold: 0.02
+    score_to_win: 50000
     max_epochs: 500
     save_best_after: 50
-    save_frequency: 25
+    save_frequency: 100
     grad_norm: 1.0
     entropy_coef: 0.0
     truncate_grads: True
     e_clip: 0.2
-    horizon_length: 64
+    horizon_length: 32
     minibatch_size: 16384
-    mini_epochs: 8
+    mini_epochs: 4
     critic_coef: 4
     clip_value: True
     seq_length: 8
