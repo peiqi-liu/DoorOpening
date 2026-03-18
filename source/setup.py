@@ -28,7 +28,7 @@ INSTALL_REQUIRES = [
     "bpy",
     "scipy",
     "viser",
-    "yourdfpy"
+    "yourdfpy",
 ]
 
 # Installation operation

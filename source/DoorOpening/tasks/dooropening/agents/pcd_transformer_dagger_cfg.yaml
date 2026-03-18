@@ -1,0 +1,85 @@
+hidden_dim: 256
+type_dim: 8
+dropout: 0.0
+chunk_size: 1
+
+normalize_state: True
+normalize_action: True
+action_space: "absolute"
+action_dim: 19
+
+aux_weight: 0.1
+aux_prediction_mode: "delta"
+aux_delta_scale: 0.01
+
+door_pcd_num_points: 10000
+local_pcd_range: [1.5, 0.25, 0.25]
+x_direction_cutoff: -0.5
+
+pcd_encoders_cfg:
+  local_pcd_t:
+    type: "pointnet"
+    num_output_tokens: 128
+    num_points: [3000, 0, 0]
+    use_pcd: true
+
+state_encoders_cfg:
+  q_base:
+    input_dim: 3
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  q_arm:
+    input_dim: 7
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  q_hand:
+    input_dim: 9
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  prev_action:
+    input_dim: 19
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  aux_object_state:
+    input_dim: 3
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  aux_door_joint_angle:
+    input_dim: 2
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+
+transformer_cfg:
+  type: "encoder_decoder"
+  encoder_layers: 6
+  decoder_layers: 6
+  encoder_heads: 8
+  decoder_heads: 8
+  encoder_dim_feedforward: 1024
+  decoder_dim_feedforward: 1024
+
+dagger:
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  num_iters: 100000
+  teacher_forcing_iters: 10000
+  log_interval: 100
+  save_interval: 5000
+  pointcloud_source: "sampler"
+  robot_num_points: 10000
+  sampler_render:
+    inflate_px: 2
+    jitter_std_m: 0.004
+    clip_mode: "post"
+    jitter_mode: "xyz"
+    use_compile: true
+  # debug_pointcloud_env_id: 0
+  wandb:
+    enabled: false

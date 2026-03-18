@@ -12,7 +12,7 @@ from DoorOpening.assets.door.door_cfg import edit_door_articulation
 from DoorOpening.utils.finger_utils import joint_angle_to_tendon_utils, tendon_to_joint_angle_utils, leap_joints_to_tendon
 from .dooropening_env_cfg import DooropeningEnvCfg
 from DoorOpening.assets.door.door_cfg import motion_traj_paths, handle_offsets, board_offsets
-from isaaclab.sensors import ContactSensor
+from isaaclab.sensors import Camera, ContactSensor
 from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES, ROBOT_KEY_BODY_NAMES
 from DoorOpening.utils.pose_utils import normalize_to_center_frame, world_to_local
 from isaaclab.utils.math import quat_conjugate, quat_apply, quat_mul
@@ -128,7 +128,7 @@ class DooropeningEnv(DirectRLEnv):
         self.handle_offsets = torch.stack(self.handle_offsets).to(self.device)
         self.board_offsets = torch.stack(self.board_offsets).to(self.device)
         env_to_file_map = [i % len(motion_traj_paths) for i in range(self.num_envs)]
-        self.ref_motion_lib = ReferenceMotionManager(num_envs=self.num_envs, device=self.device, velocity=self.cfg.velocity, reset_from_start = False, env_to_file_map=env_to_file_map, twist_indices=self.twist_indices)
+        self.ref_motion_lib = ReferenceMotionManager(num_envs=self.num_envs, device=self.device, velocity=self.cfg.velocity, reset_from_start = True, env_to_file_map=env_to_file_map, twist_indices=self.twist_indices)
         self.max_trial_steps = self.ref_motion_lib.num_frames * torch.ones_like(self.episode_length_buf, device=self.device)
 
         torch.set_printoptions(precision=4, sci_mode=False)
@@ -153,6 +153,10 @@ class DooropeningEnv(DirectRLEnv):
         # add articulation to scene
         self.scene.articulations["robot"] = self.robot
         self.scene.articulations["door"] = self.door
+        self.pointcloud_camera = None
+        if self.cfg.enable_pointcloud_camera:
+            self.pointcloud_camera = Camera(self.cfg.pointcloud_camera_cfg)
+            self.scene.sensors["pointcloud_camera"] = self.pointcloud_camera
         # self.scene.sensors["contact_forces_door1"] = ContactSensor(self.cfg.contact_forces_door1)
         self.scene.sensors["contact_forces_door2"] = ContactSensor(self.cfg.contact_forces_door2)
         # self.scene.sensors["contact_forces_robot_palm_center"] = ContactSensor(self.cfg.contact_forces_robot_palm_center)

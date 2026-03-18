@@ -26,7 +26,15 @@ from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMater
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.envs.common import ViewerCfg
 import torch
-from isaaclab.sensors import ContactSensorCfg
+import numpy as np
+from isaaclab.sensors import CameraCfg, ContactSensorCfg
+from isaaclab.utils.math import quat_from_euler_xyz
+
+import isaaclab.sim as sim_utils
+
+euler_angles = torch.tensor([-np.pi / 4, 0.0, 0])  # (roll, pitch, yaw) in radians
+POINTCLOUD_CAMERA_QUAT = quat_from_euler_xyz(euler_angles[0], euler_angles[1], euler_angles[2])
+POINTCLOUD_CAMERA_QUAT = tuple(POINTCLOUD_CAMERA_QUAT.tolist())
 
 @configclass
 class DooropeningEnvCfg(DirectRLEnvCfg):
@@ -163,6 +171,25 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     # contact_sensor_names = ["contact_forces_door1", "contact_forces_door2", "contact_forces_robot_palm_center"]
     contact_sensor_names = ["contact_forces_door2"]
+
+    enable_pointcloud_camera = False
+    pointcloud_camera_height = 480
+    pointcloud_camera_width = 640
+    pointcloud_camera_update_period = 0.1
+    pointcloud_camera_data_types = ["distance_to_image_plane"]
+    pointcloud_camera_cfg = CameraCfg(
+        prim_path="/World/envs/env_.*/Robot/x5_camera_link/cam",
+        update_period=pointcloud_camera_update_period,
+        update_latest_camera_pose=True,
+        height=pointcloud_camera_height,
+        width=pointcloud_camera_width,
+        data_types=pointcloud_camera_data_types,
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=8.0,
+            clipping_range=(0.1, 20.0),
+        ),
+        offset=CameraCfg.OffsetCfg(pos=(0.0, 0.0, 0.0), rot=POINTCLOUD_CAMERA_QUAT, convention="world"),
+    )
 
     close_finger_joints = CLOSE_FINGER_JOINT_VALUES
 

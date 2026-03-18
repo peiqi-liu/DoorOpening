@@ -71,3 +71,8 @@ tests/
 .isaac-lab-docker-history
 
 */assets/*/PartNet/*
+
+**/*.ply
+
+materials/
+pretrained_ckpts/
