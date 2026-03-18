@@ -20,7 +20,7 @@ pcd_encoders_cfg:
   local_pcd_t:
     type: "pointnet"
     num_output_tokens: 128
-    num_points: [3000, 0, 0]
+    num_points: [2500, 1000, 1000]
     use_pcd: true
 
 state_encoders_cfg:
