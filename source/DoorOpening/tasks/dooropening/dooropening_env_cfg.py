@@ -206,9 +206,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         (len(robot_key_bodies) - 1) * (3 + 6) + 6 +\
         len(robot_key_bodies) * 3 +\
         len(door_joint_names) * 2 +\
-        len(twist_indices) * (len(robot_key_bodies) * 3 + len(robot_key_bodies) * 6 + 3 + len(door_joint_names) + len(arm_joints) + len(base_joints)) +\
         actuated_joints_num
     #  5 * 3 +\
+    # len(twist_indices) * (len(robot_key_bodies) * 3 + len(robot_key_bodies) * 6 + 3 + len(door_joint_names) + len(arm_joints) + len(base_joints)) +\
     
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=False)
@@ -243,7 +243,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_body_lin_vel_scale = 10.0
     robot_body_ang_vel_scale = 10.0
 
-    reset_key_body_pos_delta_min = 0.3
+    reset_key_body_pos_delta_min = 0.5
     reset_key_body_quat_delta_min = 1.5
     reset_key_body_pos_delta_max = 0.9
     reset_key_body_quat_delta_max = 3.0
