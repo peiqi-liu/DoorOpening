@@ -139,6 +139,7 @@ class Dagger:
         self.completed_successes = deque(maxlen=self.games_to_track)
         self.completed_timeout_successes = deque(maxlen=self.games_to_track)
         self.episode_reached_last_frame = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.latest_env_metrics = {}
         self.student_update_steps = 0
         self.last_local_update_batch_size = 0
         self.last_global_update_batch_size = 0
@@ -875,6 +876,25 @@ class Dagger:
             return None
         return float(sum(values) / len(values))
 
+    def _to_loggable_scalar(self, value):
+        if isinstance(value, torch.Tensor):
+            if value.numel() != 1:
+                return None
+            return float(value.detach().cpu().item())
+        if isinstance(value, (int, float, bool)):
+            return float(value)
+        return None
+
+    def _collect_env_metrics(self, info):
+        metrics = {}
+        if isinstance(info, dict):
+            for key, value in info.items():
+                scalar = self._to_loggable_scalar(value)
+                if scalar is not None:
+                    metrics[key] = scalar
+
+        return metrics
+
     def _update_completed_episode_metrics(self, done_mask, timed_out):
         if done_mask.numel() == 0:
             return
@@ -974,6 +994,7 @@ class Dagger:
             metrics["timing/pointcloud_ms"] = timing_means["pointcloud_ms"]
         if timing_means["env_step_ms"] is not None:
             metrics["timing/env_step_ms"] = timing_means["env_step_ms"]
+        metrics.update(self.latest_env_metrics)
         self._wandb_log(metrics, step=iteration)
 
     def distill(self):
@@ -1035,9 +1056,10 @@ class Dagger:
                 self._update_last_frame_tracker()
                 self._sync_timing_device()
                 env_step_start_time = time.perf_counter()
-                obs, rew, out_of_reach, timed_out, _ = self.env.step(step_actions)
+                obs, rew, out_of_reach, timed_out, info = self.env.step(step_actions)
                 self._sync_timing_device()
                 self._record_timing("env_step_ms", time.perf_counter() - env_step_start_time)
+                self.latest_env_metrics = self._collect_env_metrics(info)
 
                 self.prev_actions_student[:] = step_actions
                 self.prev_actions_teacher[:] = step_actions
