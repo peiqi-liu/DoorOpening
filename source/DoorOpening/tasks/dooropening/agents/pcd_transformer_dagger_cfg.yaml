@@ -69,7 +69,10 @@ dagger:
   weight_decay: 1.0e-4
   grad_clip: 1.0
   num_iters: 1000000
-  teacher_forcing_iters: 50000
+  teacher_forcing_warmup_iters: 10000
+  teacher_forcing_transition_iters: 140000
+  teacher_forcing_schedule: "linear"
+  teacher_forcing_min_beta: 0.0
   log_interval: 100
   save_interval: 5000
   ignore_aux_debug: true

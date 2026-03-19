@@ -1,6 +1,7 @@
 import os
 import pathlib
 import time
+import math
 from collections import OrderedDict, deque
 from pathlib import Path
 
@@ -84,7 +85,15 @@ class Dagger:
         self.weight_decay = float(self.runtime_cfg.get("weight_decay", 1e-4))
         self.grad_clip = float(self.runtime_cfg.get("grad_clip", 1.0))
         self.num_iters = int(self.runtime_cfg.get("num_iters", 1_000_000))
-        self.teacher_forcing_iters = int(self.runtime_cfg.get("teacher_forcing_iters", 100_000))
+        self.teacher_forcing_warmup_iters = int(self.runtime_cfg.get("teacher_forcing_warmup_iters", 0))
+        self.teacher_forcing_transition_iters = int(
+            self.runtime_cfg.get(
+                "teacher_forcing_transition_iters",
+                self.runtime_cfg.get("teacher_forcing_iters", 100_000),
+            )
+        )
+        self.teacher_forcing_min_beta = float(self.runtime_cfg.get("teacher_forcing_min_beta", 0.0))
+        self.teacher_forcing_schedule = str(self.runtime_cfg.get("teacher_forcing_schedule", "linear")).lower()
         self.log_interval = int(self.runtime_cfg.get("log_interval", 100))
         self.save_interval = int(self.runtime_cfg.get("save_interval", 5_000))
         self.pointcloud_source = str(self.runtime_cfg.get("pointcloud_source", "sampler")).lower()
@@ -98,6 +107,14 @@ class Dagger:
         self.sampler_render_use_compile = bool(self.sampler_render_cfg.get("use_compile", True))
         if self.pointcloud_source not in {"sampler", "depth"}:
             raise ValueError(f"Unsupported pointcloud_source '{self.pointcloud_source}'.")
+        if self.teacher_forcing_warmup_iters < 0:
+            raise ValueError("teacher_forcing_warmup_iters must be non-negative.")
+        if self.teacher_forcing_transition_iters < 0:
+            raise ValueError("teacher_forcing_transition_iters must be non-negative.")
+        if not 0.0 <= self.teacher_forcing_min_beta <= 1.0:
+            raise ValueError("teacher_forcing_min_beta must be in [0, 1].")
+        if self.teacher_forcing_schedule not in {"linear", "cosine"}:
+            raise ValueError("teacher_forcing_schedule must be one of {'linear', 'cosine'}.")
 
         self.games_to_track = 100
         self.frame = 0
@@ -794,16 +811,39 @@ class Dagger:
             total_loss = total_loss + self.student_model.aux_weight * aux_loss
         return total_loss, action_loss, aux_loss
 
+    def _get_teacher_forcing_beta(self, iteration):
+        if self.play_policy or self.teacher_model is None:
+            return 0.0
+        if iteration < self.teacher_forcing_warmup_iters:
+            return 1.0
+        if self.teacher_forcing_transition_iters <= 0:
+            return self.teacher_forcing_min_beta
+
+        transition_iteration = iteration - self.teacher_forcing_warmup_iters
+        if transition_iteration >= self.teacher_forcing_transition_iters:
+            return self.teacher_forcing_min_beta
+
+        progress = transition_iteration / float(self.teacher_forcing_transition_iters)
+        if self.teacher_forcing_schedule == "linear":
+            schedule_value = 1.0 - progress
+        else:
+            schedule_value = 0.5 * (1.0 + math.cos(math.pi * progress))
+
+        beta = self.teacher_forcing_min_beta + (1.0 - self.teacher_forcing_min_beta) * schedule_value
+        return float(max(self.teacher_forcing_min_beta, min(1.0, beta)))
+
     def _mix_actions(self, student_actions, teacher_actions, iteration):
         if self.play_policy or teacher_actions is None:
-            return student_actions
-        beta = 1.0 if iteration < self.teacher_forcing_iters else 0.0
+            return student_actions, 0.0
+        beta = self._get_teacher_forcing_beta(iteration)
         if beta <= 0.0:
-            return student_actions
+            return student_actions, beta
+        if beta >= 1.0:
+            return teacher_actions, beta
         teacher_mask = torch.rand(self.num_envs, device=self.device) < beta
         step_actions = student_actions.clone()
         step_actions[teacher_mask] = teacher_actions[teacher_mask]
-        return step_actions
+        return step_actions, beta
 
     def _reset_aux_buffer(self, done_mask):
         if self.aux_buffer is None or done_mask.numel() == 0:
@@ -842,7 +882,7 @@ class Dagger:
         self.completed_successes.extend(float(value) for value in episode_successes)
         self.completed_timeout_successes.extend(float(value) for value in episode_timeouts)
 
-    def _log(self, iteration, total_loss, action_loss, aux_loss):
+    def _log(self, iteration, total_loss, action_loss, aux_loss, teacher_forcing_beta):
         if iteration % self.log_interval != 0:
             return
         mean_reward = self.current_rewards.mean().item()
@@ -862,6 +902,7 @@ class Dagger:
         print("ITERATION:", iteration)
         print("Total Loss:", float(total_loss.detach().cpu()))
         print("Action Loss:", float(action_loss.detach().cpu()))
+        print("Teacher Forcing Beta:", teacher_forcing_beta)
         if aux_loss is not None:
             print("Aux Loss:", float(aux_loss.detach().cpu()))
         # print("Mean Reward:", mean_reward)
@@ -964,7 +1005,11 @@ class Dagger:
                     prev_aux = self._flatten_aux_dict(OrderedDict((key, student_obs[key]) for key in self.aux_state_keys))
                     self.aux_buffer[:] = self._decode_aux_prediction(student_output["aux"].detach(), prev_aux)
 
-                step_actions = self._mix_actions(student_actions.detach(), teacher_actions, iteration)
+                step_actions, teacher_forcing_beta = self._mix_actions(
+                    student_actions.detach(),
+                    teacher_actions,
+                    iteration,
+                )
                 self._update_last_frame_tracker()
                 self._sync_timing_device()
                 env_step_start_time = time.perf_counter()
@@ -991,7 +1036,7 @@ class Dagger:
                 if total_loss is not None:
                     self._sync_timing_device()
                     self._record_timing("iteration_ms", time.perf_counter() - iteration_start_time)
-                    self._log(iteration, total_loss, action_loss, aux_loss)
+                    self._log(iteration, total_loss, action_loss, aux_loss, teacher_forcing_beta)
                 else:
                     self._sync_timing_device()
                     self._record_timing("iteration_ms", time.perf_counter() - iteration_start_time)
