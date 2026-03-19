@@ -228,14 +228,24 @@ class Dagger:
         print(self.student_model)
         print("state_encoders_cfg", self.student_model.state_encoders_cfg)
 
+        self.student_ddp_find_unused_parameters = bool(
+            self.student_model.aux_prediction and self.ignore_aux_debug
+        )
+
         if self.use_ddp:
             self.student_model_ddp = DDP(
                 self.student_model,
                 device_ids=[self.local_rank],
-                find_unused_parameters=False,
+                find_unused_parameters=self.student_ddp_find_unused_parameters,
             )
         else:
             self.student_model_ddp = self.student_model
+
+        if self.student_ddp_find_unused_parameters and self.rank == 0:
+            print(
+                "DDP unused-parameter detection enabled because aux prediction is active "
+                "while ignore_aux_debug skips the aux loss."
+            )
         self.optimizer = torch.optim.AdamW(
             self.student_model_ddp.parameters(),
             lr=self.lr,
