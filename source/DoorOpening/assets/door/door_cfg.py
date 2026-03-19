@@ -86,7 +86,7 @@ def create_urdf_door_cfg(asset_path: str, training_mode: bool = False):
             make_instanceable=False,
             asset_path=asset_path,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                max_depenetration_velocity=300,
+                max_depenetration_velocity=5,
             ),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 enabled_self_collisions=False,

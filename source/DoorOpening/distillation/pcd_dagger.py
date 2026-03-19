@@ -89,6 +89,7 @@ class Dagger:
         self.save_interval = int(self.runtime_cfg.get("save_interval", 5_000))
         self.pointcloud_source = str(self.runtime_cfg.get("pointcloud_source", "sampler")).lower()
         self.robot_pcd_num_points = self.runtime_cfg.get("robot_num_points")
+        self.ignore_aux_debug = bool(self.runtime_cfg.get("ignore_aux_debug", False))
         self.sampler_render_cfg = self.runtime_cfg.get("sampler_render", {})
         self.sampler_render_inflate_px = int(self.sampler_render_cfg.get("inflate_px", 2))
         self.sampler_render_jitter_std_m = float(self.sampler_render_cfg.get("jitter_std_m", 0.004))
@@ -134,8 +135,10 @@ class Dagger:
         self.success_frame_idx = float(self.ov_env.ref_motion_lib.num_frames - 1)
 
         self.aux_buffer = None
-        if self.student_model.aux_prediction and self.aux_total_dim > 0:
+        if not self.ignore_aux_debug and self.student_model.aux_prediction and self.aux_total_dim > 0:
             self.aux_buffer = torch.zeros((self.num_envs, 1, self.aux_total_dim), dtype=torch.float32, device=self.device)
+        if self.ignore_aux_debug and self.rank == 0:
+            print("Aux debug bypass enabled: using ground-truth aux inputs and skipping aux loss/rollout.")
 
     def _init_teacher(self):
         self.teacher_model = None
@@ -732,7 +735,9 @@ class Dagger:
 
         aux_gt_dict = self._get_aux_state_dict()
         aux_gt = self._flatten_aux_dict(aux_gt_dict)
-        if self.aux_buffer is not None:
+        if self.ignore_aux_debug and aux_gt is not None:
+            aux_input = torch.zeros_like(aux_gt)
+        elif self.aux_buffer is not None:
             aux_input = self._aux_to_2d(self.aux_buffer)
             if torch.count_nonzero(self.aux_buffer) == 0:
                 aux_input = aux_gt
@@ -742,6 +747,7 @@ class Dagger:
 
         palm_pos_base = world_to_local(palm_pos_w, robot_base_pos_w, robot_base_quat_w).squeeze(1)
         door_pcd_base = self._sample_door_pointcloud_base()
+        aux_crop_center = palm_pos_base if self.ignore_aux_debug else self._get_aux_crop_center(aux_gt_dict)
 
         obs = OrderedDict()
         for key in self.state_encoders_keys:
@@ -764,7 +770,7 @@ class Dagger:
                 obs[key] = self._build_local_pcd(
                     door_pcd_base,
                     palm_pos_base,
-                    self._get_aux_crop_center(aux_gt_dict),
+                    aux_crop_center,
                 )
                 # self._debug_visualize_pointcloud(obs[key], "local_pcd_t")
             else:
@@ -779,7 +785,7 @@ class Dagger:
         action_loss = F.mse_loss(student_output["action"][:, 0, :], teacher_actions)
         total_loss = action_loss
         aux_loss = None
-        if self.student_model.aux_prediction and "aux" in student_output:
+        if not self.ignore_aux_debug and self.student_model.aux_prediction and "aux" in student_output:
             prev_aux = None
             if self.aux_state_keys and all(key in student_obs for key in self.aux_state_keys):
                 prev_aux = self._flatten_aux_dict(OrderedDict((key, student_obs[key]) for key in self.aux_state_keys))
