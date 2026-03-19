@@ -139,6 +139,9 @@ class Dagger:
         self.completed_successes = deque(maxlen=self.games_to_track)
         self.completed_timeout_successes = deque(maxlen=self.games_to_track)
         self.episode_reached_last_frame = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.student_update_steps = 0
+        self.last_local_update_batch_size = 0
+        self.last_global_update_batch_size = 0
         self._timing_stats = {
             "iteration_ms": {"sum_ms": 0.0, "count": 0},
             "student_obs_ms": {"sum_ms": 0.0, "count": 0},
@@ -744,6 +747,12 @@ class Dagger:
         wandb.finish()
         self.wandb_run = None
 
+    def _get_global_batch_size(self, local_batch_size):
+        batch_size = torch.tensor(int(local_batch_size), dtype=torch.int64, device=self.device)
+        if self.use_ddp:
+            dist.all_reduce(batch_size, op=dist.ReduceOp.SUM)
+        return int(batch_size.item())
+
     def _build_student_obs(self):
         q_pos = self.ov_env.robot.data.joint_pos
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
@@ -898,35 +907,39 @@ class Dagger:
             success_region = self.ov_env.in_success_region.float().mean().item()
         timing_means = self._consume_timing_means()
 
-        print("=" * 10)
-        print("ITERATION:", iteration)
-        print("Total Loss:", float(total_loss.detach().cpu()))
-        print("Action Loss:", float(action_loss.detach().cpu()))
-        print("Teacher Forcing Beta:", teacher_forcing_beta)
-        if aux_loss is not None:
-            print("Aux Loss:", float(aux_loss.detach().cpu()))
-        # print("Mean Reward:", mean_reward)
-        # print("Mean Length:", mean_length)
-        # if episode_reward is not None:
-        #     print("Episode Reward:", episode_reward)
-        if episode_length is not None:
-            print("Episode Length:", episode_length)
-        if success_rate is not None:
-            print("Success Rate:", success_rate)
-        # print("Active Success Rate:", active_success_rate)
-        if timeout_success_rate is not None:
-            print("Timeout Success Rate:", timeout_success_rate)
-        # print("Mean Ref Frame Idx:", mean_ref_frame_idx)
-        if success_region is not None:
-            print("Success Region:", success_region)
-        if timing_means["iteration_ms"] is not None:
-            print("Iteration Time (ms):", timing_means["iteration_ms"])
-        # if timing_means["student_obs_ms"] is not None:
-        #     print("Student Obs Time (ms):", timing_means["student_obs_ms"])
-        # if timing_means["pointcloud_ms"] is not None:
-        #     print("Pointcloud Time (ms):", timing_means["pointcloud_ms"])
-        # if timing_means["env_step_ms"] is not None:
-        #     print("Env Step Time (ms):", timing_means["env_step_ms"])
+        if self.rank == 0:
+            print("=" * 10)
+            print("ITERATION:", iteration)
+            print("Total Loss:", float(total_loss.detach().cpu()))
+            print("Action Loss:", float(action_loss.detach().cpu()))
+            print("Teacher Forcing Beta:", teacher_forcing_beta)
+            print("Student Update Steps:", self.student_update_steps)
+            print("Last Local Update Batch Size:", self.last_local_update_batch_size)
+            print("Last Global Update Batch Size:", self.last_global_update_batch_size)
+            if aux_loss is not None:
+                print("Aux Loss:", float(aux_loss.detach().cpu()))
+            # print("Mean Reward:", mean_reward)
+            # print("Mean Length:", mean_length)
+            # if episode_reward is not None:
+            #     print("Episode Reward:", episode_reward)
+            if episode_length is not None:
+                print("Episode Length:", episode_length)
+            if success_rate is not None:
+                print("Success Rate:", success_rate)
+            # print("Active Success Rate:", active_success_rate)
+            if timeout_success_rate is not None:
+                print("Timeout Success Rate:", timeout_success_rate)
+            # print("Mean Ref Frame Idx:", mean_ref_frame_idx)
+            if success_region is not None:
+                print("Success Region:", success_region)
+            if timing_means["iteration_ms"] is not None:
+                print("Iteration Time (ms):", timing_means["iteration_ms"])
+            # if timing_means["student_obs_ms"] is not None:
+            #     print("Student Obs Time (ms):", timing_means["student_obs_ms"])
+            # if timing_means["pointcloud_ms"] is not None:
+            #     print("Pointcloud Time (ms):", timing_means["pointcloud_ms"])
+            # if timing_means["env_step_ms"] is not None:
+            #     print("Env Step Time (ms):", timing_means["env_step_ms"])
 
         metrics = {
             "loss/total": float(total_loss.detach().cpu()),
@@ -936,6 +949,10 @@ class Dagger:
             "stats/active_success_rate": active_success_rate,
             "stats/ref_frame_idx": mean_ref_frame_idx,
             "stats/completed_episodes": len(self.completed_lengths),
+            "dist/world_size": self.world_size,
+            "dist/update_steps": self.student_update_steps,
+            "dist/last_local_update_batch_size": self.last_local_update_batch_size,
+            "dist/last_global_update_batch_size": self.last_global_update_batch_size,
         }
         if aux_loss is not None:
             metrics["loss/aux"] = float(aux_loss.detach().cpu())
@@ -996,10 +1013,15 @@ class Dagger:
                     total_loss, action_loss, aux_loss = self._compute_student_loss(
                         student_output, teacher_output["mus"], aux_gt, student_obs
                     )
+                    local_batch_size = int(student_actions.shape[0])
+                    global_batch_size = self._get_global_batch_size(local_batch_size)
                     self.optimizer.zero_grad()
                     total_loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.student_model_ddp.parameters(), self.grad_clip)
                     self.optimizer.step()
+                    self.student_update_steps += 1
+                    self.last_local_update_batch_size = local_batch_size
+                    self.last_global_update_batch_size = global_batch_size
 
                 if self.student_model.aux_prediction and self.aux_buffer is not None and self.aux_state_keys:
                     prev_aux = self._flatten_aux_dict(OrderedDict((key, student_obs[key]) for key in self.aux_state_keys))
@@ -1050,6 +1072,10 @@ class Dagger:
                     ckpt_path = os.path.join(self.nn_dir, f"pcd_student_{iteration}.pt")
                     self.save(ckpt_path)
         finally:
+            if not self.play_policy and self.rank == 0:
+                print("=" * 10)
+                print("TRAINING SUMMARY")
+                print("Student Update Steps:", self.student_update_steps)
             self._finish_wandb()
 
     def save(self, filename):
