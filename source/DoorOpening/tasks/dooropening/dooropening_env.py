@@ -140,6 +140,18 @@ class DooropeningEnv(DirectRLEnv):
         self.alive_bonus = self.cfg.alive_bonus
         self.termination_penalty = self.cfg.termination_penalty
 
+    def _activate_door_contact_reporters(self):
+        try:
+            from isaaclab.sim.schemas import schemas as sim_schemas
+        except ImportError:
+            from isaaclab.sim.schemas.schemas import activate_contact_sensors
+        else:
+            activate_contact_sensors = sim_schemas.activate_contact_sensors
+
+        for env_id in range(self.num_envs):
+            for link_name in ("link_1", "link_2"):
+                activate_contact_sensors(f"/World/envs/env_{env_id}/Door/{link_name}", True)
+
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
         self.door = Articulation(self.cfg.door_cfg)
@@ -153,6 +165,7 @@ class DooropeningEnv(DirectRLEnv):
         # add articulation to scene
         self.scene.articulations["robot"] = self.robot
         self.scene.articulations["door"] = self.door
+        self._activate_door_contact_reporters()
         self.pointcloud_camera = None
         if self.cfg.enable_pointcloud_camera:
             self.pointcloud_camera = Camera(self.cfg.pointcloud_camera_cfg)
