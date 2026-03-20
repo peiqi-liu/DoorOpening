@@ -105,6 +105,20 @@ class Dagger:
         self.sampler_render_clip_mode = str(self.sampler_render_cfg.get("clip_mode", "post"))
         self.sampler_render_jitter_mode = str(self.sampler_render_cfg.get("jitter_mode", "xyz"))
         self.sampler_render_use_compile = bool(self.sampler_render_cfg.get("use_compile", True))
+        self.viser_cfg = dict(self.runtime_cfg.get("viser", {}))
+        self.viser_enabled = self.rank == 0 and bool(self.viser_cfg.get("enabled", False))
+        self.viser_env_id = int(self.viser_cfg.get("env_id", self.runtime_cfg.get("debug_pointcloud_env_id", 0)))
+        self.viser_update_interval = max(1, int(self.viser_cfg.get("update_interval", 1)))
+        self.viser_show_policy_input = bool(self.viser_cfg.get("show_policy_input", True))
+        self.viser_point_size = float(self.viser_cfg.get("point_size", 0.004))
+        self.viser_max_points = int(self.viser_cfg.get("max_points", 12_000))
+        self.viser_record_cfg = dict(self.viser_cfg.get("record", {}))
+        self.viser_record_enabled = self.rank == 0 and bool(self.viser_record_cfg.get("enabled", False))
+        self.viser_record_interval = max(1, int(self.viser_record_cfg.get("interval", self.viser_update_interval)))
+        self.viser_record_max_frames = int(self.viser_record_cfg.get("max_frames", 500))
+        self.viser_record_flush_interval = max(1, int(self.viser_record_cfg.get("flush_interval", 25)))
+        self.viser_record_save_raw = bool(self.viser_record_cfg.get("save_raw", True))
+        self.viser_record_max_points = int(self.viser_record_cfg.get("max_points", self.viser_max_points))
         if self.pointcloud_source not in {"sampler", "depth"}:
             raise ValueError(f"Unsupported pointcloud_source '{self.pointcloud_source}'.")
         if self.teacher_forcing_warmup_iters < 0:
@@ -153,6 +167,7 @@ class Dagger:
         self._init_teacher()
         self._init_student()
         self._init_pointcloud_assets()
+        self._init_viser_debug_tools()
         self.success_frame_idx = float(self.ov_env.ref_motion_lib.num_frames - 1)
 
         self.aux_buffer = None
@@ -365,6 +380,275 @@ class Dagger:
         if self.pointcloud_source == "depth" and self.pointcloud_camera is None:
             raise ValueError("pointcloud_source='depth' requires DooropeningEnv to enable the pointcloud camera.")
         self.sampler_camera_spec = self._build_sampler_camera_spec()
+
+    def _init_viser_debug_tools(self):
+        self._viser_server = None
+        self._viser_serializer = None
+        self._viser_pointcloud_handles = {}
+        self._viser_capture_requested = False
+        self._viser_capture_iteration = 0
+        self._viser_record_frames = []
+        self._viser_record_limit_reached = False
+
+        default_record_dir = Path(self.nn_dir).parent if self.nn_dir is not None else Path(os.getcwd())
+        default_record_path = default_record_dir / "viser_replay.viser"
+
+        configured_record_path = self.viser_record_cfg.get("path")
+        if configured_record_path is None:
+            self.viser_record_path = str(default_record_path)
+        else:
+            configured_record_path = Path(str(configured_record_path))
+            if not configured_record_path.is_absolute():
+                configured_record_path = default_record_dir / configured_record_path
+            self.viser_record_path = str(configured_record_path)
+
+        configured_raw_path = self.viser_record_cfg.get("raw_path")
+        if configured_raw_path is None:
+            self.viser_record_raw_path = str(Path(self.viser_record_path).with_suffix(".pt"))
+        else:
+            configured_raw_path = Path(str(configured_raw_path))
+            if not configured_raw_path.is_absolute():
+                configured_raw_path = default_record_dir / configured_raw_path
+            self.viser_record_raw_path = str(configured_raw_path)
+
+        sim_cfg = getattr(self.ov_env.cfg, "sim", None)
+        sim_dt = getattr(sim_cfg, "dt", None)
+        self.viser_record_frame_dt = float(
+            self.viser_record_cfg.get("frame_dt", sim_dt if sim_dt is not None else 1.0 / 30.0)
+        )
+
+        if not (self.viser_enabled or self.viser_record_enabled):
+            return
+
+        if self.viser_record_enabled:
+            record_dir = os.path.dirname(self.viser_record_path)
+            if record_dir:
+                os.makedirs(record_dir, exist_ok=True)
+            if self.viser_record_save_raw:
+                raw_dir = os.path.dirname(self.viser_record_raw_path)
+                if raw_dir:
+                    os.makedirs(raw_dir, exist_ok=True)
+
+        try:
+            import viser
+        except ImportError:
+            if self.viser_enabled:
+                raise ImportError(
+                    "dagger.viser.enabled=True requires the optional 'viser' package. "
+                    "You can keep live Viser off and still use dagger.viser.record.save_raw for replay data."
+                )
+            if self.viser_record_enabled and self.rank == 0:
+                print("Viser is not installed; saving raw replay data only.")
+            return
+
+        self._viser_server = viser.ViserServer()
+        self._viser_server.gui.configure_theme(control_width="medium")
+        self._viser_server.scene.add_frame(
+            "/base_axes",
+            show_axes=True,
+            axes_length=0.15,
+            axes_radius=0.01,
+            visible=True,
+        )
+        self._viser_server.scene.add_grid(
+            "/grid",
+            width=4,
+            height=4,
+            position=(0.0, 0.0, 0.0),
+            shadow_opacity=0.1,
+        )
+        self._viser_pointcloud_handles["ground_truth_points"] = self._viser_server.scene.add_point_cloud(
+            "/ground_truth_points",
+            points=torch.zeros((0, 3), dtype=torch.float32).cpu().numpy(),
+            colors=(120, 120, 120),
+            point_size=self.viser_point_size,
+        )
+        self._viser_pointcloud_handles["robot_obs_points"] = self._viser_server.scene.add_point_cloud(
+            "/robot_obs_points",
+            points=torch.zeros((0, 3), dtype=torch.float32).cpu().numpy(),
+            colors=(79, 195, 247),
+            point_size=self.viser_point_size,
+        )
+        self._viser_pointcloud_handles["policy_input_points"] = self._viser_server.scene.add_point_cloud(
+            "/policy_input_points",
+            points=torch.zeros((0, 3), dtype=torch.float32).cpu().numpy(),
+            colors=(0, 170, 120),
+            point_size=self.viser_point_size,
+        )
+
+        env_id_handle = self._viser_server.gui.add_number(
+            label="Env ID",
+            initial_value=self.viser_env_id,
+            min=0,
+            max=self.num_envs - 1,
+            step=1,
+            hint="Select environment index for point-cloud playback.",
+        )
+
+        @env_id_handle.on_update
+        def _(_event):
+            self.viser_env_id = int(env_id_handle.value)
+
+        if self.viser_record_enabled:
+            self._viser_serializer = self._viser_server.get_scene_serializer()
+
+        if self.rank == 0:
+            print(f"Viser debug enabled for env {self.viser_env_id}. Open the Viser URL in your browser.")
+            print(f"Viser live update interval: every {self.viser_update_interval} training iterations.")
+            if self.viser_record_enabled:
+                print(f"Viser recording interval: every {self.viser_record_interval} training iterations.")
+                print(f"Viser recordings will be written as {self._format_iterated_record_path(self.viser_record_path, '<iteration>')}")
+                if self.viser_record_save_raw:
+                    print(f"Raw replay data will also be written as {self._format_iterated_record_path(self.viser_record_raw_path, '<iteration>')}")
+            else:
+                print("Viser recording is disabled, so no replay file will be saved.")
+
+    def _get_viser_env_id(self):
+        if self.num_envs <= 0:
+            return 0
+        return max(0, min(int(self.viser_env_id), self.num_envs - 1))
+
+    def _should_capture_viser_frame(self, iteration):
+        if not (self.viser_enabled or self.viser_record_enabled):
+            return False
+
+        should_update_live = self.viser_enabled and (iteration % self.viser_update_interval == 0)
+        should_record = self.viser_record_enabled and (iteration % self.viser_record_interval == 0)
+        if should_record and self.viser_record_max_frames > 0:
+            should_record = len(self._viser_record_frames) < self.viser_record_max_frames
+        if not should_record and self.viser_record_enabled and not self._viser_record_limit_reached:
+            if self.viser_record_max_frames > 0 and len(self._viser_record_frames) >= self.viser_record_max_frames:
+                print(f"Reached dagger.viser.record.max_frames={self.viser_record_max_frames}; stopping recording.")
+                self._viser_record_limit_reached = True
+        return should_update_live or should_record
+
+    def _sample_ground_truth_scene_pointcloud_base(self):
+        robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
+        robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
+        gt_scene_pcd_world = self._sample_scene_pointcloud_world_sampler()
+        return world_to_local(gt_scene_pcd_world, robot_base_pos_w, robot_base_quat_w)
+
+    def _local_pointcloud_to_world(self, pointcloud_local, base_pos_w, base_quat_w):
+        if pointcloud_local is None:
+            return None
+        quat = base_quat_w.unsqueeze(1).expand(-1, pointcloud_local.shape[1], -1)
+        return quat_apply(quat, pointcloud_local) + base_pos_w.unsqueeze(1)
+
+    def _prepare_viser_points(self, pointcloud, env_id, max_points, drop_zero_rows=False):
+        if pointcloud is None:
+            return torch.zeros((0, 3), dtype=torch.float32)
+        if pointcloud.ndim != 3 or pointcloud.shape[-1] != 3:
+            raise ValueError(f"Expected batched pointcloud with shape (B, N, 3), got {tuple(pointcloud.shape)}.")
+
+        points = pointcloud[env_id].detach()
+        finite_mask = torch.isfinite(points).all(dim=-1)
+        points = points[finite_mask]
+        if drop_zero_rows and points.numel() > 0:
+            nonzero_mask = torch.any(points.abs() > 1e-6, dim=-1)
+            points = points[nonzero_mask]
+        if max_points is not None and max_points > 0 and points.shape[0] > max_points:
+            step = max(1, points.shape[0] // max_points)
+            points = points[::step][:max_points]
+        return points.to(dtype=torch.float32).cpu()
+
+    def _format_iterated_record_path(self, path_str, iteration):
+        path = Path(path_str)
+        return str(path.with_name(f"{path.stem}_{iteration}{path.suffix}"))
+
+    def _set_viser_pointcloud(self, handle_name, points_cpu):
+        if self._viser_server is None:
+            return
+        handle = self._viser_pointcloud_handles[handle_name]
+        handle.points = points_cpu.numpy()
+
+    def _maybe_update_viser_debug(
+        self,
+        iteration,
+        q_pos,
+        door_joint_pos,
+        ground_truth_pcd_base,
+        robot_obs_pcd_base,
+        policy_input_pcd_base,
+    ):
+        if not self._viser_capture_requested:
+            return
+
+        env_id = self._get_viser_env_id()
+        gt_points = self._prepare_viser_points(ground_truth_pcd_base, env_id, self.viser_max_points)
+        obs_points = self._prepare_viser_points(robot_obs_pcd_base, env_id, self.viser_max_points)
+        policy_points = self._prepare_viser_points(
+            policy_input_pcd_base,
+            env_id,
+            self.viser_max_points,
+            drop_zero_rows=True,
+        ) if (self.viser_show_policy_input and policy_input_pcd_base is not None) else torch.zeros((0, 3), dtype=torch.float32)
+
+        if self.viser_enabled and self._viser_server is not None and iteration % self.viser_update_interval == 0:
+            self._set_viser_pointcloud("ground_truth_points", gt_points)
+            self._set_viser_pointcloud("robot_obs_points", obs_points)
+            self._set_viser_pointcloud("policy_input_points", policy_points)
+
+        should_record = self.viser_record_enabled and (iteration % self.viser_record_interval == 0)
+        if should_record and (self.viser_record_max_frames <= 0 or len(self._viser_record_frames) < self.viser_record_max_frames):
+            record_points = lambda pts, drop_zero=False: self._prepare_viser_points(pts, env_id, self.viser_record_max_points, drop_zero_rows=drop_zero)
+            frame_record = {
+                "iteration": int(iteration),
+                "sim_frame": int(self.frame),
+                "env_id": int(env_id),
+                "pointcloud_source": self.pointcloud_source,
+                "ground_truth_points_world": record_points(ground_truth_pcd_base).to(dtype=torch.float16),
+                "robot_obs_points_world": record_points(robot_obs_pcd_base).to(dtype=torch.float16),
+                "policy_input_points_world": record_points(policy_input_pcd_base, drop_zero=True).to(dtype=torch.float16)
+                if policy_input_pcd_base is not None
+                else None,
+                "robot_joint_pos": q_pos[env_id].detach().cpu().to(dtype=torch.float32),
+                "door_joint_pos": door_joint_pos[env_id].detach().cpu().to(dtype=torch.float32),
+                "robot_base_pos_w": self.ov_env.robot.data.body_pos_w[env_id, self.robot_base_body_idx].detach().cpu().to(dtype=torch.float32),
+                "robot_base_quat_w": self.ov_env.robot.data.body_quat_w[env_id, self.robot_base_body_idx].detach().cpu().to(dtype=torch.float32),
+                "door_asset_idx": int(self.env_asset_idx[env_id].detach().cpu().item()),
+                "door_asset_path": str(door_asset_paths[int(self.env_asset_idx[env_id].detach().cpu().item())]),
+            }
+            self._viser_record_frames.append(frame_record)
+
+            if self._viser_serializer is not None:
+                self._set_viser_pointcloud("ground_truth_points", gt_points)
+                self._set_viser_pointcloud("robot_obs_points", obs_points)
+                self._set_viser_pointcloud("policy_input_points", policy_points)
+                self._viser_serializer.insert_sleep(self.viser_record_frame_dt)
+
+            if len(self._viser_record_frames) % self.viser_record_flush_interval == 0:
+                self._flush_viser_recordings()
+
+    def _flush_viser_recordings(self):
+        if not self.viser_record_enabled or self.rank != 0:
+            return
+
+        if not self._viser_record_frames:
+            return
+
+        latest_iteration = self._viser_record_frames[-1]["iteration"]
+
+        if self._viser_serializer is not None:
+            Path(self._format_iterated_record_path(self.viser_record_path, latest_iteration)).write_bytes(
+                self._viser_serializer.serialize()
+            )
+
+        if self.viser_record_save_raw:
+            payload = {
+                "format": "dooropening_viser_replay_v1",
+                "pointcloud_frame": "world",
+                "pointcloud_source": self.pointcloud_source,
+                "glorbot_urdf_path": str(glorbot_urdf_path),
+                "robot_joint_names": list(getattr(self.ov_env.robot, "joint_names", [])),
+                "door_joint_names": list(getattr(self.ov_env.door, "joint_names", [])),
+                "frames": self._viser_record_frames,
+            }
+            torch.save(payload, self._format_iterated_record_path(self.viser_record_raw_path, latest_iteration))
+
+    def _close_viser_debug_tools(self):
+        self._flush_viser_recordings()
+        if self._viser_server is not None:
+            self._viser_server.stop()
 
     def _extract_model_state(self, weights):
         if isinstance(weights, dict):
@@ -766,6 +1050,7 @@ class Dagger:
 
     def _build_student_obs(self):
         q_pos = self.ov_env.robot.data.joint_pos
+        door_joint_pos = self.ov_env.door.data.joint_pos
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
         palm_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_palm_body_idx].unsqueeze(1)
@@ -812,6 +1097,20 @@ class Dagger:
                 # self._debug_visualize_pointcloud(obs[key], "local_pcd_t")
             else:
                 raise KeyError(f"Unsupported student pointcloud key '{key}' in config.")
+
+        if self._viser_capture_requested:
+            ground_truth_pcd_world = self._sample_scene_pointcloud_world_sampler()
+            robot_obs_pcd_world = self._local_pointcloud_to_world(door_pcd_base, robot_base_pos_w, robot_base_quat_w)
+            policy_input_pcd_world = self._local_pointcloud_to_world(obs.get("local_pcd_t"), robot_base_pos_w, robot_base_quat_w)
+            self._maybe_update_viser_debug(
+                iteration=self._viser_capture_iteration,
+                q_pos=q_pos,
+                door_joint_pos=door_joint_pos,
+                ground_truth_pcd_base=ground_truth_pcd_world,
+                robot_obs_pcd_base=robot_obs_pcd_world,
+                policy_input_pcd_base=policy_input_pcd_world,
+            )
+            self._viser_capture_requested = False
 
         return obs, aux_gt
 
@@ -1029,6 +1328,8 @@ class Dagger:
 
                 self._sync_timing_device()
                 student_obs_start_time = time.perf_counter()
+                self._viser_capture_requested = self._should_capture_viser_frame(iteration)
+                self._viser_capture_iteration = iteration
                 student_obs, aux_gt = self._build_student_obs()
                 self._sync_timing_device()
                 self._record_timing("student_obs_ms", time.perf_counter() - student_obs_start_time)
@@ -1106,6 +1407,7 @@ class Dagger:
                     ckpt_path = os.path.join(self.nn_dir, f"pcd_student_{iteration}.pt")
                     self.save(ckpt_path)
         finally:
+            self._close_viser_debug_tools()
             if not self.play_policy and self.rank == 0:
                 print("=" * 10)
                 print("TRAINING SUMMARY")

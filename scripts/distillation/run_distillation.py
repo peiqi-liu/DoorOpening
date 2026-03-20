@@ -195,6 +195,21 @@ def main(env_cfg, agent_cfg: dict):
     else:
         dagger_runtime_cfg.setdefault("pointcloud_source", "sampler")
     dagger_runtime_cfg["pointcloud_source"] = str(dagger_runtime_cfg["pointcloud_source"]).lower()
+
+    if "reset_progress_total" in dagger_runtime_cfg:
+        env_cfg.reset_progress_total = dagger_runtime_cfg["reset_progress_total"]
+
+    viser_cfg = dagger_runtime_cfg.get("viser", {})
+    if not isinstance(viser_cfg, dict):
+        viser_cfg = {}
+    viser_cfg["update_interval"] = int(args_cli.video_interval)
+    viser_record_cfg = viser_cfg.get("record", {})
+    if not isinstance(viser_record_cfg, dict):
+        viser_record_cfg = {}
+    viser_record_cfg["interval"] = int(args_cli.video_interval)
+    viser_cfg["record"] = viser_record_cfg
+    dagger_runtime_cfg["viser"] = viser_cfg
+
     env_cfg.enable_pointcloud_camera = dagger_runtime_cfg["pointcloud_source"] == "depth"
 
     # Determine teacher checkpoint path
@@ -250,6 +265,9 @@ def main(env_cfg, agent_cfg: dict):
 
     if wandb_enabled and rank == 0 and wandb_entity is None:
         raise ValueError("Weights and Biases entity must be specified for tracking.")
+
+    if rank == 0:
+        print(f"Distillation reset_progress_total: {env_cfg.reset_progress_total}")
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
