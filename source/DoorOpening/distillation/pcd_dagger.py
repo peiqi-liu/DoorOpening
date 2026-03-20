@@ -996,6 +996,8 @@ class Dagger:
             metrics["stats/timeout_success_rate"] = timeout_success_rate
         if success_region is not None:
             metrics["stats/success_region"] = success_region
+        if teacher_forcing_beta is not None:
+            metrics["stats/teacher_forcing_beta"] = teacher_forcing_beta
         if timing_means["iteration_ms"] is not None:
             metrics["timing/iteration_ms"] = timing_means["iteration_ms"]
         if timing_means["student_obs_ms"] is not None:
