@@ -68,14 +68,14 @@ dagger:
   learning_rate: 1.0e-4
   weight_decay: 1.0e-4
   grad_clip: 1.0
-  num_iters: 1000000
+  num_iters: 100000
   teacher_forcing_warmup_iters: 10000
-  teacher_forcing_transition_iters: 140000
+  teacher_forcing_transition_iters: 40000
   teacher_forcing_schedule: "linear"
   teacher_forcing_min_beta: 0.0
   log_interval: 100
   save_interval: 5000
-  reset_progress_total: 200000
+  reset_progress_total: 5e5
   ignore_aux_debug: true
   pointcloud_source: "sampler"
   robot_num_points: 10000
@@ -86,9 +86,9 @@ dagger:
     jitter_mode: "xyz"
     use_compile: true
   viser:
-    enabled: true
+    enabled: false
     env_id: 0
-    show_policy_input: true
+    show_policy_input: false
     point_size: 0.004
     max_points: 12000
     record:

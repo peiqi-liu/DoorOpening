@@ -146,6 +146,7 @@ class Dagger:
 
         self.prev_actions_student = torch.zeros((self.num_envs, self.num_actions), dtype=torch.float32, device=self.device)
         self.prev_actions_teacher = torch.zeros((self.num_envs, self.num_actions), dtype=torch.float32, device=self.device)
+        self.teacher_forcing_env_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.current_rewards = torch.zeros((self.num_envs, 1), dtype=torch.float32, device=self.device)
         self.current_lengths = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         self.completed_rewards = deque(maxlen=self.games_to_track)
@@ -1212,15 +1213,58 @@ class Dagger:
         beta = self.teacher_forcing_min_beta + (1.0 - self.teacher_forcing_min_beta) * schedule_value
         return float(max(self.teacher_forcing_min_beta, min(1.0, beta)))
 
+    def _sample_teacher_forcing_mask(self, num_envs, beta):
+        mask = torch.zeros(num_envs, dtype=torch.bool, device=self.device)
+        if num_envs <= 0 or beta <= 0.0:
+            return mask
+        if beta >= 1.0:
+            mask.fill_(True)
+            return mask
+
+        num_teacher_envs = int(round(beta * num_envs))
+        if num_teacher_envs <= 0:
+            return mask
+        if num_teacher_envs >= num_envs:
+            mask.fill_(True)
+            return mask
+
+        selected_envs = torch.randperm(num_envs, device=self.device)[:num_teacher_envs]
+        mask[selected_envs] = True
+        return mask
+
+    def _resample_teacher_forcing_env_mask(self, iteration, env_ids=None):
+        beta = self._get_teacher_forcing_beta(iteration)
+        if self.play_policy or self.teacher_model is None:
+            if env_ids is None:
+                self.teacher_forcing_env_mask.zero_()
+            elif env_ids.numel() > 0:
+                self.teacher_forcing_env_mask[env_ids] = False
+            return beta
+
+        if env_ids is None:
+            self.teacher_forcing_env_mask[:] = self._sample_teacher_forcing_mask(self.num_envs, beta)
+            return beta
+
+        if env_ids.numel() == 0:
+            return beta
+
+        self.teacher_forcing_env_mask[env_ids] = self._sample_teacher_forcing_mask(int(env_ids.numel()), beta)
+        return beta
+
+    def _get_teacher_forcing_env_fraction(self):
+        if self.play_policy or self.teacher_model is None:
+            return 0.0
+        return float(self.teacher_forcing_env_mask.float().mean().item())
+
     def _mix_actions(self, student_actions, teacher_actions, iteration):
         if self.play_policy or teacher_actions is None:
             return student_actions, 0.0
         beta = self._get_teacher_forcing_beta(iteration)
-        if beta <= 0.0:
+        teacher_mask = self.teacher_forcing_env_mask
+        if not torch.any(teacher_mask):
             return student_actions, beta
-        if beta >= 1.0:
+        if torch.all(teacher_mask):
             return teacher_actions, beta
-        teacher_mask = torch.rand(self.num_envs, device=self.device) < beta
         step_actions = student_actions.clone()
         step_actions[teacher_mask] = teacher_actions[teacher_mask]
         return step_actions, beta
@@ -1292,6 +1336,8 @@ class Dagger:
         timeout_success_rate = self._mean_completed_metric(self.completed_timeout_successes)
         active_success_rate = self.episode_reached_last_frame.float().mean().item()
         mean_ref_frame_idx = self.ov_env.ref_motion_lib.frame_idx.float().mean().item()
+        teacher_env_fraction = self._get_teacher_forcing_env_fraction()
+        student_env_fraction = 1.0 - teacher_env_fraction
         success_region = None
         if hasattr(self.ov_env, "in_success_region"):
             success_region = self.ov_env.in_success_region.float().mean().item()
@@ -1303,6 +1349,8 @@ class Dagger:
             print("Total Loss:", float(total_loss.detach().cpu()))
             print("Action Loss:", float(action_loss.detach().cpu()))
             print("Teacher Forcing Beta:", teacher_forcing_beta)
+            print("Teacher Rollout Env Fraction:", teacher_env_fraction)
+            print("Student Rollout Env Fraction:", student_env_fraction)
             print("Student Update Steps:", self.student_update_steps)
             print("Last Local Update Batch Size:", self.last_local_update_batch_size)
             print("Last Global Update Batch Size:", self.last_global_update_batch_size)
@@ -1358,6 +1406,8 @@ class Dagger:
             metrics["stats/success_region"] = success_region
         if teacher_forcing_beta is not None:
             metrics["stats/teacher_forcing_beta"] = teacher_forcing_beta
+        metrics["stats/teacher_rollout_env_fraction"] = teacher_env_fraction
+        metrics["stats/student_rollout_env_fraction"] = student_env_fraction
         if timing_means["iteration_ms"] is not None:
             metrics["timing/iteration_ms"] = timing_means["iteration_ms"]
         if timing_means["student_obs_ms"] is not None:
@@ -1382,6 +1432,7 @@ class Dagger:
             if self.aux_buffer is not None:
                 self.aux_buffer[:, 0, :] = self._flatten_aux_dict(self._get_aux_state_dict())
             self.episode_reached_last_frame.zero_()
+            self._resample_teacher_forcing_env_mask(0)
 
             for iteration in range(self.num_iters):
                 self._sync_timing_device()
@@ -1450,6 +1501,7 @@ class Dagger:
                     self.prev_actions_teacher[done_mask] = 0.0
                     self.episode_reached_last_frame[done_mask] = False
                     self._reset_aux_buffer(done_mask)
+                    self._resample_teacher_forcing_env_mask(iteration + 1, done_mask)
 
                 if total_loss is not None:
                     self._sync_timing_device()
