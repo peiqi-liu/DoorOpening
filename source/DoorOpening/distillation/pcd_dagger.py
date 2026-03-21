@@ -387,8 +387,10 @@ class Dagger:
         self._viser_pointcloud_handles = {}
         self._viser_capture_requested = False
         self._viser_capture_iteration = 0
+        self._viser_cached_ground_truth_pcd_world = None
         self._viser_record_frames = []
         self._viser_record_limit_reached = False
+        self._viser_record_last_flush_frame_count = 0
 
         default_record_dir = Path(self.nn_dir).parent if self.nn_dir is not None else Path(os.getcwd())
         default_record_path = default_record_dir / "viser_replay.viser"
@@ -534,6 +536,32 @@ class Dagger:
         quat = base_quat_w.unsqueeze(1).expand(-1, pointcloud_local.shape[1], -1)
         return quat_apply(quat, pointcloud_local) + base_pos_w.unsqueeze(1)
 
+    def _prepare_viser_world_points_from_local(
+        self,
+        pointcloud_local,
+        base_pos_w,
+        base_quat_w,
+        env_id,
+        max_points,
+        drop_zero_rows=False,
+    ):
+        if pointcloud_local is None:
+            return torch.zeros((0, 3), dtype=torch.float32)
+
+        local_points = self._prepare_viser_points(
+            pointcloud_local,
+            env_id,
+            max_points,
+            drop_zero_rows=drop_zero_rows,
+        )
+        if local_points.numel() == 0:
+            return local_points
+
+        local_points = local_points.to(device=self.device)
+        quat = base_quat_w[env_id].unsqueeze(0).expand(local_points.shape[0], -1)
+        world_points = quat_apply(quat, local_points) + base_pos_w[env_id].unsqueeze(0)
+        return world_points.to(dtype=torch.float32).cpu()
+
     def _prepare_viser_points(self, pointcloud, env_id, max_points, drop_zero_rows=False):
         if pointcloud is None:
             return torch.zeros((0, 3), dtype=torch.float32)
@@ -566,7 +594,9 @@ class Dagger:
         iteration,
         q_pos,
         door_joint_pos,
-        ground_truth_pcd_base,
+        robot_base_pos_w,
+        robot_base_quat_w,
+        ground_truth_pcd_world,
         robot_obs_pcd_base,
         policy_input_pcd_base,
     ):
@@ -574,10 +604,18 @@ class Dagger:
             return
 
         env_id = self._get_viser_env_id()
-        gt_points = self._prepare_viser_points(ground_truth_pcd_base, env_id, self.viser_max_points)
-        obs_points = self._prepare_viser_points(robot_obs_pcd_base, env_id, self.viser_max_points)
-        policy_points = self._prepare_viser_points(
+        gt_points = self._prepare_viser_points(ground_truth_pcd_world, env_id, self.viser_max_points)
+        obs_points = self._prepare_viser_world_points_from_local(
+            robot_obs_pcd_base,
+            robot_base_pos_w,
+            robot_base_quat_w,
+            env_id,
+            self.viser_max_points,
+        )
+        policy_points = self._prepare_viser_world_points_from_local(
             policy_input_pcd_base,
+            robot_base_pos_w,
+            robot_base_quat_w,
             env_id,
             self.viser_max_points,
             drop_zero_rows=True,
@@ -590,21 +628,34 @@ class Dagger:
 
         should_record = self.viser_record_enabled and (iteration % self.viser_record_interval == 0)
         if should_record and (self.viser_record_max_frames <= 0 or len(self._viser_record_frames) < self.viser_record_max_frames):
-            record_points = lambda pts, drop_zero=False: self._prepare_viser_points(pts, env_id, self.viser_record_max_points, drop_zero_rows=drop_zero)
+            record_world_points = lambda pts, drop_zero=False: self._prepare_viser_world_points_from_local(
+                pts,
+                robot_base_pos_w,
+                robot_base_quat_w,
+                env_id,
+                self.viser_record_max_points,
+                drop_zero_rows=drop_zero,
+            )
             frame_record = {
                 "iteration": int(iteration),
                 "sim_frame": int(self.frame),
                 "env_id": int(env_id),
                 "pointcloud_source": self.pointcloud_source,
-                "ground_truth_points_world": record_points(ground_truth_pcd_base).to(dtype=torch.float16),
-                "robot_obs_points_world": record_points(robot_obs_pcd_base).to(dtype=torch.float16),
-                "policy_input_points_world": record_points(policy_input_pcd_base, drop_zero=True).to(dtype=torch.float16)
+                "ground_truth_points_world": self._prepare_viser_points(
+                    ground_truth_pcd_world,
+                    env_id,
+                    self.viser_record_max_points,
+                ).to(dtype=torch.float16),
+                "robot_obs_points_world": record_world_points(robot_obs_pcd_base).to(dtype=torch.float16),
+                "policy_input_points_world": record_world_points(policy_input_pcd_base, drop_zero=True).to(dtype=torch.float16)
                 if policy_input_pcd_base is not None
                 else None,
                 "robot_joint_pos": q_pos[env_id].detach().cpu().to(dtype=torch.float32),
                 "door_joint_pos": door_joint_pos[env_id].detach().cpu().to(dtype=torch.float32),
                 "robot_base_pos_w": self.ov_env.robot.data.body_pos_w[env_id, self.robot_base_body_idx].detach().cpu().to(dtype=torch.float32),
                 "robot_base_quat_w": self.ov_env.robot.data.body_quat_w[env_id, self.robot_base_body_idx].detach().cpu().to(dtype=torch.float32),
+                "door_base_pos_w": self.ov_env.door.data.body_pos_w[env_id, self.door_base_body_idx].detach().cpu().to(dtype=torch.float32),
+                "door_base_quat_w": self.ov_env.door.data.body_quat_w[env_id, self.door_base_body_idx].detach().cpu().to(dtype=torch.float32),
                 "door_asset_idx": int(self.env_asset_idx[env_id].detach().cpu().item()),
                 "door_asset_path": str(door_asset_paths[int(self.env_asset_idx[env_id].detach().cpu().item())]),
             }
@@ -626,12 +677,17 @@ class Dagger:
         if not self._viser_record_frames:
             return
 
+        if len(self._viser_record_frames) == self._viser_record_last_flush_frame_count:
+            return
+
         latest_iteration = self._viser_record_frames[-1]["iteration"]
 
         if self._viser_serializer is not None:
             Path(self._format_iterated_record_path(self.viser_record_path, latest_iteration)).write_bytes(
                 self._viser_serializer.serialize()
             )
+            if self._viser_server is not None:
+                self._viser_serializer = self._viser_server.get_scene_serializer()
 
         if self.viser_record_save_raw:
             payload = {
@@ -644,6 +700,8 @@ class Dagger:
                 "frames": self._viser_record_frames,
             }
             torch.save(payload, self._format_iterated_record_path(self.viser_record_raw_path, latest_iteration))
+
+        self._viser_record_last_flush_frame_count = len(self._viser_record_frames)
 
     def _close_viser_debug_tools(self):
         self._flush_viser_recordings()
@@ -846,6 +904,8 @@ class Dagger:
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
         gt_scene_pcd_world = self._sample_scene_pointcloud_world_sampler()
+        if self._viser_capture_requested:
+            self._viser_cached_ground_truth_pcd_world = gt_scene_pcd_world
         # self._debug_visualize_pointcloud(gt_scene_pcd_world, "gt_scene_pointcloud_before_render")
         rendered_pcd_world, _ = simulate_depth_cam_render_from_pose(
             pcd=gt_scene_pcd_world,
@@ -893,6 +953,7 @@ class Dagger:
     def _sample_door_pointcloud_base(self):
         self._sync_timing_device()
         start_time = time.perf_counter()
+        self._viser_cached_ground_truth_pcd_world = None
         if self.pointcloud_source == "sampler":
             door_pcd_base = self._sample_door_pointcloud_base_sampler()
         else:
@@ -1099,17 +1160,17 @@ class Dagger:
                 raise KeyError(f"Unsupported student pointcloud key '{key}' in config.")
 
         if self._viser_capture_requested:
-            ground_truth_pcd_world = self._sample_scene_pointcloud_world_sampler()
-            robot_obs_pcd_world = self._local_pointcloud_to_world(door_pcd_base, robot_base_pos_w, robot_base_quat_w)
-            policy_input_pcd_world = self._local_pointcloud_to_world(obs.get("local_pcd_t"), robot_base_pos_w, robot_base_quat_w)
             self._maybe_update_viser_debug(
                 iteration=self._viser_capture_iteration,
                 q_pos=q_pos,
                 door_joint_pos=door_joint_pos,
-                ground_truth_pcd_base=ground_truth_pcd_world,
-                robot_obs_pcd_base=robot_obs_pcd_world,
-                policy_input_pcd_base=policy_input_pcd_world,
+                robot_base_pos_w=robot_base_pos_w,
+                robot_base_quat_w=robot_base_quat_w,
+                ground_truth_pcd_world=self._viser_cached_ground_truth_pcd_world,
+                robot_obs_pcd_base=door_pcd_base,
+                policy_input_pcd_base=obs.get("local_pcd_t"),
             )
+            self._viser_cached_ground_truth_pcd_world = None
             self._viser_capture_requested = False
 
         return obs, aux_gt
