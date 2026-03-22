@@ -75,7 +75,7 @@ dagger:
   teacher_forcing_min_beta: 0.0
   log_interval: 100
   save_interval: 5000
-  reset_progress_total: 5e5
+  reset_progress_total: 40000
   ignore_aux_debug: true
   pointcloud_source: "sampler"
   robot_num_points: 10000
@@ -88,11 +88,11 @@ dagger:
   viser:
     enabled: false
     env_id: 0
-    show_policy_input: false
+    show_policy_input: true
     point_size: 0.004
     max_points: 12000
     record:
-      enabled: true
+      enabled: false
       path: "viser_replay.viser"
       max_frames: 1000
       flush_interval: 5

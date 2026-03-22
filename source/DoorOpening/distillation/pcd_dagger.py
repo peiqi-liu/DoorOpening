@@ -388,6 +388,7 @@ class Dagger:
         self._viser_pointcloud_handles = {}
         self._viser_capture_requested = False
         self._viser_capture_iteration = 0
+        self._viser_capture_env_id = 0
         self._viser_cached_ground_truth_pcd_world = None
         self._viser_record_frames = []
         self._viser_record_limit_reached = False
@@ -558,18 +559,23 @@ class Dagger:
         if local_points.numel() == 0:
             return local_points
 
-        local_points = local_points.to(device=self.device)
-        quat = base_quat_w[env_id].unsqueeze(0).expand(local_points.shape[0], -1)
-        world_points = quat_apply(quat, local_points) + base_pos_w[env_id].unsqueeze(0)
+        quat = base_quat_w[env_id].detach().to(device=local_points.device, dtype=local_points.dtype).unsqueeze(0)
+        quat = quat.expand(local_points.shape[0], -1)
+        pos = base_pos_w[env_id].detach().to(device=local_points.device, dtype=local_points.dtype).unsqueeze(0)
+        world_points = quat_apply(quat, local_points) + pos
         return world_points.to(dtype=torch.float32).cpu()
 
     def _prepare_viser_points(self, pointcloud, env_id, max_points, drop_zero_rows=False):
         if pointcloud is None:
             return torch.zeros((0, 3), dtype=torch.float32)
-        if pointcloud.ndim != 3 or pointcloud.shape[-1] != 3:
-            raise ValueError(f"Expected batched pointcloud with shape (B, N, 3), got {tuple(pointcloud.shape)}.")
+        if pointcloud.ndim == 2 and pointcloud.shape[-1] == 3:
+            points = pointcloud.detach()
+        elif pointcloud.ndim == 3 and pointcloud.shape[-1] == 3:
+            points = pointcloud[env_id].detach()
+        else:
+            raise ValueError(f"Expected pointcloud with shape (N, 3) or (B, N, 3), got {tuple(pointcloud.shape)}.")
 
-        points = pointcloud[env_id].detach()
+        points = points.to(dtype=torch.float32, device="cpu")
         finite_mask = torch.isfinite(points).all(dim=-1)
         points = points[finite_mask]
         if drop_zero_rows and points.numel() > 0:
@@ -578,7 +584,7 @@ class Dagger:
         if max_points is not None and max_points > 0 and points.shape[0] > max_points:
             step = max(1, points.shape[0] // max_points)
             points = points[::step][:max_points]
-        return points.to(dtype=torch.float32).cpu()
+        return points
 
     def _format_iterated_record_path(self, path_str, iteration):
         path = Path(path_str)
@@ -589,6 +595,33 @@ class Dagger:
             return
         handle = self._viser_pointcloud_handles[handle_name]
         handle.points = points_cpu.numpy()
+
+    def _to_viser_display_frame(self, points_cpu, env_id):
+        if points_cpu is None or points_cpu.numel() == 0:
+            return points_cpu
+        root_pos_w = self.ov_env.robot.data.body_pos_w[env_id, self.robot_root_body_idx].detach().to(device="cpu", dtype=torch.float32)
+        root_quat_w = self.ov_env.robot.data.body_quat_w[env_id, self.robot_root_body_idx].detach().to(device="cpu", dtype=torch.float32)
+        return world_to_local(
+            points_cpu.unsqueeze(0),
+            root_pos_w.unsqueeze(0),
+            root_quat_w.unsqueeze(0),
+        ).squeeze(0)
+
+    def _summarize_viser_points(self, points_cpu):
+        if points_cpu is None:
+            return {"count": 0, "nonzero_count": 0, "min": None, "max": None}
+        if points_cpu.ndim != 2 or points_cpu.shape[-1] != 3:
+            raise ValueError(f"Expected Viser points with shape (N, 3), got {tuple(points_cpu.shape)}.")
+        count = int(points_cpu.shape[0])
+        if count == 0:
+            return {"count": 0, "nonzero_count": 0, "min": None, "max": None}
+        nonzero_count = int(torch.any(points_cpu.abs() > 1e-6, dim=-1).sum().item())
+        return {
+            "count": count,
+            "nonzero_count": nonzero_count,
+            "min": [float(v) for v in points_cpu.min(dim=0).values.tolist()],
+            "max": [float(v) for v in points_cpu.max(dim=0).values.tolist()],
+        }
 
     def _maybe_update_viser_debug(
         self,
@@ -604,7 +637,7 @@ class Dagger:
         if not self._viser_capture_requested:
             return
 
-        env_id = self._get_viser_env_id()
+        env_id = max(0, min(int(self._viser_capture_env_id), self.num_envs - 1))
         gt_points = self._prepare_viser_points(ground_truth_pcd_world, env_id, self.viser_max_points)
         obs_points = self._prepare_viser_world_points_from_local(
             robot_obs_pcd_base,
@@ -622,10 +655,14 @@ class Dagger:
             drop_zero_rows=True,
         ) if (self.viser_show_policy_input and policy_input_pcd_base is not None) else torch.zeros((0, 3), dtype=torch.float32)
 
+        display_gt_points = self._to_viser_display_frame(gt_points, env_id)
+        display_obs_points = self._to_viser_display_frame(obs_points, env_id)
+        display_policy_points = self._to_viser_display_frame(policy_points, env_id)
+
         if self.viser_enabled and self._viser_server is not None and iteration % self.viser_update_interval == 0:
-            self._set_viser_pointcloud("ground_truth_points", gt_points)
-            self._set_viser_pointcloud("robot_obs_points", obs_points)
-            self._set_viser_pointcloud("policy_input_points", policy_points)
+            self._set_viser_pointcloud("ground_truth_points", display_gt_points)
+            self._set_viser_pointcloud("robot_obs_points", display_obs_points)
+            self._set_viser_pointcloud("policy_input_points", display_policy_points)
 
         should_record = self.viser_record_enabled and (iteration % self.viser_record_interval == 0)
         if should_record and (self.viser_record_max_frames <= 0 or len(self._viser_record_frames) < self.viser_record_max_frames):
@@ -663,12 +700,12 @@ class Dagger:
             self._viser_record_frames.append(frame_record)
 
             if self._viser_serializer is not None:
-                self._set_viser_pointcloud("ground_truth_points", gt_points)
-                self._set_viser_pointcloud("robot_obs_points", obs_points)
-                self._set_viser_pointcloud("policy_input_points", policy_points)
+                self._set_viser_pointcloud("ground_truth_points", display_gt_points)
+                self._set_viser_pointcloud("robot_obs_points", display_obs_points)
+                self._set_viser_pointcloud("policy_input_points", display_policy_points)
                 self._viser_serializer.insert_sleep(self.viser_record_frame_dt)
 
-            if len(self._viser_record_frames) % self.viser_record_flush_interval == 0:
+            if len(self._viser_record_frames) % self.viser_record_flush_interval == 1:
                 self._flush_viser_recordings()
 
     def _flush_viser_recordings(self):
@@ -906,7 +943,9 @@ class Dagger:
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
         gt_scene_pcd_world = self._sample_scene_pointcloud_world_sampler()
         if self._viser_capture_requested:
-            self._viser_cached_ground_truth_pcd_world = gt_scene_pcd_world
+            # Keep only the selected env on CPU so Viser debug does not retain an extra
+            # full batched scene pointcloud on GPU during training/debug runs.
+            self._viser_cached_ground_truth_pcd_world = gt_scene_pcd_world[self._viser_capture_env_id].detach().cpu()
         # self._debug_visualize_pointcloud(gt_scene_pcd_world, "gt_scene_pointcloud_before_render")
         rendered_pcd_world, _ = simulate_depth_cam_render_from_pose(
             pcd=gt_scene_pcd_world,
@@ -1442,6 +1481,7 @@ class Dagger:
                 student_obs_start_time = time.perf_counter()
                 self._viser_capture_requested = self._should_capture_viser_frame(iteration)
                 self._viser_capture_iteration = iteration
+                self._viser_capture_env_id = self._get_viser_env_id()
                 student_obs, aux_gt = self._build_student_obs()
                 self._sync_timing_device()
                 self._record_timing("student_obs_ms", time.perf_counter() - student_obs_start_time)
