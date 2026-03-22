@@ -75,7 +75,7 @@ dagger:
   teacher_forcing_min_beta: 0.0
   log_interval: 100
   save_interval: 5000
-  reset_progress_total: 5e5
+  reset_progress_total: 400000
   ignore_aux_debug: true
   pointcloud_source: "sampler"
   robot_num_points: 10000
