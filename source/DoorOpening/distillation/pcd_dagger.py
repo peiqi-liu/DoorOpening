@@ -76,6 +76,33 @@ class Dagger:
         self.num_actions = int(self.ov_env.cfg.action_space)
         self.config = config
 
+        base_action_dim = len(self.ov_env._robot_base_dof_idx)
+        arm_action_dim = len(self.ov_env._robot_arm_dof_idx)
+        hand_action_dim = len(self.ov_env._robot_finger_dof_idx)
+        if base_action_dim + arm_action_dim + hand_action_dim != self.num_actions:
+            raise ValueError(
+                "Action dimensions from base/arm/hand do not match env action dim: "
+                f"{base_action_dim} + {arm_action_dim} + {hand_action_dim} != {self.num_actions}."
+            )
+        self.action_component_dims = OrderedDict(
+            [
+                ("base", base_action_dim),
+                ("arm", arm_action_dim),
+                ("hand", hand_action_dim),
+            ]
+        )
+        self.action_component_slices = OrderedDict()
+        action_start_idx = 0
+        for name, dim in self.action_component_dims.items():
+            self.action_component_slices[name] = slice(action_start_idx, action_start_idx + dim)
+            action_start_idx += dim
+        self.action_component_aliases = {
+            "base": "base",
+            "arm": "arm",
+            "hand": "hand",
+            "finger": "hand",
+        }
+
         self.student_cfg = self.config.get("student", {})
         self.teacher_cfg = self.config.get("teacher", {})
         self.play_policy = bool(self.config.get("play_policy", False))
@@ -144,8 +171,8 @@ class Dagger:
                 raise ImportError("wandb logging is enabled, but the 'wandb' package is not installed.")
             self._init_wandb(summaries_dir)
 
-        self.prev_actions_student = torch.zeros((self.num_envs, self.num_actions), dtype=torch.float32, device=self.device)
-        self.prev_actions_teacher = torch.zeros((self.num_envs, self.num_actions), dtype=torch.float32, device=self.device)
+        self.student_action_history = None
+        self.teacher_action_history = None
         self.teacher_forcing_env_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.current_rewards = torch.zeros((self.num_envs, 1), dtype=torch.float32, device=self.device)
         self.current_lengths = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
@@ -167,6 +194,7 @@ class Dagger:
 
         self._init_teacher()
         self._init_student()
+        self._init_action_history_buffers()
         self._init_pointcloud_assets()
         self._init_viser_debug_tools()
         self.success_frame_idx = float(self.ov_env.ref_motion_lib.num_frames - 1)
@@ -285,6 +313,24 @@ class Dagger:
         if "q_hand" not in self.state_encoders_keys:
             raise ValueError("PCDTransformer student config must include q_hand in state_encoders_cfg.")
 
+        self.action_history_state_specs = OrderedDict()
+        self.max_student_action_history_lag = 1
+        for key in self.state_encoders_keys:
+            spec = self._parse_action_history_state_key(key)
+            if spec is None:
+                continue
+            input_dim = int(self.student_model.state_encoders_cfg[key]["input_dim"])
+            if input_dim != spec["dim"]:
+                raise ValueError(
+                    "{} must have input_dim={} to match the {} action slice.".format(
+                        key,
+                        spec["dim"],
+                        spec["component"],
+                    )
+                )
+            self.action_history_state_specs[key] = spec
+            self.max_student_action_history_lag = max(self.max_student_action_history_lag, spec["lag"])
+
         self.aux_state_specs = OrderedDict()
         for key in self.state_encoders_keys:
             if key == "aux_object_state":
@@ -333,6 +379,82 @@ class Dagger:
 
         if self.local_pcd_points[2] > 0 and "aux_object_state" not in self.aux_state_specs:
             raise ValueError("local_pcd_t aux crop requires aux_object_state to be enabled in state_encoders_cfg.")
+
+    def _parse_action_history_state_key(self, key):
+        if not key.startswith("prev_action"):
+            return None
+
+        parts = key.split("_")
+        if parts[:2] != ["prev", "action"]:
+            raise KeyError(
+                f"Unsupported action history key {key}. "
+                "Expected prev_action[_base|_arm|_hand][_tK]."
+            )
+
+        component = "full"
+        lag = 1
+        for part in parts[2:]:
+            if not part:
+                continue
+            if part.startswith("t") and part[1:].isdigit():
+                parsed_lag = int(part[1:])
+                if parsed_lag < 1:
+                    raise ValueError(f"Action history lag in {key} must be >= 1.")
+                lag = parsed_lag
+                continue
+            if part in self.action_component_aliases:
+                component = self.action_component_aliases[part]
+                continue
+            raise KeyError(
+                f"Unsupported action history key {key}. "
+                "Expected prev_action[_base|_arm|_hand][_tK]."
+            )
+
+        if component == "full":
+            action_slice = slice(0, self.num_actions)
+            action_dim = self.num_actions
+        else:
+            action_slice = self.action_component_slices[component]
+            action_dim = self.action_component_dims[component]
+        return {
+            "component": component,
+            "lag": lag,
+            "slice": action_slice,
+            "dim": action_dim,
+        }
+
+    def _init_action_history_buffers(self):
+        self.student_action_history = torch.zeros(
+            (self.num_envs, self.max_student_action_history_lag, self.num_actions),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self.teacher_action_history = torch.zeros(
+            (self.num_envs, 1, self.num_actions),
+            dtype=torch.float32,
+            device=self.device,
+        )
+
+    def _get_action_history_tensor(self, history_buffer, lag, action_slice):
+        if history_buffer is None:
+            raise RuntimeError("Action history buffer is not initialized.")
+        if lag < 1 or lag > history_buffer.shape[1]:
+            raise IndexError(
+                f"Requested action history lag t-{lag} but buffer only stores {history_buffer.shape[1]} steps."
+            )
+        return history_buffer[:, lag - 1, action_slice]
+
+    def _push_action_history(self, history_buffer, actions):
+        if history_buffer is None:
+            return
+        if history_buffer.shape[1] > 1:
+            history_buffer[:, 1:, :] = history_buffer[:, :-1, :].clone()
+        history_buffer[:, 0, :] = actions
+
+    def _reset_action_history(self, history_buffer, env_ids):
+        if history_buffer is None or env_ids.numel() == 0:
+            return
+        history_buffer[env_ids] = 0.0
 
     def _init_pointcloud_assets(self):
         asset_index_by_dir = {
@@ -843,7 +965,7 @@ class Dagger:
         batch_dict = {
             "is_train": False,
             "obs": obs[self.teacher_obs_type],
-            "prev_actions": self.prev_actions_teacher,
+            "prev_actions": self.teacher_action_history[:, 0, :],
         }
         with torch.no_grad():
             res_dict = self.teacher_model(batch_dict)
@@ -1180,8 +1302,13 @@ class Dagger:
                 obs[key] = q_pos[:, self.ov_env._robot_arm_dof_idx]
             elif key == "q_hand":
                 obs[key] = q_pos[:, self.ov_env._robot_finger_dof_idx]
-            elif key == "prev_action":
-                obs[key] = self.prev_actions_student
+            elif key in self.action_history_state_specs:
+                spec = self.action_history_state_specs[key]
+                obs[key] = self._get_action_history_tensor(
+                    self.student_action_history,
+                    lag=spec["lag"],
+                    action_slice=spec["slice"],
+                )
             elif key in self.aux_state_specs:
                 obs[key] = aux_input_dict[key]
             else:
@@ -1468,6 +1595,8 @@ class Dagger:
 
         try:
             obs = self.env.reset()[0]
+            self.student_action_history.zero_()
+            self.teacher_action_history.zero_()
             if self.aux_buffer is not None:
                 self.aux_buffer[:, 0, :] = self._flatten_aux_dict(self._get_aux_state_dict())
             self.episode_reached_last_frame.zero_()
@@ -1526,8 +1655,8 @@ class Dagger:
                 self._record_timing("env_step_ms", time.perf_counter() - env_step_start_time)
                 self.latest_env_metrics = self._collect_env_metrics(info)
 
-                self.prev_actions_student[:] = step_actions
-                self.prev_actions_teacher[:] = step_actions
+                self._push_action_history(self.student_action_history, step_actions)
+                self._push_action_history(self.teacher_action_history, step_actions)
                 self.frame += self.num_envs
 
                 self.current_rewards += rew.unsqueeze(-1)
@@ -1537,8 +1666,8 @@ class Dagger:
                     self._update_completed_episode_metrics(done_mask, timed_out)
                     self.current_rewards[done_mask] = 0.0
                     self.current_lengths[done_mask] = 0.0
-                    self.prev_actions_student[done_mask] = 0.0
-                    self.prev_actions_teacher[done_mask] = 0.0
+                    self._reset_action_history(self.student_action_history, done_mask)
+                    self._reset_action_history(self.teacher_action_history, done_mask)
                     self.episode_reached_last_frame[done_mask] = False
                     self._reset_aux_buffer(done_mask)
                     self._resample_teacher_forcing_env_mask(iteration + 1, done_mask)
