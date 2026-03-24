@@ -79,14 +79,18 @@ def create_actuators():
         ),
     }
 
-def create_urdf_door_cfg(asset_path: str, training_mode: bool = False):
+def create_urdf_door_cfg(
+    asset_path: str,
+    training_mode: bool = False,
+    activate_contact_sensors: bool = True,
+):
     return sim_utils.UrdfFileCfg(
             fix_base=True,
             merge_fixed_joints=True,
             make_instanceable=False,
             asset_path=asset_path,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                max_depenetration_velocity=1.0,
+                max_depenetration_velocity=5,
             ),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 enabled_self_collisions=False,
@@ -98,15 +102,23 @@ def create_urdf_door_cfg(asset_path: str, training_mode: bool = False):
             ),
             # Note: joint_drive is usually not needed for URDF; PD gains can be in actuators
             # scale = (1.0, 1.2, 1.1),
-            activate_contact_sensors=True,
+            activate_contact_sensors=activate_contact_sensors,
             collider_type = "convex_hull" if training_mode else "convex_decomposition",
             collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.03, rest_offset=0.0),
     )
 
-def create_door_cfg(asset_path: str, training_mode: bool = False) -> ArticulationCfg:
+def create_door_cfg(
+    asset_path: str,
+    training_mode: bool = False,
+    activate_contact_sensors: bool = True,
+) -> ArticulationCfg:
     """Helper to create an ArticulationCfg from a URDF path."""
     return ArticulationCfg(
-        spawn=create_urdf_door_cfg(asset_path, training_mode),
+        spawn=create_urdf_door_cfg(
+            asset_path,
+            training_mode=training_mode,
+            activate_contact_sensors=activate_contact_sensors,
+        ),
         # spawn=sim_utils.UsdFileCfg(
         #     usd_path=asset_path,
         #     scale = (1.0, 1.2, 0.95),
@@ -148,12 +160,18 @@ def setup_doors(training_mode: bool = False):
     """Load all door cfg"""
     door_urdf_configs = []
     for asset_path in asset_paths:
-        door_urdf_configs.append(create_urdf_door_cfg(asset_path, training_mode=training_mode))
+        door_urdf_configs.append(
+            create_urdf_door_cfg(
+                asset_path,
+                training_mode=training_mode,
+                activate_contact_sensors=False,
+            )
+        )
     return ArticulationCfg(
         spawn=sim_utils.MultiAssetSpawnerCfg(
             assets_cfg=door_urdf_configs,
             random_choice=False,
-            activate_contact_sensors=True,
+            activate_contact_sensors=False,
         ),
         init_state=create_initial_state(),
         actuators=create_actuators(),

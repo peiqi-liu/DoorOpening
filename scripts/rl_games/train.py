@@ -222,6 +222,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # create runner from rl-games
 
     if "pbt" in agent_cfg and agent_cfg["pbt"]["enabled"]:
+        if MultiObserver is None or PbtAlgoObserver is None:
+            raise ImportError(
+                "PBT is enabled in the agent config, but this installed isaaclab_rl build does not export "
+                "MultiObserver/PbtAlgoObserver. Disable PBT or install a compatible Isaac Lab version."
+            )
         observers = MultiObserver([IsaacAlgoObserver(), PbtAlgoObserver(agent_cfg, args_cli)])
         runner = Runner(observers)
     else:

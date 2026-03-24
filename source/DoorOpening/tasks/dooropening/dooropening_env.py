@@ -12,7 +12,7 @@ from DoorOpening.assets.door.door_cfg import edit_door_articulation
 from DoorOpening.utils.finger_utils import joint_angle_to_tendon_utils, tendon_to_joint_angle_utils, leap_joints_to_tendon
 from .dooropening_env_cfg import DooropeningEnvCfg
 from DoorOpening.assets.door.door_cfg import motion_traj_paths, handle_offsets, board_offsets
-from isaaclab.sensors import ContactSensor
+from isaaclab.sensors import Camera, ContactSensor
 from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES, ROBOT_KEY_BODY_NAMES
 from DoorOpening.utils.pose_utils import normalize_to_center_frame, world_to_local
 from isaaclab.utils.math import quat_conjugate, quat_apply, quat_mul
@@ -140,6 +140,18 @@ class DooropeningEnv(DirectRLEnv):
         self.alive_bonus = self.cfg.alive_bonus
         self.termination_penalty = self.cfg.termination_penalty
 
+    def _activate_door_contact_reporters(self):
+        try:
+            from isaaclab.sim.schemas import schemas as sim_schemas
+        except ImportError:
+            from isaaclab.sim.schemas.schemas import activate_contact_sensors
+        else:
+            activate_contact_sensors = sim_schemas.activate_contact_sensors
+
+        for env_id in range(self.num_envs):
+            for link_name in ("link_1", "link_2"):
+                activate_contact_sensors(f"/World/envs/env_{env_id}/Door/{link_name}", True)
+
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
         self.door = Articulation(self.cfg.door_cfg)
@@ -153,6 +165,11 @@ class DooropeningEnv(DirectRLEnv):
         # add articulation to scene
         self.scene.articulations["robot"] = self.robot
         self.scene.articulations["door"] = self.door
+        self._activate_door_contact_reporters()
+        self.pointcloud_camera = None
+        if self.cfg.enable_pointcloud_camera:
+            self.pointcloud_camera = Camera(self.cfg.pointcloud_camera_cfg)
+            self.scene.sensors["pointcloud_camera"] = self.pointcloud_camera
         # self.scene.sensors["contact_forces_door1"] = ContactSensor(self.cfg.contact_forces_door1)
         self.scene.sensors["contact_forces_door2"] = ContactSensor(self.cfg.contact_forces_door2)
         # self.scene.sensors["contact_forces_robot_palm_center"] = ContactSensor(self.cfg.contact_forces_robot_palm_center)

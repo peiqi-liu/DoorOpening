@@ -1,0 +1,162 @@
+hidden_dim: 256
+type_dim: 8
+dropout: 0.0
+chunk_size: 1
+
+normalize_state: True
+normalize_action: True
+action_space: "absolute"
+action_dim: 19
+
+aux_weight: 0.1
+aux_prediction_mode: "delta"
+aux_delta_scale: 0.01
+
+door_pcd_num_points: 10000
+local_pcd_range: [1.5, 0.25, 0.25]
+x_direction_cutoff: -0.5
+
+pcd_encoders_cfg:
+  local_pcd_t:
+    type: "pointnet"
+    num_output_tokens: 128
+    num_points: [2500, 1000, 1000]
+    use_pcd: true
+
+state_encoders_cfg:
+  q_base:
+    input_dim: 3
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  q_arm:
+    input_dim: 7
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  q_hand:
+    input_dim: 9
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  prev_action_base_t1:
+    input_dim: 3
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  prev_action_arm_t1:
+    input_dim: 7
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  prev_action_hand_t1:
+    input_dim: 9
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  prev_action_base_t5:
+    input_dim: 3
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  prev_action_arm_t5:
+    input_dim: 7
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  prev_action_hand_t5:
+    input_dim: 9
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  prev_action_base_t10:
+    input_dim: 3
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  prev_action_arm_t10:
+    input_dim: 7
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  prev_action_hand_t10:
+    input_dim: 9
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  prev_action_base_t20:
+    input_dim: 3
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  prev_action_arm_t20:
+    input_dim: 7
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  prev_action_hand_t20:
+    input_dim: 9
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  aux_object_state:
+    input_dim: 3
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  aux_door_joint_angle:
+    input_dim: 2
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+
+transformer_cfg:
+  type: "encoder_decoder"
+  encoder_layers: 6
+  decoder_layers: 6
+  encoder_heads: 8
+  decoder_heads: 8
+  encoder_dim_feedforward: 1024
+  decoder_dim_feedforward: 1024
+
+dagger:
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  num_iters: 250000
+  teacher_forcing_warmup_iters: 10000
+  teacher_forcing_transition_iters: 40000
+  teacher_forcing_schedule: "linear"
+  teacher_forcing_min_beta: 0.0
+  log_interval: 100
+  save_interval: 5000
+  reset_progress_total: 100000
+  ignore_aux_debug: true
+  pointcloud_source: "sampler"
+  robot_num_points: 10000
+  sampler_render:
+    inflate_px: 2
+    jitter_std_m: 0.004
+    clip_mode: "post"
+    jitter_mode: "xyz"
+    use_compile: true
+  viser:
+    enabled: false  # Mode 1: stream the selected env live to Viser.
+    update_interval: 1
+    env_id: 0
+    show_policy_input: true
+    point_size: 0.004
+    max_points: 12000
+    serializer:
+      enabled: false  # Mode 2: save `.viser` episode replays.
+      path: "viser_replay.viser"
+      frame_dt: 0.0333333333
+    raw:
+      enabled: false  # Mode 3: save raw `.pt` episode replays, independent of live/serializer.
+      path: "viser_replay.pt"
+      max_points: 12000
+      max_frames: 0  # Warning threshold disabled so complete selected-env episodes are always saved.
+  # Legacy `dagger.viser.record.*` keys are still accepted, but `serializer` + `raw` are the preferred split.
+  # debug_pointcloud_env_id: 0
+  wandb:
+    enabled: false
