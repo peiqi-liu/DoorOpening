@@ -4,6 +4,7 @@ import argparse
 import os
 import pathlib
 import sys
+import types
 from distutils.util import strtobool
 
 import yaml
@@ -34,6 +35,40 @@ def _load_student_dagger_defaults(student_cfg_path):
 
     dagger_cfg = student_cfg.get("dagger", {})
     return dict(dagger_cfg) if isinstance(dagger_cfg, dict) else {}
+
+
+def _get_base_env(env):
+    return getattr(env, "unwrapped", getattr(env, "env", env))
+
+
+def _configure_rollout_env_mode(env, play_policy):
+    """Match the RL Games train/play env semantics used by the reference scripts."""
+    base_env = _get_base_env(env)
+    ref_motion_lib = getattr(base_env, "ref_motion_lib", None)
+    if ref_motion_lib is not None:
+        ref_motion_lib.reset_from_start = bool(play_policy)
+    if hasattr(base_env, "early_stopping"):
+        base_env.early_stopping = not bool(play_policy)
+    if play_policy:
+        _patch_play_mode_done_tensor(base_env)
+    return base_env
+
+
+def _patch_play_mode_done_tensor(base_env):
+    """Normalize custom env done outputs so play mode still satisfies tensor-based reward code."""
+    if not hasattr(base_env, "_get_dones") or getattr(base_env, "_play_mode_done_tensor_patch", False):
+        return
+
+    original_get_dones = base_env._get_dones
+
+    def _get_dones_with_tensor_killed(self):
+        is_killed, timed_out = original_get_dones()
+        if isinstance(is_killed, bool):
+            is_killed = torch.zeros_like(timed_out, dtype=torch.bool)
+        return is_killed, timed_out
+
+    base_env._get_dones = types.MethodType(_get_dones_with_tensor_killed, base_env)
+    base_env._play_mode_done_tensor_patch = True
 
 
 # add argparse arguments
@@ -71,6 +106,48 @@ parser.add_argument(
     choices=["sampler", "depth"],
     default=None,
     help="Source used to build the student pointcloud observation. Defaults to dagger.pointcloud_source in the student YAML.",
+)
+parser.add_argument(
+    "--viser_live",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help="Enable or disable live Viser streaming. Defaults to dagger.viser.enabled in the student YAML.",
+)
+parser.add_argument(
+    "--viser_serializer",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help="Enable or disable serialized `.viser` episode replays. Defaults to dagger.viser.serializer.enabled.",
+)
+parser.add_argument(
+    "--viser_raw",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help="Enable or disable raw `.pt` episode replays. Defaults to dagger.viser.raw.enabled.",
+)
+parser.add_argument(
+    "--viser_env_id",
+    type=int,
+    default=None,
+    help="Environment index used for live/replay Viser capture. Defaults to dagger.viser.env_id.",
+)
+parser.add_argument(
+    "--viser_update_interval",
+    type=int,
+    default=None,
+    help="Iteration interval for live Viser streaming. Defaults to dagger.viser.update_interval.",
+)
+parser.add_argument(
+    "--viser_serializer_path",
+    type=str,
+    default=None,
+    help="Base output path for serialized `.viser` replays.",
+)
+parser.add_argument(
+    "--viser_raw_path",
+    type=str,
+    default=None,
+    help="Base output path for raw `.pt` replays.",
 )
 
 # append AppLauncher cli args
@@ -202,12 +279,32 @@ def main(env_cfg, agent_cfg: dict):
     viser_cfg = dagger_runtime_cfg.get("viser", {})
     if not isinstance(viser_cfg, dict):
         viser_cfg = {}
-    viser_cfg["update_interval"] = int(args_cli.video_interval)
-    viser_record_cfg = viser_cfg.get("record", {})
-    if not isinstance(viser_record_cfg, dict):
-        viser_record_cfg = {}
-    viser_record_cfg["interval"] = int(args_cli.video_interval)
-    viser_cfg["record"] = viser_record_cfg
+    serializer_cfg = viser_cfg.get("serializer", {})
+    if not isinstance(serializer_cfg, dict):
+        serializer_cfg = {}
+    raw_cfg = viser_cfg.get("raw", {})
+    if not isinstance(raw_cfg, dict):
+        raw_cfg = {}
+    if args_cli.viser_live is not None:
+        viser_cfg["enabled"] = args_cli.viser_live
+    if args_cli.viser_update_interval is not None:
+        viser_cfg["update_interval"] = max(1, int(args_cli.viser_update_interval))
+    else:
+        viser_cfg.setdefault("update_interval", 1)
+    if args_cli.viser_env_id is not None:
+        viser_cfg["env_id"] = int(args_cli.viser_env_id)
+    if args_cli.viser_serializer is not None:
+        serializer_cfg["enabled"] = args_cli.viser_serializer
+        print(f"Viser serializer enabled: {args_cli.viser_serializer}")
+    if args_cli.viser_raw is not None:
+        raw_cfg["enabled"] = args_cli.viser_raw
+        print(f"Viser raw enabled: {args_cli.viser_raw}")
+    if args_cli.viser_serializer_path is not None:
+        serializer_cfg["path"] = args_cli.viser_serializer_path
+    if args_cli.viser_raw_path is not None:
+        raw_cfg["path"] = args_cli.viser_raw_path
+    viser_cfg["serializer"] = serializer_cfg
+    viser_cfg["raw"] = raw_cfg
     dagger_runtime_cfg["viser"] = viser_cfg
 
     env_cfg.enable_pointcloud_camera = dagger_runtime_cfg["pointcloud_source"] == "depth"
@@ -271,8 +368,16 @@ def main(env_cfg, agent_cfg: dict):
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
-    ov_env = env.env
-    print(ov_env)
+    ov_env = _configure_rollout_env_mode(env, args_cli.play_policy)
+    if rank == 0:
+        ref_motion_lib = getattr(ov_env, "ref_motion_lib", None)
+        reset_from_start = getattr(ref_motion_lib, "reset_from_start", None)
+        early_stopping = getattr(ov_env, "early_stopping", None)
+        print(
+            "[INFO] Distillation rollout mode: "
+            f"{'play' if args_cli.play_policy else 'train'} "
+            f"(reset_from_start={reset_from_start}, early_stopping={early_stopping})"
+        )
 
     if args_cli.video and rank == 0:
         video_kwargs = {
