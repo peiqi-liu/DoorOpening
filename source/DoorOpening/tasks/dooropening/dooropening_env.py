@@ -107,6 +107,8 @@ class DooropeningEnv(DirectRLEnv):
         self.hinge_contact_reward_w = self.cfg.hinge_contact_reward_w
         self.robot_body_lin_vel_w = self.cfg.robot_body_lin_vel_w
         self.robot_body_ang_vel_w = self.cfg.robot_body_ang_vel_w
+        self.joint_limit_penalty_w = self.cfg.joint_limit_penalty_w
+        self.joint_limit_penalty_margin_ratio = self.cfg.joint_limit_penalty_margin_ratio
 
         self.reset_key_body_pos_delta_min = self.cfg.reset_key_body_pos_delta_min
         self.reset_key_body_quat_delta_min = self.cfg.reset_key_body_quat_delta_min
@@ -639,6 +641,16 @@ class DooropeningEnv(DirectRLEnv):
             contact_force_w = self.hinge_contact_reward_w * self.ref_hinge_contact_mask,
         )
 
+        joint_limit_penalty, joint_limit_active_fraction = compute_joint_limit_penalty(
+            joint_pos=self.robot.data.joint_pos[:, self._robot_dof_idx],
+            joint_lower_limits=self.robot_dof_lower_limits,
+            joint_upper_limits=self.robot_dof_upper_limits,
+            soft_ratio=self.joint_limit_penalty_margin_ratio,
+        )
+        weighted_joint_limit_penalty = self.joint_limit_penalty_w * joint_limit_penalty
+        self.extras["reward/joint_limit_penalty"] = weighted_joint_limit_penalty.mean().item()
+        self.extras["stats/joint_limit_active_fraction"] = joint_limit_active_fraction.mean().item()
+
         # 1. Base Alive Reward: Small constant for staying in the safety tunnel
         alive_base = self.alive_base 
         
@@ -652,7 +664,7 @@ class DooropeningEnv(DirectRLEnv):
         is_killed, _ = self._get_dones()
         termination_penalty = self.termination_penalty
         
-        final_reward = deep_mimic_reward + total_alive_reward
+        final_reward = deep_mimic_reward + total_alive_reward - weighted_joint_limit_penalty
         final_reward = torch.where(is_killed, final_reward + termination_penalty, final_reward)
 
         return final_reward
@@ -951,3 +963,36 @@ def compute_tracking_error(
     finger_joint_vel_diff = ref_robot_finger_joint_vel - robot_finger_joint_vel
     finger_joint_vel_err = torch.sum(finger_joint_vel_diff * finger_joint_vel_diff, dim=-1)  # [B]
     return (key_body_pos_err, key_body_quat_err, door_err, base_joint_pos_err, arm_joint_pos_err, finger_joint_pos_err, base_joint_vel_err, arm_joint_vel_err, finger_joint_vel_err)
+
+def compute_joint_limit_penalty(
+    joint_pos: torch.Tensor,
+    joint_lower_limits: torch.Tensor,
+    joint_upper_limits: torch.Tensor,
+    soft_ratio: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    zeros = torch.zeros(joint_pos.shape[0], device=joint_pos.device, dtype=joint_pos.dtype)
+    if soft_ratio <= 0.0:
+        return zeros, zeros
+
+    finite_limit_mask = torch.isfinite(joint_lower_limits) & torch.isfinite(joint_upper_limits)
+    valid_limit_mask = finite_limit_mask & (joint_upper_limits > joint_lower_limits)
+
+    joint_range = torch.where(valid_limit_mask, joint_upper_limits - joint_lower_limits, torch.ones_like(joint_lower_limits))
+    soft_zone = torch.clamp(joint_range * soft_ratio, min=1e-6)
+
+    dist_to_lower = joint_pos - joint_lower_limits.unsqueeze(0)
+    dist_to_upper = joint_upper_limits.unsqueeze(0) - joint_pos
+    dist_to_limit = torch.minimum(dist_to_lower, dist_to_upper)
+
+    normalized_penalty = torch.clamp(
+        (soft_zone.unsqueeze(0) - dist_to_limit) / soft_zone.unsqueeze(0),
+        min=0.0,
+        max=1.0,
+    )
+    valid_limit_mask = valid_limit_mask.unsqueeze(0)
+    normalized_penalty = torch.where(valid_limit_mask, normalized_penalty, torch.zeros_like(normalized_penalty))
+
+    num_tracked_joints = valid_limit_mask.to(joint_pos.dtype).sum(dim=-1).clamp(min=1.0)
+    joint_limit_penalty = normalized_penalty.square().sum(dim=-1) / num_tracked_joints
+    active_joint_fraction = (normalized_penalty > 0.0).to(joint_pos.dtype).sum(dim=-1) / num_tracked_joints
+    return joint_limit_penalty, active_joint_fraction
