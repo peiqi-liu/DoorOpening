@@ -91,17 +91,14 @@ class Dagger:
                 ("hand", hand_action_dim),
             ]
         )
-        self.action_component_slices = OrderedDict()
-        action_start_idx = 0
-        for name, dim in self.action_component_dims.items():
-            self.action_component_slices[name] = slice(action_start_idx, action_start_idx + dim)
-            action_start_idx += dim
         self.action_component_aliases = {
             "base": "base",
             "arm": "arm",
             "hand": "hand",
             "finger": "hand",
         }
+        self.action_component_history_indices = self._build_action_component_history_indices()
+        self.proprio_component_history_indices = self._build_proprio_component_history_indices()
 
         self.student_cfg = self.config.get("student", {})
         self.teacher_cfg = self.config.get("teacher", {})
@@ -125,7 +122,6 @@ class Dagger:
         self.save_interval = int(self.runtime_cfg.get("save_interval", 5_000))
         self.pointcloud_source = str(self.runtime_cfg.get("pointcloud_source", "sampler")).lower()
         self.robot_pcd_num_points = self.runtime_cfg.get("robot_num_points")
-        self.ignore_aux_debug = bool(self.runtime_cfg.get("ignore_aux_debug", False))
         self.sampler_render_cfg = self.runtime_cfg.get("sampler_render", {})
         self.sampler_render_inflate_px = int(self.sampler_render_cfg.get("inflate_px", 2))
         self.sampler_render_jitter_std_m = float(self.sampler_render_cfg.get("jitter_std_m", 0.004))
@@ -190,6 +186,8 @@ class Dagger:
 
         self.student_action_history = None
         self.teacher_action_history = None
+        self.student_proprio_history = None
+        self.student_proprio_reference = None
         self.teacher_forcing_env_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.current_rewards = torch.zeros((self.num_envs, 1), dtype=torch.float32, device=self.device)
         self.current_lengths = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
@@ -210,16 +208,10 @@ class Dagger:
 
         self._init_teacher()
         self._init_student()
-        self._init_action_history_buffers()
+        self._init_history_buffers()
         self._init_pointcloud_assets()
         self._init_viser_debug_tools()
         self.success_frame_idx = float(self.ov_env.ref_motion_lib.num_frames - 1)
-
-        self.aux_buffer = None
-        if not self.ignore_aux_debug and self.student_model.aux_prediction and self.aux_total_dim > 0:
-            self.aux_buffer = torch.zeros((self.num_envs, 1, self.aux_total_dim), dtype=torch.float32, device=self.device)
-        if self.ignore_aux_debug and self.rank == 0:
-            print("Aux debug bypass enabled: using ground-truth aux inputs and skipping aux loss/rollout.")
 
     def _init_teacher(self):
         self.teacher_model = None
@@ -288,24 +280,14 @@ class Dagger:
         # print(self.student_model)
         # print("state_encoders_cfg", self.student_model.state_encoders_cfg)
 
-        self.student_ddp_find_unused_parameters = bool(
-            self.student_model.aux_prediction and self.ignore_aux_debug
-        )
-
         if self.use_ddp:
             self.student_model_ddp = DDP(
                 self.student_model,
                 device_ids=[self.local_rank],
-                find_unused_parameters=self.student_ddp_find_unused_parameters,
+                find_unused_parameters=False,
             )
         else:
             self.student_model_ddp = self.student_model
-
-        if self.student_ddp_find_unused_parameters and self.rank == 0:
-            print(
-                "DDP unused-parameter detection enabled because aux prediction is active "
-                "while ignore_aux_debug skips the aux loss."
-            )
         self.optimizer = torch.optim.AdamW(
             self.student_model_ddp.parameters(),
             lr=self.lr,
@@ -346,39 +328,29 @@ class Dagger:
                 )
             self.action_history_state_specs[key] = spec
             self.max_student_action_history_lag = max(self.max_student_action_history_lag, spec["lag"])
+        if student_ckpt is not None and self.action_history_state_specs and self.rank == 0:
+            print(
+                "Warning: student checkpoint was loaded while prev_action_* inputs are active. "
+                "If their meaning changed since the checkpoint was trained, reusing those encoder weights can spike loss."
+            )
 
-        self.aux_state_specs = OrderedDict()
+        self.proprio_history_state_specs = OrderedDict()
+        self.max_student_proprio_history_lag = 1
         for key in self.state_encoders_keys:
-            if key == "aux_object_state":
-                input_dim = int(self.student_model.state_encoders_cfg[key]["input_dim"])
-                if input_dim != 3:
-                    raise ValueError("aux_object_state must have input_dim=3.")
-                self.aux_state_specs[key] = {"dim": input_dim, "getter_name": "_get_aux_object_state"}
-            elif key == "aux_door_joint_angle":
-                input_dim = int(self.student_model.state_encoders_cfg[key]["input_dim"])
-                expected_dim = len(self.ov_env._door_joint_idx)
-                if input_dim != expected_dim:
-                    raise ValueError(f"aux_door_joint_angle must have input_dim={expected_dim}.")
-                self.aux_state_specs[key] = {"dim": input_dim, "getter_name": "_get_aux_door_joint_angle"}
-
-        unknown_aux_keys = [
-            key
-            for key in self.state_encoders_keys
-            if key.startswith("aux_") and key not in self.aux_state_specs
-        ]
-        if unknown_aux_keys:
-            raise KeyError(
-                f"Unsupported aux state keys in student config: {unknown_aux_keys}. "
-                "Add a getter in pcd_dagger.py before enabling them."
-            )
-
-        self.aux_state_keys = tuple(self.aux_state_specs.keys())
-        self.aux_total_dim = sum(spec["dim"] for spec in self.aux_state_specs.values())
-        if self.student_model.aux_prediction and self.student_model.aux_output_dim != self.aux_total_dim:
-            raise ValueError(
-                f"Student aux output dim ({self.student_model.aux_output_dim}) does not match "
-                f"configured aux state dim ({self.aux_total_dim})."
-            )
+            spec = self._parse_proprio_history_state_key(key)
+            if spec is None:
+                continue
+            input_dim = int(self.student_model.state_encoders_cfg[key]["input_dim"])
+            if input_dim != spec["dim"]:
+                raise ValueError(
+                    "{} must have input_dim={} to match the {} joint slice.".format(
+                        key,
+                        spec["dim"],
+                        spec["component"],
+                    )
+                )
+            self.proprio_history_state_specs[key] = spec
+            self.max_student_proprio_history_lag = max(self.max_student_proprio_history_lag, spec["lag"])
 
         local_pcd_cfg = self.student_model.pcd_encoders_cfg.get("local_pcd_t")
         self.local_pcd_points = [0, 0, 0]
@@ -393,8 +365,38 @@ class Dagger:
             # while len(self.local_pcd_points) < 3:
             #     self.local_pcd_points.append(0)
 
-        if self.local_pcd_points[2] > 0 and "aux_object_state" not in self.aux_state_specs:
-            raise ValueError("local_pcd_t aux crop requires aux_object_state to be enabled in state_encoders_cfg.")
+    def _build_action_component_history_indices(self):
+        target_joint_ids = torch.as_tensor(self.ov_env._robot_dof_idx, device=self.device, dtype=torch.long)
+        joint_id_to_target_pos = {int(joint_id): pos for pos, joint_id in enumerate(target_joint_ids.tolist())}
+
+        indices = OrderedDict()
+        indices["full"] = torch.arange(self.num_actions, device=self.device, dtype=torch.long)
+        indices["base"] = torch.as_tensor(
+            [joint_id_to_target_pos[int(joint_id)] for joint_id in self.ov_env._robot_base_dof_idx],
+            device=self.device,
+            dtype=torch.long,
+        )
+        indices["arm"] = torch.as_tensor(
+            [joint_id_to_target_pos[int(joint_id)] for joint_id in self.ov_env._robot_arm_dof_idx],
+            device=self.device,
+            dtype=torch.long,
+        )
+        indices["hand"] = torch.as_tensor(
+            [joint_id_to_target_pos[int(joint_id)] for joint_id in self.ov_env._robot_finger_dof_idx],
+            device=self.device,
+            dtype=torch.long,
+        )
+        return indices
+
+    def _build_proprio_component_history_indices(self):
+        return OrderedDict(
+            [
+                ("full", torch.as_tensor(self.ov_env._robot_dof_idx, device=self.device, dtype=torch.long)),
+                ("base", torch.as_tensor(self.ov_env._robot_base_dof_idx, device=self.device, dtype=torch.long)),
+                ("arm", torch.as_tensor(self.ov_env._robot_arm_dof_idx, device=self.device, dtype=torch.long)),
+                ("hand", torch.as_tensor(self.ov_env._robot_finger_dof_idx, device=self.device, dtype=torch.long)),
+            ]
+        )
 
     def _parse_action_history_state_key(self, key):
         if not key.startswith("prev_action"):
@@ -426,20 +428,55 @@ class Dagger:
                 "Expected prev_action[_base|_arm|_hand][_tK]."
             )
 
-        if component == "full":
-            action_slice = slice(0, self.num_actions)
-            action_dim = self.num_actions
-        else:
-            action_slice = self.action_component_slices[component]
-            action_dim = self.action_component_dims[component]
+        action_indices = self.action_component_history_indices[component]
+        action_dim = int(action_indices.numel())
         return {
             "component": component,
             "lag": lag,
-            "slice": action_slice,
+            "indices": action_indices,
             "dim": action_dim,
         }
 
-    def _init_action_history_buffers(self):
+    def _parse_proprio_history_state_key(self, key):
+        if not key.startswith("prev_q"):
+            return None
+
+        parts = key.split("_")
+        if parts[:2] != ["prev", "q"]:
+            raise KeyError(
+                f"Unsupported proprio history key {key}. "
+                "Expected prev_q[_base|_arm|_hand][_tK]."
+            )
+
+        component = "full"
+        lag = 1
+        for part in parts[2:]:
+            if not part:
+                continue
+            if part.startswith("t") and part[1:].isdigit():
+                parsed_lag = int(part[1:])
+                if parsed_lag < 1:
+                    raise ValueError(f"Proprio history lag in {key} must be >= 1.")
+                lag = parsed_lag
+                continue
+            if part in self.action_component_aliases:
+                component = self.action_component_aliases[part]
+                continue
+            raise KeyError(
+                f"Unsupported proprio history key {key}. "
+                "Expected prev_q[_base|_arm|_hand][_tK]."
+            )
+
+        proprio_indices = self.proprio_component_history_indices[component]
+        proprio_dim = int(proprio_indices.numel())
+        return {
+            "component": component,
+            "lag": lag,
+            "indices": proprio_indices,
+            "dim": proprio_dim,
+        }
+
+    def _init_history_buffers(self):
         self.student_action_history = torch.zeros(
             (self.num_envs, self.max_student_action_history_lag, self.num_actions),
             dtype=torch.float32,
@@ -450,27 +487,72 @@ class Dagger:
             dtype=torch.float32,
             device=self.device,
         )
+        self.student_proprio_history_dim = int(self.ov_env.robot.data.joint_pos.shape[-1])
+        self.student_proprio_history = torch.zeros(
+            (self.num_envs, self.max_student_proprio_history_lag, self.student_proprio_history_dim),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self.student_proprio_reference = torch.zeros(
+            (self.num_envs, self.student_proprio_history_dim),
+            dtype=torch.float32,
+            device=self.device,
+        )
 
-    def _get_action_history_tensor(self, history_buffer, lag, action_slice):
+    def _get_history_tensor(self, history_buffer, lag, value_indices, reference_buffer=None):
         if history_buffer is None:
-            raise RuntimeError("Action history buffer is not initialized.")
+            raise RuntimeError("History buffer is not initialized.")
         if lag < 1 or lag > history_buffer.shape[1]:
             raise IndexError(
-                f"Requested action history lag t-{lag} but buffer only stores {history_buffer.shape[1]} steps."
+                f"Requested history lag t-{lag} but buffer only stores {history_buffer.shape[1]} steps."
             )
-        return history_buffer[:, lag - 1, action_slice]
+        values = history_buffer[:, lag - 1, value_indices]
+        if reference_buffer is not None:
+            values = values - reference_buffer[:, value_indices]
+        return values
 
-    def _push_action_history(self, history_buffer, actions):
+    def _push_history(self, history_buffer, values):
         if history_buffer is None:
             return
         if history_buffer.shape[1] > 1:
             history_buffer[:, 1:, :] = history_buffer[:, :-1, :].clone()
-        history_buffer[:, 0, :] = actions
+        history_buffer[:, 0, :] = values
 
-    def _reset_action_history(self, history_buffer, env_ids):
+    def _reset_history(self, history_buffer, env_ids):
         if history_buffer is None or env_ids.numel() == 0:
             return
         history_buffer[env_ids] = 0.0
+
+    def _seed_student_histories(self, env_ids=None):
+        proprio_seed = self._get_student_proprio_vector().detach()
+
+        if env_ids is None:
+            if self.student_action_history is not None:
+                self.student_action_history.zero_()
+            if self.student_proprio_reference is not None:
+                self.student_proprio_reference[:] = proprio_seed
+            if self.student_proprio_history is not None:
+                self.student_proprio_history[:] = proprio_seed.unsqueeze(1).expand(
+                    -1, self.student_proprio_history.shape[1], -1
+                )
+            return
+
+        if env_ids.numel() == 0:
+            return
+        if self.student_action_history is not None:
+            self.student_action_history[env_ids] = 0.0
+        if self.student_proprio_reference is not None:
+            self.student_proprio_reference[env_ids] = proprio_seed[env_ids]
+        if self.student_proprio_history is not None:
+            self.student_proprio_history[env_ids] = proprio_seed[env_ids].unsqueeze(1).expand(
+                -1, self.student_proprio_history.shape[1], -1
+            )
+
+    def _get_student_proprio_vector(self):
+        q_pos = self.ov_env.robot.data.joint_pos
+        if q_pos.ndim != 2:
+            raise RuntimeError(f"Expected joint_pos to be rank-2, got shape {tuple(q_pos.shape)}.")
+        return q_pos
 
     def _init_pointcloud_assets(self):
         asset_index_by_dir = {
@@ -501,17 +583,11 @@ class Dagger:
         robot_joint_name_to_idx = {name: idx for idx, name in enumerate(robot_joint_names)}
         self.robot_sampler_joint_reorder = [robot_joint_name_to_idx[name] for name in robot_sampler_joint_names]
 
-        if "link_2" in self.ov_env.door_body_names:
-            handle_name_idx = self.ov_env.door_body_names.index("link_2")
-        else:
-            handle_name_idx = len(self.ov_env.door_body_names) - 1
         self.robot_base_body_idx = int(self.ov_env._robot_base_body_link_idx)
         self.robot_palm_body_idx = int(self.ov_env._robot_key_body_idx[self.ov_env._robot_palm_id_in_key_body_idx])
         self.robot_camera_body_idx = int(self.ov_env.robot.find_bodies("x5_camera_link")[0][0])
         self.robot_root_body_idx = int(self.ov_env._robot_base_link_idx[0])
         self.door_base_body_idx = int(self.ov_env._door_base_link_idx)
-        self.door_handle_body_idx = int(self.ov_env._door_body_idx[handle_name_idx])
-        self.door_aux_joint_idx = torch.as_tensor(self.ov_env._door_joint_idx, device=self.device, dtype=torch.long)
         camera_cfg = self.ov_env.cfg.pointcloud_camera_cfg
         self.camera_offset_pos = torch.tensor(camera_cfg.offset.pos, device=self.device, dtype=torch.float32)
         self.camera_offset_quat_world = torch.tensor(camera_cfg.offset.rot, device=self.device, dtype=torch.float32)
@@ -1063,64 +1139,6 @@ class Dagger:
         self.student_model.load_state_dict(state_dict, strict=False)
         print(f"Loaded student checkpoint: {ckpt}")
 
-    def _aux_to_2d(self, aux_tensor):
-        if aux_tensor is None:
-            return None
-        if aux_tensor.ndim == 3:
-            return aux_tensor[:, 0, :]
-        return aux_tensor
-
-    def _flatten_aux_dict(self, aux_dict):
-        if not self.aux_state_keys:
-            return None
-        aux_parts = []
-        for key in self.aux_state_keys:
-            if key not in aux_dict:
-                raise KeyError(f"Missing aux state '{key}' while flattening aux dict.")
-            aux_parts.append(self._aux_to_2d(aux_dict[key]))
-        return torch.cat(aux_parts, dim=-1)
-
-    def _split_aux_tensor(self, aux_tensor):
-        aux_tensor_2d = self._aux_to_2d(aux_tensor)
-        if aux_tensor_2d is None:
-            return OrderedDict()
-
-        aux_dict = OrderedDict()
-        start_idx = 0
-        for key, spec in self.aux_state_specs.items():
-            end_idx = start_idx + spec["dim"]
-            aux_dict[key] = aux_tensor_2d[:, start_idx:end_idx]
-            start_idx = end_idx
-        return aux_dict
-
-    def _get_aux_state_dict(self):
-        aux_state = OrderedDict()
-        for key, spec in self.aux_state_specs.items():
-            # print("key", key)
-            # print("spec", spec)
-            # print("getter_name", spec["getter_name"])
-            aux_state[key] = getattr(self, spec["getter_name"])()
-            # print("aux_state[key]", aux_state[key])
-        return aux_state
-
-    def _decode_aux_prediction(self, aux_pred, prev_abs_aux):
-        prev_abs_aux = self._aux_to_2d(prev_abs_aux)
-        if prev_abs_aux is None:
-            return aux_pred.detach()
-        if self.student_model.aux_prediction_mode == "delta":
-            aux_delta = torch.clamp(aux_pred, -1.0, 1.0)
-            return prev_abs_aux.unsqueeze(1) + self.student_model.aux_delta_scale * aux_delta
-        return self._aux_to_2d(aux_pred).unsqueeze(1)
-
-    def _get_aux_target(self, current_aux, prev_abs_aux):
-        prev_abs_aux = self._aux_to_2d(prev_abs_aux)
-        if prev_abs_aux is None:
-            return current_aux
-        if self.student_model.aux_prediction_mode == "delta":
-            target_delta = (current_aux - prev_abs_aux) / self.student_model.aux_delta_scale
-            return torch.clamp(target_delta, -1.0, 1.0)
-        return current_aux
-
     def _get_teacher_actions(self, obs):
         if self.teacher_model is None:
             raise RuntimeError("Teacher model is not initialized.")
@@ -1315,21 +1333,7 @@ class Dagger:
         except Exception as exc:
             print(f"Skipping pointcloud visualization for {filename}: {exc}")
 
-    def _get_aux_object_state(self):
-        robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
-        robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
-        handle_pos_w = self.ov_env.door.data.body_pos_w[:, self.door_handle_body_idx].unsqueeze(1)
-        return world_to_local(handle_pos_w, robot_base_pos_w, robot_base_quat_w).squeeze(1)
-
-    def _get_aux_door_joint_angle(self):
-        return self.ov_env.door.data.joint_pos[:, self.door_aux_joint_idx]
-
-    def _get_aux_crop_center(self, aux_state_dict):
-        if "aux_object_state" not in aux_state_dict:
-            raise KeyError("aux_object_state is required to crop the auxiliary local pointcloud.")
-        return aux_state_dict["aux_object_state"]
-
-    def _build_local_pcd(self, door_pcd_base, palm_pos_base, aux_crop_center):
+    def _build_local_pcd(self, door_pcd_base, palm_pos_base):
         pcd_parts = []
 
         if self.local_pcd_points[0] > 0:
@@ -1355,18 +1359,6 @@ class Dagger:
                 log_name="palm",
             )
             pcd_parts.append(palm_crop)
-
-        if self.local_pcd_points[2] > 0:
-            aux_crop, _ = crop_local_pcd(
-                door_pcd_base,
-                local_range=self.local_pcd_range[2],
-                num_local_points=self.local_pcd_points[2],
-                is_cylindrical=False,
-                crop_center=aux_crop_center,
-                x_direction_cutoff=None,
-                log_name="aux",
-            )
-            pcd_parts.append(aux_crop)
 
         if not pcd_parts:
             raise ValueError("Student config requested local_pcd_t but no local point counts were configured.")
@@ -1440,21 +1432,8 @@ class Dagger:
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
         palm_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_palm_body_idx].unsqueeze(1)
 
-        aux_gt_dict = self._get_aux_state_dict()
-        aux_gt = self._flatten_aux_dict(aux_gt_dict)
-        if self.ignore_aux_debug and aux_gt is not None:
-            aux_input = torch.zeros_like(aux_gt)
-        elif self.aux_buffer is not None:
-            aux_input = self._aux_to_2d(self.aux_buffer)
-            if torch.count_nonzero(self.aux_buffer) == 0:
-                aux_input = aux_gt
-        else:
-            aux_input = aux_gt
-        aux_input_dict = self._split_aux_tensor(aux_input)
-
         palm_pos_base = world_to_local(palm_pos_w, robot_base_pos_w, robot_base_quat_w).squeeze(1)
         door_pcd_base = self._sample_door_pointcloud_base()
-        aux_crop_center = palm_pos_base if self.ignore_aux_debug else self._get_aux_crop_center(aux_gt_dict)
 
         obs = OrderedDict()
         for key in self.state_encoders_keys:
@@ -1466,13 +1445,19 @@ class Dagger:
                 obs[key] = q_pos[:, self.ov_env._robot_finger_dof_idx]
             elif key in self.action_history_state_specs:
                 spec = self.action_history_state_specs[key]
-                obs[key] = self._get_action_history_tensor(
+                obs[key] = self._get_history_tensor(
                     self.student_action_history,
                     lag=spec["lag"],
-                    action_slice=spec["slice"],
+                    value_indices=spec["indices"],
                 )
-            elif key in self.aux_state_specs:
-                obs[key] = aux_input_dict[key]
+            elif key in self.proprio_history_state_specs:
+                spec = self.proprio_history_state_specs[key]
+                obs[key] = self._get_history_tensor(
+                    self.student_proprio_history,
+                    lag=spec["lag"],
+                    value_indices=spec["indices"],
+                    reference_buffer=self.student_proprio_reference,
+                )
             else:
                 raise KeyError(f"Unsupported student state key '{key}' in config.")
 
@@ -1482,7 +1467,6 @@ class Dagger:
                 obs[key] = self._build_local_pcd(
                     door_pcd_base,
                     palm_pos_base,
-                    aux_crop_center,
                 )
                 # self._debug_visualize_pointcloud(obs[key], "local_pcd_t")
             else:
@@ -1502,23 +1486,15 @@ class Dagger:
             self._viser_cached_ground_truth_pcd_world = None
             self._viser_capture_requested = False
 
-        return obs, aux_gt
+        return obs
 
     def _student_forward(self, student_obs):
         return self.student_model_ddp(student_obs)
 
-    def _compute_student_loss(self, student_output, teacher_actions, aux_gt, student_obs):
+    def _compute_student_loss(self, student_output, teacher_actions):
         action_loss = F.mse_loss(student_output["action"][:, 0, :], teacher_actions)
         total_loss = action_loss
-        aux_loss = None
-        if not self.ignore_aux_debug and self.student_model.aux_prediction and "aux" in student_output:
-            prev_aux = None
-            if self.aux_state_keys and all(key in student_obs for key in self.aux_state_keys):
-                prev_aux = self._flatten_aux_dict(OrderedDict((key, student_obs[key]) for key in self.aux_state_keys))
-            aux_target = self._get_aux_target(aux_gt, prev_aux)
-            aux_loss = F.mse_loss(student_output["aux"][:, 0, :], aux_target)
-            total_loss = total_loss + self.student_model.aux_weight * aux_loss
-        return total_loss, action_loss, aux_loss
+        return total_loss, action_loss
 
     def _get_teacher_forcing_beta(self, iteration):
         if self.play_policy or self.teacher_model is None:
@@ -1597,12 +1573,6 @@ class Dagger:
         step_actions[teacher_mask] = teacher_actions[teacher_mask]
         return step_actions, beta
 
-    def _reset_aux_buffer(self, done_mask):
-        if self.aux_buffer is None or done_mask.numel() == 0:
-            return
-        aux_gt = self._flatten_aux_dict(self._get_aux_state_dict())
-        self.aux_buffer[done_mask, 0, :] = aux_gt[done_mask]
-
     def _update_last_frame_tracker(self):
         ref_motion_lib = getattr(self.ov_env, "ref_motion_lib", None)
         if ref_motion_lib is None:
@@ -1651,7 +1621,7 @@ class Dagger:
         self.completed_lengths.extend(float(value) for value in episode_lengths)
         self.completed_successes.extend(float(value) for value in episode_successes)
 
-    def _log(self, iteration, total_loss, action_loss, aux_loss, teacher_forcing_beta):
+    def _log(self, iteration, total_loss, action_loss, teacher_forcing_beta):
         if iteration % self.log_interval != 0:
             return
         mean_reward = self.current_rewards.mean().item()
@@ -1679,8 +1649,6 @@ class Dagger:
             print("Student Update Steps:", self.student_update_steps)
             print("Last Local Update Batch Size:", self.last_local_update_batch_size)
             print("Last Global Update Batch Size:", self.last_global_update_batch_size)
-            if aux_loss is not None:
-                print("Aux Loss:", float(aux_loss.detach().cpu()))
             # print("Mean Reward:", mean_reward)
             # print("Mean Length:", mean_length)
             # if episode_reward is not None:
@@ -1715,8 +1683,6 @@ class Dagger:
             "dist/last_local_update_batch_size": self.last_local_update_batch_size,
             "dist/last_global_update_batch_size": self.last_global_update_batch_size,
         }
-        if aux_loss is not None:
-            metrics["loss/aux"] = float(aux_loss.detach().cpu())
         if episode_reward is not None:
             metrics["stats/episode_reward"] = episode_reward
         if episode_length is not None:
@@ -1750,10 +1716,8 @@ class Dagger:
 
         try:
             obs = self.env.reset()[0]
-            self.student_action_history.zero_()
+            self._seed_student_histories()
             self.teacher_action_history.zero_()
-            if self.aux_buffer is not None:
-                self.aux_buffer[:, 0, :] = self._flatten_aux_dict(self._get_aux_state_dict())
             self.episode_reached_last_frame.zero_()
             self._resample_teacher_forcing_env_mask(0)
 
@@ -1765,23 +1729,22 @@ class Dagger:
                 student_obs_start_time = time.perf_counter()
                 self._viser_capture_iteration = iteration
                 self._viser_capture_requested = self._should_capture_viser_frame(iteration)
-                student_obs, aux_gt = self._build_student_obs()
+                student_obs = self._build_student_obs()
                 self._sync_timing_device()
                 self._record_timing("student_obs_ms", time.perf_counter() - student_obs_start_time)
                 student_output = self._student_forward(student_obs)
                 student_actions = torch.clamp(student_output["action"][:, 0, :], -1.0, 1.0)
+                # Capture q_t before stepping so prev_q features align with the next state.
+                current_q_pos = self._get_student_proprio_vector().detach().clone()
 
                 teacher_actions = None
                 total_loss = None
                 action_loss = None
-                aux_loss = None
 
                 if not self.play_policy:
                     teacher_output = self._get_teacher_actions(obs)
                     teacher_actions = teacher_output["actions"]
-                    total_loss, action_loss, aux_loss = self._compute_student_loss(
-                        student_output, teacher_output["mus"], aux_gt, student_obs
-                    )
+                    total_loss, action_loss = self._compute_student_loss(student_output, teacher_output["mus"])
                     local_batch_size = int(student_actions.shape[0])
                     global_batch_size = self._get_global_batch_size(local_batch_size)
                     self.optimizer.zero_grad()
@@ -1791,10 +1754,6 @@ class Dagger:
                     self.student_update_steps += 1
                     self.last_local_update_batch_size = local_batch_size
                     self.last_global_update_batch_size = global_batch_size
-
-                if self.student_model.aux_prediction and self.aux_buffer is not None and self.aux_state_keys:
-                    prev_aux = self._flatten_aux_dict(OrderedDict((key, student_obs[key]) for key in self.aux_state_keys))
-                    self.aux_buffer[:] = self._decode_aux_prediction(student_output["aux"].detach(), prev_aux)
 
                 step_actions, teacher_forcing_beta = self._mix_actions(
                     student_actions.detach(),
@@ -1809,8 +1768,9 @@ class Dagger:
                 self._record_timing("env_step_ms", time.perf_counter() - env_step_start_time)
                 self.latest_env_metrics = self._collect_env_metrics(info)
 
-                self._push_action_history(self.student_action_history, step_actions)
-                self._push_action_history(self.teacher_action_history, step_actions)
+                self._push_history(self.student_action_history, step_actions)
+                self._push_history(self.student_proprio_history, current_q_pos)
+                self._push_history(self.teacher_action_history, step_actions)
                 self.frame += self.num_envs
 
                 self.current_rewards += rew.unsqueeze(-1)
@@ -1821,16 +1781,15 @@ class Dagger:
                     self._update_completed_episode_metrics(done_mask, timed_out)
                     self.current_rewards[done_mask] = 0.0
                     self.current_lengths[done_mask] = 0.0
-                    self._reset_action_history(self.student_action_history, done_mask)
-                    self._reset_action_history(self.teacher_action_history, done_mask)
+                    self._seed_student_histories(done_mask)
+                    self._reset_history(self.teacher_action_history, done_mask)
                     self.episode_reached_last_frame[done_mask] = False
-                    self._reset_aux_buffer(done_mask)
                     self._resample_teacher_forcing_env_mask(iteration + 1, done_mask)
 
                 if total_loss is not None:
                     self._sync_timing_device()
                     self._record_timing("iteration_ms", time.perf_counter() - iteration_start_time)
-                    self._log(iteration, total_loss, action_loss, aux_loss, teacher_forcing_beta)
+                    self._log(iteration, total_loss, action_loss, teacher_forcing_beta)
                 else:
                     self._sync_timing_device()
                     self._record_timing("iteration_ms", time.perf_counter() - iteration_start_time)

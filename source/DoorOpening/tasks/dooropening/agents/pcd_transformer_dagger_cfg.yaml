@@ -8,10 +8,6 @@ normalize_action: True
 action_space: "absolute"
 action_dim: 19
 
-aux_weight: 0.1
-aux_prediction_mode: "delta"
-aux_delta_scale: 0.01
-
 door_pcd_num_points: 10000
 local_pcd_range: [1.5, 0.25, 0.25]
 x_direction_cutoff: -0.5
@@ -20,7 +16,7 @@ pcd_encoders_cfg:
   local_pcd_t:
     type: "pointnet"
     num_output_tokens: 128
-    num_points: [2500, 1000, 1000]
+    num_points: [2500, 1000, 0]
     use_pcd: true
 
 state_encoders_cfg:
@@ -69,43 +65,63 @@ state_encoders_cfg:
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  prev_action_base_t10:
+  prev_q_base_t1:
     input_dim: 3
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  prev_action_arm_t10:
+  prev_q_arm_t1:
     input_dim: 7
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  prev_action_hand_t10:
+  prev_q_hand_t1:
     input_dim: 9
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  prev_action_base_t20:
+  prev_q_base_t5:
     input_dim: 3
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  prev_action_arm_t20:
+  prev_q_arm_t5:
     input_dim: 7
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  prev_action_hand_t20:
+  prev_q_hand_t5:
     input_dim: 9
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  aux_object_state:
+  prev_q_base_t10:
     input_dim: 3
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  aux_door_joint_angle:
-    input_dim: 2
+  prev_q_arm_t10:
+    input_dim: 7
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  prev_q_hand_t10:
+    input_dim: 9
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  prev_q_base_t20:
+    input_dim: 3
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  prev_q_arm_t20:
+    input_dim: 7
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  prev_q_hand_t20:
+    input_dim: 9
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
@@ -131,7 +147,6 @@ dagger:
   log_interval: 100
   save_interval: 5000
   reset_progress_total: 100000
-  ignore_aux_debug: true
   pointcloud_source: "sampler"
   robot_num_points: 10000
   sampler_render:
