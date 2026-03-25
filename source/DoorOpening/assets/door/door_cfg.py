@@ -21,6 +21,17 @@ from DoorOpening.constants.env_constants import DOOR_INITIAL_POS, DOOR_INITIAL_R
 import json
 from DoorOpening.utils.urdf_utils import compute_exact_door_keypoints
 
+from datetime import datetime
+import random
+
+
+def _make_usd_dir() -> str:
+    cache_root = os.path.expanduser("IsaacLab_tmp")
+    os.makedirs(cache_root, exist_ok=True)
+    time_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return os.path.join(cache_root, f"usd_{time_tag}_{random.randrange(10000)}")
+
+
 def load_meta_data(board_meta_data_paths: str, handle_meta_data_paths: str, device: str = "cuda" if torch.cuda.is_available() else "cpu"):
     """
     Load the meta data from the json files.
@@ -105,6 +116,7 @@ def create_urdf_door_cfg(
             activate_contact_sensors=activate_contact_sensors,
             collider_type = "convex_hull" if training_mode else "convex_decomposition",
             collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.03, rest_offset=0.0),
+            usd_dir=_make_usd_dir(),
     )
 
 def create_door_cfg(
