@@ -30,6 +30,17 @@ import numpy as np
 from DoorOpening.constants.robot_constants import DEFAULT_JOINT_POS, OPEN_FINGER_JOINT_VALUES, CLOSE_FINGER_JOINT_VALUES, FULL_JOINT_NAMES, BASE_JOINT_NAMES, FRANKA_JOINT_NAMES
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
 
+from datetime import datetime
+import random
+
+
+def _make_usd_dir() -> str:
+    cache_root = os.path.expanduser("IsaacLab_tmp")
+    os.makedirs(cache_root, exist_ok=True)
+    time_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return os.path.join(cache_root, f"usd_{time_tag}_{random.randrange(10000)}")
+
+
 GLORBOT_CONFIG = ArticulationCfg(
     spawn=sim_utils.UrdfFileCfg(
         fix_base=True,
@@ -44,6 +55,7 @@ GLORBOT_CONFIG = ArticulationCfg(
         ),
         # scale = (0.8, 0.8, 0.8),
         activate_contact_sensors=True,
+        usd_dir=_make_usd_dir(),
     ),
     # spawn=sim_utils.UsdFileCfg(
     #     usd_path=glorbot_usd_path,
