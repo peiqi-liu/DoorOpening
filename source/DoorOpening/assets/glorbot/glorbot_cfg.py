@@ -30,16 +30,6 @@ import numpy as np
 from DoorOpening.constants.robot_constants import DEFAULT_JOINT_POS, OPEN_FINGER_JOINT_VALUES, CLOSE_FINGER_JOINT_VALUES, FULL_JOINT_NAMES, BASE_JOINT_NAMES, FRANKA_JOINT_NAMES
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
 
-from datetime import datetime
-import random
-
-
-def _make_usd_dir() -> str:
-    cache_root = os.path.expanduser("IsaacLab_tmp")
-    os.makedirs(cache_root, exist_ok=True)
-    time_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return os.path.join(cache_root, f"usd_{time_tag}_{random.randrange(10000)}")
-
 
 GLORBOT_CONFIG = ArticulationCfg(
     spawn=sim_utils.UrdfFileCfg(
@@ -47,6 +37,8 @@ GLORBOT_CONFIG = ArticulationCfg(
         merge_fixed_joints=False,
         make_instanceable=False,
         asset_path=glorbot_urdf_path,
+        # Keep Isaac Lab's default absolute temp USD path here.
+        # The relative repo-local cache path was causing URDFImportRobot to emit broken stub USDs.
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             enabled_self_collisions=False, solver_position_iteration_count=8, solver_velocity_iteration_count=0
         ),
@@ -55,7 +47,6 @@ GLORBOT_CONFIG = ArticulationCfg(
         ),
         # scale = (0.8, 0.8, 0.8),
         activate_contact_sensors=True,
-        usd_dir=_make_usd_dir(),
     ),
     # spawn=sim_utils.UsdFileCfg(
     #     usd_path=glorbot_usd_path,
