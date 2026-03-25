@@ -10,6 +10,7 @@ from DoorOpening.utils.quat_utils import quat_diff_angle, hinge_angle_diff
 from DoorOpening.motion.motion_lib import ReferenceMotionManager
 from DoorOpening.assets.door.door_cfg import edit_door_articulation
 from DoorOpening.utils.finger_utils import joint_angle_to_tendon_utils, tendon_to_joint_angle_utils, leap_joints_to_tendon
+from .dooropening_adr import DoorOpeningADR
 from .dooropening_env_cfg import DooropeningEnvCfg
 from DoorOpening.assets.door.door_cfg import motion_traj_paths, handle_offsets, board_offsets
 from isaaclab.sensors import Camera, ContactSensor
@@ -49,6 +50,27 @@ class DooropeningEnv(DirectRLEnv):
         self._robot_base_dof_idx, base_joint_names = self.robot.find_joints(self.cfg.base_joints)
         self._robot_arm_dof_idx, arm_joint_names = self.robot.find_joints(self.cfg.arm_joints)
         self._robot_finger_dof_idx, finger_joint_names = self.robot.find_joints(self.cfg.finger_joints)
+        self._robot_base_dof_idx = torch.tensor(self._robot_base_dof_idx, device=self.device)
+        self._robot_arm_dof_idx = torch.tensor(self._robot_arm_dof_idx, device=self.device)
+        self._robot_finger_dof_idx = torch.tensor(self._robot_finger_dof_idx, device=self.device)
+        base_joint_name_to_local_idx = {name: idx for idx, name in enumerate(base_joint_names)}
+        self._robot_base_rot_dof_idx = torch.tensor(
+            [self._robot_base_dof_idx[base_joint_name_to_local_idx["base_rotation_joint"]]], device=self.device
+        )
+        self._robot_base_xy_dof_idx = torch.tensor(
+            [
+                self._robot_base_dof_idx[base_joint_name_to_local_idx["base_x_joint"]],
+                self._robot_base_dof_idx[base_joint_name_to_local_idx["base_y_joint"]],
+            ],
+            device=self.device,
+        )
+        self._robot_base_rot_local_idx = torch.tensor(
+            [base_joint_name_to_local_idx["base_rotation_joint"]], device=self.device
+        )
+        self._robot_base_xy_local_idx = torch.tensor(
+            [base_joint_name_to_local_idx["base_x_joint"], base_joint_name_to_local_idx["base_y_joint"]],
+            device=self.device,
+        )
 
         self.ref_base_joint_idx = [FULL_JOINT_NAMES.index(name) for name in base_joint_names]
         self.ref_arm_joint_idx = [FULL_JOINT_NAMES.index(name) for name in arm_joint_names]
@@ -81,6 +103,11 @@ class DooropeningEnv(DirectRLEnv):
 
         # We are going to update this variables to control the robot
         self.robot_dof_targets = torch.zeros((self.num_envs, len(self._robot_dof_idx)), device=self.device)
+        self.applied_robot_dof_targets = torch.zeros_like(self.robot_dof_targets)
+        self._target_base_rot_slice = slice(0, 1)
+        self._target_base_xy_slice = slice(1, self.num_base_joints)
+        self._target_arm_slice = slice(self.num_base_joints, self.num_base_joints + self.num_arm_joints)
+        self._target_finger_slice = slice(self.num_base_joints + self.num_arm_joints, self.robot_dof_targets.shape[1])
 
         # Loading all reward parameters
         self.robot_key_body_pos_scale = self.cfg.robot_key_body_pos_scale
@@ -142,6 +169,16 @@ class DooropeningEnv(DirectRLEnv):
         self.alive_bonus = self.cfg.alive_bonus
         self.termination_penalty = self.cfg.termination_penalty
 
+        self.dooropening_adr = DoorOpeningADR(self.event_manager, self.cfg.adr_cfg_dict, self.cfg.adr_custom_cfg_dict)
+        self.dooropening_adr.set_num_increments(self.cfg.starting_adr_increments)
+
+        self.robot_spawn_noise_widths = self._make_env_buffer_dict(self.cfg.adr_custom_cfg_dict["robot_spawn"].keys())
+        robot_state_cfg = self.cfg.adr_custom_cfg_dict["robot_state_noise"]
+        self.robot_state_noise_widths = self._make_env_buffer_dict(
+            [key for key in robot_state_cfg if key.endswith("_noise")]
+        )
+        self.robot_state_biases = self._make_env_buffer_dict([key for key in robot_state_cfg if key.endswith("_bias")])
+
     def _activate_door_contact_reporters(self):
         try:
             from isaaclab.sim.schemas import schemas as sim_schemas
@@ -178,6 +215,86 @@ class DooropeningEnv(DirectRLEnv):
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)    
+
+    def _make_env_buffer_dict(self, keys):
+        return {key: torch.zeros((self.num_envs, 1), device=self.device) for key in keys}
+
+    def _current_custom_param(self, group: str, name: str) -> float:
+        return self.dooropening_adr.get_custom_param_value(group, name)
+
+    def _sample_reset_randomization(self, env_ids: torch.Tensor):
+        num_ids = len(env_ids)
+
+        for key in self.robot_spawn_noise_widths:
+            value = self._current_custom_param("robot_spawn", key)
+            self.robot_spawn_noise_widths[key][env_ids, 0] = value * torch.rand(num_ids, device=self.device)
+
+        for key in self.robot_state_noise_widths:
+            value = self._current_custom_param("robot_state_noise", key)
+            self.robot_state_noise_widths[key][env_ids, 0] = value * torch.rand(num_ids, device=self.device)
+
+        for key in self.robot_state_biases:
+            value = self._current_custom_param("robot_state_noise", key)
+            width = value * torch.rand(num_ids, device=self.device)
+            self.robot_state_biases[key][env_ids, 0] = width * (torch.rand(num_ids, device=self.device) - 0.5)
+
+    def _uniform_noise_like(self, values: torch.Tensor, width_key: str, bias_key: str | None = None):
+        width = self.robot_state_noise_widths[width_key]
+        while width.dim() < values.dim():
+            width = width.unsqueeze(-1)
+        noise = width * 2.0 * (torch.rand_like(values) - 0.5)
+        if bias_key is None:
+            return values + noise
+        bias = self.robot_state_biases[bias_key]
+        while bias.dim() < values.dim():
+            bias = bias.unsqueeze(-1)
+        return values + noise + bias
+
+    def _apply_spawn_noise(self, env_ids: torch.Tensor):
+        base_xy_noise = self.robot_spawn_noise_widths["base_xy_joint_pos_noise"][env_ids] * (
+            2.0 * torch.rand((len(env_ids), len(self._robot_base_xy_dof_idx)), device=self.device) - 1.0
+        )
+        base_rot_noise = self.robot_spawn_noise_widths["base_rot_joint_pos_noise"][env_ids] * (
+            2.0 * torch.rand((len(env_ids), 1), device=self.device) - 1.0
+        )
+        arm_noise = self.robot_spawn_noise_widths["arm_joint_pos_noise"][env_ids] * (
+            2.0 * torch.rand((len(env_ids), len(self._robot_arm_dof_idx)), device=self.device) - 1.0
+        )
+        finger_noise = self.robot_spawn_noise_widths["finger_joint_pos_noise"][env_ids] * (
+            2.0 * torch.rand((len(env_ids), len(self._robot_finger_dof_idx)), device=self.device) - 1.0
+        )
+
+        self.joint_pos[env_ids[:, None], self._robot_base_xy_dof_idx[None, :]] += base_xy_noise
+        self.joint_pos[env_ids[:, None], self._robot_base_rot_dof_idx[None, :]] += base_rot_noise
+        self.joint_pos[env_ids[:, None], self._robot_arm_dof_idx[None, :]] += arm_noise
+        self.joint_pos[env_ids[:, None], self._robot_finger_dof_idx[None, :]] += finger_noise
+
+        self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]] = torch.clamp(
+            self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]],
+            self.robot_dof_lower_limits[None, :],
+            self.robot_dof_upper_limits[None, :],
+        )
+
+    def _get_policy_target_noise(self):
+        target_noise = torch.zeros_like(self.robot_dof_targets)
+        base_xy_target_noise = self._current_custom_param("pd_targets", "base_xy_target_noise")
+        base_rot_target_noise = self._current_custom_param("pd_targets", "base_rot_target_noise")
+        arm_target_noise = self._current_custom_param("pd_targets", "arm_target_noise")
+        finger_target_noise = self._current_custom_param("pd_targets", "finger_target_noise")
+
+        target_noise[:, self._target_base_xy_slice] = base_xy_target_noise * (
+            2.0 * torch.rand_like(target_noise[:, self._target_base_xy_slice]) - 1.0
+        )
+        target_noise[:, self._target_base_rot_slice] = base_rot_target_noise * (
+            2.0 * torch.rand_like(target_noise[:, self._target_base_rot_slice]) - 1.0
+        )
+        target_noise[:, self._target_arm_slice] = arm_target_noise * (
+            2.0 * torch.rand_like(target_noise[:, self._target_arm_slice]) - 1.0
+        )
+        target_noise[:, self._target_finger_slice] = finger_target_noise * (
+            2.0 * torch.rand_like(target_noise[:, self._target_finger_slice]) - 1.0
+        )
+        return target_noise
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self.step_count = self._sim_step_counter
@@ -216,7 +333,13 @@ class DooropeningEnv(DirectRLEnv):
     def _apply_action(self):
         edit_door_articulation(self.door)
         self.ref_motion_lib.step()
-        self.robot.set_joint_position_target(self.robot_dof_targets, joint_ids=self._robot_dof_idx)
+        lag_alpha = self._current_custom_param("pd_targets", "target_lag_alpha")
+        applied_targets = self.robot_dof_targets.clone()
+        if lag_alpha > 0.0:
+            applied_targets = (1.0 - lag_alpha) * applied_targets + lag_alpha * self.applied_robot_dof_targets
+        applied_targets += self._get_policy_target_noise()
+        self.applied_robot_dof_targets[:] = torch.clamp(applied_targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
+        self.robot.set_joint_position_target(self.applied_robot_dof_targets, joint_ids=self._robot_dof_idx)
         # joint_pos = self.robot.data.default_joint_pos.clone()
         # joint_pos[:] = self.ref_motion_lib.get_robot_joint_pos()
         # self.robot.write_joint_position_to_sim(joint_pos)
@@ -228,60 +351,92 @@ class DooropeningEnv(DirectRLEnv):
         self._get_intermediate_values()
         self.joint_pos = self.robot.data.joint_pos
         self.joint_vel = self.robot.data.joint_vel
-        base_link_pos = self.robot.data.body_pos_w[:, self._robot_base_link_idx]
-        base_link_pos -= self.scene.env_origins.repeat((1, 1
-            )).reshape(self.num_envs, 1, 3) 
-        
-        # door_to_base_link_pos = (self.door_link_pos - base_link_pos).reshape(self.num_envs, 1, -1)
-        # door_to_base_link_pos = (self.door_keypoints - base_link_pos).reshape(self.num_envs, 1, -1)
-        # door_twist_base_link_pos = (self.ref_door_body_pos_twist - base_link_pos).reshape(self.num_envs, 1, -1)
-        door_to_base_link_pos = world_to_local(self.door_link_pos, self.robot_base_body_pos, self.robot_base_body_quat).reshape(self.num_envs, 1, -1)
-        door_twist_in_robot_base_frame = world_to_local(self.ref_door_body_pos_twist, self.robot_base_body_pos, self.robot_base_body_quat).reshape(self.num_envs, 1, -1)
-        # door_to_palm_link_pos = world_to_local(self.door_link_pos, self.robot_palm_body_pos, self.robot_palm_body_quat).reshape(self.num_envs, 1, -1)
-        # door_to_base_link_pos = (self.door_link_pos - self.robot_base_body_pos.unsqueeze(1))
-        # door_to_base_link_pos = world_to_local(door_to_base_link_pos, self.robot_base_body_pos, self.robot_base_body_quat)
-        # door_to_base_link_pos = door_to_base_link_pos.reshape(self.num_envs, 1, -1)
-        # door_twist_palm_link_pos = (self.ref_door_body_pos_twist - self.robot_palm_body_pos.unsqueeze(1))
-        # door_twist_palm_link_pos = world_to_local(door_twist_palm_link_pos, self.robot_base_body_pos, self.robot_base_body_quat)
-        # door_twist_palm_link_pos = door_twist_palm_link_pos.reshape(self.num_envs, 1, -1)
-        # door_to_palm_link_pos = (self.door_link_pos - self.robot_palm_body_pos.unsqueeze(1))
-        # door_to_palm_link_pos = world_to_local(door_to_palm_link_pos, self.robot_base_body_pos, self.robot_base_body_quat)
-        # door_to_palm_link_pos = door_to_palm_link_pos.reshape(self.num_envs, 1, -1)
 
-        # rel_robot_key_body_pos = (self.robot_key_body_pos - base_link_pos).reshape(self.num_envs, 1, -1)
+        door_to_base_link_pos = world_to_local(self.door_link_pos, self.robot_base_body_pos, self.robot_base_body_quat).reshape(self.num_envs, 1, -1)
         robot_key_body_pos, robot_key_body_euler, base_lin_vel_local, base_ang_vel_local = self.transform_key_bodies_to_base_frame(self.robot_key_body_pos, self.robot_key_body_quat, self.robot_body_lin_vel, self.robot_body_ang_vel, self._robot_base_body_link_idx)
         key_pos_err = (self.ref_robot_key_body_pos).to(self.robot_key_body_pos) - self.robot_key_body_pos
         key_pos_err = world_to_local(key_pos_err, None, self.robot_base_body_quat)
         key_pos_err = key_pos_err.reshape(self.num_envs, 1, -1)
 
-        # door_joint_err = self.door_joint_pos[:, self._door_joint_idx] - (self.ref_door_joint_pos[:, self._door_joint_idx]).to(self.door_joint_pos)
+        clean_joint_pos = self.joint_pos[:, self._robot_dof_idx]
+        clean_joint_vel = self.joint_vel[:, self._robot_dof_idx]
+        policy_joint_pos = clean_joint_pos.clone()
+        policy_joint_vel = clean_joint_vel.clone()
 
-        # contact_forces_door1 = self.scene.sensors["contact_forces_door1"].data.net_forces_w
-        # contact_forces_door2 = self.scene.sensors["contact_forces_door2"].data.net_forces_w
-        # contact_forces_robot_palm_center = self.scene.sensors["contact_forces_robot_palm_center"].data.net_forces_w
-        # contact_forces_door1 = contact_forces_door1.reshape(self.num_envs, 1, -1)
-        # contact_forces_door2 = contact_forces_door2.reshape(self.num_envs, 1, -1)
-        # contact_forces_robot_palm_center = contact_forces_robot_palm_center.reshape(self.num_envs, 1, -1)
+        policy_joint_pos[:, self._target_base_rot_slice] = self._uniform_noise_like(
+            policy_joint_pos[:, self._target_base_rot_slice], "base_rot_joint_pos_noise", "base_rot_joint_pos_bias"
+        )
+        policy_joint_pos[:, self._target_base_xy_slice] = self._uniform_noise_like(
+            policy_joint_pos[:, self._target_base_xy_slice], "base_xy_joint_pos_noise", "base_xy_joint_pos_bias"
+        )
+        policy_joint_pos[:, self._target_arm_slice] = self._uniform_noise_like(
+            policy_joint_pos[:, self._target_arm_slice], "arm_joint_pos_noise", "arm_joint_pos_bias"
+        )
+        policy_joint_pos[:, self._target_finger_slice] = self._uniform_noise_like(
+            policy_joint_pos[:, self._target_finger_slice], "finger_joint_pos_noise", "finger_joint_pos_bias"
+        )
 
-        # frame_idx = torch.ceil(self.ref_motion_lib.frame_idx).unsqueeze(dim = -1).to(self.device) // (self.ref_motion_lib.num_frames // 10)
-        obs = torch.cat(
+        policy_joint_vel[:, self._target_base_rot_slice] = self._uniform_noise_like(
+            policy_joint_vel[:, self._target_base_rot_slice], "base_rot_joint_vel_noise", "base_rot_joint_vel_bias"
+        )
+        policy_joint_vel[:, self._target_base_xy_slice] = self._uniform_noise_like(
+            policy_joint_vel[:, self._target_base_xy_slice], "base_xy_joint_vel_noise", "base_xy_joint_vel_bias"
+        )
+        policy_joint_vel[:, self._target_arm_slice] = self._uniform_noise_like(
+            policy_joint_vel[:, self._target_arm_slice], "arm_joint_vel_noise", "arm_joint_vel_bias"
+        )
+        policy_joint_vel[:, self._target_finger_slice] = self._uniform_noise_like(
+            policy_joint_vel[:, self._target_finger_slice], "finger_joint_vel_noise", "finger_joint_vel_bias"
+        )
+
+        policy_key_pos_err = self._uniform_noise_like(key_pos_err, "key_pos_err_noise", "key_pos_err_bias")
+        policy_robot_key_body_pos = self._uniform_noise_like(
+            robot_key_body_pos.reshape(self.num_envs, 1, -1), "key_body_pos_noise", "key_body_pos_bias"
+        )
+        policy_robot_key_body_euler = self._uniform_noise_like(
+            robot_key_body_euler.reshape(self.num_envs, 1, -1), "key_body_rot_noise", "key_body_rot_bias"
+        )
+        policy_base_lin_vel_local = self._uniform_noise_like(
+            base_lin_vel_local.reshape(self.num_envs, 1, -1), "base_lin_vel_noise", "base_lin_vel_bias"
+        )
+        policy_base_ang_vel_local = self._uniform_noise_like(
+            base_ang_vel_local.reshape(self.num_envs, 1, -1), "base_ang_vel_noise", "base_ang_vel_bias"
+        )
+        policy_door_to_base_link_pos = self._uniform_noise_like(
+            door_to_base_link_pos, "door_to_base_pos_noise", "door_to_base_pos_bias"
+        )
+
+        policy_obs = torch.cat(
             (
-                self.joint_pos[:, self._robot_dof_idx].unsqueeze(dim = 1),
-                self.joint_vel[:, self._robot_dof_idx].unsqueeze(dim = 1),
-                # self.last_actions.unsqueeze(dim = 1),
+                policy_joint_pos.unsqueeze(dim=1),
+                policy_joint_vel.unsqueeze(dim=1),
                 self.robot_dof_targets.unsqueeze(dim = 1),
-                (self.ref_robot_base_joint_pos - self.joint_pos[:,self._robot_base_dof_idx]).unsqueeze(dim = 1),
-                (self.ref_robot_arm_joint_pos - self.joint_pos[:,self._robot_arm_dof_idx]).unsqueeze(dim = 1),
+                (self.ref_robot_base_joint_pos - policy_joint_pos[:, self._target_base_rot_slice.start:self._target_base_xy_slice.stop]).unsqueeze(dim=1),
+                (self.ref_robot_arm_joint_pos - policy_joint_pos[:, self._target_arm_slice]).unsqueeze(dim=1),
+                policy_key_pos_err,
+                policy_robot_key_body_pos,
+                policy_robot_key_body_euler,
+                policy_base_lin_vel_local,
+                policy_base_ang_vel_local,
+                policy_door_to_base_link_pos,
+                self.door_joint_pos[:, self._door_joint_idx].unsqueeze(dim = 1),
+                self.ref_door_joint_pos[:, self._door_joint_idx].to(self.door_joint_pos).unsqueeze(dim = 1),
+            ),
+            dim=-1,
+        )
 
+        critic_obs = torch.cat(
+            (
+                clean_joint_pos.unsqueeze(dim=1),
+                clean_joint_vel.unsqueeze(dim=1),
+                self.robot_dof_targets.unsqueeze(dim=1),
+                self.robot_base_joint_pos.unsqueeze(dim=1),
+                self.robot_arm_joint_pos.unsqueeze(dim=1),
                 key_pos_err,
-                # rel_robot_key_body_pos,
                 robot_key_body_pos.reshape(self.num_envs, 1, -1),
                 robot_key_body_euler.reshape(self.num_envs, 1, -1),
                 base_lin_vel_local.reshape(self.num_envs, 1, -1),
                 base_ang_vel_local.reshape(self.num_envs, 1, -1),
-                # self.robot_base_body_pos.reshape(self.num_envs, 1, -1),
-                # quat_to_6d(self.robot_base_body_quat).reshape(self.num_envs, 1, -1),
-
                 door_to_base_link_pos,
                 # door_to_palm_link_pos,
                 # self.door_link_pos.reshape(self.num_envs, 1, -1),
@@ -298,7 +453,8 @@ class DooropeningEnv(DirectRLEnv):
             ),
             dim=-1,
         )
-        observations = {"policy": obs.squeeze()}
+
+        observations = {"policy": policy_obs.squeeze(), "critic": critic_obs.squeeze()}
         return observations
 
 
@@ -719,16 +875,9 @@ class DooropeningEnv(DirectRLEnv):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
 
-        # Optional: change static friction and dynamic friction of the robot
-        if not hasattr(self, "_initialized_materials"):
-            props = self.robot.root_physx_view.get_material_properties().to(self.device)
-            props[..., 0] = 3.0
-            props[..., 1] = 1.5
-            self.robot.root_physx_view.set_material_properties(props.cpu(), torch.arange(self.num_envs, device="cpu"))
-            self._initialized_materials = True
-
         reset_frame_idx = self.ref_motion_lib.reset(env_ids, step_count=self.step_count, reset_progress_total=self.reset_progress_total)
         self.max_trial_steps[env_ids] = ((self.ref_motion_lib.num_frames - reset_frame_idx) // self.ref_motion_lib.velocity).long()
+        self._sample_reset_randomization(env_ids)
 
         deep_mimic_initial_joint_pos = self.ref_motion_lib.get_robot_joint_pos(env_ids)
         deep_mimic_initial_joint_vel = self.ref_motion_lib.get_robot_joint_vel(env_ids)
@@ -740,6 +889,7 @@ class DooropeningEnv(DirectRLEnv):
         self.joint_vel[env_ids] = self.robot.data.default_joint_vel[env_ids]
         self.joint_vel[env_ids[:, None], self._robot_dof_idx[None, :]] = deep_mimic_initial_joint_vel.to(self.joint_vel)[..., self.ref_robot_dof_idx]
         self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]] = deep_mimic_initial_joint_pos.to(self.joint_pos)[..., self.ref_robot_dof_idx]
+        self._apply_spawn_noise(env_ids)
 
         self.robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
@@ -754,6 +904,7 @@ class DooropeningEnv(DirectRLEnv):
 
         # self.last_actions[env_ids] = 0.0
         self.robot_dof_targets[env_ids, :] = self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]]
+        self.applied_robot_dof_targets[env_ids, :] = self.robot_dof_targets[env_ids, :]
         super()._reset_idx(env_ids)
 
 @torch.jit.script

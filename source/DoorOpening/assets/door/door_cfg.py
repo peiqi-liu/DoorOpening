@@ -195,7 +195,7 @@ ALL_DOOR_CONFIGS = setup_doors()
 def edit_door_articulation(
     door: Articulation, 
     door_closed_range = 0.01,     # radians
-    hinge_range = 0.4,
+    hinge_range = 0.8,
     # Optional: disable the latching behavior by setting the hinge range to a negative value
     # hinge_range = -0.1,
 ):
@@ -209,9 +209,19 @@ def edit_door_articulation(
     # locked mask: (num_envs,)
     locked = (q[:, j1].abs() < door_closed_range) & (q[:, j2].abs() < hinge_range)
 
-    joint_stiffness = door.data.default_joint_stiffness.clone()
-    joint_damping = door.data.default_joint_damping.clone()
-    joint_stiffness[locked, j1] = 1e6
-    joint_damping[locked, j1] = 1e5
+    default_joint_stiffness = door.data.default_joint_stiffness
+    default_joint_damping = door.data.default_joint_damping
+
+    # Start from the live joint gains so reset-time randomization survives the lock logic.
+    joint_stiffness = door.data.joint_stiffness.clone()
+    joint_damping = door.data.joint_damping.clone()
+    stiffness_scale = torch.ones_like(joint_stiffness[:, j1])
+    damping_scale = torch.ones_like(joint_damping[:, j1])
+    valid_stiffness = default_joint_stiffness[:, j1].abs() > 1e-6
+    valid_damping = default_joint_damping[:, j1].abs() > 1e-6
+    stiffness_scale[valid_stiffness] = joint_stiffness[valid_stiffness, j1] / default_joint_stiffness[valid_stiffness, j1]
+    damping_scale[valid_damping] = joint_damping[valid_damping, j1] / default_joint_damping[valid_damping, j1]
+    joint_stiffness[locked, j1] = 1e6 * stiffness_scale[locked]
+    joint_damping[locked, j1] = 1e5 * damping_scale[locked]
     door.write_joint_stiffness_to_sim(joint_stiffness)
     door.write_joint_damping_to_sim(joint_damping)

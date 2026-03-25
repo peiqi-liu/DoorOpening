@@ -18,12 +18,14 @@ from DoorOpening.constants.robot_constants import (
 )
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
+import isaaclab.envs.mdp as mdp
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg, PhysxCfg
 from isaaclab.utils import configclass
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 
 from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import SceneEntityCfg
 from isaaclab.envs.common import ViewerCfg
 import torch
 import numpy as np
@@ -37,6 +39,92 @@ POINTCLOUD_CAMERA_QUAT = quat_from_euler_xyz(euler_angles[0], euler_angles[1], e
 POINTCLOUD_CAMERA_QUAT = tuple(POINTCLOUD_CAMERA_QUAT.tolist())
 
 @configclass
+class EventCfg:
+    """Configuration for reset-time physics randomization."""
+
+    robot_physics_material = EventTerm(
+        func=mdp.randomize_rigid_body_material,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+            "static_friction_range": (1.0, 1.0),
+            "dynamic_friction_range": (1.0, 1.0),
+            "restitution_range": (0.0, 0.0),
+            "num_buckets": 250,
+        },
+    )
+
+    door_physics_material = EventTerm(
+        func=mdp.randomize_rigid_body_material,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("door", body_names=".*"),
+            "static_friction_range": (1.0, 1.0),
+            "dynamic_friction_range": (1.0, 1.0),
+            "restitution_range": (0.0, 0.0),
+            "num_buckets": 250,
+        },
+    )
+
+    robot_joint_stiffness_and_damping = EventTerm(
+        func=mdp.randomize_actuator_gains,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+            "stiffness_distribution_params": (1.0, 1.0),
+            "damping_distribution_params": (1.0, 1.0),
+            "operation": "scale",
+            "distribution": "uniform",
+        },
+    )
+
+    robot_joint_friction = EventTerm(
+        func=mdp.randomize_joint_parameters,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+            "friction_distribution_params": (0.0, 0.0),
+            "operation": "abs",
+            "distribution": "uniform",
+        },
+    )
+
+    door_latch_joint_stiffness_and_damping = EventTerm(
+        func=mdp.randomize_actuator_gains,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("door", joint_names="joint_1"),
+            "stiffness_distribution_params": (1.0, 1.0),
+            "damping_distribution_params": (1.0, 1.0),
+            "operation": "scale",
+            "distribution": "uniform",
+        },
+    )
+
+    door_hinge_joint_stiffness_and_damping = EventTerm(
+        func=mdp.randomize_actuator_gains,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("door", joint_names="joint_2"),
+            "stiffness_distribution_params": (1.0, 1.0),
+            "damping_distribution_params": (1.0, 1.0),
+            "operation": "scale",
+            "distribution": "uniform",
+        },
+    )
+
+    door_joint_friction = EventTerm(
+        func=mdp.randomize_joint_parameters,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("door", joint_names="joint_(1|2)"),
+            "friction_distribution_params": (0.0, 0.0),
+            "operation": "abs",
+            "distribution": "uniform",
+        },
+    )
+
+@configclass
 class DooropeningEnvCfg(DirectRLEnvCfg):
     sim_dt = 1/60.
     decimation = 1
@@ -44,6 +132,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     num_sim_steps_to_render=2
     # - spaces definition
     state_space = 0
+    num_states = 0
+    asymmetric_obs = True
 
     viewer: ViewerCfg = ViewerCfg(eye=(1.5, -2.0, 1.0), lookat=(0.4, 0.0, 0.7), origin_type="env")
 
@@ -235,6 +325,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         len(door_joint_names) * 2 +\
         len(twist_indices) * (len(robot_key_bodies) * 3 + len(robot_key_bodies) * 6 + 3 + len(door_joint_names) + len(arm_joints) + len(base_joints)) +\
         actuated_joints_num
+    state_space = observation_space
+    num_observations = observation_space
+    num_states = state_space
     #  5 * 3 +\
     
     # scene
@@ -287,6 +380,90 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     termination_penalty = -100.0
 
     velocity = 1.0
+
+    enable_adr = False
+    num_adr_increments = 20
+    starting_adr_increments = num_adr_increments
+
+    events: EventCfg = EventCfg()
+
+    adr_cfg_dict = {
+        "num_increments": num_adr_increments,
+        "robot_physics_material": {
+            "static_friction_range": (0.6, 1.25),
+            "dynamic_friction_range": (0.5, 1.1),
+            "restitution_range": (0.0, 0.0),
+        },
+        "door_physics_material": {
+            "static_friction_range": (0.6, 1.25),
+            "dynamic_friction_range": (0.5, 1.1),
+            "restitution_range": (0.0, 0.0),
+        },
+        "robot_joint_stiffness_and_damping": {
+            "stiffness_distribution_params": (0.8, 1.2),
+            "damping_distribution_params": (0.7, 1.3),
+        },
+        "robot_joint_friction": {
+            "friction_distribution_params": (0.0, 0.02),
+        },
+        "door_latch_joint_stiffness_and_damping": {
+            "stiffness_distribution_params": (0.95, 1.05),
+            "damping_distribution_params": (0.95, 1.05),
+        },
+        "door_hinge_joint_stiffness_and_damping": {
+            "stiffness_distribution_params": (0.85, 1.15),
+            "damping_distribution_params": (0.85, 1.15),
+        },
+        "door_joint_friction": {
+            "friction_distribution_params": (0.0, 0.02),
+        },
+    }
+
+    adr_custom_cfg_dict = {
+        "robot_spawn": {
+            "base_xy_joint_pos_noise": (0.0, 0.01),
+            "base_rot_joint_pos_noise": (0.0, 0.03),
+            "arm_joint_pos_noise": (0.0, 0.03),
+            "finger_joint_pos_noise": (0.0, 0.05),
+        },
+        "robot_state_noise": {
+            "base_xy_joint_pos_noise": (0.0, 0.003),
+            "base_xy_joint_pos_bias": (0.0, 0.002),
+            "base_rot_joint_pos_noise": (0.0, 0.01),
+            "base_rot_joint_pos_bias": (0.0, 0.006),
+            "arm_joint_pos_noise": (0.0, 0.01),
+            "arm_joint_pos_bias": (0.0, 0.006),
+            "finger_joint_pos_noise": (0.0, 0.02),
+            "finger_joint_pos_bias": (0.0, 0.01),
+            "base_xy_joint_vel_noise": (0.0, 0.03),
+            "base_xy_joint_vel_bias": (0.0, 0.015),
+            "base_rot_joint_vel_noise": (0.0, 0.08),
+            "base_rot_joint_vel_bias": (0.0, 0.04),
+            "arm_joint_vel_noise": (0.0, 0.1),
+            "arm_joint_vel_bias": (0.0, 0.05),
+            "finger_joint_vel_noise": (0.0, 0.15),
+            "finger_joint_vel_bias": (0.0, 0.08),
+            "key_body_pos_noise": (0.0, 0.01),
+            "key_body_pos_bias": (0.0, 0.005),
+            "key_body_rot_noise": (0.0, 0.02),
+            "key_body_rot_bias": (0.0, 0.01),
+            "base_lin_vel_noise": (0.0, 0.05),
+            "base_lin_vel_bias": (0.0, 0.025),
+            "base_ang_vel_noise": (0.0, 0.08),
+            "base_ang_vel_bias": (0.0, 0.04),
+            "door_to_base_pos_noise": (0.0, 0.01),
+            "door_to_base_pos_bias": (0.0, 0.005),
+            "key_pos_err_noise": (0.0, 0.01),
+            "key_pos_err_bias": (0.0, 0.005),
+        },
+        "pd_targets": {
+            "base_xy_target_noise": (0.0, 0.0015),
+            "base_rot_target_noise": (0.0, 0.005),
+            "arm_target_noise": (0.0, 0.003),
+            "finger_target_noise": (0.0, 0.005),
+            "target_lag_alpha": (0.0, 0.15),
+        },
+    }
 
     # Change this to where you store your motions
     motion_file = "trajectory.pkl"
