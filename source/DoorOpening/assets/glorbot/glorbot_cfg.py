@@ -37,8 +37,11 @@ GLORBOT_CONFIG = ArticulationCfg(
         merge_fixed_joints=False,
         make_instanceable=False,
         asset_path=glorbot_urdf_path,
-        # Keep Isaac Lab's default absolute temp USD path here.
-        # The relative repo-local cache path was causing URDFImportRobot to emit broken stub USDs.
+        usd_dir=os.path.dirname(glorbot_usd_path),
+        usd_file_name=os.path.basename(glorbot_usd_path),
+        force_usd_conversion=True,
+        # Use an explicit absolute USD cache path. The repo-local relative
+        # IsaacLab_tmp path can produce unresolved references during import.
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             enabled_self_collisions=False, solver_position_iteration_count=8, solver_velocity_iteration_count=0
         ),

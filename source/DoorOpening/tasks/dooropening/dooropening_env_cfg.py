@@ -16,9 +16,13 @@ from DoorOpening.constants.robot_constants import (
     ROBOT_PALM_LINK_NAME,
     ROBOT_BASE_BODY_LINK_NAME,
 )
+from DoorOpening.tasks.dooropening.dooropening_event_helpers import (
+    randomize_actuator_gains_compat,
+    randomize_joint_parameters_compat,
+    randomize_rigid_body_material_compat,
+)
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
-import isaaclab.envs.mdp as mdp
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg, PhysxCfg
 from isaaclab.utils import configclass
@@ -43,7 +47,7 @@ class EventCfg:
     """Configuration for reset-time physics randomization."""
 
     robot_physics_material = EventTerm(
-        func=mdp.randomize_rigid_body_material,
+        func=randomize_rigid_body_material_compat,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
@@ -55,7 +59,7 @@ class EventCfg:
     )
 
     door_physics_material = EventTerm(
-        func=mdp.randomize_rigid_body_material,
+        func=randomize_rigid_body_material_compat,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("door", body_names=".*"),
@@ -67,7 +71,7 @@ class EventCfg:
     )
 
     robot_joint_stiffness_and_damping = EventTerm(
-        func=mdp.randomize_actuator_gains,
+        func=randomize_actuator_gains_compat,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
@@ -79,7 +83,7 @@ class EventCfg:
     )
 
     robot_joint_friction = EventTerm(
-        func=mdp.randomize_joint_parameters,
+        func=randomize_joint_parameters_compat,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
@@ -90,7 +94,7 @@ class EventCfg:
     )
 
     door_latch_joint_stiffness_and_damping = EventTerm(
-        func=mdp.randomize_actuator_gains,
+        func=randomize_actuator_gains_compat,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("door", joint_names="joint_1"),
@@ -102,7 +106,7 @@ class EventCfg:
     )
 
     door_hinge_joint_stiffness_and_damping = EventTerm(
-        func=mdp.randomize_actuator_gains,
+        func=randomize_actuator_gains_compat,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("door", joint_names="joint_2"),
@@ -114,7 +118,7 @@ class EventCfg:
     )
 
     door_joint_friction = EventTerm(
-        func=mdp.randomize_joint_parameters,
+        func=randomize_joint_parameters_compat,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("door", joint_names="joint_(1|2)"),
@@ -133,6 +137,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # - spaces definition
     state_space = 0
     num_states = 0
+    # Actor gets noisy deployment-style observations while the critic keeps the full clean state.
     asymmetric_obs = True
 
     viewer: ViewerCfg = ViewerCfg(eye=(1.5, -2.0, 1.0), lookat=(0.4, 0.0, 0.7), origin_type="env")
@@ -317,15 +322,27 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # action_space = len(arm_joints) + len(base_joints) + 4
     # observation_space = actuated_joints_num * 2 + len(door_body_names) * 3 + len(robot_key_bodies) * 3 * 2 + len(door_joint_names) + len(door_joint_names) + len(contact_sensor_names) * 3
     observation_space = \
-        actuated_joints_num * 2 +\
-        len(door_body_names) * 3 +\
-        len(arm_joints) + len(base_joints) +\
-        (len(robot_key_bodies) - 1) * (3 + 6) + 6 +\
+        actuated_joints_num * 3 +\
+        len(base_joints) + len(arm_joints) +\
         len(robot_key_bodies) * 3 +\
+        (len(robot_key_bodies) - 1) * (3 + 6) + 6 +\
+        len(door_body_names) * 3 +\
+        len(door_joint_names) * 2
+    state_space = \
+        actuated_joints_num * 3 +\
+        len(base_joints) + len(arm_joints) +\
+        len(robot_key_bodies) * 3 +\
+        (len(robot_key_bodies) - 1) * (3 + 6) + 6 +\
+        len(door_body_names) * 3 +\
         len(door_joint_names) * 2 +\
-        len(twist_indices) * (len(robot_key_bodies) * 3 + len(robot_key_bodies) * 6 + 3 + len(door_joint_names) + len(arm_joints) + len(base_joints)) +\
-        actuated_joints_num
-    state_space = observation_space
+        len(twist_indices) * (
+            len(robot_key_bodies) * 3 +
+            len(robot_key_bodies) * 6 +
+            3 +
+            len(door_joint_names) +
+            len(arm_joints) +
+            len(base_joints)
+        )
     num_observations = observation_space
     num_states = state_space
     #  5 * 3 +\
@@ -387,6 +404,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     events: EventCfg = EventCfg()
 
+    # These are the ADR endpoints for simulator parameters handled by EventTerms at reset.
     adr_cfg_dict = {
         "num_increments": num_adr_increments,
         "robot_physics_material": {
@@ -419,6 +437,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         },
     }
 
+    # These terms are sampled inside the env because they perturb reset state, observations, and controller targets.
     adr_custom_cfg_dict = {
         "robot_spawn": {
             "base_xy_joint_pos_noise": (0.0, 0.01),

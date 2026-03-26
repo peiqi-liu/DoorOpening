@@ -2,6 +2,8 @@ import copy
 
 
 class DoorOpeningADR:
+    """Tracks the current ADR stage for reset-time EventTerms and env-side custom noise."""
+
     def __init__(self, event_manager, adr_cfg_dict, adr_custom_cfg_dict):
         self.event_manager = event_manager
         self.adr_cfg_dict = adr_cfg_dict
@@ -13,6 +15,7 @@ class DoorOpeningADR:
         self.increment_counter = 0
 
     def save_param_ranges(self):
+        # Snapshot the nominal EventTerm ranges so ADR can widen from the base task instead of compounding updates.
         for term_name, term_params in self.adr_cfg_dict.items():
             if term_name == "num_increments":
                 continue
@@ -26,6 +29,7 @@ class DoorOpeningADR:
         elif increase_counter:
             self.increment_counter += 1
 
+        # EventTerms store their active ranges in-place, so ADR just interpolates each range endpoint for the current stage.
         for term_name, term_params in self.adr_cfg_dict.items():
             if term_name == "num_increments":
                 continue
@@ -51,5 +55,6 @@ class DoorOpeningADR:
         upper_limit = self.adr_custom_cfg_dict[param_group][param_name][1]
         lower_limit = self.adr_custom_cfg_dict[param_group][param_name][0]
 
+        # Reset noise, observation noise, and target noise are sampled in the env, so ADR exposes them as scalars.
         param_slope = (upper_limit - lower_limit) / float(self.adr_cfg_dict["num_increments"])
         return param_slope * self.increment_counter + lower_limit
