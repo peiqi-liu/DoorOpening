@@ -93,18 +93,6 @@ class EventCfg:
         },
     )
 
-    door_latch_joint_stiffness_and_damping = EventTerm(
-        func=randomize_actuator_gains_compat,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("door", joint_names="joint_1"),
-            "stiffness_distribution_params": (1.0, 1.0),
-            "damping_distribution_params": (1.0, 1.0),
-            "operation": "scale",
-            "distribution": "uniform",
-        },
-    )
-
     door_hinge_joint_stiffness_and_damping = EventTerm(
         func=randomize_actuator_gains_compat,
         mode="reset",
@@ -321,28 +309,24 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     action_space = actuated_joints_num * 1
     # action_space = len(arm_joints) + len(base_joints) + 4
     # observation_space = actuated_joints_num * 2 + len(door_body_names) * 3 + len(robot_key_bodies) * 3 * 2 + len(door_joint_names) + len(door_joint_names) + len(contact_sensor_names) * 3
+    twist_observation_space = len(twist_indices) * (
+        len(robot_key_bodies) * 3 +
+        len(robot_key_bodies) * 6 +
+        3 +
+        len(door_joint_names) +
+        len(arm_joints) +
+        len(base_joints)
+    )
+
     observation_space = \
         actuated_joints_num * 3 +\
         len(base_joints) + len(arm_joints) +\
         len(robot_key_bodies) * 3 +\
         (len(robot_key_bodies) - 1) * (3 + 6) + 6 +\
         len(door_body_names) * 3 +\
-        len(door_joint_names) * 2
-    state_space = \
-        actuated_joints_num * 3 +\
-        len(base_joints) + len(arm_joints) +\
-        len(robot_key_bodies) * 3 +\
-        (len(robot_key_bodies) - 1) * (3 + 6) + 6 +\
-        len(door_body_names) * 3 +\
         len(door_joint_names) * 2 +\
-        len(twist_indices) * (
-            len(robot_key_bodies) * 3 +
-            len(robot_key_bodies) * 6 +
-            3 +
-            len(door_joint_names) +
-            len(arm_joints) +
-            len(base_joints)
-        )
+        twist_observation_space
+    state_space = observation_space
     num_observations = observation_space
     num_states = state_space
     #  5 * 3 +\
@@ -400,7 +384,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     enable_adr = False
     num_adr_increments = 20
-    starting_adr_increments = num_adr_increments
+    starting_adr_increments = 0
 
     events: EventCfg = EventCfg()
 
@@ -423,10 +407,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         },
         "robot_joint_friction": {
             "friction_distribution_params": (0.0, 0.02),
-        },
-        "door_latch_joint_stiffness_and_damping": {
-            "stiffness_distribution_params": (0.95, 1.05),
-            "damping_distribution_params": (0.95, 1.05),
         },
         "door_hinge_joint_stiffness_and_damping": {
             "stiffness_distribution_params": (0.85, 1.15),
@@ -462,18 +442,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "arm_joint_vel_bias": (0.0, 0.05),
             "finger_joint_vel_noise": (0.0, 0.15),
             "finger_joint_vel_bias": (0.0, 0.08),
-            "key_body_pos_noise": (0.0, 0.01),
-            "key_body_pos_bias": (0.0, 0.005),
-            "key_body_rot_noise": (0.0, 0.02),
-            "key_body_rot_bias": (0.0, 0.01),
-            "base_lin_vel_noise": (0.0, 0.05),
-            "base_lin_vel_bias": (0.0, 0.025),
-            "base_ang_vel_noise": (0.0, 0.08),
-            "base_ang_vel_bias": (0.0, 0.04),
-            "door_to_base_pos_noise": (0.0, 0.01),
-            "door_to_base_pos_bias": (0.0, 0.005),
-            "key_pos_err_noise": (0.0, 0.01),
-            "key_pos_err_bias": (0.0, 0.005),
         },
         "pd_targets": {
             "base_xy_target_noise": (0.0, 0.0015),

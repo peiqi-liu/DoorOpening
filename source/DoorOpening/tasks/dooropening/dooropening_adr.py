@@ -51,6 +51,15 @@ class DoorOpeningADR:
         self.increment_counter = num_increments
         self.increase_ranges(increase_counter=False)
 
+    def get_increment_fraction(self) -> float:
+        num_increments = float(self.adr_cfg_dict["num_increments"])
+        if num_increments <= 0:
+            return 0.0
+        return float(self.increment_counter) / num_increments
+
+    def get_term_param_range(self, term_name: str, param_name: str):
+        return self.event_manager.get_term_cfg(term_name).params[param_name]
+
     def get_custom_param_value(self, param_group: str, param_name: str):
         upper_limit = self.adr_custom_cfg_dict[param_group][param_name][1]
         lower_limit = self.adr_custom_cfg_dict[param_group][param_name][0]

@@ -187,6 +187,8 @@ def edit_door_articulation(
     door: Articulation, 
     door_closed_range = 0.01,     # radians
     hinge_range = 0.8,
+    locked_stiffness = 1e4,
+    locked_damping = 1e3,
     # Optional: disable the latching behavior by setting the hinge range to a negative value
     # hinge_range = -0.1,
 ):
@@ -212,7 +214,7 @@ def edit_door_articulation(
     valid_damping = default_joint_damping[:, j1].abs() > 1e-6
     stiffness_scale[valid_stiffness] = joint_stiffness[valid_stiffness, j1] / default_joint_stiffness[valid_stiffness, j1]
     damping_scale[valid_damping] = joint_damping[valid_damping, j1] / default_joint_damping[valid_damping, j1]
-    joint_stiffness[locked, j1] = 1e6 * stiffness_scale[locked]
-    joint_damping[locked, j1] = 1e5 * damping_scale[locked]
+    joint_stiffness[locked, j1] = locked_stiffness * stiffness_scale[locked]
+    joint_damping[locked, j1] = locked_damping * damping_scale[locked]
     door.write_joint_stiffness_to_sim(joint_stiffness)
     door.write_joint_damping_to_sim(joint_damping)
