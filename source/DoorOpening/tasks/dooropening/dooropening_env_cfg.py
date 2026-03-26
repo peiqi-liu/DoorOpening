@@ -398,9 +398,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     velocity = 1.0
 
-    enable_adr = False
+    enable_adr = True
     num_adr_increments = 20
-    starting_adr_increments = num_adr_increments
+    # Start with non-zero randomization and progressively increase range widths.
+    starting_adr_increments = 1
 
     events: EventCfg = EventCfg()
 
