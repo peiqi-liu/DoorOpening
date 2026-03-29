@@ -186,9 +186,9 @@ ALL_DOOR_CONFIGS = setup_doors()
 def edit_door_articulation(
     door: Articulation, 
     door_closed_range = 0.01,     # radians
-    hinge_range = 0.8,
-    locked_stiffness = 1e4,
-    locked_damping = 1e3,
+    hinge_range = 0.05,
+    locked_stiffness = 1e3,
+    locked_damping = 1e2,
     # Optional: disable the latching behavior by setting the hinge range to a negative value
     # hinge_range = -0.1,
 ):
@@ -199,7 +199,7 @@ def edit_door_articulation(
     # joint positions
     q = door.data.joint_pos
 
-    # locked mask: (num_envs,)
+    # Only relock when both joints are still very close to the closed pose.
     locked = (q[:, j1].abs() < door_closed_range) & (q[:, j2].abs() < hinge_range)
 
     default_joint_stiffness = door.data.default_joint_stiffness

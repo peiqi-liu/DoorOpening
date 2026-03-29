@@ -33,6 +33,45 @@ def _get_num_shapes_per_body(asset: Articulation) -> list[int]:
     return num_shapes_per_body
 
 
+def _get_material_buckets(
+    asset: RigidObject | Articulation,
+    static_friction_range: tuple[float, float],
+    dynamic_friction_range: tuple[float, float],
+    restitution_range: tuple[float, float],
+    num_buckets: int,
+    make_consistent: bool,
+) -> torch.Tensor:
+    """Cache sampled material buckets per asset/range to avoid creating unbounded unique materials."""
+    cache_name = "_dooropening_material_bucket_cache"
+    if not hasattr(asset, cache_name):
+        setattr(asset, cache_name, {})
+    bucket_cache = getattr(asset, cache_name)
+
+    # Round range endpoints so recurring ADR stages map to the same cache key.
+    key = (
+        round(float(static_friction_range[0]), 8),
+        round(float(static_friction_range[1]), 8),
+        round(float(dynamic_friction_range[0]), 8),
+        round(float(dynamic_friction_range[1]), 8),
+        round(float(restitution_range[0]), 8),
+        round(float(restitution_range[1]), 8),
+        int(num_buckets),
+        bool(make_consistent),
+    )
+    if key in bucket_cache:
+        return bucket_cache[key]
+
+    static_friction = torch.empty((num_buckets,), device="cpu").uniform_(*static_friction_range)
+    dynamic_friction = torch.empty((num_buckets,), device="cpu").uniform_(*dynamic_friction_range)
+    restitution = torch.empty((num_buckets,), device="cpu").uniform_(*restitution_range)
+    if make_consistent:
+        dynamic_friction = torch.minimum(dynamic_friction, static_friction)
+
+    material_buckets = torch.stack((static_friction, dynamic_friction, restitution), dim=-1)
+    bucket_cache[key] = material_buckets
+    return material_buckets
+
+
 def randomize_rigid_body_material_compat(
     env,
     env_ids: torch.Tensor | None,
@@ -44,20 +83,26 @@ def randomize_rigid_body_material_compat(
     make_consistent: bool = False,
 ):
     asset: RigidObject | Articulation = env.scene[asset_cfg.name]
+    if num_buckets <= 0:
+        raise ValueError(f"num_buckets must be > 0, received {num_buckets}.")
 
     if env_ids is None:
         env_ids_cpu = torch.arange(env.scene.num_envs, device="cpu")
     else:
         env_ids_cpu = env_ids.cpu()
 
-    total_num_shapes = asset.root_physx_view.max_shapes
-    static_friction = torch.empty((len(env_ids_cpu), total_num_shapes), device="cpu").uniform_(*static_friction_range)
-    dynamic_friction = torch.empty((len(env_ids_cpu), total_num_shapes), device="cpu").uniform_(*dynamic_friction_range)
-    restitution = torch.empty((len(env_ids_cpu), total_num_shapes), device="cpu").uniform_(*restitution_range)
-    if make_consistent:
-        dynamic_friction = torch.minimum(dynamic_friction, static_friction)
+    material_buckets = _get_material_buckets(
+        asset=asset,
+        static_friction_range=static_friction_range,
+        dynamic_friction_range=dynamic_friction_range,
+        restitution_range=restitution_range,
+        num_buckets=num_buckets,
+        make_consistent=make_consistent,
+    )
 
-    material_samples = torch.stack((static_friction, dynamic_friction, restitution), dim=-1)
+    total_num_shapes = asset.root_physx_view.max_shapes
+    bucket_ids = torch.randint(0, num_buckets, (len(env_ids_cpu), total_num_shapes), device="cpu")
+    material_samples = material_buckets[bucket_ids]
     materials = asset.root_physx_view.get_material_properties()
 
     body_ids = _resolve_body_ids(asset_cfg, asset)

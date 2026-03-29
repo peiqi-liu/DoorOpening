@@ -1,3 +1,3 @@
 [submodule "third_party/pointnet2_ops"]
 	path = third_party/pointnet2_ops
-	url = git@github.com:Jim-Young6709/pointnet2_ops.git
+	url = https://github.com/Jim-Young6709/pointnet2_ops.git

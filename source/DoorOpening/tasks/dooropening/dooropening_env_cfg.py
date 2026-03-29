@@ -18,7 +18,6 @@ from DoorOpening.constants.robot_constants import (
 )
 from DoorOpening.tasks.dooropening.dooropening_event_helpers import (
     randomize_actuator_gains_compat,
-    randomize_joint_parameters_compat,
     randomize_rigid_body_material_compat,
 )
 from isaaclab.assets import ArticulationCfg
@@ -82,17 +81,6 @@ class EventCfg:
         },
     )
 
-    robot_joint_friction = EventTerm(
-        func=randomize_joint_parameters_compat,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
-            "friction_distribution_params": (0.0, 0.0),
-            "operation": "abs",
-            "distribution": "uniform",
-        },
-    )
-
     door_hinge_joint_stiffness_and_damping = EventTerm(
         func=randomize_actuator_gains_compat,
         mode="reset",
@@ -101,17 +89,6 @@ class EventCfg:
             "stiffness_distribution_params": (1.0, 1.0),
             "damping_distribution_params": (1.0, 1.0),
             "operation": "scale",
-            "distribution": "uniform",
-        },
-    )
-
-    door_joint_friction = EventTerm(
-        func=randomize_joint_parameters_compat,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("door", joint_names="joint_(1|2)"),
-            "friction_distribution_params": (0.0, 0.0),
-            "operation": "abs",
             "distribution": "uniform",
         },
     )
@@ -382,6 +359,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     velocity = 1.0
 
+    # Keep DR opt-in so the default task is the clean baseline.
     enable_adr = False
     num_adr_increments = 20
     starting_adr_increments = 0
@@ -405,15 +383,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "stiffness_distribution_params": (0.8, 1.2),
             "damping_distribution_params": (0.7, 1.3),
         },
-        "robot_joint_friction": {
-            "friction_distribution_params": (0.0, 0.02),
-        },
         "door_hinge_joint_stiffness_and_damping": {
             "stiffness_distribution_params": (0.85, 1.15),
             "damping_distribution_params": (0.85, 1.15),
-        },
-        "door_joint_friction": {
-            "friction_distribution_params": (0.0, 0.02),
         },
     }
 

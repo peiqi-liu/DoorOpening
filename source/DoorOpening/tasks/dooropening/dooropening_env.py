@@ -175,7 +175,9 @@ class DooropeningEnv(DirectRLEnv):
 
         # DEXTRAH-style split: EventTerms handle physics DR, while the env samples reset/obs/controller noise from ADR.
         self.dooropening_adr = DoorOpeningADR(self.event_manager, self.cfg.adr_cfg_dict, self.cfg.adr_custom_cfg_dict)
-        self.dooropening_adr.set_num_increments(self.cfg.starting_adr_increments)
+        self._adr_enabled = bool(self.cfg.enable_adr)
+        initial_adr_increments = self.cfg.starting_adr_increments if self._adr_enabled else 0
+        self.dooropening_adr.set_num_increments(initial_adr_increments)
 
         self.robot_spawn_noise_widths = self._make_env_buffer_dict(self.cfg.adr_custom_cfg_dict["robot_spawn"].keys())
         robot_state_cfg = self.cfg.adr_custom_cfg_dict["robot_state_noise"]
@@ -322,12 +324,15 @@ class DooropeningEnv(DirectRLEnv):
         return tensor.reshape(self.num_envs, -1).mean().item()
 
     def _current_custom_param(self, group: str, name: str) -> float:
+        if not self._adr_enabled:
+            return 0.0
         return self.dooropening_adr.get_custom_param_value(group, name)
 
     def _current_event_param_range(self, term_name: str, param_name: str):
         return self.dooropening_adr.get_term_param_range(term_name, param_name)
 
     def _log_dr_metrics(self):
+        self.extras["dr/enabled"] = float(self._adr_enabled)
         robot_stiffness = self._current_event_param_range(
             "robot_joint_stiffness_and_damping", "stiffness_distribution_params"
         )
@@ -386,6 +391,16 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["dr_sample/obs_finger_joint_vel_noise_mean"] = self.robot_state_noise_widths[
             "finger_joint_vel_noise"
         ].mean().item()
+    def _update_adr_ranges(self):
+        if not self._adr_enabled:
+            return
+
+        progress = min(float(self.step_count) / float(self.reset_progress_total), 1.0)
+        target_increment = int(progress * self.cfg.num_adr_increments)
+        target_increment = max(self.cfg.starting_adr_increments, target_increment)
+        target_increment = min(self.cfg.num_adr_increments, target_increment)
+        if target_increment != self.dooropening_adr.increment_counter:
+            self.dooropening_adr.set_num_increments(target_increment)
 
     def _sample_reset_randomization(self, env_ids: torch.Tensor):
         num_ids = len(env_ids)
@@ -1109,6 +1124,7 @@ class DooropeningEnv(DirectRLEnv):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
 
+        self._update_adr_ranges()
         reset_frame_idx = self.ref_motion_lib.reset(env_ids, step_count=self.step_count, reset_progress_total=self.reset_progress_total)
         self.max_trial_steps[env_ids] = ((self.ref_motion_lib.num_frames - reset_frame_idx) // self.ref_motion_lib.velocity).long()
         self._sample_reset_randomization(env_ids)
