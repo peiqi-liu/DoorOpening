@@ -1,4 +1,5 @@
 import copy
+import math
 
 
 class DoorOpeningADR:
@@ -30,22 +31,19 @@ class DoorOpeningADR:
             self.increment_counter += 1
 
         # EventTerms store their active ranges in-place, so ADR just interpolates each range endpoint for the current stage.
+        fraction = self.get_increment_fraction()
         for term_name, term_params in self.adr_cfg_dict.items():
             if term_name == "num_increments":
                 continue
             term = self.event_manager.get_term_cfg(term_name)
             for param_name, param_values in term_params.items():
-                lower_limit_inc = (
-                    self.adr_cfg_dict[term_name][param_name][0] - self.adr_cfg_dict_initial[term_name][param_name][0]
-                ) / float(self.adr_cfg_dict["num_increments"])
-                lower_limit = lower_limit_inc * self.increment_counter + self.adr_cfg_dict_initial[term_name][param_name][0]
-
-                upper_limit_inc = (
-                    self.adr_cfg_dict[term_name][param_name][1] - self.adr_cfg_dict_initial[term_name][param_name][1]
-                ) / float(self.adr_cfg_dict["num_increments"])
-                upper_limit = upper_limit_inc * self.increment_counter + self.adr_cfg_dict_initial[term_name][param_name][1]
-
-                term.params[param_name] = (lower_limit, upper_limit)
+                target_range, interpolation = self._parse_range_cfg(param_values)
+                term.params[param_name] = self.interpolate_range(
+                    self.adr_cfg_dict_initial[term_name][param_name],
+                    target_range,
+                    fraction,
+                    interpolation,
+                )
 
     def set_num_increments(self, num_increments: int):
         self.increment_counter = num_increments
@@ -65,5 +63,50 @@ class DoorOpeningADR:
         lower_limit = self.adr_custom_cfg_dict[param_group][param_name][0]
 
         # Reset noise, observation noise, and target noise are sampled in the env, so ADR exposes them as scalars.
-        param_slope = (upper_limit - lower_limit) / float(self.adr_cfg_dict["num_increments"])
-        return param_slope * self.increment_counter + lower_limit
+        return self.interpolate_scalar(lower_limit, upper_limit, self.get_increment_fraction())
+
+    def get_interpolated_range(
+        self,
+        initial_range: tuple[float, float],
+        target_range: tuple[float, float],
+        interpolation: str = "linear",
+    ) -> tuple[float, float]:
+        return self.interpolate_range(initial_range, target_range, self.get_increment_fraction(), interpolation)
+
+    @staticmethod
+    def _parse_range_cfg(param_cfg) -> tuple[tuple[float, float], str]:
+        if isinstance(param_cfg, dict):
+            return tuple(param_cfg["range"]), param_cfg.get("interpolation", "linear")
+        return tuple(param_cfg), "linear"
+
+    @staticmethod
+    def interpolate_scalar(start: float, end: float, fraction: float) -> float:
+        fraction = max(0.0, min(1.0, float(fraction)))
+        return (1.0 - fraction) * float(start) + fraction * float(end)
+
+    @classmethod
+    def interpolate_range(
+        cls,
+        initial_range: tuple[float, float],
+        target_range: tuple[float, float],
+        fraction: float,
+        interpolation: str = "linear",
+    ) -> tuple[float, float]:
+        lower_initial, upper_initial = (float(initial_range[0]), float(initial_range[1]))
+        lower_target, upper_target = (float(target_range[0]), float(target_range[1]))
+        fraction = max(0.0, min(1.0, float(fraction)))
+
+        if interpolation == "linear":
+            return (
+                cls.interpolate_scalar(lower_initial, lower_target, fraction),
+                cls.interpolate_scalar(upper_initial, upper_target, fraction),
+            )
+        if interpolation == "log":
+            positive_values = (lower_initial, upper_initial, lower_target, upper_target)
+            if any(value <= 0.0 for value in positive_values):
+                raise ValueError("Log interpolation requires strictly positive range bounds.")
+            return (
+                math.exp(cls.interpolate_scalar(math.log(lower_initial), math.log(lower_target), fraction)),
+                math.exp(cls.interpolate_scalar(math.log(upper_initial), math.log(upper_target), fraction)),
+            )
+        raise ValueError(f"Unsupported interpolation mode: {interpolation}")

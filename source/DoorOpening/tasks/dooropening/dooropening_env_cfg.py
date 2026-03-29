@@ -7,7 +7,6 @@ from DoorOpening.assets.door.door_cfg import DOOR_CONFIG, ALL_DOOR_CONFIGS
 from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
 from DoorOpening.constants.door_constants import DOOR_BODY_NAMES, DOOR_JOINT_NAMES
-from DoorOpening.tasks.dooropening.dooropening_event_helpers import randomize_actuator_gains_from_choices
 from DoorOpening.constants.robot_constants import (
     CLOSE_FINGER_JOINT_VALUES,
     DEFAULT_JOINT_POS,
@@ -39,9 +38,8 @@ euler_angles = torch.tensor([-np.pi / 4, 0.0, 0])  # (roll, pitch, yaw) in radia
 POINTCLOUD_CAMERA_QUAT = quat_from_euler_xyz(euler_angles[0], euler_angles[1], euler_angles[2])
 POINTCLOUD_CAMERA_QUAT = tuple(POINTCLOUD_CAMERA_QUAT.tolist())
 
-# Keep the board-joint choices wide, but avoid the ultra-soft regime that was more likely to destabilize contacts.
-DOOR_PANEL_STIFFNESS_CHOICES = (0.3, 1.0, 10.0, 100.0)
-DOOR_PANEL_DAMPING_CHOICES = (1.0, 10.0)
+DOOR_BOARD_GAIN_MULTIPLIER_FINAL_RANGE = (1.0, 100.0)
+DOOR_HANDLE_GAIN_MULTIPLIER_FINAL_RANGE = (1.0, 10.0)
 
 @configclass
 class EventCfg:
@@ -84,12 +82,14 @@ class EventCfg:
     )
 
     door_board_joint_stiffness_and_damping = EventTerm(
-        func=randomize_actuator_gains_from_choices,
+        func=randomize_actuator_gains,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("door", joint_names="joint_1"),
-            "stiffness_choices": DOOR_PANEL_STIFFNESS_CHOICES,
-            "damping_choices": DOOR_PANEL_DAMPING_CHOICES,
+            "stiffness_distribution_params": (1.0, 1.0),
+            "damping_distribution_params": (1.0, 1.0),
+            "operation": "scale",
+            "distribution": "log_uniform",
         },
     )
 
@@ -101,7 +101,7 @@ class EventCfg:
             "stiffness_distribution_params": (1.0, 1.0),
             "damping_distribution_params": (1.0, 1.0),
             "operation": "scale",
-            "distribution": "uniform",
+            "distribution": "log_uniform",
         },
     )
 
@@ -383,17 +383,21 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     events: EventCfg = EventCfg()
 
     # These are the ADR endpoints for simulator parameters handled by EventTerms at reset.
-    # Door board randomization stays fixed from the beginning; the door hinge uses ADR because it is not
-    # overwritten by the manual board-joint latch logic.
+    # Door gains start at their nominal values and only widen toward harder settings.
+    # The board widens more aggressively than the handle hinge.
     adr_cfg_dict = {
         "num_increments": num_adr_increments,
         "robot_joint_stiffness_and_damping": {
             "stiffness_distribution_params": (0.8, 1.2),
             "damping_distribution_params": (0.7, 1.3),
         },
+        "door_board_joint_stiffness_and_damping": {
+            "stiffness_distribution_params": {"range": DOOR_BOARD_GAIN_MULTIPLIER_FINAL_RANGE, "interpolation": "log"},
+            "damping_distribution_params": {"range": DOOR_BOARD_GAIN_MULTIPLIER_FINAL_RANGE, "interpolation": "log"},
+        },
         "door_hinge_joint_stiffness_and_damping": {
-            "stiffness_distribution_params": (0.85, 1.15),
-            "damping_distribution_params": (0.85, 1.15),
+            "stiffness_distribution_params": {"range": DOOR_HANDLE_GAIN_MULTIPLIER_FINAL_RANGE, "interpolation": "log"},
+            "damping_distribution_params": {"range": DOOR_HANDLE_GAIN_MULTIPLIER_FINAL_RANGE, "interpolation": "log"},
         },
     }
 

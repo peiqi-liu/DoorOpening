@@ -175,7 +175,8 @@ class DooropeningEnv(DirectRLEnv):
         self.alive_bonus = self.cfg.alive_bonus
         self.termination_penalty = self.cfg.termination_penalty
 
-        # DEXTRAH-style split: EventTerms handle physics DR, while the env samples reset/obs/controller noise from ADR.
+        # DEXTRAH-style split: EventTerms handle reset-time physics DR, while the env samples
+        # reset/observation/controller noise from ADR.
         self.dooropening_adr = DoorOpeningADR(self.event_manager, self.cfg.adr_cfg_dict, self.cfg.adr_custom_cfg_dict)
         self._adr_enabled = bool(self.cfg.enable_adr)
         initial_adr_increments = self.cfg.starting_adr_increments if self._adr_enabled else 0
@@ -327,10 +328,10 @@ class DooropeningEnv(DirectRLEnv):
             "robot_joint_stiffness_and_damping", "damping_distribution_params"
         )
         board_stiffness = self._current_event_param(
-            "door_board_joint_stiffness_and_damping", "stiffness_choices"
+            "door_board_joint_stiffness_and_damping", "stiffness_distribution_params"
         )
         board_damping = self._current_event_param(
-            "door_board_joint_stiffness_and_damping", "damping_choices"
+            "door_board_joint_stiffness_and_damping", "damping_distribution_params"
         )
         hinge_stiffness = self._current_event_param(
             "door_hinge_joint_stiffness_and_damping", "stiffness_distribution_params"
@@ -357,10 +358,10 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["dr/robot_stiffness_max"] = float(robot_stiffness[1])
         self.extras["dr/robot_damping_min"] = float(robot_damping[0])
         self.extras["dr/robot_damping_max"] = float(robot_damping[1])
-        self.extras["dr/door_board_stiffness_min"] = float(min(board_stiffness))
-        self.extras["dr/door_board_stiffness_max"] = float(max(board_stiffness))
-        self.extras["dr/door_board_damping_min"] = float(min(board_damping))
-        self.extras["dr/door_board_damping_max"] = float(max(board_damping))
+        self.extras["dr/door_board_stiffness_min"] = float(board_stiffness[0])
+        self.extras["dr/door_board_stiffness_max"] = float(board_stiffness[1])
+        self.extras["dr/door_board_damping_min"] = float(board_damping[0])
+        self.extras["dr/door_board_damping_max"] = float(board_damping[1])
         self.extras["dr/door_hinge_stiffness_min"] = float(hinge_stiffness[0])
         self.extras["dr/door_hinge_stiffness_max"] = float(hinge_stiffness[1])
         self.extras["dr/door_hinge_damping_min"] = float(hinge_damping[0])
