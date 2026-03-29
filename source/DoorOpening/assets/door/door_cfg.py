@@ -75,8 +75,8 @@ def create_actuators():
         ),
         "joint_2": ImplicitActuatorCfg(
             joint_names_expr=["joint_2"],
-            stiffness=2.5,
-            damping=1,
+            stiffness=15,
+            damping=2.5,
         ),
     }
 
@@ -185,10 +185,12 @@ ALL_DOOR_CONFIGS = setup_doors()
 
 def edit_door_articulation(
     door: Articulation, 
+    nominal_joint_stiffness: torch.Tensor | None = None,
+    nominal_joint_damping: torch.Tensor | None = None,
     door_closed_range = 0.01,     # radians
-    hinge_range = 0.05,
-    locked_stiffness = 1e3,
-    locked_damping = 1e2,
+    hinge_range = 0.8,
+    locked_stiffness = 1e6,
+    locked_damping = 1e5,
     # Optional: disable the latching behavior by setting the hinge range to a negative value
     # hinge_range = -0.1,
 ):
@@ -204,17 +206,17 @@ def edit_door_articulation(
 
     default_joint_stiffness = door.data.default_joint_stiffness
     default_joint_damping = door.data.default_joint_damping
+    if nominal_joint_stiffness is None:
+        nominal_joint_stiffness = default_joint_stiffness
+    if nominal_joint_damping is None:
+        nominal_joint_damping = default_joint_damping
 
-    # Start from the live joint gains so reset-time randomization survives the lock logic.
     joint_stiffness = door.data.joint_stiffness.clone()
     joint_damping = door.data.joint_damping.clone()
-    stiffness_scale = torch.ones_like(joint_stiffness[:, j1])
-    damping_scale = torch.ones_like(joint_damping[:, j1])
-    valid_stiffness = default_joint_stiffness[:, j1].abs() > 1e-6
-    valid_damping = default_joint_damping[:, j1].abs() > 1e-6
-    stiffness_scale[valid_stiffness] = joint_stiffness[valid_stiffness, j1] / default_joint_stiffness[valid_stiffness, j1]
-    damping_scale[valid_damping] = joint_damping[valid_damping, j1] / default_joint_damping[valid_damping, j1]
-    joint_stiffness[locked, j1] = locked_stiffness * stiffness_scale[locked]
-    joint_damping[locked, j1] = locked_damping * damping_scale[locked]
+    # Restore the normal door-panel gains every step, then temporarily override them only while latched.
+    joint_stiffness[:, j1] = nominal_joint_stiffness[:, j1]
+    joint_damping[:, j1] = nominal_joint_damping[:, j1]
+    joint_stiffness[locked, j1] = locked_stiffness
+    joint_damping[locked, j1] = locked_damping
     door.write_joint_stiffness_to_sim(joint_stiffness)
     door.write_joint_damping_to_sim(joint_damping)

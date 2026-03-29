@@ -21,7 +21,10 @@ from isaaclab.assets.articulation import ArticulationCfg
 module_path = os.path.dirname(__file__)
 root_path = os.path.dirname(module_path)
 glorbot_urdf_path = os.path.join(root_path, "glorbot/glorbot.urdf")
-glorbot_usd_path = os.path.join(root_path, "glorbot/glorbot.usd")
+glorbot_usd_dir = os.path.join(os.getcwd(), "IsaacLab_tmp", "glorbot")
+os.makedirs(glorbot_usd_dir, exist_ok=True)
+glorbot_usd_file_name = "glorbot.usd"
+glorbot_usd_path = os.path.join(glorbot_usd_dir, glorbot_usd_file_name)
 print("glorbot_usd_path: ", glorbot_usd_path)
 
 import numpy as np
@@ -37,11 +40,11 @@ GLORBOT_CONFIG = ArticulationCfg(
         merge_fixed_joints=False,
         make_instanceable=False,
         asset_path=glorbot_urdf_path,
-        usd_dir=os.path.dirname(glorbot_usd_path),
-        usd_file_name=os.path.basename(glorbot_usd_path),
+        usd_dir=glorbot_usd_dir,
+        usd_file_name=glorbot_usd_file_name,
         force_usd_conversion=True,
-        # Use an explicit absolute USD cache path. The repo-local relative
-        # IsaacLab_tmp path can produce unresolved references during import.
+        # Keep the generated USD under the current run directory instead of the
+        # checked-in asset folder or Isaac Lab's default temp cache.
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             enabled_self_collisions=False, solver_position_iteration_count=8, solver_velocity_iteration_count=0
         ),

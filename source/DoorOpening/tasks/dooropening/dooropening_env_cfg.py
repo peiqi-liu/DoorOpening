@@ -7,21 +7,19 @@ from DoorOpening.assets.door.door_cfg import DOOR_CONFIG, ALL_DOOR_CONFIGS
 from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
 from DoorOpening.constants.door_constants import DOOR_BODY_NAMES, DOOR_JOINT_NAMES
+from DoorOpening.tasks.dooropening.dooropening_event_helpers import randomize_actuator_gains_from_choices
 from DoorOpening.constants.robot_constants import (
-    CAMERA_JOINT_DEFAULT_VALUES,
     CLOSE_FINGER_JOINT_VALUES,
+    DEFAULT_JOINT_POS,
     OPEN_FINGER_JOINT_VALUES,
     ROBOT_KEY_BODY_NAMES,
     ROBOT_RESET_KEY_BODY_NAMES,
     ROBOT_PALM_LINK_NAME,
     ROBOT_BASE_BODY_LINK_NAME,
 )
-from DoorOpening.tasks.dooropening.dooropening_event_helpers import (
-    randomize_actuator_gains_compat,
-    randomize_rigid_body_material_compat,
-)
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
+from isaaclab.envs.mdp.events import randomize_actuator_gains, randomize_rigid_body_material
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg, PhysxCfg
 from isaaclab.utils import configclass
@@ -41,39 +39,43 @@ euler_angles = torch.tensor([-np.pi / 4, 0.0, 0])  # (roll, pitch, yaw) in radia
 POINTCLOUD_CAMERA_QUAT = quat_from_euler_xyz(euler_angles[0], euler_angles[1], euler_angles[2])
 POINTCLOUD_CAMERA_QUAT = tuple(POINTCLOUD_CAMERA_QUAT.tolist())
 
+# Keep the board-joint choices wide, but avoid the ultra-soft regime that was more likely to destabilize contacts.
+DOOR_PANEL_STIFFNESS_CHOICES = (0.3, 1.0, 10.0, 100.0)
+DOOR_PANEL_DAMPING_CHOICES = (1.0, 10.0)
+
 @configclass
 class EventCfg:
     """Configuration for reset-time physics randomization."""
 
     robot_physics_material = EventTerm(
-        func=randomize_rigid_body_material_compat,
+        func=randomize_rigid_body_material,
         mode="reset",
         params={
-            "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-            "static_friction_range": (1.0, 1.0),
-            "dynamic_friction_range": (1.0, 1.0),
+            "asset_cfg": SceneEntityCfg("robot"),
+            "static_friction_range": (0.6, 1.25),
+            "dynamic_friction_range": (0.5, 1.1),
             "restitution_range": (0.0, 0.0),
             "num_buckets": 250,
         },
     )
 
     door_physics_material = EventTerm(
-        func=randomize_rigid_body_material_compat,
+        func=randomize_rigid_body_material,
         mode="reset",
         params={
-            "asset_cfg": SceneEntityCfg("door", body_names=".*"),
-            "static_friction_range": (1.0, 1.0),
-            "dynamic_friction_range": (1.0, 1.0),
+            "asset_cfg": SceneEntityCfg("door"),
+            "static_friction_range": (0.6, 1.25),
+            "dynamic_friction_range": (0.5, 1.1),
             "restitution_range": (0.0, 0.0),
             "num_buckets": 250,
         },
     )
 
     robot_joint_stiffness_and_damping = EventTerm(
-        func=randomize_actuator_gains_compat,
+        func=randomize_actuator_gains,
         mode="reset",
         params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+            "asset_cfg": SceneEntityCfg("robot"),
             "stiffness_distribution_params": (1.0, 1.0),
             "damping_distribution_params": (1.0, 1.0),
             "operation": "scale",
@@ -81,8 +83,18 @@ class EventCfg:
         },
     )
 
+    door_board_joint_stiffness_and_damping = EventTerm(
+        func=randomize_actuator_gains_from_choices,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("door", joint_names="joint_1"),
+            "stiffness_choices": DOOR_PANEL_STIFFNESS_CHOICES,
+            "damping_choices": DOOR_PANEL_DAMPING_CHOICES,
+        },
+    )
+
     door_hinge_joint_stiffness_and_damping = EventTerm(
-        func=randomize_actuator_gains_compat,
+        func=randomize_actuator_gains,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("door", joint_names="joint_2"),
@@ -271,7 +283,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_cfg: ArticulationCfg = GLORBOT_CONFIG.replace(
         prim_path="/World/envs/env_.*/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
-            joint_pos=CAMERA_JOINT_DEFAULT_VALUES,
+            # Keep both the Panda arm and the x5 camera arm in an explicit pose at spawn.
+            joint_pos=DEFAULT_JOINT_POS,
             pos=ROBOT_INITIAL_POS,
             rot=ROBOT_INITIAL_ROT
         ),
@@ -360,25 +373,20 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     velocity = 1.0
 
     # Keep DR opt-in so the default task is the clean baseline.
-    enable_adr = False
+    enable_adr = True
     num_adr_increments = 20
     starting_adr_increments = 0
+    print_domain_randomization_on_reset = True
+    print_domain_randomization_max_resets = 100
+    print_domain_randomization_max_envs = 20
 
     events: EventCfg = EventCfg()
 
     # These are the ADR endpoints for simulator parameters handled by EventTerms at reset.
+    # Door board randomization stays fixed from the beginning; the door hinge uses ADR because it is not
+    # overwritten by the manual board-joint latch logic.
     adr_cfg_dict = {
         "num_increments": num_adr_increments,
-        "robot_physics_material": {
-            "static_friction_range": (0.6, 1.25),
-            "dynamic_friction_range": (0.5, 1.1),
-            "restitution_range": (0.0, 0.0),
-        },
-        "door_physics_material": {
-            "static_friction_range": (0.6, 1.25),
-            "dynamic_friction_range": (0.5, 1.1),
-            "restitution_range": (0.0, 0.0),
-        },
         "robot_joint_stiffness_and_damping": {
             "stiffness_distribution_params": (0.8, 1.2),
             "damping_distribution_params": (0.7, 1.3),

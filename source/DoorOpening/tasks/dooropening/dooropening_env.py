@@ -1,3 +1,4 @@
+import inspect
 import math
 import torch
 from collections.abc import Sequence
@@ -29,6 +30,7 @@ class DooropeningEnv(DirectRLEnv):
 
     def __init__(self, cfg: DooropeningEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
+        self._initialize_runtime_event_terms()
         self.early_stopping = True
 
         self.num_base_joints = len(self.cfg.base_joints)
@@ -38,12 +40,9 @@ class DooropeningEnv(DirectRLEnv):
         self._robot_dof_idx, joint_names = self.robot.find_joints(actuated_joints)
         self._robot_dof_idx = torch.tensor(self._robot_dof_idx, device=self.device)
         self.ref_robot_dof_idx = torch.tensor([FULL_JOINT_NAMES.index(name) for name in joint_names], device=self.device)
-        self.robot_dof_names = joint_names
 
         self._robot_key_body_idx, robot_key_body_names = self.robot.find_bodies(self.cfg.robot_key_bodies)
         self._robot_reset_key_body_idx, robot_reset_key_body_names = self.robot.find_bodies(self.cfg.robot_reset_key_bodies)
-        self.robot_key_body_names = robot_key_body_names
-        self.robot_reset_key_body_names = robot_reset_key_body_names
         self._robot_base_id_in_key_body_idx = robot_key_body_names.index(self.cfg.robot_base_body_link_name)
         self._robot_palm_id_in_key_body_idx = robot_key_body_names.index(self.cfg.robot_palm_link_name)
 
@@ -91,6 +90,9 @@ class DooropeningEnv(DirectRLEnv):
         self._door_base_link_idx, self.door_base_link_name = self.door.find_bodies(self.cfg.door_base_frame_name)
         self._door_base_link_idx = self._door_base_link_idx[0]
         self._door_joint_idx, self.door_joint_names = self.door.find_joints(self.cfg.door_joint_names)
+        door_joint_name_to_idx = {name: idx for idx, name in enumerate(self.door_joint_names)}
+        self._door_board_joint_idx = int(self._door_joint_idx[door_joint_name_to_idx["joint_1"]])
+        self._door_hinge_joint_idx = int(self._door_joint_idx[door_joint_name_to_idx["joint_2"]])
 
         self._robot_base_body_link_idx, self.robot_base_body_link_name = self.robot.find_bodies(self.cfg.robot_base_body_link_name)
         self._robot_base_body_link_idx = self._robot_base_body_link_idx[0]
@@ -185,6 +187,27 @@ class DooropeningEnv(DirectRLEnv):
             [key for key in robot_state_cfg if key.endswith("_noise")]
         )
         self.robot_state_biases = self._make_env_buffer_dict([key for key in robot_state_cfg if key.endswith("_bias")])
+        self._door_nominal_joint_stiffness = self.door.data.joint_stiffness.clone()
+        self._door_nominal_joint_damping = self.door.data.joint_damping.clone()
+        self._print_domain_randomization_on_reset = bool(self.cfg.print_domain_randomization_on_reset)
+        self._print_domain_randomization_max_resets = int(self.cfg.print_domain_randomization_max_resets)
+        self._print_domain_randomization_max_envs = int(self.cfg.print_domain_randomization_max_envs)
+        self._print_domain_randomization_count = 0
+
+    def _initialize_runtime_event_terms(self):
+        if not self.cfg.events:
+            return
+
+        # IsaacLab's EventManager initializes class-based terms eagerly for "prestartup",
+        # but reset-time class terms still need their play-time processing once physics is live.
+        for mode in self.event_manager.available_modes:
+            if mode == "prestartup":
+                continue
+            term_names = self.event_manager._mode_term_names.get(mode, [])
+            term_cfgs = self.event_manager._mode_term_cfgs.get(mode, [])
+            for term_name, term_cfg in zip(term_names, term_cfgs):
+                if inspect.isclass(term_cfg.func):
+                    self.event_manager._process_term_cfg_at_play(term_name, term_cfg)
 
     def _activate_door_contact_reporters(self):
         try:
@@ -226,132 +249,117 @@ class DooropeningEnv(DirectRLEnv):
     def _make_env_buffer_dict(self, keys):
         return {key: torch.zeros((self.num_envs, 1), device=self.device) for key in keys}
 
-    def _tensor_range_str(self, tensor: torch.Tensor) -> str:
-        if tensor.numel() == 0:
-            return "empty"
-        finite = tensor[torch.isfinite(tensor)]
-        if finite.numel() == 0:
-            return "all_non_finite"
-        return f"[{finite.min().item():.4g}, {finite.max().item():.4g}]"
-
-    def _find_bad_entity_names(self, tensor_name: str, env_row: torch.Tensor) -> list[str]:
-        flat_bad_mask = ~torch.isfinite(env_row.reshape(env_row.shape[0], -1)).all(dim=1)
-        bad_indices = flat_bad_mask.nonzero(as_tuple=False).flatten().tolist()
-        if tensor_name.startswith("robot_key_body") or tensor_name.startswith("robot_body_"):
-            return [self.robot_key_body_names[idx] for idx in bad_indices]
-        if tensor_name.startswith("robot_reset_key_body"):
-            return [self.robot_reset_key_body_names[idx] for idx in bad_indices]
-        if tensor_name.startswith("door_link_"):
-            return [self.door_body_names[idx] for idx in bad_indices]
-        return [str(idx) for idx in bad_indices]
-
-    def _format_nonfinite_env_detail(self, tensor_name: str, env_id: int, tensor: torch.Tensor) -> str:
-        parts = [f"env={env_id}"]
-        parts.append(f"episode_step={int(self.episode_length_buf[env_id].item())}")
-
-        if hasattr(self, "ref_motion_lib") and hasattr(self.ref_motion_lib, "frame_idx"):
-            parts.append(f"frame_idx={float(self.ref_motion_lib.frame_idx[env_id].item()):.3f}")
-            if hasattr(self.ref_motion_lib, "env_to_file_map"):
-                motion_idx = int(self.ref_motion_lib.env_to_file_map[env_id].item())
-                parts.append(f"motion_idx={motion_idx}")
-                motion_path = motion_traj_paths[motion_idx]
-                parts.append(f"motion_file={motion_path.split('/')[-2]}/{motion_path.split('/')[-1]}")
-
-        parts.append(f"door_asset_idx={env_id % self.num_door_assets}")
-
-        env_row = tensor[env_id]
-        if env_row.ndim >= 2:
-            bad_names = self._find_bad_entity_names(tensor_name, env_row)
-            parts.append(f"bad_entities={bad_names}")
-
-        joint_pos = self.robot.data.joint_pos[env_id, self._robot_dof_idx]
-        joint_vel = self.robot.data.joint_vel[env_id, self._robot_dof_idx]
-        target_pos = self.robot_dof_targets[env_id]
-        applied_target_pos = self.applied_robot_dof_targets[env_id]
-        door_joint_pos = self.door.data.joint_pos[env_id, self._door_joint_idx]
-        parts.append(f"joint_pos_range={self._tensor_range_str(joint_pos)}")
-        parts.append(f"joint_vel_range={self._tensor_range_str(joint_vel)}")
-        parts.append(f"target_range={self._tensor_range_str(target_pos)}")
-        parts.append(f"applied_target_range={self._tensor_range_str(applied_target_pos)}")
-        parts.append(f"door_joint_pos={door_joint_pos.detach().cpu().tolist()}")
-
-        nonfinite_joint_names = [
-            self.robot_dof_names[idx]
-            for idx, is_finite in enumerate(torch.isfinite(joint_pos).tolist())
-            if not is_finite
-        ]
-        if nonfinite_joint_names:
-            parts.append(f"nonfinite_joint_pos={nonfinite_joint_names}")
-
-        nonfinite_joint_vel_names = [
-            self.robot_dof_names[idx]
-            for idx, is_finite in enumerate(torch.isfinite(joint_vel).tolist())
-            if not is_finite
-        ]
-        if nonfinite_joint_vel_names:
-            parts.append(f"nonfinite_joint_vel={nonfinite_joint_vel_names}")
-
-        return ", ".join(parts)
-
-    def _assert_finite_tensor(self, name: str, tensor: torch.Tensor):
-        if tensor is None or torch.isfinite(tensor).all():
-            return
-
-        if tensor.ndim > 0 and tensor.shape[0] == self.num_envs:
-            invalid_envs = (~torch.isfinite(tensor.reshape(self.num_envs, -1)).all(dim=1)).nonzero(as_tuple=False).flatten()
-            sample_envs = invalid_envs[:8].tolist()
-            env_details = [
-                self._format_nonfinite_env_detail(name, env_id, tensor)
-                for env_id in sample_envs[:4]
-            ]
-        else:
-            sample_envs = []
-            env_details = []
-
-        bad_values = tensor[~torch.isfinite(tensor)].detach().cpu().reshape(-1)[:8].tolist()
-        raise RuntimeError(
-            f"Non-finite values detected in '{name}'. "
-            f"sample_env_ids={sample_envs}, sample_bad_values={bad_values}, "
-            f"env_details={env_details}"
-        )
-
-    def _assert_finite_tensors(self, **named_tensors: torch.Tensor):
-        for name, tensor in named_tensors.items():
-            self._assert_finite_tensor(name, tensor)
-
-    def _safe_env_mean(self, tensor: torch.Tensor) -> float:
-        self._assert_finite_tensor("metric_tensor", tensor)
-        return tensor.reshape(self.num_envs, -1).mean().item()
-
     def _current_custom_param(self, group: str, name: str) -> float:
         if not self._adr_enabled:
             return 0.0
         return self.dooropening_adr.get_custom_param_value(group, name)
 
-    def _current_event_param_range(self, term_name: str, param_name: str):
-        return self.dooropening_adr.get_term_param_range(term_name, param_name)
+    def _current_event_param(self, term_name: str, param_name: str):
+        return self.event_manager.get_term_cfg(term_name).params[param_name]
+
+    def _refresh_nominal_door_joint_gains(self, env_ids: torch.Tensor | None = None):
+        if env_ids is None:
+            self._door_nominal_joint_stiffness.copy_(self.door.data.joint_stiffness)
+            self._door_nominal_joint_damping.copy_(self.door.data.joint_damping)
+            return
+        self._door_nominal_joint_stiffness[env_ids] = self.door.data.joint_stiffness[env_ids]
+        self._door_nominal_joint_damping[env_ids] = self.door.data.joint_damping[env_ids]
+
+    def _format_debug_scalar(self, value: float) -> str:
+        return f"{value:.4g}"
+
+    def _print_domain_randomization_debug(self, env_ids: Sequence[int] | torch.Tensor):
+        if not self._print_domain_randomization_on_reset:
+            return
+        if self._print_domain_randomization_count >= self._print_domain_randomization_max_resets:
+            return
+
+        env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+        if env_ids.numel() == 0:
+            return
+        sample_env_ids = env_ids[: min(env_ids.numel(), self._print_domain_randomization_max_envs)]
+
+        print(
+            "[DR Debug] "
+            f"reset_print={self._print_domain_randomization_count + 1}/{self._print_domain_randomization_max_resets} "
+            f"env_ids={sample_env_ids.detach().cpu().tolist()}"
+        )
+
+        default_joint_stiffness = self.door.data.default_joint_stiffness
+        default_joint_damping = self.door.data.default_joint_damping
+        live_joint_stiffness = self.door.data.joint_stiffness
+        live_joint_damping = self.door.data.joint_damping
+        for env_id in sample_env_ids.tolist():
+            board_default_stiffness = float(default_joint_stiffness[env_id, self._door_board_joint_idx].item())
+            board_default_damping = float(default_joint_damping[env_id, self._door_board_joint_idx].item())
+            hinge_default_stiffness = float(default_joint_stiffness[env_id, self._door_hinge_joint_idx].item())
+            hinge_default_damping = float(default_joint_damping[env_id, self._door_hinge_joint_idx].item())
+
+            board_actual_stiffness = float(live_joint_stiffness[env_id, self._door_board_joint_idx].item())
+            board_actual_damping = float(live_joint_damping[env_id, self._door_board_joint_idx].item())
+            hinge_actual_stiffness = float(live_joint_stiffness[env_id, self._door_hinge_joint_idx].item())
+            hinge_actual_damping = float(live_joint_damping[env_id, self._door_hinge_joint_idx].item())
+            print(
+                "[DR Debug] "
+                f"env={env_id} "
+                f"joint_1_default(k={self._format_debug_scalar(board_default_stiffness)}, "
+                f"c={self._format_debug_scalar(board_default_damping)}) "
+                f"joint_1_actual(k={self._format_debug_scalar(board_actual_stiffness)}, "
+                f"c={self._format_debug_scalar(board_actual_damping)}) "
+                f"joint_2_default(k={self._format_debug_scalar(hinge_default_stiffness)}, "
+                f"c={self._format_debug_scalar(hinge_default_damping)}) "
+                f"joint_2_actual(k={self._format_debug_scalar(hinge_actual_stiffness)}, "
+                f"c={self._format_debug_scalar(hinge_actual_damping)})"
+            )
+        self._print_domain_randomization_count += 1
 
     def _log_dr_metrics(self):
+        progress = min(float(self.step_count) / float(self.reset_progress_total), 1.0)
+        scheduled_increment = int(progress * self.cfg.num_adr_increments)
+        scheduled_increment = max(self.cfg.starting_adr_increments, scheduled_increment)
+        scheduled_increment = min(self.cfg.num_adr_increments, scheduled_increment)
+
         self.extras["dr/enabled"] = float(self._adr_enabled)
-        robot_stiffness = self._current_event_param_range(
+        robot_stiffness = self._current_event_param(
             "robot_joint_stiffness_and_damping", "stiffness_distribution_params"
         )
-        robot_damping = self._current_event_param_range(
+        robot_damping = self._current_event_param(
             "robot_joint_stiffness_and_damping", "damping_distribution_params"
         )
-        hinge_stiffness = self._current_event_param_range(
+        board_stiffness = self._current_event_param(
+            "door_board_joint_stiffness_and_damping", "stiffness_choices"
+        )
+        board_damping = self._current_event_param(
+            "door_board_joint_stiffness_and_damping", "damping_choices"
+        )
+        hinge_stiffness = self._current_event_param(
             "door_hinge_joint_stiffness_and_damping", "stiffness_distribution_params"
         )
-        hinge_damping = self._current_event_param_range(
+        hinge_damping = self._current_event_param(
             "door_hinge_joint_stiffness_and_damping", "damping_distribution_params"
         )
 
+        board_nominal_stiffness = self._door_nominal_joint_stiffness[:, self._door_board_joint_idx]
+        board_nominal_damping = self._door_nominal_joint_damping[:, self._door_board_joint_idx]
+        hinge_nominal_stiffness = self._door_nominal_joint_stiffness[:, self._door_hinge_joint_idx]
+        hinge_nominal_damping = self._door_nominal_joint_damping[:, self._door_hinge_joint_idx]
+        live_board_stiffness = self.door.data.joint_stiffness[:, self._door_board_joint_idx]
+        live_board_damping = self.door.data.joint_damping[:, self._door_board_joint_idx]
+        live_hinge_stiffness = self.door.data.joint_stiffness[:, self._door_hinge_joint_idx]
+        live_hinge_damping = self.door.data.joint_damping[:, self._door_hinge_joint_idx]
+
         self.extras["dr/increment"] = float(self.dooropening_adr.increment_counter)
         self.extras["dr/fraction"] = self.dooropening_adr.get_increment_fraction()
+        self.extras["dr/scheduled_increment_from_step"] = float(scheduled_increment)
+        self.extras["dr/scheduled_fraction_from_step"] = progress
         self.extras["dr/robot_stiffness_min"] = float(robot_stiffness[0])
         self.extras["dr/robot_stiffness_max"] = float(robot_stiffness[1])
         self.extras["dr/robot_damping_min"] = float(robot_damping[0])
         self.extras["dr/robot_damping_max"] = float(robot_damping[1])
+        self.extras["dr/door_board_stiffness_min"] = float(min(board_stiffness))
+        self.extras["dr/door_board_stiffness_max"] = float(max(board_stiffness))
+        self.extras["dr/door_board_damping_min"] = float(min(board_damping))
+        self.extras["dr/door_board_damping_max"] = float(max(board_damping))
         self.extras["dr/door_hinge_stiffness_min"] = float(hinge_stiffness[0])
         self.extras["dr/door_hinge_stiffness_max"] = float(hinge_stiffness[1])
         self.extras["dr/door_hinge_damping_min"] = float(hinge_damping[0])
@@ -391,6 +399,22 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["dr_sample/obs_finger_joint_vel_noise_mean"] = self.robot_state_noise_widths[
             "finger_joint_vel_noise"
         ].mean().item()
+        self.extras["dr_sample/door_board_stiffness_mean"] = board_nominal_stiffness.mean().item()
+        self.extras["dr_sample/door_board_stiffness_min"] = board_nominal_stiffness.min().item()
+        self.extras["dr_sample/door_board_stiffness_max"] = board_nominal_stiffness.max().item()
+        self.extras["dr_sample/door_board_damping_mean"] = board_nominal_damping.mean().item()
+        self.extras["dr_sample/door_board_damping_min"] = board_nominal_damping.min().item()
+        self.extras["dr_sample/door_board_damping_max"] = board_nominal_damping.max().item()
+        self.extras["dr_sample/door_hinge_stiffness_mean"] = hinge_nominal_stiffness.mean().item()
+        self.extras["dr_sample/door_hinge_stiffness_min"] = hinge_nominal_stiffness.min().item()
+        self.extras["dr_sample/door_hinge_stiffness_max"] = hinge_nominal_stiffness.max().item()
+        self.extras["dr_sample/door_hinge_damping_mean"] = hinge_nominal_damping.mean().item()
+        self.extras["dr_sample/door_hinge_damping_min"] = hinge_nominal_damping.min().item()
+        self.extras["dr_sample/door_hinge_damping_max"] = hinge_nominal_damping.max().item()
+        self.extras["dr_live/door_board_stiffness_mean"] = live_board_stiffness.mean().item()
+        self.extras["dr_live/door_board_damping_mean"] = live_board_damping.mean().item()
+        self.extras["dr_live/door_hinge_stiffness_mean"] = live_hinge_stiffness.mean().item()
+        self.extras["dr_live/door_hinge_damping_mean"] = live_hinge_damping.mean().item()
     def _update_adr_ranges(self):
         if not self._adr_enabled:
             return
@@ -481,13 +505,11 @@ class DooropeningEnv(DirectRLEnv):
     def _pre_physics_step(self, actions: torch.Tensor):
         self.step_count = self._sim_step_counter
         # delta actions
-        self._assert_finite_tensors(actions=actions)
         self.scaled_actions = actions.clamp(-1.0, 1.0)
         self.scaled_actions[:, :self.num_base_joints] = self.scaled_actions[:, :self.num_base_joints] * self.cfg.base_action_scale
         self.scaled_actions[:, self.num_base_joints:self.num_base_joints + self.num_arm_joints] = self.scaled_actions[:, self.num_base_joints:self.num_base_joints + self.num_arm_joints] * self.cfg.arm_action_scale
         self.scaled_actions[:, self.num_base_joints + self.num_arm_joints:] = self.scaled_actions[:, self.num_base_joints + self.num_arm_joints:] * self.cfg.finger_action_scale
         targets = self.robot_dof_targets + self.dt * self.scaled_actions
-        self._assert_finite_tensors(scaled_actions=self.scaled_actions, unclamped_robot_targets=targets)
         # Optional: lock the abduction joints
         # targets[..., self.robot_abduction_dof_idx_in_targets] = self.robot_abduction_default_pos
         # targets[..., self.num_base_joints + self.num_arm_joints:] = torch.where( \
@@ -512,11 +534,14 @@ class DooropeningEnv(DirectRLEnv):
         # print("ref joint vel: ", self.ref_robot_base_joint_vel)
 
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
-        self._assert_finite_tensors(robot_dof_targets=self.robot_dof_targets)
         # self.last_actions[:] = self.scaled_actions
 
     def _apply_action(self):
-        edit_door_articulation(self.door)
+        edit_door_articulation(
+            self.door,
+            nominal_joint_stiffness=self._door_nominal_joint_stiffness,
+            nominal_joint_damping=self._door_nominal_joint_damping,
+        )
         self.ref_motion_lib.step()
         lag_alpha = self._current_custom_param("pd_targets", "target_lag_alpha")
         applied_targets = self.robot_dof_targets.clone()
@@ -524,11 +549,9 @@ class DooropeningEnv(DirectRLEnv):
             applied_targets = (1.0 - lag_alpha) * applied_targets + lag_alpha * self.applied_robot_dof_targets
         # Controller-side DR is applied on the position targets after action integration.
         applied_targets += self._get_policy_target_noise()
-        self._assert_finite_tensors(unclamped_applied_targets=applied_targets)
         self.applied_robot_dof_targets[:] = torch.clamp(
             applied_targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits
         )
-        self._assert_finite_tensors(applied_robot_dof_targets=self.applied_robot_dof_targets)
         self.robot.set_joint_position_target(self.applied_robot_dof_targets, joint_ids=self._robot_dof_idx)
         # joint_pos = self.robot.data.default_joint_pos.clone()
         # joint_pos[:] = self.ref_motion_lib.get_robot_joint_pos()
@@ -661,7 +684,6 @@ class DooropeningEnv(DirectRLEnv):
         # The actor sees noisy deployment-like inputs; the critic keeps the clean privileged state.
         policy_obs = policy_obs.squeeze(1)
         critic_obs = critic_obs.squeeze(1)
-        self._assert_finite_tensors(policy_obs=policy_obs, critic_obs=critic_obs)
 
         observations = {"policy": policy_obs, "critic": critic_obs}
         return observations
@@ -904,34 +926,6 @@ class DooropeningEnv(DirectRLEnv):
         self.ref_door_body_pos_twist = self.ref_motion_lib.get_door_body_pos_twist()
         self.ref_robot_body_lin_vel = self.ref_motion_lib.get_robot_body_lin_vel()[:, self.ref_key_body_idx] / self.cfg.sim_dt
         self.ref_robot_body_ang_vel = self.ref_motion_lib.get_robot_body_ang_vel()[:, self.ref_key_body_idx] / self.cfg.sim_dt
-        self._assert_finite_tensors(
-            robot_key_body_pos=self.robot_key_body_pos,
-            robot_key_body_quat=self.robot_key_body_quat,
-            robot_reset_key_body_pos=self.robot_reset_key_body_pos,
-            robot_base_joint_pos=self.robot_base_joint_pos,
-            robot_arm_joint_pos=self.robot_arm_joint_pos,
-            robot_finger_joint_pos=self.robot_finger_joint_pos,
-            door_joint_pos=self.door_joint_pos,
-            robot_base_joint_vel=self.robot_base_joint_vel,
-            robot_arm_joint_vel=self.robot_arm_joint_vel,
-            robot_finger_joint_vel=self.robot_finger_joint_vel,
-            door_link_pos=self.door_link_pos,
-            door_link_quat=self.door_link_quat,
-            robot_body_lin_vel=self.robot_body_lin_vel,
-            robot_body_ang_vel=self.robot_body_ang_vel,
-            ref_robot_key_body_pos_twist=self.ref_robot_key_body_pos_twist,
-            ref_robot_key_body_quat_twist=self.ref_robot_key_body_quat_twist,
-            ref_robot_key_body_pos=self.ref_robot_key_body_pos,
-            ref_robot_key_body_quat=self.ref_robot_key_body_quat,
-            ref_robot_base_joint_pos=self.ref_robot_base_joint_pos,
-            ref_robot_arm_joint_pos=self.ref_robot_arm_joint_pos,
-            ref_robot_finger_joint_pos=self.ref_robot_finger_joint_pos,
-            ref_door_joint_pos=self.ref_door_joint_pos,
-            ref_door_joint_pos_twist=self.ref_door_joint_pos_twist,
-            ref_door_body_pos_twist=self.ref_door_body_pos_twist,
-            ref_robot_body_lin_vel=self.ref_robot_body_lin_vel,
-            ref_robot_body_ang_vel=self.ref_robot_body_ang_vel,
-        )
 
     def _get_rewards(self) -> torch.Tensor:
         self._get_intermediate_values()
@@ -960,17 +954,17 @@ class DooropeningEnv(DirectRLEnv):
             ref_robot_finger_joint_vel = self.ref_robot_finger_joint_vel,
         )
 
-        self.extras["error/key_body_pos_err"] = math.sqrt(max(self._safe_env_mean(key_body_pos_err), 0.0))
-        self.extras["error/key_body_quat_err"] = math.sqrt(max(self._safe_env_mean(key_body_quat_err), 0.0))
-        self.extras["error/door_err"] = math.sqrt(max(self._safe_env_mean(door_err), 0.0))
+        self.extras["error/key_body_pos_err"] = math.sqrt(max(key_body_pos_err.reshape(self.num_envs, -1).mean().item(), 0.0))
+        self.extras["error/key_body_quat_err"] = math.sqrt(max(key_body_quat_err.reshape(self.num_envs, -1).mean().item(), 0.0))
+        self.extras["error/door_err"] = math.sqrt(max(door_err.reshape(self.num_envs, -1).mean().item(), 0.0))
         self.extras["error/base_joint_pos_err"] = math.sqrt(
-            max(self._safe_env_mean(base_joint_pos_err) / len(self.cfg.base_joints), 0.0)
+            max(base_joint_pos_err.reshape(self.num_envs, -1).mean().item() / len(self.cfg.base_joints), 0.0)
         )
         self.extras["error/arm_joint_pos_err"] = math.sqrt(
-            max(self._safe_env_mean(arm_joint_pos_err) / len(self.cfg.arm_joints), 0.0)
+            max(arm_joint_pos_err.reshape(self.num_envs, -1).mean().item() / len(self.cfg.arm_joints), 0.0)
         )
         self.extras["error/finger_joint_pos_err"] = math.sqrt(
-            max(self._safe_env_mean(finger_joint_pos_err) / len(self.cfg.finger_joints), 0.0)
+            max(finger_joint_pos_err.reshape(self.num_envs, -1).mean().item() / len(self.cfg.finger_joints), 0.0)
         )
         # self.extras["error/base_joint_vel_err"] = base_joint_vel_err.mean()
         # self.extras["error/arm_joint_vel_err"] = arm_joint_vel_err.mean()
@@ -1048,8 +1042,10 @@ class DooropeningEnv(DirectRLEnv):
             soft_ratio=self.joint_limit_penalty_margin_ratio,
         )
         weighted_joint_limit_penalty = self.joint_limit_penalty_w * joint_limit_penalty
-        self.extras["error/joint_limit_penalty"] = self._safe_env_mean(weighted_joint_limit_penalty)
-        self.extras["stats/joint_limit_active_fraction"] = self._safe_env_mean(joint_limit_active_fraction)
+        self.extras["error/joint_limit_penalty"] = weighted_joint_limit_penalty.reshape(self.num_envs, -1).mean().item()
+        self.extras["stats/joint_limit_active_fraction"] = (
+            joint_limit_active_fraction.reshape(self.num_envs, -1).mean().item()
+        )
 
         # 1. Base Alive Reward: Small constant for staying in the safety tunnel
         alive_base = self.alive_base 
@@ -1066,11 +1062,6 @@ class DooropeningEnv(DirectRLEnv):
         
         final_reward = deep_mimic_reward + total_alive_reward - weighted_joint_limit_penalty
         final_reward = torch.where(is_killed, final_reward + termination_penalty, final_reward)
-        self._assert_finite_tensors(
-            deep_mimic_reward=deep_mimic_reward,
-            weighted_joint_limit_penalty=weighted_joint_limit_penalty,
-            final_reward=final_reward,
-        )
 
         return final_reward
 
@@ -1156,6 +1147,8 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_dof_targets[env_ids, :] = self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]]
         self.applied_robot_dof_targets[env_ids, :] = self.robot_dof_targets[env_ids, :]
         super()._reset_idx(env_ids)
+        self._refresh_nominal_door_joint_gains(env_ids)
+        self._print_domain_randomization_debug(env_ids)
 
 @torch.jit.script
 def compute_deep_mimic_rewards(
