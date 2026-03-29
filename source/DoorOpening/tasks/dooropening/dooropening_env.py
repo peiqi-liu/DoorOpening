@@ -351,6 +351,7 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["dr/increment"] = float(self.dooropening_adr.increment_counter)
         self.extras["dr/fraction"] = self.dooropening_adr.get_increment_fraction()
         self.extras["dr/scheduled_increment_from_step"] = float(scheduled_increment)
+        self.extras["dr/step_count"] = int(self.step_count)
         self.extras["dr/scheduled_fraction_from_step"] = progress
         self.extras["dr/robot_stiffness_min"] = float(robot_stiffness[0])
         self.extras["dr/robot_stiffness_max"] = float(robot_stiffness[1])
@@ -415,6 +416,7 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["dr_live/door_board_damping_mean"] = live_board_damping.mean().item()
         self.extras["dr_live/door_hinge_stiffness_mean"] = live_hinge_stiffness.mean().item()
         self.extras["dr_live/door_hinge_damping_mean"] = live_hinge_damping.mean().item()
+
     def _update_adr_ranges(self):
         if not self._adr_enabled:
             return

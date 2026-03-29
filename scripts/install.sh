@@ -1,7 +1,7 @@
 # mamba create -n DoorOpening python=3.11
 # mamba activate DoorOpening
 
-# mamba install -c nvidia cuda-toolkit=12.4
+conda install -y -c "nvidia/label/cuda-12.4.x" cuda-toolkit=12.4
 
 pip install isaacsim[all,extscache]==5.1.0 --extra-index-url https://pypi.nvidia.com
 
@@ -16,4 +16,4 @@ pip install git+https://github.com/isaac-sim/rl_games.git@python3.11
 cd ../DoorOpening
 pip install -e source
 
-pip install -e third_party/pointnet2_ops
+pip install -e third_party/pointnet2_ops --no-build-isolation
