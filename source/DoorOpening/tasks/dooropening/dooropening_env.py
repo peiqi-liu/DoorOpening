@@ -170,6 +170,7 @@ class DooropeningEnv(DirectRLEnv):
 
         self.step_count = 0
         self.reset_progress_total = self.cfg.reset_progress_total
+        self.adr_reset_progress_total = self.cfg.adr_reset_progress_total
 
         self.alive_base = self.cfg.alive_base
         self.alive_bonus = self.cfg.alive_bonus
@@ -265,11 +266,15 @@ class DooropeningEnv(DirectRLEnv):
         self._door_nominal_joint_stiffness[env_ids] = self.door.data.joint_stiffness[env_ids]
         self._door_nominal_joint_damping[env_ids] = self.door.data.joint_damping[env_ids]
 
+    def _compute_curriculum_progress(self, progress_total: float) -> float:
+        progress_total = max(float(progress_total), 1.0)
+        return min(float(self.step_count) / progress_total, 1.0)
+
     def _log_dr_metrics(self):
         if self.step_count % self._dr_metrics_interval != 0:
             return
 
-        progress = min(float(self.step_count) / float(self.reset_progress_total), 1.0)
+        progress = self._compute_curriculum_progress(self.adr_reset_progress_total)
         scheduled_increment = int(progress * self.cfg.num_adr_increments)
         scheduled_increment = max(self.cfg.starting_adr_increments, scheduled_increment)
         scheduled_increment = min(self.cfg.num_adr_increments, scheduled_increment)
@@ -386,7 +391,7 @@ class DooropeningEnv(DirectRLEnv):
         if not self._adr_enabled:
             return
 
-        progress = min(float(self.step_count) / float(self.reset_progress_total), 1.0)
+        progress = self._compute_curriculum_progress(self.adr_reset_progress_total)
         target_increment = int(progress * self.cfg.num_adr_increments)
         target_increment = max(self.cfg.starting_adr_increments, target_increment)
         target_increment = min(self.cfg.num_adr_increments, target_increment)

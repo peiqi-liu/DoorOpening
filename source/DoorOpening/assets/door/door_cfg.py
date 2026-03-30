@@ -21,11 +21,6 @@ from DoorOpening.constants.env_constants import DOOR_INITIAL_POS, DOOR_INITIAL_R
 import json
 from DoorOpening.utils.urdf_utils import compute_exact_door_keypoints
 
-DOOR_BOARD_NOMINAL_STIFFNESS = 1.0
-DOOR_BOARD_NOMINAL_DAMPING = 0.2
-DOOR_HANDLE_NOMINAL_STIFFNESS = 5.0
-DOOR_HANDLE_NOMINAL_DAMPING = 1.0
-
 
 def load_meta_data(board_meta_data_paths: str, handle_meta_data_paths: str, device: str = "cuda" if torch.cuda.is_available() else "cpu"):
     """
@@ -72,16 +67,22 @@ def create_initial_state():
     )
 
 def create_actuators():
+    # These are the base door gains before any reset-time domain randomization scales them.
+    board_nominal_stiffness = 1.0
+    board_nominal_damping = 0.2
+    handle_nominal_stiffness = 5.0
+    handle_nominal_damping = 1.0
+
     return {
         "joint_1": ImplicitActuatorCfg(
             joint_names_expr=["joint_1"],
-            stiffness=DOOR_BOARD_NOMINAL_STIFFNESS,
-            damping=DOOR_BOARD_NOMINAL_DAMPING,
+            stiffness=board_nominal_stiffness,
+            damping=board_nominal_damping,
         ),
         "joint_2": ImplicitActuatorCfg(
             joint_names_expr=["joint_2"],
-            stiffness=DOOR_HANDLE_NOMINAL_STIFFNESS,
-            damping=DOOR_HANDLE_NOMINAL_DAMPING,
+            stiffness=handle_nominal_stiffness,
+            damping=handle_nominal_damping,
         ),
     }
 

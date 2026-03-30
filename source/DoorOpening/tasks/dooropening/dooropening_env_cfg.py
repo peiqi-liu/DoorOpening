@@ -38,9 +38,6 @@ euler_angles = torch.tensor([-np.pi / 4, 0.0, 0])  # (roll, pitch, yaw) in radia
 POINTCLOUD_CAMERA_QUAT = quat_from_euler_xyz(euler_angles[0], euler_angles[1], euler_angles[2])
 POINTCLOUD_CAMERA_QUAT = tuple(POINTCLOUD_CAMERA_QUAT.tolist())
 
-DOOR_BOARD_GAIN_MULTIPLIER_FINAL_RANGE = (1.0, 100.0)
-DOOR_HANDLE_GAIN_MULTIPLIER_FINAL_RANGE = (1.0, 10.0)
-
 @configclass
 class EventCfg:
     """Configuration for reset-time physics randomization."""
@@ -86,7 +83,7 @@ class EventCfg:
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("door", joint_names="joint_1"),
-            "stiffness_distribution_params": (1.0, 1.0),
+            "stiffness_distribution_params": (100.0, 100.0),
             "damping_distribution_params": (1.0, 1.0),
             "operation": "scale",
             "distribution": "log_uniform",
@@ -364,7 +361,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     reset_door_joint_pos_delta_max = 0.8
     # We are slowly increasing our tolerance on base position drift and slowly only resettting the env from the first key frame
     # This variable is used to indicate when we stop increasing the tolerance and reset the env from the first key frame for the greatest probability
-    reset_progress_total = 1e5
+    reset_progress_total = 3e5
+    # ADR should ramp faster than the reference-motion reset curriculum so physics randomization is not lagging behind.
+    adr_reset_progress_total = 1.5e5
 
     alive_base = 10.0
     alive_bonus = 20.0
@@ -383,8 +382,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     events: EventCfg = EventCfg()
 
     # These are the ADR endpoints for simulator parameters handled by EventTerms at reset.
-    # Door gains start at their nominal values and only widen toward harder settings.
-    # The board widens more aggressively than the handle hinge.
+    # The door board stiffness starts from a fixed hard setting, then widens down to include easier settings.
     adr_cfg_dict = {
         "num_increments": num_adr_increments,
         "robot_joint_stiffness_and_damping": {
@@ -392,12 +390,12 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "damping_distribution_params": (0.7, 1.3),
         },
         "door_board_joint_stiffness_and_damping": {
-            "stiffness_distribution_params": {"range": DOOR_BOARD_GAIN_MULTIPLIER_FINAL_RANGE, "interpolation": "log"},
-            "damping_distribution_params": {"range": DOOR_BOARD_GAIN_MULTIPLIER_FINAL_RANGE, "interpolation": "log"},
+            "stiffness_distribution_params": (1.0, 100.0),
+            "damping_distribution_params": (1.0, 20.0),
         },
         "door_hinge_joint_stiffness_and_damping": {
-            "stiffness_distribution_params": {"range": DOOR_HANDLE_GAIN_MULTIPLIER_FINAL_RANGE, "interpolation": "log"},
-            "damping_distribution_params": {"range": DOOR_HANDLE_GAIN_MULTIPLIER_FINAL_RANGE, "interpolation": "log"},
+            "stiffness_distribution_params": (1.0, 10.0),
+            "damping_distribution_params": (1.0, 5.0),
         },
     }
 

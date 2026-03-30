@@ -1,5 +1,4 @@
 import copy
-import math
 
 
 class DoorOpeningADR:
@@ -36,13 +35,11 @@ class DoorOpeningADR:
             if term_name == "num_increments":
                 continue
             term = self.event_manager.get_term_cfg(term_name)
-            for param_name, param_values in term_params.items():
-                target_range, interpolation = self._parse_range_cfg(param_values)
+            for param_name, target_range in term_params.items():
                 term.params[param_name] = self.interpolate_range(
                     self.adr_cfg_dict_initial[term_name][param_name],
                     target_range,
                     fraction,
-                    interpolation,
                 )
 
     def set_num_increments(self, num_increments: int):
@@ -69,15 +66,8 @@ class DoorOpeningADR:
         self,
         initial_range: tuple[float, float],
         target_range: tuple[float, float],
-        interpolation: str = "linear",
     ) -> tuple[float, float]:
-        return self.interpolate_range(initial_range, target_range, self.get_increment_fraction(), interpolation)
-
-    @staticmethod
-    def _parse_range_cfg(param_cfg) -> tuple[tuple[float, float], str]:
-        if isinstance(param_cfg, dict):
-            return tuple(param_cfg["range"]), param_cfg.get("interpolation", "linear")
-        return tuple(param_cfg), "linear"
+        return self.interpolate_range(initial_range, target_range, self.get_increment_fraction())
 
     @staticmethod
     def interpolate_scalar(start: float, end: float, fraction: float) -> float:
@@ -90,23 +80,12 @@ class DoorOpeningADR:
         initial_range: tuple[float, float],
         target_range: tuple[float, float],
         fraction: float,
-        interpolation: str = "linear",
     ) -> tuple[float, float]:
         lower_initial, upper_initial = (float(initial_range[0]), float(initial_range[1]))
         lower_target, upper_target = (float(target_range[0]), float(target_range[1]))
         fraction = max(0.0, min(1.0, float(fraction)))
 
-        if interpolation == "linear":
-            return (
-                cls.interpolate_scalar(lower_initial, lower_target, fraction),
-                cls.interpolate_scalar(upper_initial, upper_target, fraction),
-            )
-        if interpolation == "log":
-            positive_values = (lower_initial, upper_initial, lower_target, upper_target)
-            if any(value <= 0.0 for value in positive_values):
-                raise ValueError("Log interpolation requires strictly positive range bounds.")
-            return (
-                math.exp(cls.interpolate_scalar(math.log(lower_initial), math.log(lower_target), fraction)),
-                math.exp(cls.interpolate_scalar(math.log(upper_initial), math.log(upper_target), fraction)),
-            )
-        raise ValueError(f"Unsupported interpolation mode: {interpolation}")
+        return (
+            cls.interpolate_scalar(lower_initial, lower_target, fraction),
+            cls.interpolate_scalar(upper_initial, upper_target, fraction),
+        )
