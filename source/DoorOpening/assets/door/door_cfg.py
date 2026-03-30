@@ -17,6 +17,7 @@ import torch
 import isaaclab.sim as sim_utils
 from isaaclab.actuators.actuator_cfg import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg, Articulation
+from DoorOpening.assets.cache_utils import resolve_converter_cache_dir
 from DoorOpening.constants.env_constants import DOOR_INITIAL_POS, DOOR_INITIAL_ROT
 import json
 from DoorOpening.utils.urdf_utils import compute_exact_door_keypoints
@@ -91,13 +92,23 @@ def create_urdf_door_cfg(
     training_mode: bool = False,
     activate_contact_sensors: bool = True,
 ):
+    cache_variant = "_".join(
+        [
+            "training" if training_mode else "eval",
+            "contacts" if activate_contact_sensors else "no_contacts",
+        ]
+    )
     return sim_utils.UrdfFileCfg(
             fix_base=True,
             merge_fixed_joints=True,
             make_instanceable=False,
             asset_path=asset_path,
-            # Keep Isaac Lab's default absolute temp USD path here.
-            # The relative repo-local cache path was generating broken mobility sublayer references.
+            usd_dir=resolve_converter_cache_dir(
+                asset_path,
+                asset_root=asset_base_folder,
+                variant=cache_variant,
+            ),
+            # Use a writable absolute repo-local cache instead of Isaac Lab's default /tmp cache.
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 max_depenetration_velocity=5,
             ),

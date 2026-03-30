@@ -11,21 +11,20 @@
 Defines the Glorbot robot configuration for simulation with Isaac Sim.
 """
 
-import os
+from pathlib import Path
 import torch
 
 import isaaclab.sim as sim_utils
 from isaaclab.actuators.actuator_cfg import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
+from DoorOpening.assets.cache_utils import resolve_converter_cache_dir
 
-module_path = os.path.dirname(__file__)
-root_path = os.path.dirname(module_path)
-glorbot_urdf_path = os.path.join(root_path, "glorbot/glorbot.urdf")
-glorbot_usd_dir = os.path.join(os.getcwd(), "IsaacLab_tmp", "glorbot")
-os.makedirs(glorbot_usd_dir, exist_ok=True)
+module_path = Path(__file__).resolve().parent
+root_path = module_path.parent
+glorbot_urdf_path = str(root_path / "glorbot" / "glorbot.urdf")
+glorbot_usd_dir = resolve_converter_cache_dir(glorbot_urdf_path, asset_root=root_path)
 glorbot_usd_file_name = "glorbot.usd"
-glorbot_usd_path = os.path.join(glorbot_usd_dir, glorbot_usd_file_name)
-print("glorbot_usd_path: ", glorbot_usd_path)
+glorbot_usd_path = str(Path(glorbot_usd_dir) / glorbot_usd_file_name)
 
 import numpy as np
 
@@ -43,8 +42,7 @@ GLORBOT_CONFIG = ArticulationCfg(
         usd_dir=glorbot_usd_dir,
         usd_file_name=glorbot_usd_file_name,
         force_usd_conversion=True,
-        # Keep the generated USD under the current run directory instead of the
-        # checked-in asset folder or Isaac Lab's default temp cache.
+        # Keep the generated USD in a writable repo-local cache instead of Isaac Lab's default /tmp cache.
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             enabled_self_collisions=False, solver_position_iteration_count=8, solver_velocity_iteration_count=0
         ),

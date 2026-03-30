@@ -84,7 +84,7 @@ class EventCfg:
         params={
             "asset_cfg": SceneEntityCfg("door", joint_names="joint_1"),
             "stiffness_distribution_params": (100.0, 100.0),
-            "damping_distribution_params": (1.0, 1.0),
+            "damping_distribution_params": (10.0, 10.0),
             "operation": "scale",
             "distribution": "log_uniform",
         },
