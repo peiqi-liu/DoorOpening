@@ -364,7 +364,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     reset_door_joint_pos_delta_max = 0.8
     # We are slowly increasing our tolerance on base position drift and slowly only resettting the env from the first key frame
     # This variable is used to indicate when we stop increasing the tolerance and reset the env from the first key frame for the greatest probability
-    reset_progress_total = 5e5
+    reset_progress_total = 1e5
 
     alive_base = 10.0
     alive_bonus = 20.0
@@ -374,11 +374,11 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     # Keep DR opt-in so the default task is the clean baseline.
     enable_adr = True
-    num_adr_increments = 100
+    num_adr_increments = 20
     starting_adr_increments = 0
-    print_domain_randomization_on_reset = True
-    print_domain_randomization_max_resets = 100
-    print_domain_randomization_max_envs = 20
+    dr_metrics_interval = 100
+    log_verbose_dr_metrics = False
+    verbose_dr_metrics_interval = 100
 
     events: EventCfg = EventCfg()
 

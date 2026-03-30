@@ -190,10 +190,9 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_state_biases = self._make_env_buffer_dict([key for key in robot_state_cfg if key.endswith("_bias")])
         self._door_nominal_joint_stiffness = self.door.data.joint_stiffness.clone()
         self._door_nominal_joint_damping = self.door.data.joint_damping.clone()
-        self._print_domain_randomization_on_reset = bool(self.cfg.print_domain_randomization_on_reset)
-        self._print_domain_randomization_max_resets = int(self.cfg.print_domain_randomization_max_resets)
-        self._print_domain_randomization_max_envs = int(self.cfg.print_domain_randomization_max_envs)
-        self._print_domain_randomization_count = 0
+        self._dr_metrics_interval = max(int(self.cfg.dr_metrics_interval), 1)
+        self._log_verbose_dr_metrics = bool(self.cfg.log_verbose_dr_metrics)
+        self._verbose_dr_metrics_interval = max(int(self.cfg.verbose_dr_metrics_interval), 1)
 
     def _initialize_runtime_event_terms(self):
         if not self.cfg.events:
@@ -266,55 +265,10 @@ class DooropeningEnv(DirectRLEnv):
         self._door_nominal_joint_stiffness[env_ids] = self.door.data.joint_stiffness[env_ids]
         self._door_nominal_joint_damping[env_ids] = self.door.data.joint_damping[env_ids]
 
-    def _format_debug_scalar(self, value: float) -> str:
-        return f"{value:.4g}"
-
-    def _print_domain_randomization_debug(self, env_ids: Sequence[int] | torch.Tensor):
-        if not self._print_domain_randomization_on_reset:
-            return
-        if self._print_domain_randomization_count >= self._print_domain_randomization_max_resets:
-            return
-
-        env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
-        if env_ids.numel() == 0:
-            return
-        sample_env_ids = env_ids[: min(env_ids.numel(), self._print_domain_randomization_max_envs)]
-
-        print(
-            "[DR Debug] "
-            f"reset_print={self._print_domain_randomization_count + 1}/{self._print_domain_randomization_max_resets} "
-            f"env_ids={sample_env_ids.detach().cpu().tolist()}"
-        )
-
-        default_joint_stiffness = self.door.data.default_joint_stiffness
-        default_joint_damping = self.door.data.default_joint_damping
-        live_joint_stiffness = self.door.data.joint_stiffness
-        live_joint_damping = self.door.data.joint_damping
-        for env_id in sample_env_ids.tolist():
-            board_default_stiffness = float(default_joint_stiffness[env_id, self._door_board_joint_idx].item())
-            board_default_damping = float(default_joint_damping[env_id, self._door_board_joint_idx].item())
-            hinge_default_stiffness = float(default_joint_stiffness[env_id, self._door_hinge_joint_idx].item())
-            hinge_default_damping = float(default_joint_damping[env_id, self._door_hinge_joint_idx].item())
-
-            board_actual_stiffness = float(live_joint_stiffness[env_id, self._door_board_joint_idx].item())
-            board_actual_damping = float(live_joint_damping[env_id, self._door_board_joint_idx].item())
-            hinge_actual_stiffness = float(live_joint_stiffness[env_id, self._door_hinge_joint_idx].item())
-            hinge_actual_damping = float(live_joint_damping[env_id, self._door_hinge_joint_idx].item())
-            print(
-                "[DR Debug] "
-                f"env={env_id} "
-                f"joint_1_default(k={self._format_debug_scalar(board_default_stiffness)}, "
-                f"c={self._format_debug_scalar(board_default_damping)}) "
-                f"joint_1_actual(k={self._format_debug_scalar(board_actual_stiffness)}, "
-                f"c={self._format_debug_scalar(board_actual_damping)}) "
-                f"joint_2_default(k={self._format_debug_scalar(hinge_default_stiffness)}, "
-                f"c={self._format_debug_scalar(hinge_default_damping)}) "
-                f"joint_2_actual(k={self._format_debug_scalar(hinge_actual_stiffness)}, "
-                f"c={self._format_debug_scalar(hinge_actual_damping)})"
-            )
-        self._print_domain_randomization_count += 1
-
     def _log_dr_metrics(self):
+        if self.step_count % self._dr_metrics_interval != 0:
+            return
+
         progress = min(float(self.step_count) / float(self.reset_progress_total), 1.0)
         scheduled_increment = int(progress * self.cfg.num_adr_increments)
         scheduled_increment = max(self.cfg.starting_adr_increments, scheduled_increment)
@@ -340,19 +294,15 @@ class DooropeningEnv(DirectRLEnv):
             "door_hinge_joint_stiffness_and_damping", "damping_distribution_params"
         )
 
-        board_nominal_stiffness = self._door_nominal_joint_stiffness[:, self._door_board_joint_idx]
-        board_nominal_damping = self._door_nominal_joint_damping[:, self._door_board_joint_idx]
-        hinge_nominal_stiffness = self._door_nominal_joint_stiffness[:, self._door_hinge_joint_idx]
-        hinge_nominal_damping = self._door_nominal_joint_damping[:, self._door_hinge_joint_idx]
-        live_board_stiffness = self.door.data.joint_stiffness[:, self._door_board_joint_idx]
-        live_board_damping = self.door.data.joint_damping[:, self._door_board_joint_idx]
-        live_hinge_stiffness = self.door.data.joint_stiffness[:, self._door_hinge_joint_idx]
-        live_hinge_damping = self.door.data.joint_damping[:, self._door_hinge_joint_idx]
-
         self.extras["dr/increment"] = float(self.dooropening_adr.increment_counter)
         self.extras["dr/fraction"] = self.dooropening_adr.get_increment_fraction()
         self.extras["dr/scheduled_increment_from_step"] = float(scheduled_increment)
         self.extras["dr/step_count"] = int(self.step_count)
+        self.extras["dr/common_env_step_count"] = int(self.common_step_counter)
+        self.extras["dr/rlgames_frame_equivalent_from_sim_steps"] = float(
+            self.step_count * self.num_envs / max(self.cfg.decimation, 1)
+        )
+        self.extras["dr/frame_per_sim_step_expected"] = float(self.num_envs / max(self.cfg.decimation, 1))
         self.extras["dr/scheduled_fraction_from_step"] = progress
         self.extras["dr/robot_stiffness_min"] = float(robot_stiffness[0])
         self.extras["dr/robot_stiffness_max"] = float(robot_stiffness[1])
@@ -384,6 +334,20 @@ class DooropeningEnv(DirectRLEnv):
             "robot_state_noise", "finger_joint_vel_noise"
         )
         self.extras["dr_limit/target_lag_alpha"] = self._current_custom_param("pd_targets", "target_lag_alpha")
+
+        if not self._log_verbose_dr_metrics:
+            return
+        if self.step_count % self._verbose_dr_metrics_interval != 0:
+            return
+
+        board_nominal_stiffness = self._door_nominal_joint_stiffness[:, self._door_board_joint_idx]
+        board_nominal_damping = self._door_nominal_joint_damping[:, self._door_board_joint_idx]
+        hinge_nominal_stiffness = self._door_nominal_joint_stiffness[:, self._door_hinge_joint_idx]
+        hinge_nominal_damping = self._door_nominal_joint_damping[:, self._door_hinge_joint_idx]
+        live_board_stiffness = self.door.data.joint_stiffness[:, self._door_board_joint_idx]
+        live_board_damping = self.door.data.joint_damping[:, self._door_board_joint_idx]
+        live_hinge_stiffness = self.door.data.joint_stiffness[:, self._door_hinge_joint_idx]
+        live_hinge_damping = self.door.data.joint_damping[:, self._door_hinge_joint_idx]
 
         self.extras["dr_sample/spawn_arm_joint_pos_noise_mean"] = self.robot_spawn_noise_widths["arm_joint_pos_noise"].mean().item()
         self.extras["dr_sample/spawn_finger_joint_pos_noise_mean"] = self.robot_spawn_noise_widths[
@@ -1151,7 +1115,6 @@ class DooropeningEnv(DirectRLEnv):
         self.applied_robot_dof_targets[env_ids, :] = self.robot_dof_targets[env_ids, :]
         super()._reset_idx(env_ids)
         self._refresh_nominal_door_joint_gains(env_ids)
-        self._print_domain_randomization_debug(env_ids)
 
 @torch.jit.script
 def compute_deep_mimic_rewards(
