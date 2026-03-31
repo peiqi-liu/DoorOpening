@@ -376,8 +376,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     num_adr_increments = 20
     starting_adr_increments = 0
     dr_metrics_interval = 100
-    log_verbose_dr_metrics = False
-    verbose_dr_metrics_interval = 100
+    log_verbose_dr_metrics = True
 
     events: EventCfg = EventCfg()
 

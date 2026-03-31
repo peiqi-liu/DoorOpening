@@ -110,7 +110,7 @@ def create_urdf_door_cfg(
             ),
             # Use a writable absolute repo-local cache instead of Isaac Lab's default /tmp cache.
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                max_depenetration_velocity=5,
+                max_depenetration_velocity=50,
             ),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 enabled_self_collisions=False,

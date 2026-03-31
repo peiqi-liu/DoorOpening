@@ -164,6 +164,7 @@ class DooropeningEnv(DirectRLEnv):
         self.board_offsets = torch.stack(self.board_offsets).to(self.device)
         env_to_file_map = [i % len(motion_traj_paths) for i in range(self.num_envs)]
         self.ref_motion_lib = ReferenceMotionManager(num_envs=self.num_envs, device=self.device, velocity=self.cfg.velocity, reset_from_start = False, env_to_file_map=env_to_file_map, twist_indices=self.twist_indices)
+        self.prob_get_first_key_frame = None
         self.max_trial_steps = self.ref_motion_lib.num_frames * torch.ones_like(self.episode_length_buf, device=self.device)
 
         torch.set_printoptions(precision=4, sci_mode=False)
@@ -193,7 +194,6 @@ class DooropeningEnv(DirectRLEnv):
         self._door_nominal_joint_damping = self.door.data.joint_damping.clone()
         self._dr_metrics_interval = max(int(self.cfg.dr_metrics_interval), 1)
         self._log_verbose_dr_metrics = bool(self.cfg.log_verbose_dr_metrics)
-        self._verbose_dr_metrics_interval = max(int(self.cfg.verbose_dr_metrics_interval), 1)
 
     def _initialize_runtime_event_terms(self):
         if not self.cfg.events:
@@ -279,7 +279,6 @@ class DooropeningEnv(DirectRLEnv):
         scheduled_increment = max(self.cfg.starting_adr_increments, scheduled_increment)
         scheduled_increment = min(self.cfg.num_adr_increments, scheduled_increment)
 
-        self.extras["dr/enabled"] = float(self._adr_enabled)
         robot_stiffness = self._current_event_param(
             "robot_joint_stiffness_and_damping", "stiffness_distribution_params"
         )
@@ -300,15 +299,15 @@ class DooropeningEnv(DirectRLEnv):
         )
 
         self.extras["dr/increment"] = float(self.dooropening_adr.increment_counter)
-        self.extras["dr/fraction"] = self.dooropening_adr.get_increment_fraction()
-        self.extras["dr/scheduled_increment_from_step"] = float(scheduled_increment)
-        self.extras["dr/step_count"] = int(self.step_count)
-        self.extras["dr/common_env_step_count"] = int(self.common_step_counter)
-        self.extras["dr/rlgames_frame_equivalent_from_sim_steps"] = float(
-            self.step_count * self.num_envs / max(self.cfg.decimation, 1)
-        )
-        self.extras["dr/frame_per_sim_step_expected"] = float(self.num_envs / max(self.cfg.decimation, 1))
-        self.extras["dr/scheduled_fraction_from_step"] = progress
+        # self.extras["dr/fraction"] = self.dooropening_adr.get_increment_fraction()
+        # self.extras["dr/scheduled_increment_from_step"] = float(scheduled_increment)
+        # self.extras["dr/step_count"] = int(self.step_count)
+        # self.extras["dr/common_env_step_count"] = int(self.common_step_counter)
+        # self.extras["dr/rlgames_frame_equivalent_from_sim_steps"] = float(
+        #     self.step_count * self.num_envs / max(self.cfg.decimation, 1)
+        # )
+        # self.extras["dr/frame_per_sim_step_expected"] = float(self.num_envs / max(self.cfg.decimation, 1))
+        # self.extras["dr/scheduled_fraction_from_step"] = progress
         self.extras["dr/robot_stiffness_min"] = float(robot_stiffness[0])
         self.extras["dr/robot_stiffness_max"] = float(robot_stiffness[1])
         self.extras["dr/robot_damping_min"] = float(robot_damping[0])
@@ -342,8 +341,6 @@ class DooropeningEnv(DirectRLEnv):
 
         if not self._log_verbose_dr_metrics:
             return
-        if self.step_count % self._verbose_dr_metrics_interval != 0:
-            return
 
         board_nominal_stiffness = self._door_nominal_joint_stiffness[:, self._door_board_joint_idx]
         board_nominal_damping = self._door_nominal_joint_damping[:, self._door_board_joint_idx]
@@ -354,22 +351,22 @@ class DooropeningEnv(DirectRLEnv):
         live_hinge_stiffness = self.door.data.joint_stiffness[:, self._door_hinge_joint_idx]
         live_hinge_damping = self.door.data.joint_damping[:, self._door_hinge_joint_idx]
 
-        self.extras["dr_sample/spawn_arm_joint_pos_noise_mean"] = self.robot_spawn_noise_widths["arm_joint_pos_noise"].mean().item()
-        self.extras["dr_sample/spawn_finger_joint_pos_noise_mean"] = self.robot_spawn_noise_widths[
-            "finger_joint_pos_noise"
-        ].mean().item()
-        self.extras["dr_sample/obs_arm_joint_pos_noise_mean"] = self.robot_state_noise_widths[
-            "arm_joint_pos_noise"
-        ].mean().item()
-        self.extras["dr_sample/obs_finger_joint_pos_noise_mean"] = self.robot_state_noise_widths[
-            "finger_joint_pos_noise"
-        ].mean().item()
-        self.extras["dr_sample/obs_arm_joint_vel_noise_mean"] = self.robot_state_noise_widths[
-            "arm_joint_vel_noise"
-        ].mean().item()
-        self.extras["dr_sample/obs_finger_joint_vel_noise_mean"] = self.robot_state_noise_widths[
-            "finger_joint_vel_noise"
-        ].mean().item()
+        # self.extras["dr_sample/spawn_arm_joint_pos_noise_mean"] = self.robot_spawn_noise_widths["arm_joint_pos_noise"].mean().item()
+        # self.extras["dr_sample/spawn_finger_joint_pos_noise_mean"] = self.robot_spawn_noise_widths[
+        #     "finger_joint_pos_noise"
+        # ].mean().item()
+        # self.extras["dr_sample/obs_arm_joint_pos_noise_mean"] = self.robot_state_noise_widths[
+        #     "arm_joint_pos_noise"
+        # ].mean().item()
+        # self.extras["dr_sample/obs_finger_joint_pos_noise_mean"] = self.robot_state_noise_widths[
+        #     "finger_joint_pos_noise"
+        # ].mean().item()
+        # self.extras["dr_sample/obs_arm_joint_vel_noise_mean"] = self.robot_state_noise_widths[
+        #     "arm_joint_vel_noise"
+        # ].mean().item()
+        # self.extras["dr_sample/obs_finger_joint_vel_noise_mean"] = self.robot_state_noise_widths[
+        #     "finger_joint_vel_noise"
+        # ].mean().item()
         self.extras["dr_sample/door_board_stiffness_mean"] = board_nominal_stiffness.mean().item()
         self.extras["dr_sample/door_board_stiffness_min"] = board_nominal_stiffness.min().item()
         self.extras["dr_sample/door_board_stiffness_max"] = board_nominal_stiffness.max().item()
@@ -942,14 +939,16 @@ class DooropeningEnv(DirectRLEnv):
         # self.extras["error/arm_joint_vel_err"] = arm_joint_vel_err.mean()
         # self.extras["error/finger_joint_vel_err"] = finger_joint_vel_err.mean()
 
-        progress = min(self.step_count / self.reset_progress_total, 1.0)
-        alpha = 1 - 0.1**(2 ** (2.0 - 4.0 * progress))
-        probs = torch.tensor(
-            [(1 - alpha) * (alpha ** i) for i in range(self.ref_motion_lib.key_indices.shape[1])],
-            device=self.ref_motion_lib.key_indices.device
-        )
-        probs = probs / probs.sum()
-        self.extras["reset/prob_get_first_key_frame"] = probs[0]
+        # progress = min(self.step_count / self.reset_progress_total, 1.0)
+        # alpha = 1 - 0.1**(2 ** (2.0 - 4.0 * progress))
+        # probs = torch.tensor(
+        #     [(1 - alpha) * (alpha ** i) for i in range(self.ref_motion_lib.key_indices.shape[1])],
+        #     device=self.ref_motion_lib.key_indices.device
+        # )
+        # probs = probs / probs.sum()
+        # self.extras["reset/prob_get_first_key_frame"] = probs[0]
+        if self.prob_get_first_key_frame is not None:
+            self.extras["reset/prob_get_first_key_frame"] = float(self.prob_get_first_key_frame)
 
         # contact_forces_robot_palm_center = self.scene.sensors["contact_forces_robot_palm_center"].data.net_forces_w
         contact_forces_door2 = self.scene.sensors["contact_forces_door2"].data.net_forces_w
@@ -1088,7 +1087,7 @@ class DooropeningEnv(DirectRLEnv):
             env_ids = self.robot._ALL_INDICES
 
         self._update_adr_ranges()
-        reset_frame_idx = self.ref_motion_lib.reset(env_ids, step_count=self.step_count, reset_progress_total=self.reset_progress_total)
+        reset_frame_idx, self.prob_get_first_key_frame = self.ref_motion_lib.reset(env_ids, step_count=self.step_count, reset_progress_total=self.reset_progress_total)
         self.max_trial_steps[env_ids] = ((self.ref_motion_lib.num_frames - reset_frame_idx) // self.ref_motion_lib.velocity).long()
         self._sample_reset_randomization(env_ids)
 
