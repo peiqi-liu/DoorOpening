@@ -47,8 +47,8 @@ class EventCfg:
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("robot"),
-            "static_friction_range": (0.6, 1.25),
-            "dynamic_friction_range": (0.5, 1.1),
+            "static_friction_range": (0.8, 1.25),
+            "dynamic_friction_range": (0.9, 1.1),
             "restitution_range": (0.0, 0.0),
             "num_buckets": 250,
         },
@@ -59,8 +59,8 @@ class EventCfg:
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("door"),
-            "static_friction_range": (0.6, 1.25),
-            "dynamic_friction_range": (0.5, 1.1),
+            "static_friction_range": (0.8, 1.25),
+            "dynamic_friction_range": (0.9, 1.1),
             "restitution_range": (0.0, 0.0),
             "num_buckets": 250,
         },
@@ -74,7 +74,6 @@ class EventCfg:
             "stiffness_distribution_params": (1.0, 1.0),
             "damping_distribution_params": (1.0, 1.0),
             "operation": "scale",
-            "distribution": "uniform",
         },
     )
 
@@ -85,8 +84,9 @@ class EventCfg:
             "asset_cfg": SceneEntityCfg("door", joint_names="joint_1"),
             "stiffness_distribution_params": (100.0, 100.0),
             "damping_distribution_params": (10.0, 10.0),
-            "operation": "scale",
-            "distribution": "log_uniform",
+            # Use absolute values so the curriculum is expressed in physical gains, not multipliers of the
+            # board actuator defaults (whose damping is 0.2).
+            "operation": "abs",
         },
     )
 
@@ -97,8 +97,7 @@ class EventCfg:
             "asset_cfg": SceneEntityCfg("door", joint_names="joint_2"),
             "stiffness_distribution_params": (1.0, 1.0),
             "damping_distribution_params": (1.0, 1.0),
-            "operation": "scale",
-            "distribution": "log_uniform",
+            "operation": "abs",
         },
     )
 
@@ -381,7 +380,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     events: EventCfg = EventCfg()
 
     # These are the ADR endpoints for simulator parameters handled by EventTerms at reset.
-    # The door board stiffness starts from a fixed hard setting, then widens down to include easier settings.
+    # Robot gains use multipliers on the actuator defaults, while door gains are specified in physical units.
+    # The door board starts at stiffness=100 and damping=10, and the hinge starts at stiffness=1 and damping=1.
     adr_cfg_dict = {
         "num_increments": num_adr_increments,
         "robot_joint_stiffness_and_damping": {
@@ -390,7 +390,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         },
         "door_board_joint_stiffness_and_damping": {
             "stiffness_distribution_params": (1.0, 100.0),
-            "damping_distribution_params": (1.0, 20.0),
+            "damping_distribution_params": (1.0, 10.0),
         },
         "door_hinge_joint_stiffness_and_damping": {
             "stiffness_distribution_params": (1.0, 10.0),

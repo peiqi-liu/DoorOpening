@@ -346,10 +346,6 @@ class DooropeningEnv(DirectRLEnv):
         board_nominal_damping = self._door_nominal_joint_damping[:, self._door_board_joint_idx]
         hinge_nominal_stiffness = self._door_nominal_joint_stiffness[:, self._door_hinge_joint_idx]
         hinge_nominal_damping = self._door_nominal_joint_damping[:, self._door_hinge_joint_idx]
-        live_board_stiffness = self.door.data.joint_stiffness[:, self._door_board_joint_idx]
-        live_board_damping = self.door.data.joint_damping[:, self._door_board_joint_idx]
-        live_hinge_stiffness = self.door.data.joint_stiffness[:, self._door_hinge_joint_idx]
-        live_hinge_damping = self.door.data.joint_damping[:, self._door_hinge_joint_idx]
 
         # self.extras["dr_sample/spawn_arm_joint_pos_noise_mean"] = self.robot_spawn_noise_widths["arm_joint_pos_noise"].mean().item()
         # self.extras["dr_sample/spawn_finger_joint_pos_noise_mean"] = self.robot_spawn_noise_widths[
@@ -379,10 +375,6 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["dr_sample/door_hinge_damping_mean"] = hinge_nominal_damping.mean().item()
         self.extras["dr_sample/door_hinge_damping_min"] = hinge_nominal_damping.min().item()
         self.extras["dr_sample/door_hinge_damping_max"] = hinge_nominal_damping.max().item()
-        self.extras["dr_live/door_board_stiffness_mean"] = live_board_stiffness.mean().item()
-        self.extras["dr_live/door_board_damping_mean"] = live_board_damping.mean().item()
-        self.extras["dr_live/door_hinge_stiffness_mean"] = live_hinge_stiffness.mean().item()
-        self.extras["dr_live/door_hinge_damping_mean"] = live_hinge_damping.mean().item()
 
     def _update_adr_ranges(self):
         if not self._adr_enabled:
