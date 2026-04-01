@@ -173,7 +173,6 @@ class DooropeningEnv(DirectRLEnv):
 
         self.twist_indices = self.cfg.twist_indices
 
-        # self.ref_motion_lib = ReferenceMotionManager(self.cfg.motion_file, self.num_envs, self.device, velocity=self.cfg.velocity, reset_from_start = True)
         self.num_door_assets = len(handle_offsets)
         self.handle_offsets = [handle_offsets[i % len(handle_offsets)] for i in range(self.num_envs)]
         self.board_offsets = [board_offsets[i % len(board_offsets)] for i in range(self.num_envs)]
