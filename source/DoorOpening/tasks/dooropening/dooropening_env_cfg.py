@@ -124,6 +124,12 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             dynamic_friction=1.0,
         ),
         physx=PhysxCfg(
+            solve_articulation_contact_last=True,
+            min_position_iteration_count=4,
+            max_position_iteration_count=64,
+            min_velocity_iteration_count=2,
+            max_velocity_iteration_count=16,
+            enable_ccd=True,
             bounce_threshold_velocity=0.2,
             gpu_max_rigid_patch_count=4 * 5 * 2**15
         ),
@@ -205,7 +211,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     contact_forces_door2 = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Door/link_2",
-        update_period=0.02,
+        update_period=0.0,
         history_length=1,
         debug_vis=False,
         filter_prim_paths_expr=[
@@ -323,6 +329,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     base_action_scale = 1.0
     arm_action_scale = 0.6
     finger_action_scale = 0.5
+    handle_contact_force_threshold = 20.0
+    handle_contact_force_saturation = 60.0
+    finger_contact_release_step = 0.08
 
     # Deep Mimic Reward Parameters
     robot_body_quat_w = 1.0

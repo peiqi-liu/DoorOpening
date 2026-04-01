@@ -22,6 +22,12 @@ from DoorOpening.constants.env_constants import DOOR_INITIAL_POS, DOOR_INITIAL_R
 import json
 from DoorOpening.utils.urdf_utils import compute_exact_door_keypoints
 
+DOOR_SOLVER_POSITION_ITERS = 16
+DOOR_SOLVER_VELOCITY_ITERS = 4
+DOOR_CONTACT_OFFSET = 0.015
+DOOR_REST_OFFSET = 0.002
+DOOR_MAX_DEPENETRATION_VELOCITY = 10.0
+
 
 def load_meta_data(board_meta_data_paths: str, handle_meta_data_paths: str, device: str = "cuda" if torch.cuda.is_available() else "cpu"):
     """
@@ -82,6 +88,7 @@ def create_actuators():
         ),
         "joint_2": ImplicitActuatorCfg(
             joint_names_expr=["joint_2"],
+            effort_limit_sim = 100,
             stiffness=handle_nominal_stiffness,
             damping=handle_nominal_damping,
         ),
@@ -109,12 +116,14 @@ def create_urdf_door_cfg(
                 variant=cache_variant,
             ),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                max_depenetration_velocity=50,
+                max_depenetration_velocity=DOOR_MAX_DEPENETRATION_VELOCITY,
+                solver_position_iteration_count=DOOR_SOLVER_POSITION_ITERS,
+                solver_velocity_iteration_count=DOOR_SOLVER_VELOCITY_ITERS,
             ),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 enabled_self_collisions=False,
-                solver_position_iteration_count=8,
-                solver_velocity_iteration_count=0,
+                solver_position_iteration_count=DOOR_SOLVER_POSITION_ITERS,
+                solver_velocity_iteration_count=DOOR_SOLVER_VELOCITY_ITERS,
             ),
             joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
                 gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
@@ -123,7 +132,10 @@ def create_urdf_door_cfg(
             # scale = (1.0, 1.2, 1.1),
             activate_contact_sensors=activate_contact_sensors,
             collider_type = "convex_hull" if training_mode else "convex_decomposition",
-            collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.03, rest_offset=0.0),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                contact_offset=DOOR_CONTACT_OFFSET,
+                rest_offset=DOOR_REST_OFFSET,
+            ),
     )
 
 def create_door_cfg(

@@ -32,6 +32,12 @@ import numpy as np
 from DoorOpening.constants.robot_constants import DEFAULT_JOINT_POS, OPEN_FINGER_JOINT_VALUES, CLOSE_FINGER_JOINT_VALUES, FULL_JOINT_NAMES, BASE_JOINT_NAMES, FRANKA_JOINT_NAMES
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
 
+ROBOT_SOLVER_POSITION_ITERS = 16
+ROBOT_SOLVER_VELOCITY_ITERS = 4
+ROBOT_CONTACT_OFFSET = 0.01
+ROBOT_REST_OFFSET = 0.001
+ROBOT_MAX_DEPENETRATION_VELOCITY = 10.0
+
 
 GLORBOT_CONFIG = ArticulationCfg(
     spawn=sim_utils.UrdfFileCfg(
@@ -42,14 +48,22 @@ GLORBOT_CONFIG = ArticulationCfg(
         usd_dir=glorbot_usd_dir,
         usd_file_name=glorbot_usd_file_name,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
-            max_depenetration_velocity=50,
+            max_depenetration_velocity=ROBOT_MAX_DEPENETRATION_VELOCITY,
+            solver_position_iteration_count=ROBOT_SOLVER_POSITION_ITERS,
+            solver_velocity_iteration_count=ROBOT_SOLVER_VELOCITY_ITERS,
         ),
         force_usd_conversion=True,
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-            enabled_self_collisions=False, solver_position_iteration_count=8, solver_velocity_iteration_count=0
+            enabled_self_collisions=False,
+            solver_position_iteration_count=ROBOT_SOLVER_POSITION_ITERS,
+            solver_velocity_iteration_count=ROBOT_SOLVER_VELOCITY_ITERS,
         ),
         joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
             gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
+        ),
+        collision_props=sim_utils.CollisionPropertiesCfg(
+            contact_offset=ROBOT_CONTACT_OFFSET,
+            rest_offset=ROBOT_REST_OFFSET,
         ),
         # scale = (0.8, 0.8, 0.8),
         activate_contact_sensors=True,
@@ -98,9 +112,9 @@ GLORBOT_CONFIG = ArticulationCfg(
         ),
         "finger": ImplicitActuatorCfg(
             joint_names_expr=["finger_joint_.*"],
-            effort_limit_sim=500,
-            stiffness=800,
-            damping=80,
+            effort_limit_sim=250,
+            stiffness=600,
+            damping=120,
         ),
     }
 )
