@@ -69,10 +69,10 @@ def create_initial_state():
 
 def create_actuators():
     # These are the base door gains before any reset-time domain randomization scales them.
-    board_nominal_stiffness = 1.0
-    board_nominal_damping = 0.2
-    handle_nominal_stiffness = 5.0
-    handle_nominal_damping = 1.0
+    board_nominal_stiffness = 30.0
+    board_nominal_damping = 10.0
+    handle_nominal_stiffness = 50.0
+    handle_nominal_damping = 0.6
 
     return {
         "joint_1": ImplicitActuatorCfg(
@@ -108,7 +108,6 @@ def create_urdf_door_cfg(
                 asset_root=asset_base_folder,
                 variant=cache_variant,
             ),
-            # Use a writable absolute repo-local cache instead of Isaac Lab's default /tmp cache.
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 max_depenetration_velocity=50,
             ),

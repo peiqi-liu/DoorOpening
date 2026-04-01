@@ -41,8 +41,10 @@ GLORBOT_CONFIG = ArticulationCfg(
         asset_path=glorbot_urdf_path,
         usd_dir=glorbot_usd_dir,
         usd_file_name=glorbot_usd_file_name,
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            max_depenetration_velocity=50,
+        ),
         force_usd_conversion=True,
-        # Keep the generated USD in a writable repo-local cache instead of Isaac Lab's default /tmp cache.
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             enabled_self_collisions=False, solver_position_iteration_count=8, solver_velocity_iteration_count=0
         ),
@@ -96,7 +98,7 @@ GLORBOT_CONFIG = ArticulationCfg(
         ),
         "finger": ImplicitActuatorCfg(
             joint_names_expr=["finger_joint_.*"],
-            effort_limit_sim=50,
+            effort_limit_sim=500,
             stiffness=800,
             damping=80,
         ),
