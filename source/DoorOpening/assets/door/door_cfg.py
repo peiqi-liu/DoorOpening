@@ -22,11 +22,11 @@ from DoorOpening.constants.env_constants import DOOR_INITIAL_POS, DOOR_INITIAL_R
 import json
 from DoorOpening.utils.urdf_utils import compute_exact_door_keypoints
 
-DOOR_SOLVER_POSITION_ITERS = 16
-DOOR_SOLVER_VELOCITY_ITERS = 4
+DOOR_SOLVER_POSITION_ITERS = 8
+DOOR_SOLVER_VELOCITY_ITERS = 2
 DOOR_CONTACT_OFFSET = 0.015
 DOOR_REST_OFFSET = 0.002
-DOOR_MAX_DEPENETRATION_VELOCITY = 10.0
+DOOR_MAX_DEPENETRATION_VELOCITY = 150.0
 
 
 def load_meta_data(board_meta_data_paths: str, handle_meta_data_paths: str, device: str = "cuda" if torch.cuda.is_available() else "cpu"):
