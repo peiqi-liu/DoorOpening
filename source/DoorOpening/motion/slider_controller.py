@@ -32,7 +32,7 @@ class OmniJointController:
         self.q_slider = scene["robot"].data.joint_pos.clone()
         self.door_q_slider = scene["door"].data.joint_pos.clone()
         self.finger_q_slider = torch.zeros(4)
-        finger_joint_names = [f"finger_joint_{i}" for i in range(15)]
+        finger_joint_names = [f"finger_joint_{i}" for i in range(16)]
         self.finger_joint_ids, finger_joint_names = scene["robot"].find_joints(finger_joint_names)
 
         self.xyz = scene["robot"].data.body_pos_w[:, self.key_pose_idx].clone()
@@ -265,7 +265,7 @@ class OmniJointController:
         new_q_value = tendon_to_joint_angle_utils(self.scene["robot"], self.finger_q_slider)
         self.q_slider[..., self.finger_joint_ids] = new_q_value[..., self.finger_joint_ids]
 
-        test_tendon_value =joint_angle_to_tendon_utils(self.scene["robot"])
+        test_tendon_value = joint_angle_to_tendon_utils(self.scene["robot"])
 
     def _on_slider_changed(self, idx, model):
         self._initialize_trajectory()

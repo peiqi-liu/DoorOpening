@@ -16,6 +16,7 @@ from viser.extras import ViserUrdf
 
 from yourdfpy import URDF
 from DoorOpening.utils.state_machine.pin import PinocchioIKSolver
+from DoorOpening.utils.state_machine.offline_pull_door import state_machine_offline_pull_door
 import glob
 
 
@@ -563,14 +564,23 @@ def compute_link_twist(pos_traj: torch.Tensor,
     return twist
 
 
-def play_and_save_traj(robot_urdf_path, door_urdf_path):
+def play_and_save_traj(robot_urdf_path, door_urdf_path, handle_side="right"):
     dir_path = os.path.dirname(door_urdf_path)
     robot_initial_pose = torch.tensor([[ROBOT_INITIAL_POS[0], ROBOT_INITIAL_POS[1], ROBOT_INITIAL_POS[2], ROBOT_INITIAL_ROT[0], ROBOT_INITIAL_ROT[1], ROBOT_INITIAL_ROT[2], ROBOT_INITIAL_ROT[3]]], device="cpu")
     door_initial_pose = torch.tensor([[DOOR_INITIAL_POS[0], DOOR_INITIAL_POS[1], DOOR_INITIAL_POS[2], DOOR_INITIAL_ROT[0], DOOR_INITIAL_ROT[1], DOOR_INITIAL_ROT[2], DOOR_INITIAL_ROT[3]]], device="cpu")
     robot_constants, robot_initial_q = get_robot_constants()
     door_initial_q = torch.tensor([0.0, 0.0], device="cpu")
     start_time = time.time()
-    robot_traj, door_traj, key_idx_in_key_indices = state_machine_offline(robot_urdf_path, door_urdf_path, robot_initial_pose, door_initial_pose, robot_initial_q, door_initial_q, device="cpu")
+    robot_traj, door_traj, key_idx_in_key_indices = state_machine_offline_pull_door(
+        robot_urdf_path,
+        door_urdf_path,
+        robot_initial_pose,
+        door_initial_pose,
+        robot_initial_q,
+        door_initial_q,
+        handle_side=handle_side,
+        device="cpu",
+    )
     print(f"Time taken: {time.time() - start_time} seconds")
     torch.set_printoptions(precision=4, sci_mode=False)
     # new_robot_traj = []
@@ -656,6 +666,7 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path):
     mask[key_indices[1]:key_indices[3]] = 1
 
     data = {
+        "handle_side": handle_side,
         "door_traj": door_traj, 
         "robot_body_pos_traj": robot_body_pos_traj,
         "robot_body_quat_traj": robot_body_quat_traj,
@@ -669,9 +680,11 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path):
     }
     print(key_indices)
     # print(torch.tensor(key_indices, dtype=torch.int32)[key_idx_in_key_indices])
-    with open(os.path.join(dir_path, "traj.pkl"), "wb") as f:
+    traj_file = "traj.pkl" if handle_side == "right" else f"traj_{handle_side}_pull.pkl"
+    traj_path = os.path.join(dir_path, traj_file)
+    with open(traj_path, "wb") as f:
         pkl.dump(data, f)
-        print("Trajectory saved to " + os.path.join(dir_path, "traj.pkl"))
+        print("Trajectory saved to " + traj_path)
 
 
 if __name__ == "__main__":
@@ -691,6 +704,12 @@ if __name__ == "__main__":
         default=None,
         help="Optional single door URDF path. If set, this overrides --asset-base-folder.",
     )
+    parser.add_argument(
+        "--handle-side",
+        default="left",
+        choices=["right", "left"],
+        help="Select the pull-door planner variant. 'right' keeps the legacy path; 'left' uses the mirrored planner.",
+    )
     args = parser.parse_args()
 
     robot_urdf_path = args.robot_urdf_path
@@ -701,6 +720,6 @@ if __name__ == "__main__":
         asset_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/mobility.urdf"), recursive=True), reverse=False)
 
     for i, door_urdf_path in enumerate(asset_paths):
-        play_and_save_traj(robot_urdf_path, door_urdf_path)
+        play_and_save_traj(robot_urdf_path, door_urdf_path, handle_side=args.handle_side)
         print("Finished processing ", door_urdf_path, ", index: ", i)
     
