@@ -82,8 +82,8 @@ class EventCfg:
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("door", joint_names="joint_1"),
-            "stiffness_distribution_params": (75.0, 75.0),
-            "damping_distribution_params": (10.0, 10.0),
+            "stiffness_distribution_params": (38.0, 38.0),
+            "damping_distribution_params": (0.5, 0.5),
             # Use absolute values so the curriculum is expressed in physical gains, not multipliers of the
             # board actuator defaults (whose damping is 0.2).
             "operation": "abs",
@@ -95,7 +95,7 @@ class EventCfg:
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("door", joint_names="joint_2"),
-            "stiffness_distribution_params": (50.0, 50.0),
+            "stiffness_distribution_params": (35.0, 35.0),
             "damping_distribution_params": (0.6, 0.6),
             "operation": "abs",
         },
@@ -402,8 +402,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "damping_distribution_params": (1.0, 10.0),
         },
         "door_hinge_joint_stiffness_and_damping": {
-            "stiffness_distribution_params": (20.0, 50.0),
-            "damping_distribution_params": (0.03, 0.6),
+            "stiffness_distribution_params": (10.0, 60.0),
+            "damping_distribution_params": (0.03, 1.0),
         },
     }
 
