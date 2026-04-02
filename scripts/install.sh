@@ -17,3 +17,5 @@ cd ../DoorOpening
 pip install -e source
 
 pip install -e third_party/pointnet2_ops --no-build-isolation
+
+pip install --no-binary=pinocchio pin

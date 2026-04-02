@@ -5,7 +5,6 @@ from isaaclab.utils.math import (
     quat_conjugate,
     quat_apply_inverse,
     quat_apply,
-    quat_inv,
 )
 from typing import Optional
 

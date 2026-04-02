@@ -1,3 +1,4 @@
+import argparse
 from DoorOpening.utils.state_machine.api import solve_ik, get_hinge_pos, open_hand
 import torch
 from isaaclab.utils.math import quat_from_euler_xyz, quat_from_matrix, combine_frame_transforms, quat_mul, quat_inv
@@ -674,13 +675,30 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path):
 
 
 if __name__ == "__main__":
-    robot_urdf_path = "/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/glorbot/glorbot.urdf"
-    # door_urdf_path = "/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/door/PartNetv4/99650089960001/mobility.urdf"
-    # door_urdf_path = "/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/door/PartNetv4/99655059960012/mobility.urdf"
+    parser = argparse.ArgumentParser(description="Compute and save door waypoint trajectories.")
+    parser.add_argument(
+        "--robot-urdf-path",
+        default="source/DoorOpening/assets/glorbot/glorbot.urdf",
+        help="Path to the robot URDF used for offline IK and playback.",
+    )
+    parser.add_argument(
+        "--asset-base-folder",
+        default="source/DoorOpening/assets/door/PartNetv5",
+        help="Folder to scan recursively for door mobility.urdf files.",
+    )
+    parser.add_argument(
+        "--door-urdf-path",
+        default=None,
+        help="Optional single door URDF path. If set, this overrides --asset-base-folder.",
+    )
+    args = parser.parse_args()
 
-    root_path = "source/DoorOpening/assets/"
-    asset_base_folder = os.path.join(root_path, "door/PartNetv4")
-    asset_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/mobility.urdf"), recursive=True), reverse=False)
+    robot_urdf_path = args.robot_urdf_path
+    if args.door_urdf_path is not None:
+        asset_paths = [args.door_urdf_path]
+    else:
+        asset_base_folder = args.asset_base_folder
+        asset_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/mobility.urdf"), recursive=True), reverse=False)
 
     for i, door_urdf_path in enumerate(asset_paths):
         play_and_save_traj(robot_urdf_path, door_urdf_path)
