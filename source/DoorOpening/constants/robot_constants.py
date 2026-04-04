@@ -9,6 +9,15 @@ CAMERA_JOINT_DEFAULT_VALUES = {
     "x5_joint6": 0.0,
 }
 
+# CAMERA_JOINT_DEFAULT_VALUES = {
+#     "x5_joint1": 1.57, 
+#     "x5_joint2": 2.355, 
+#     "x5_joint3": 0.0, 
+#     "x5_joint4": 1.57, 
+#     "x5_joint5": 0.0, 
+#     "x5_joint6": 0.0,
+# }
+
 FRANKA_DEFAULT_JOINT_POS = {
     "panda_joint1": 0.0,
     "panda_joint2": -0.25 * np.pi,
@@ -20,10 +29,10 @@ FRANKA_DEFAULT_JOINT_POS = {
 }
 
 DEFAULT_JOINT_POS = {
-    "x5_joint1": 0.0, 
-    "x5_joint2": 0.785, 
-    "x5_joint3": 0.785, 
-    "x5_joint4": 0.0, 
+    "x5_joint1": 2.2, 
+    "x5_joint2": 2.355, 
+    "x5_joint3": 0.45, 
+    "x5_joint4": 1.57, 
     "x5_joint5": 0.0, 
     "x5_joint6": 0.0,
     "panda_joint1": 0.0,
@@ -54,7 +63,7 @@ BASE_JOINT_NAMES = [
 ]
 
 DM_JOINT_NAMES = BASE_JOINT_NAMES + FRANKA_JOINT_NAMES
-ACTIVE_ARM_JOINT_NAMES = DM_JOINT_NAMES
+DEBUG_JOINT_NAMES = BASE_JOINT_NAMES + FRANKA_JOINT_NAMES + list(CAMERA_JOINT_DEFAULT_VALUES.keys())
 
 FINGER_JOINT_NAMES = [
     'finger_joint_0',

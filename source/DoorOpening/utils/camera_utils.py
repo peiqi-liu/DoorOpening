@@ -1,3 +1,4 @@
+import math
 from typing import Dict, Optional, Tuple
 
 import torch
@@ -625,3 +626,389 @@ def simulate_depth_cam_render_from_pose(
 
     pcd_nan_padding = sorted_pcds[:, :num_points]
     return pcd_nan_padding, logs
+
+
+_lidar_dir_cache: dict = {}
+_lidar_compiled_cache: dict = {}
+
+
+def rotmat_from_quat_xyzw(q: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    """
+    q: (...,4) in xyzw
+    Returns: (...,3,3) rotation matrix mapping local(frame) -> world.
+    """
+    q = q / q.norm(dim=-1, keepdim=True).clamp_min(eps)
+    qx, qy, qz, qw = q.unbind(-1)
+
+    xx = qx * qx
+    yy = qy * qy
+    zz = qz * qz
+    xy = qx * qy
+    xz = qx * qz
+    yz = qy * qz
+    wx = qw * qx
+    wy = qw * qy
+    wz = qw * qz
+
+    R00 = 1.0 - 2.0 * (yy + zz)
+    R01 = 2.0 * (xy - wz)
+    R02 = 2.0 * (xz + wy)
+
+    R10 = 2.0 * (xy + wz)
+    R11 = 1.0 - 2.0 * (xx + zz)
+    R12 = 2.0 * (yz - wx)
+
+    R20 = 2.0 * (xz - wy)
+    R21 = 2.0 * (yz + wx)
+    R22 = 1.0 - 2.0 * (xx + yy)
+
+    return torch.stack(
+        [
+            torch.stack([R00, R01, R02], dim=-1),
+            torch.stack([R10, R11, R12], dim=-1),
+            torch.stack([R20, R21, R22], dim=-1),
+        ],
+        dim=-2,
+    )
+
+
+def _get_lidar_dir_flat(Hp: int, Wp: int, device, dtype) -> torch.Tensor:
+    """
+    Returns dir_flat: (K,3) LiDAR-frame unit directions for bin centers.
+    Hemisphere:
+      theta in [0, pi/2] from +Z (0 = +Z, pi/2 = XY plane)
+      phi   in [-pi, pi) around +Z
+    """
+    key = (int(Hp), int(Wp), device, dtype)
+    if key in _lidar_dir_cache:
+        return _lidar_dir_cache[key]
+
+    iu_c = (torch.arange(Wp, device=device, dtype=dtype) + 0.5) / float(Wp)
+    iv_c = (torch.arange(Hp, device=device, dtype=dtype) + 0.5) / float(Hp)
+
+    phi = iu_c * (2.0 * math.pi) - math.pi
+    theta = iv_c * (0.5 * math.pi)
+
+    theta2d = theta[:, None]
+    phi2d = phi[None, :]
+
+    sin_t = torch.sin(theta2d)
+    cos_t = torch.cos(theta2d)
+    cos_p = torch.cos(phi2d)
+    sin_p = torch.sin(phi2d)
+
+    x = sin_t * cos_p
+    y = sin_t * sin_p
+    z = cos_t.expand_as(x)
+
+    dir_hw3 = torch.stack([x, y, z], dim=-1)
+    dir_flat = dir_hw3.reshape(Hp * Wp, 3).contiguous()
+    _lidar_dir_cache[key] = dir_flat
+    return dir_flat
+
+
+@torch.no_grad()
+def render_lidar_bins_to_world_from_pose_fast(
+    pcd: torch.Tensor,
+    lidar_pose: torch.Tensor,
+    num_azimuth: int,
+    num_polar: int,
+    near_m: float,
+    far_m: Optional[float],
+    suppress_bins: int,
+    occlusion_eps_m: float,
+    occlusion_eps_rel: float,
+    jitter_std_m: float,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Returns:
+      pts_w:      (B,K,3) world-frame points with NaNs for empty bins
+      valid_flat: (B,K) bool
+    """
+    assert pcd.ndim == 3 and pcd.shape[-1] == 3
+    assert lidar_pose.ndim == 2 and lidar_pose.shape[-1] == 7
+
+    B, _, _ = pcd.shape
+    device, dtype = pcd.device, pcd.dtype
+
+    Hp = int(num_polar)
+    Wp = int(num_azimuth)
+    K = Hp * Wp
+
+    o = lidar_pose[:, 0:3]
+    q = lidar_pose[:, 3:7]
+    R = rotmat_from_quat_xyzw(q).to(dtype=dtype)
+    Rt = R.transpose(-1, -2)
+
+    rel_w = pcd - o[:, None, :]
+    rel_l = torch.matmul(Rt[:, None, :, :], rel_w[..., None]).squeeze(-1)
+    x, y, z = rel_l[..., 0], rel_l[..., 1], rel_l[..., 2]
+
+    r = torch.sqrt((x * x + y * y + z * z).clamp_min(1e-24))
+
+    inside = z > 0.0
+    if near_m is not None and near_m > 0.0:
+        inside = inside & (r >= float(near_m))
+    far_val = float("inf") if far_m is None else float(far_m)
+    inside = inside & (r <= far_val)
+
+    phi = torch.atan2(y, x)
+    u = (phi + math.pi) / (2.0 * math.pi)
+    u = u - torch.floor(u)
+
+    zr = (z / r.clamp_min(1e-12)).clamp(0.0, 1.0)
+    theta = torch.acos(zr)
+    v = theta / (0.5 * math.pi)
+
+    iu = torch.floor(u * float(Wp)).clamp(0, Wp - 1).long()
+    iv = torch.floor(v * float(Hp)).clamp(0, Hp - 1).long()
+    pix = iv * Wp + iu
+
+    if not hasattr(torch.Tensor, "scatter_reduce_"):
+        raise RuntimeError("Tensor.scatter_reduce_ not found. Need PyTorch >= 1.12 (PyTorch 2.x is fine).")
+
+    inf = torch.full((), float("inf"), device=device, dtype=dtype)
+    r_masked = torch.where(inside, r, inf)
+
+    range_flat = torch.full((B, K), float("inf"), device=device, dtype=dtype)
+    range_flat.scatter_reduce_(dim=1, index=pix, src=r_masked, reduce="amin", include_self=True)
+    range_img = range_flat.view(B, Hp, Wp)
+
+    if suppress_bins > 0:
+        s = int(suppress_bins)
+        k = int(2 * s + 1)
+
+        neg = -range_img.unsqueeze(1)
+        neg = torch.cat([neg[..., -s:], neg, neg[..., :s]], dim=-1)
+
+        top = neg[:, :, 0:1, :].expand(-1, -1, s, -1)
+        bot = neg[:, :, -1:, :].expand(-1, -1, s, -1)
+        neg = torch.cat([top, neg, bot], dim=-2)
+
+        pooled = F.max_pool2d(neg, kernel_size=(k, k), stride=1)
+        neighbor_min = (-pooled).squeeze(1)
+
+        eps = float(occlusion_eps_m) + float(occlusion_eps_rel) * neighbor_min.clamp_min(0.0)
+        suppress = torch.isfinite(range_img) & torch.isfinite(neighbor_min) & (range_img > neighbor_min + eps)
+
+        range_img = torch.where(suppress, inf, range_img)
+        range_flat = range_img.view(B, K)
+
+    valid_flat = torch.isfinite(range_flat)
+
+    dir_flat = _get_lidar_dir_flat(Hp, Wp, device, dtype)
+    pts_l = dir_flat.unsqueeze(0) * range_flat.unsqueeze(-1)
+    pts_w = torch.matmul(R, pts_l.transpose(1, 2)).transpose(1, 2) + o[:, None, :]
+
+    nan = torch.full((), float("nan"), device=device, dtype=dtype)
+    pts_w = torch.where(valid_flat.unsqueeze(-1), pts_w, nan)
+
+    if jitter_std_m > 0.0:
+        noise = torch.randn_like(pts_w) * float(jitter_std_m)
+        pts_w = torch.where(valid_flat.unsqueeze(-1), pts_w + noise, pts_w)
+
+    return pts_w, valid_flat
+
+
+def get_compiled_lidar_renderer_fixed_shapes(
+    num_azimuth: int,
+    num_polar: int,
+    near_m: float,
+    far_m: Optional[float],
+    suppress_bins: int,
+    occlusion_eps_m: float,
+    occlusion_eps_rel: float,
+    compile_mode: str = "max-autotune",
+):
+    """
+    Returns compiled callable:
+        fn(pcd: (B,N,3), lidar_pose: (B,7), jitter_std: scalar tensor) -> (pts_w: (B,K,3), valid_flat: (B,K))
+
+    IMPORTANT: FIXED shapes (B and N do not change), and all params passed here remain constant.
+    """
+    Hp = int(num_polar)
+    Wp = int(num_azimuth)
+    K = Hp * Wp
+
+    far_val = float("inf") if far_m is None else float(far_m)
+    do_suppress = int(suppress_bins) > 0
+    s = int(suppress_bins)
+    k = int(2 * s + 1)
+
+    def _get_or_build(device, dtype):
+        key = (
+            Hp,
+            Wp,
+            float(near_m),
+            float(far_val),
+            int(suppress_bins),
+            float(occlusion_eps_m),
+            float(occlusion_eps_rel),
+            compile_mode,
+            device,
+            dtype,
+        )
+        if key in _lidar_compiled_cache:
+            return _lidar_compiled_cache[key]
+
+        dir_flat = _get_lidar_dir_flat(Hp, Wp, device, dtype)
+
+        @torch.no_grad()
+        def _compiled_fn(pcd: torch.Tensor, lidar_pose: torch.Tensor, jitter_std: torch.Tensor):
+            B = pcd.shape[0]
+
+            o = lidar_pose[:, 0:3]
+            q = lidar_pose[:, 3:7]
+            R = rotmat_from_quat_xyzw(q).to(dtype=pcd.dtype)
+            Rt = R.transpose(-1, -2)
+
+            rel_w = pcd - o[:, None, :]
+            rel_l = torch.matmul(Rt[:, None, :, :], rel_w[..., None]).squeeze(-1)
+            x = rel_l[..., 0]
+            y = rel_l[..., 1]
+            z = rel_l[..., 2]
+
+            r = torch.sqrt((x * x + y * y + z * z).clamp_min(1e-24))
+
+            inside = z > 0.0
+            if near_m is not None and near_m > 0.0:
+                inside = inside & (r >= float(near_m))
+            inside = inside & (r <= float(far_val))
+
+            phi = torch.atan2(y, x)
+            u = (phi + math.pi) / (2.0 * math.pi)
+            u = u - torch.floor(u)
+
+            zr = (z / r.clamp_min(1e-12)).clamp(0.0, 1.0)
+            theta = torch.acos(zr)
+            v = theta / (0.5 * math.pi)
+
+            iu = torch.floor(u * float(Wp)).clamp(0, Wp - 1).long()
+            iv = torch.floor(v * float(Hp)).clamp(0, Hp - 1).long()
+            pix = iv * Wp + iu
+
+            inf = torch.full((), float("inf"), device=pcd.device, dtype=pcd.dtype)
+            r_masked = torch.where(inside, r, inf)
+
+            range_flat = torch.full((B, K), float("inf"), device=pcd.device, dtype=pcd.dtype)
+            range_flat.scatter_reduce_(dim=1, index=pix, src=r_masked, reduce="amin", include_self=True)
+            range_img = range_flat.view(B, Hp, Wp)
+
+            if do_suppress:
+                neg = -range_img.unsqueeze(1)
+
+                neg = torch.cat([neg[..., -s:], neg, neg[..., :s]], dim=-1)
+
+                top = neg[:, :, 0:1, :].expand(-1, -1, s, -1)
+                bot = neg[:, :, -1:, :].expand(-1, -1, s, -1)
+                neg = torch.cat([top, neg, bot], dim=-2)
+
+                pooled = F.max_pool2d(neg, kernel_size=(k, k), stride=1)
+                neighbor_min = (-pooled).squeeze(1)
+
+                eps = float(occlusion_eps_m) + float(occlusion_eps_rel) * neighbor_min.clamp_min(0.0)
+                suppress = torch.isfinite(range_img) & torch.isfinite(neighbor_min) & (range_img > neighbor_min + eps)
+                range_img = torch.where(suppress, inf, range_img)
+                range_flat = range_img.view(B, K)
+
+            valid_flat = torch.isfinite(range_flat)
+
+            pts_l = dir_flat.unsqueeze(0) * range_flat.unsqueeze(-1)
+            pts_w = torch.matmul(R, pts_l.transpose(1, 2)).transpose(1, 2) + o[:, None, :]
+
+            nan = torch.full((), float("nan"), device=pcd.device, dtype=pcd.dtype)
+            pts_w = torch.where(valid_flat.unsqueeze(-1), pts_w, nan)
+
+            noise = torch.randn_like(pts_w) * jitter_std
+            pts_w = torch.where(valid_flat.unsqueeze(-1), pts_w + noise, pts_w)
+
+            return pts_w, valid_flat
+
+        compiled = torch.compile(_compiled_fn, mode=compile_mode, dynamic=False)
+        _lidar_compiled_cache[key] = compiled
+        return compiled
+
+    def wrapper(pcd: torch.Tensor, lidar_pose: torch.Tensor, jitter_std_m: float):
+        fn = _get_or_build(pcd.device, pcd.dtype)
+        jitter_std = torch.tensor(float(jitter_std_m), device=pcd.device, dtype=pcd.dtype)
+        return fn(pcd, lidar_pose, jitter_std)
+
+    return wrapper
+
+
+@torch.no_grad()
+def simulate_lidar_render_from_pose(
+    pcd: torch.Tensor,
+    lidar_pose: torch.Tensor,
+    num_points: int = 10000,
+    num_azimuth: int = 512,
+    num_polar: int = 512,
+    near_m: float = 0.1,
+    far_m: Optional[float] = 30.0,
+    suppress_bins: int = 2,
+    occlusion_eps_m: float = 0.02,
+    occlusion_eps_rel: float = 0.01,
+    jitter_std_m: float = 0.0,
+    shuffle: bool = True,
+    use_compile: bool = True,
+    compile_mode: str = "max-autotune",
+) -> Tuple[torch.Tensor, Dict[str, float]]:
+    """
+    Returns:
+      lidar_pcd: (B, num_points, 3) valid-first, NaN padded
+      logs: dict
+    """
+    assert pcd.ndim == 3 and pcd.shape[-1] == 3
+    assert lidar_pose.ndim == 2 and lidar_pose.shape[-1] == 7
+
+    B = pcd.shape[0]
+    device = pcd.device
+
+    Hp = int(num_polar)
+    Wp = int(num_azimuth)
+    K = Hp * Wp
+
+    if use_compile:
+        renderer = get_compiled_lidar_renderer_fixed_shapes(
+            num_azimuth=Wp,
+            num_polar=Hp,
+            near_m=float(near_m),
+            far_m=None if far_m is None else float(far_m),
+            suppress_bins=int(suppress_bins),
+            occlusion_eps_m=float(occlusion_eps_m),
+            occlusion_eps_rel=float(occlusion_eps_rel),
+            compile_mode=compile_mode,
+        )
+        pts_w_flat, valid_flat = renderer(pcd, lidar_pose, jitter_std_m)
+    else:
+        pts_w_flat, valid_flat = render_lidar_bins_to_world_from_pose_fast(
+            pcd=pcd,
+            lidar_pose=lidar_pose,
+            num_azimuth=Wp,
+            num_polar=Hp,
+            near_m=float(near_m),
+            far_m=None if far_m is None else float(far_m),
+            suppress_bins=int(suppress_bins),
+            occlusion_eps_m=float(occlusion_eps_m),
+            occlusion_eps_rel=float(occlusion_eps_rel),
+            jitter_std_m=float(jitter_std_m),
+        )
+
+    if shuffle:
+        pts_w_flat = shuffle_pcd(pts_w_flat)
+
+    nan_mask = torch.isnan(pts_w_flat).any(dim=-1)
+    sort_idx = torch.argsort(nan_mask.int(), dim=-1)
+    batch_idx = torch.arange(B, device=device)[:, None].expand(B, K)
+    sorted_out = pts_w_flat[batch_idx, sort_idx]
+    lidar_pcd = sorted_out[:, :num_points]
+
+    num_valid_per_batch = valid_flat.sum(dim=-1)
+    logs: Dict[str, float] = {
+        "sim_lidar_render/avg_num_valid_points": float(num_valid_per_batch.float().mean().item()),
+        "sim_lidar_render/min_num_valid_points": float(num_valid_per_batch.min().item()),
+        "sim_lidar_render/num_rays": float(K),
+        "sim_lidar_render/suppress_bins": float(suppress_bins),
+    }
+
+    return lidar_pcd, logs

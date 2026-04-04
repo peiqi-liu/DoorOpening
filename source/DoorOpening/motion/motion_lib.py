@@ -40,7 +40,7 @@ class ReferenceMotionManager:
         # from DoorOpening.assets.door.door_cfg import motion_traj_paths
         import glob
         root_path = os.path.dirname(os.path.dirname(__file__))
-        asset_base_folder = os.path.join(root_path, "assets/door/PartNetv4")
+        asset_base_folder = os.path.join(root_path, "assets/door/PartNetv5")
         motion_traj_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/traj.pkl"), recursive=True))
 
         robot_joint_pos_trajs = []
@@ -461,7 +461,7 @@ class ReferenceMotionManager:
 if __name__ == "__main__":
     import glob
     root_path = os.path.dirname(os.path.dirname(__file__))
-    asset_base_folder = os.path.join(root_path, "assets/door/PartNetv4")
+    asset_base_folder = os.path.join(root_path, "assets/door/PartNetv5")
     print("asset_base_folder: ", asset_base_folder)
     motion_traj_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/traj.pkl"), recursive=True))
     num_envs = 200

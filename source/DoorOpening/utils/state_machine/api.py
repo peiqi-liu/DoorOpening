@@ -3,7 +3,7 @@ import pinocchio as pin
 import numpy as np
 from DoorOpening.utils.state_machine.pin import PinocchioIKSolver
 from DoorOpening.constants.robot_constants import BASE_JOINT_NAMES, FRANKA_JOINT_NAMES, OPEN_FINGER_JOINT_VALUES, CLOSE_FINGER_JOINT_VALUES
-from DoorOpening.utils.pose_utils import compute_base_joint, get_base_pos_and_quat, world_to_base_frame, wrap_to_pi
+from DoorOpening.utils.pose_utils import get_base_pos_and_quat, world_to_base_frame, wrap_to_pi
 import torch
 from DoorOpening.utils.extract_pointcloud_from_articulation import sample_pointcloud, sample_pointcloud_from_link_name
 from isaaclab.utils.math import quat_apply, euler_xyz_from_quat

@@ -680,7 +680,7 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path, handle_side="right"):
     }
     print(key_indices)
     # print(torch.tensor(key_indices, dtype=torch.int32)[key_idx_in_key_indices])
-    traj_file = "traj.pkl" if handle_side == "right" else f"traj_{handle_side}_pull.pkl"
+    traj_file = "traj.pkl"
     traj_path = os.path.join(dir_path, traj_file)
     with open(traj_path, "wb") as f:
         pkl.dump(data, f)

@@ -61,10 +61,35 @@ parser.add_argument(
     default=1000,
     help="Number of points to keep in each benchmarked pointcloud.",
 )
+parser.add_argument(
+    "--save_lidar_points",
+    action="store_true",
+    default=False,
+    help="Save rendered lidar points to .ply using Open3D.",
+)
+parser.add_argument(
+    "--log_viser",
+    action="store_true",
+    default=False,
+    help="Stream rendered lidar points to a viser pointcloud viewer.",
+)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli = parser.parse_args()
+
+# Preload viser before AppLauncher mutates import paths via Isaac Sim/Kit.
+# This avoids importing an incompatible `websockets` module from Isaac Sim internals.
+VISER_MODULE = None
+VISER_IMPORT_ERROR = None
+if args_cli.log_viser:
+    try:
+        import websockets.asyncio.server  # noqa: F401
+        import viser as _viser_module
+
+        VISER_MODULE = _viser_module
+    except Exception as exc:
+        VISER_IMPORT_ERROR = exc
 
 # launch omniverse app
 app_launcher = AppLauncher(args_cli)
@@ -86,19 +111,31 @@ from isaaclab.actuators import ImplicitActuatorCfg
 import omni.replicator.core as rep
 from isaaclab.utils import convert_dict_to_backend
 
-from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG
+from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, glorbot_urdf_path
 from DoorOpening.assets.door.door_cfg import DOOR_CONFIG, door_asset_path
 
 from isaaclab.utils.math import quat_apply, quat_from_euler_xyz
 
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
 
-from DoorOpening.utils.camera_utils import depth_to_pointcloud
+from DoorOpening.utils.camera_utils import depth_to_pointcloud, simulate_lidar_render_from_pose
 from DoorOpening.utils.extract_pointcloud_from_articulation import FrankaLeapSampler
 
 
 euler_angles = torch.tensor([-np.pi / 4, 0.0, 0])  # (roll, pitch, yaw) in radians
 quat = quat_from_euler_xyz(euler_angles[0], euler_angles[1], euler_angles[2])
+
+LIDAR_DOOR_SCENE_NUM_POINTS = 60000
+LIDAR_ROBOT_SCENE_NUM_POINTS = 20000
+LIDAR_NUM_POINTS = 10000
+LIDAR_NUM_AZIMUTH = 512
+LIDAR_NUM_POLAR = 128
+LIDAR_NEAR_M = 0.1
+LIDAR_FAR_M = 30.0
+LIDAR_SUPPRESS_BINS = 2
+LIDAR_JITTER_STD_M = 0.001
+LIDAR_USE_COMPILE = True
+LIDAR_ENV_ID = 0
 
 
 def _sync_timing_device(device: torch.device):
@@ -158,6 +195,24 @@ def _print_benchmark_summary(benchmark_state: dict, num_envs: int):
         f"({total_speedup:.2f}x faster than {total_slower_name} on mean time)."
     )
 
+
+def _save_open3d_pointcloud(pointcloud: torch.Tensor, output_path: str):
+    try:
+        import open3d as o3d
+    except ImportError as exc:
+        raise RuntimeError("open3d is required for --save_lidar_points") from exc
+
+    np_points = pointcloud.detach().cpu().numpy().astype(np.float64)
+    finite_mask = np.isfinite(np_points).all(axis=-1)
+    np_points = np_points[finite_mask]
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(np.ascontiguousarray(np_points))
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    o3d.io.write_point_cloud(output_path, pcd)
+    print(f"[INFO]: Saved lidar pointcloud to {output_path} ({np_points.shape[0]} points)")
+
+
 @configclass
 class SensorsSceneCfg(InteractiveSceneCfg):
     """Design the scene with sensors on the robot."""
@@ -183,10 +238,11 @@ class SensorsSceneCfg(InteractiveSceneCfg):
     camera = CameraCfg(
         prim_path="{ENV_REGEX_NS}/Robot/x5_camera_link/cam",
         update_period=0.1,
+        update_latest_camera_pose=True,
         height=480,
         width=640,
-        # data_types=["rgb", "distance_to_image_plane"],
-        data_types=["distance_to_image_plane"],
+        data_types=["rgb", "distance_to_image_plane"],
+        # data_types=["distance_to_image_plane"],
         spawn=sim_utils.PinholeCameraCfg(focal_length=8.0, clipping_range=(0.1, 20.0)),
         offset=CameraCfg.OffsetCfg(pos=(0.0, 0.0, 0.0), rot=quat, convention="world"),
     )
@@ -238,8 +294,66 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             f"after {args_cli.benchmark_warmup_frames} warmup frames."
         )
 
+    enable_lidar_render = args_cli.save_lidar_points or args_cli.log_viser
+    lidar_state = None
+    if enable_lidar_render:
+        door_base_body_idx = int(scene["door"].find_bodies("base")[0][0])
+        lidar_output_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "output", "lidar")
+        os.makedirs(lidar_output_dir, exist_ok=True)
+
+        viser_server = None
+        viser_handle = None
+        if args_cli.log_viser:
+            if VISER_MODULE is None:
+                raise RuntimeError(
+                    "Failed to import viser for --log_viser. "
+                    "This is usually caused by an incompatible `websockets` module being picked up after Isaac Sim "
+                    "updates sys.path. Please ensure your active env has a recent `websockets` package and retry."
+                ) from VISER_IMPORT_ERROR
+            viser_server = VISER_MODULE.ViserServer()
+            viser_handle = viser_server.scene.add_point_cloud(
+                name="/rendered_lidar_points",
+                points=np.zeros((0, 3), dtype=np.float16),
+                colors=(0, 255, 0),
+                point_size=0.01 / 3.0,
+                precision="float16",
+            )
+            print("[INFO]: Viser logging enabled for rendered_lidar_points.")
+
+        lidar_state = {
+            "sampler": FrankaLeapSampler(
+                door_asset_path,
+                device=args_cli.device,
+                num_points=LIDAR_DOOR_SCENE_NUM_POINTS,
+            ),
+            "robot_sampler": FrankaLeapSampler(
+                glorbot_urdf_path,
+                device=args_cli.device,
+                num_points=LIDAR_ROBOT_SCENE_NUM_POINTS,
+            ),
+            "door_base_body_idx": door_base_body_idx,
+            "lidar_body_idx": int(scene["robot"].find_bodies("lidar")[0][0]),
+            "last_camera_frame": -1,
+            "rendered_frames": 0,
+            "saved_frames": 0,
+            "saved_once": False,
+            "output_dir": lidar_output_dir,
+            "viser_server": viser_server,
+            "viser_handle": viser_handle,
+        }
+
+        robot_sampler_joint_names = list(lidar_state["robot_sampler"].robot.actuated_joint_names)
+        robot_joint_ids, robot_joint_names = scene["robot"].find_joints(robot_sampler_joint_names)
+        lidar_state["robot_sampler_joint_ids"] = torch.tensor(robot_joint_ids, device=args_cli.device, dtype=torch.long)
+        robot_joint_name_to_idx = {name: idx for idx, name in enumerate(robot_joint_names)}
+        lidar_state["robot_sampler_joint_reorder"] = [robot_joint_name_to_idx[name] for name in robot_sampler_joint_names]
+        lidar_state["robot_root_body_idx"] = 0
+        print(
+            f"[INFO]: Rendering lidar points (num_points={LIDAR_NUM_POINTS}, "
+            f"azimuth={LIDAR_NUM_AZIMUTH}, polar={LIDAR_NUM_POLAR}, compile={LIDAR_USE_COMPILE})."
+        )
+
     targets = scene["robot"].data.default_joint_pos.clone()
-    # targets[..., :2] += 0.5
 
     # Simulate physics
     while simulation_app.is_running():
@@ -348,10 +462,80 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
                     benchmark_state["timed_frames"] += 1
                     if benchmark_state["timed_frames"] >= args_cli.benchmark_frames:
                         _print_benchmark_summary(benchmark_state, scene.num_envs)
+                        if not enable_lidar_render:
+                            break
+                        benchmark_state = None
+
+        if lidar_state is not None:
+            current_camera_frame = int(camera.frame[0].item())
+            if current_camera_frame != lidar_state["last_camera_frame"]:
+                lidar_state["last_camera_frame"] = current_camera_frame
+                door_joint_pos = scene["door"].data.joint_pos
+                sampled_local_pcd = lidar_state["sampler"].sample(door_joint_pos)
+
+                door_base_pos_w = scene["door"].data.body_pos_w[:, lidar_state["door_base_body_idx"]]
+                door_base_quat_w = scene["door"].data.body_quat_w[:, lidar_state["door_base_body_idx"]]
+                quat = door_base_quat_w.unsqueeze(1).expand(-1, sampled_local_pcd.shape[1], -1)
+                door_pcd_world = quat_apply(quat, sampled_local_pcd) + door_base_pos_w.unsqueeze(1)
+
+                robot_joint_pos = scene["robot"].data.joint_pos[:, lidar_state["robot_sampler_joint_ids"]]
+                robot_joint_pos = robot_joint_pos[:, lidar_state["robot_sampler_joint_reorder"]]
+                robot_local_pcd = lidar_state["robot_sampler"].sample(robot_joint_pos)
+                robot_root_pos_w = scene["robot"].data.body_pos_w[:, lidar_state["robot_root_body_idx"]]
+                robot_root_quat_w = scene["robot"].data.body_quat_w[:, lidar_state["robot_root_body_idx"]]
+                robot_quat = robot_root_quat_w.unsqueeze(1).expand(-1, robot_local_pcd.shape[1], -1)
+                robot_pcd_world = quat_apply(robot_quat, robot_local_pcd) + robot_root_pos_w.unsqueeze(1)
+
+                source_pcd_world = torch.cat([door_pcd_world, robot_pcd_world], dim=1)
+
+                lidar_pos_w = scene["robot"].data.body_pos_w[:, lidar_state["lidar_body_idx"]]
+                lidar_quat_w = scene["robot"].data.body_quat_w[:, lidar_state["lidar_body_idx"]]  # wxyz
+                lidar_quat_xyzw = lidar_quat_w[:, [1, 2, 3, 0]]
+                lidar_pose7 = torch.cat([lidar_pos_w, lidar_quat_xyzw], dim=-1)
+                print("lidar_pose7: ", lidar_pose7)
+
+                lidar_pcd, lidar_logs = simulate_lidar_render_from_pose(
+                    pcd=source_pcd_world,
+                    lidar_pose=lidar_pose7,
+                    num_points=LIDAR_NUM_POINTS,
+                    num_azimuth=LIDAR_NUM_AZIMUTH,
+                    num_polar=LIDAR_NUM_POLAR,
+                    near_m=LIDAR_NEAR_M,
+                    far_m=LIDAR_FAR_M,
+                    suppress_bins=LIDAR_SUPPRESS_BINS,
+                    jitter_std_m=LIDAR_JITTER_STD_M,
+                    use_compile=LIDAR_USE_COMPILE,
+                )
+
+                lidar_state["rendered_frames"] += 1
+                env_id = max(0, min(LIDAR_ENV_ID, scene.num_envs - 1))
+                valid_env_points = torch.isfinite(lidar_pcd[env_id]).all(dim=-1).sum().item()
+                print(
+                    f"[INFO]: Lidar frame={current_camera_frame} env={env_id} "
+                    f"valid_points={int(valid_env_points)}/{LIDAR_NUM_POINTS} "
+                    f"avg_valid_bins={lidar_logs['sim_lidar_render/avg_num_valid_points']:.1f}"
+                )
+
+                if lidar_state["viser_handle"] is not None:
+                    np_points = lidar_pcd[env_id].detach().cpu().numpy().astype(np.float32)
+                    finite_mask = np.isfinite(np_points).all(axis=-1)
+                    lidar_state["viser_handle"].points = np_points[finite_mask].astype(np.float16, copy=False)
+
+                if args_cli.save_lidar_points and not lidar_state["saved_once"]:
+                    out_name = (
+                        f"lidar_env{env_id:02d}_camframe{current_camera_frame:06d}.ply"
+                    )
+                    output_path = os.path.join(lidar_state["output_dir"], out_name)
+                    _save_open3d_pointcloud(lidar_pcd[env_id], output_path)
+                    lidar_state["saved_frames"] += 1
+                    lidar_state["saved_once"] = True
+                    if not args_cli.log_viser and benchmark_state is None:
+                        print("[INFO]: Saved lidar pointcloud. Exiting.")
                         break
 
         # Extract camera data
         if args_cli.save and count % 100 == 0:
+            targets[..., 0] += 0.1
             # Save images from camera at camera_index
             # note: BasicWriter only supports saving data in numpy format, so we need to convert the data to numpy.
             single_cam_data = convert_dict_to_backend(
@@ -364,7 +548,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             # Pack data back into replicator format to save them using its writer
             rep_output = {"annotators": {}}
             for key, data, info in zip(single_cam_data.keys(), single_cam_data.values(), single_cam_info.values()):
-                print(depth_to_pointcloud(data).shape)
+                # print(depth_to_pointcloud(data).shape)
                 if info is not None:
                     rep_output["annotators"][key] = {"render_product": {"data": data, **info}}
                 else:
