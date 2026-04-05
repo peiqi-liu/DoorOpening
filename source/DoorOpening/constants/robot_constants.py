@@ -29,10 +29,16 @@ FRANKA_DEFAULT_JOINT_POS = {
 }
 
 DEFAULT_JOINT_POS = {
-    "x5_joint1": 2.2, 
-    "x5_joint2": 2.355, 
-    "x5_joint3": 0.45, 
-    "x5_joint4": 1.57, 
+    # "x5_joint1": 2.2, 
+    # "x5_joint2": 2.355, 
+    # "x5_joint3": 0.45, 
+    # "x5_joint4": 1.57, 
+    # "x5_joint5": 0.0, 
+    # "x5_joint6": 0.0,
+    "x5_joint1": 1.57, 
+    "x5_joint2": 0, 
+    "x5_joint3": 0, 
+    "x5_joint4": 0, 
     "x5_joint5": 0.0, 
     "x5_joint6": 0.0,
     "panda_joint1": 0.0,

@@ -4,6 +4,7 @@ from typing import Literal
 import torch
 from isaaclab.utils.math import euler_xyz_from_quat, quat_from_euler_xyz
 
+from DoorOpening.constants.robot_constants import FRANKA_DEFAULT_JOINT_POS, FRANKA_JOINT_NAMES
 from DoorOpening.utils.state_machine.api import get_board_edge, get_board_pos, get_hinge_pos, open_hand, solve_ik
 
 HandleSide = Literal["right", "left"]
@@ -728,21 +729,25 @@ def state_machine_offline_left_pull_door(
         robot_initial_yaw.item() + tilt_base_yaw,
         device,
     )
-    push_panel_x = -0.05
-    push_panel_y = -0.18
+    safe_open_hand_q = open_hand(1.0).to(q_robot.device)
+    push_palm_rot = get_rotation_quat(0.0, 0.0, math.pi / 2, device)
+    retreat_local_x = 0.10
+    retreat_local_y = -0.42
+    retreat_z_lift = 0.04
+    push_contact_x_offset = 0.02
+    push_contact_y_offset = -0.08
+    push_contact_z_offset = 0.04
+    contact_virtual_door_angle = 1.15
     push_door_open_angle = 1.50
 
-    clockwise_traverse_yaw = tilt_base_yaw - 0.35
-    clockwise_traverse_rot = get_rotation_quat(
-        0.0,
-        0.0,
-        robot_initial_yaw.item() + clockwise_traverse_yaw,
-        device,
+    franka_default_q = torch.tensor(
+        [FRANKA_DEFAULT_JOINT_POS[name] for name in FRANKA_JOINT_NAMES],
+        device=device,
+        dtype=q_robot.dtype,
     )
-    traverse_mid_x = -0.25
+    traverse_mid_x = -0.20
     traverse_mid_y = -0.05
     traverse_far_x = -0.5
-    traverse_mid_door_open_angle = 1.35
 
     base_target_pos[:, 0] += release_base_x_delta_1
     base_target_pos[:, 1] = release_base_y
@@ -782,7 +787,7 @@ def state_machine_offline_left_pull_door(
         robot_initial_pose=robot_initial_pose,
     )[0]
 
-    q_robot[10:26] = open_hand(1.0).to(q_robot.device)
+    q_robot[10:26] = safe_open_hand_q
     q_door = torch.tensor([release_door_open_angle, 0.0], device=device)
 
     _append_state(
@@ -795,37 +800,30 @@ def state_machine_offline_left_pull_door(
     )
 
     # -------------------------
-    # Step 6: Retract the arm to a safe travel pose and stop holding the door
+    # Step 6: Retract the arm to the right side of the tilted base
     # -------------------------
-    q_robot[3:10] = robot_initial_q[3:10]
-    q_robot[10:26] = open_hand(1.0).to(q_robot.device)
-
-    _append_state(
-        robot_traj,
-        door_traj,
-        key_idx_in_key_indices,
-        q_robot,
-        q_door,
-        mark_keyframe=True,
+    tilted_base_yaw_world = robot_initial_yaw + tilt_base_yaw
+    retreat_dx, retreat_dy = _rotate_xy_counterclockwise(
+        retreat_local_x,
+        retreat_local_y,
+        tilted_base_yaw_world,
     )
 
-    # -------------------------
-    # Step 7: Push the panel farther right using the base
-    # -------------------------
-    base_target_pos[:, 0] = push_panel_x
-    base_target_pos[:, 1] = push_panel_y
-    base_target_pose = _make_pose(base_target_pos, tilted_base_rot)
+    retreat_palm_pos = base_target_pos.clone()
+    retreat_palm_pos[:, 0] += retreat_dx
+    retreat_palm_pos[:, 1] += retreat_dy
+    retreat_palm_pos[:, 2] = palm_target_pose[:, 2].clone() + retreat_z_lift
+    retreat_palm_pose = _make_pose(retreat_palm_pos, default_palm_rot)
 
     q_robot[:10] = solve_ik(
         robot_urdf_path,
         q_robot[:10],
-        palm_pose=None,
-        base_pose=base_target_pose,
+        palm_pose=retreat_palm_pose,
+        base_pose=None,
         robot_initial_pose=robot_initial_pose,
     )[0]
-    q_robot[3:10] = robot_initial_q[3:10]
-    q_robot[10:26] = open_hand(1.0).to(q_robot.device)
-    q_door = torch.tensor([push_door_open_angle, 0.0], device=device)
+    q_robot[10:26] = safe_open_hand_q
+    retreat_arm_q = q_robot[3:10].clone()
 
     _append_state(
         robot_traj,
@@ -837,11 +835,76 @@ def state_machine_offline_left_pull_door(
     )
 
     # -------------------------
-    # Step 8: Traverse while rotating clockwise and moving forward
+    # Step 7: Push the panel open with the arm while keeping the base still
+    # -------------------------
+    contact_board_pos = get_board_edge(
+        door_urdf_path,
+        door_initial_pose,
+        torch.tensor([contact_virtual_door_angle, 0.0], device=device).unsqueeze(0),
+    ).to(device)
+
+    palm_target_pos = contact_board_pos.clone()
+    palm_target_pos[:, 0] += push_contact_x_offset
+    palm_target_pos[:, 1] += push_contact_y_offset
+    palm_target_pos[:, 2] += push_contact_z_offset
+    palm_target_pose = _make_pose(palm_target_pos, push_palm_rot)
+
+    q_robot[:10] = solve_ik(
+        robot_urdf_path,
+        q_robot[:10],
+        palm_pose=palm_target_pose,
+        base_pose=None,
+        robot_initial_pose=robot_initial_pose,
+    )[0]
+    q_robot[10:26] = safe_open_hand_q
+
+    _append_state(
+        robot_traj,
+        door_traj,
+        key_idx_in_key_indices,
+        q_robot,
+        q_door,
+        mark_keyframe=True,
+    )
+
+    q_door = torch.tensor([push_door_open_angle, 0.0], device=device)
+    board_pos = get_board_edge(
+        door_urdf_path,
+        door_initial_pose,
+        q_door.unsqueeze(0),
+    ).to(device)
+
+    palm_target_pos = board_pos.clone()
+    palm_target_pos[:, 0] += push_contact_x_offset
+    palm_target_pos[:, 1] += push_contact_y_offset
+    palm_target_pos[:, 2] += push_contact_z_offset
+    palm_target_pose = _make_pose(palm_target_pos, push_palm_rot)
+
+    q_robot[:10] = solve_ik(
+        robot_urdf_path,
+        q_robot[:10],
+        palm_pose=palm_target_pose,
+        base_pose=None,
+        robot_initial_pose=robot_initial_pose,
+    )[0]
+    q_robot[10:26] = safe_open_hand_q
+
+    _append_state(
+        robot_traj,
+        door_traj,
+        key_idx_in_key_indices,
+        q_robot,
+        q_door,
+        mark_keyframe=True,
+    )
+
+    # -------------------------
+    # Step 8: Restore the base to normal yaw, traverse with a suitable arm pose,
+    # then finish the traverse with default arm joints
     # -------------------------
     base_target_pos[:, 0] = traverse_mid_x
     base_target_pos[:, 1] = traverse_mid_y
-    base_target_pose = _make_pose(base_target_pos, clockwise_traverse_rot)
+    base_target_pose = _make_pose(base_target_pos, base_target_rot)
 
     q_robot[:10] = solve_ik(
         robot_urdf_path,
@@ -850,9 +913,8 @@ def state_machine_offline_left_pull_door(
         base_pose=base_target_pose,
         robot_initial_pose=robot_initial_pose,
     )[0]
-    q_robot[3:10] = robot_initial_q[3:10]
-    q_robot[10:26] = open_hand(1.0).to(q_robot.device)
-    q_door = torch.tensor([traverse_mid_door_open_angle, 0.0], device=device)
+    q_robot[3:10] = retreat_arm_q
+    q_robot[10:26] = safe_open_hand_q
 
     _append_state(
         robot_traj,
@@ -863,9 +925,6 @@ def state_machine_offline_left_pull_door(
         mark_keyframe=True,
     )
 
-    # -------------------------
-    # Step 9: Finish traversing the doorway and recover zero yaw
-    # -------------------------
     base_target_pos[:, 0] = traverse_far_x
     base_target_pos[:, 1] = 0.0
     base_target_pose = _make_pose(base_target_pos, base_target_rot)
@@ -877,8 +936,8 @@ def state_machine_offline_left_pull_door(
         base_pose=base_target_pose,
         robot_initial_pose=robot_initial_pose,
     )[0]
-    q_robot[3:10] = robot_initial_q[3:10]
-    q_robot[10:26] = open_hand(1.0).to(q_robot.device)
+    q_robot[3:10] = franka_default_q
+    q_robot[10:26] = safe_open_hand_q
     q_door = torch.tensor([0.0, 0.0], device=device)
 
     _append_state(
