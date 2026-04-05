@@ -114,6 +114,65 @@ def get_board_pos(door_urdf_path, door_initial_pose, joint_angles):
 
     return P.mean(dim = 0).unsqueeze(0)
 
+
+def get_board_edge(
+    door_urdf_path,
+    door_initial_pose,
+    joint_angles,
+    edge_inset_ratio: float = 0.12,
+    min_inset: float = 0.03,
+    max_inset: float = 0.10,
+):
+    """
+    Return a point near the door-board free edge, but inset toward the panel
+    center so the contact stays deeper than a true edge touch.
+
+    The estimate is inspired by the door keypoint logic: we recover the board
+    width direction from the board cloud, choose the edge farther from the door
+    root, and move inward along that width axis by a small amount.
+    """
+    door_initial_pos, door_initial_quat = (
+        door_initial_pose[..., :3],
+        door_initial_pose[..., 3:]
+    )
+
+    pointcloud = sample_pointcloud_from_link_name(
+        door_urdf_path, joint_angles, "link_1", device="cpu"
+    )
+
+    door_pointcloud = quat_apply(door_initial_quat, pointcloud) + door_initial_pos
+    P = door_pointcloud
+
+    centroid = P.mean(dim=1)                  # (B, 3)
+    centered = P - centroid.unsqueeze(1)      # (B, N, 3)
+
+    cov = torch.matmul(centered.transpose(1, 2), centered) / P.shape[1]
+    eigvals, eigvecs = torch.linalg.eigh(cov)
+
+    # For a door board: smallest eigenvector ~= thickness, largest ~= height,
+    # middle ~= width. We use the width axis to locate the free edge.
+    width_dir = eigvecs[:, :, 1]
+    width_dir = width_dir / width_dir.norm(dim=1, keepdim=True).clamp_min(1e-6)
+
+    proj = (centered * width_dir.unsqueeze(1)).sum(dim=2)   # (B, N)
+    min_proj = proj.min(dim=1).values.unsqueeze(1)
+    max_proj = proj.max(dim=1).values.unsqueeze(1)
+
+    edge_min = centroid + min_proj * width_dir
+    edge_max = centroid + max_proj * width_dir
+
+    # Use the edge farther from the door root as the free edge.
+    dist_min = torch.linalg.norm(edge_min - door_initial_pos, dim=1, keepdim=True)
+    dist_max = torch.linalg.norm(edge_max - door_initial_pos, dim=1, keepdim=True)
+    use_max = dist_max >= dist_min
+
+    board_width = (max_proj - min_proj).abs()
+    inset = (board_width * edge_inset_ratio).clamp(min=min_inset, max=max_inset)
+    edge_proj = torch.where(use_max, max_proj - inset, min_proj + inset)
+
+    edge_pos = centroid + edge_proj * width_dir
+    return edge_pos.cpu()
+
 def get_hinge_pos(door_urdf_path, door_initial_pose, joint_angles):
     door_initial_pos, door_initial_quat = (
         door_initial_pose[..., :3],
