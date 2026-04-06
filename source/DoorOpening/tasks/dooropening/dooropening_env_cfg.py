@@ -369,9 +369,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     reset_door_joint_pos_delta_max = 0.8
     # We are slowly increasing our tolerance on base position drift and slowly only resettting the env from the first key frame
     # This variable is used to indicate when we stop increasing the tolerance and reset the env from the first key frame for the greatest probability
-    reset_progress_total = 3e5
+    reset_progress_total = 6e5
     # ADR should ramp faster than the reference-motion reset curriculum so physics randomization is not lagging behind.
-    adr_reset_progress_total = 1.5e5
+    adr_reset_progress_total = 2e5
 
     alive_base = 10.0
     alive_bonus = 20.0
