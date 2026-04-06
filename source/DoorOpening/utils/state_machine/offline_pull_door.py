@@ -517,6 +517,15 @@ def state_machine_offline_left_pull_door(
     base_target_rot = robot_initial_pose[:, 3:].to(device).clone()
     default_palm_rot = get_rotation_quat(math.pi, math.pi, math.pi, device)
 
+    _append_state(
+        robot_traj,
+        door_traj,
+        key_idx_in_key_indices,
+        q_robot,
+        q_door,
+        mark_keyframe=True,
+    )
+
     # -------------------------
     # Step 1: Pregrasp
     # -------------------------
@@ -734,10 +743,10 @@ def state_machine_offline_left_pull_door(
     retreat_local_x = 0.10
     retreat_local_y = -0.42
     retreat_z_lift = 0.04
-    push_contact_x_offset = 0.02
-    push_contact_y_offset = -0.08
-    push_contact_z_offset = 0.04
-    contact_virtual_door_angle = 1.15
+    push_contact_x_offset = -0.3
+    push_contact_y_offset = -0.2
+    push_contact_z_offset = 0.15
+    contact_virtual_door_angle = 1.0
     push_door_open_angle = 1.50
 
     franka_default_q = torch.tensor(
@@ -745,7 +754,7 @@ def state_machine_offline_left_pull_door(
         device=device,
         dtype=q_robot.dtype,
     )
-    traverse_mid_x = -0.20
+    traverse_mid_x = 0.4
     traverse_mid_y = -0.05
     traverse_far_x = -0.5
 
@@ -823,7 +832,7 @@ def state_machine_offline_left_pull_door(
         robot_initial_pose=robot_initial_pose,
     )[0]
     q_robot[10:26] = safe_open_hand_q
-    retreat_arm_q = q_robot[3:10].clone()
+    # retreat_arm_q = q_robot[3:10].clone()
 
     _append_state(
         robot_traj,
@@ -909,11 +918,11 @@ def state_machine_offline_left_pull_door(
     q_robot[:10] = solve_ik(
         robot_urdf_path,
         q_robot[:10],
-        palm_pose=None,
+        palm_pose=palm_target_pose,
         base_pose=base_target_pose,
         robot_initial_pose=robot_initial_pose,
     )[0]
-    q_robot[3:10] = retreat_arm_q
+    # q_robot[3:10] = retreat_arm_q
     q_robot[10:26] = safe_open_hand_q
 
     _append_state(

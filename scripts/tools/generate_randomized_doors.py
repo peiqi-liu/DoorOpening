@@ -11,7 +11,7 @@ DEFAULT_PANEL_WIDTH_RANGE_M = (0.8, 1.1)
 # height after scaling. That keeps unusual assets with transoms from ending up
 # much taller in world space than the rest of the set.
 DEFAULT_PANEL_HEIGHT_RANGE_M = (1.80, 2.10)
-DEFAULT_HANDLE_HEIGHT_RANGE_M = (0.7, 1.00)
+DEFAULT_HANDLE_HEIGHT_RANGE_M = (0.7, 0.9)
 DEFAULT_HANDLE_EDGE_DISTANCE_RANGE_M = (0.05, 0.11)
 
 MIN_HANDLE_BOTTOM_CLEARANCE_M = 0.15

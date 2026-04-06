@@ -32,9 +32,9 @@ class OmniJointController:
 
         self.q_slider = scene["robot"].data.joint_pos.clone()
         self.door_q_slider = scene["door"].data.joint_pos.clone()
-        self.finger_q_slider = torch.zeros(4)
         finger_joint_names = [f"finger_joint_{i}" for i in range(16)]
         self.finger_joint_ids, finger_joint_names = scene["robot"].find_joints(finger_joint_names)
+        self.finger_q_slider = joint_angle_to_tendon_utils(self.scene["robot"])[0].detach().cpu()
         self.ik_joint_ids, self.ik_joint_names = scene["robot"].find_joints(BASE_JOINT_NAMES + FRANKA_JOINT_NAMES)
         self.ik_joint_pos_upper_limit = scene["robot"].data.joint_pos_limits[..., self.ik_joint_ids, 1]
         self.ik_joint_pos_lower_limit = scene["robot"].data.joint_pos_limits[..., self.ik_joint_ids, 0]
@@ -108,8 +108,6 @@ class OmniJointController:
 
                 # robot joint position sliders
                 for i, name in enumerate(self.joint_names):
-                    if name.startswith("finger_joint_"):
-                        continue
                     ui.Label(name)
 
                     if name.startswith("base_"):
@@ -129,15 +127,17 @@ class OmniJointController:
                     )
                     self.joint_sliders.append(slider)
 
+                ui.Separator(height=8)
+                ui.Label("Finger Tendon Control")
                 for i in range(4):
-                    ui.Label(f"finger_joint_{i}")
+                    ui.Label(f"finger_tendon_{i}")
                     slider = ui.FloatSlider(
                         min=0.0,
                         max=3.14,
                         step=0.01,
                         height=18,
                     )
-                    slider.model.set_value(0.0)
+                    slider.model.set_value(float(self.finger_q_slider[i]))
                     slider.model.add_value_changed_fn(partial(self._on_finger_slider_changed, i))
 
                 # door joint position sliders
@@ -268,8 +268,7 @@ class OmniJointController:
         self.finger_q_slider[idx] = value
         new_q_value = tendon_to_joint_angle_utils(self.scene["robot"], self.finger_q_slider)
         self.q_slider[..., self.finger_joint_ids] = new_q_value[..., self.finger_joint_ids]
-
-        test_tendon_value = joint_angle_to_tendon_utils(self.scene["robot"])
+        self._sync_joint_sliders()
 
     def _on_slider_changed(self, idx, model):
         self._initialize_trajectory()

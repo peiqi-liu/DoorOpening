@@ -177,8 +177,8 @@ handle_offsets = torch.tensor(handle_offsets)
 
 motion_traj_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/traj.pkl"), recursive=True))
 
-# door_asset_path = asset_paths[32]
-door_asset_path = asset_paths[0]
+door_asset_path = asset_paths[32]
+# door_asset_path = asset_paths[0]
 board_offset = board_offsets[0]
 handle_offset = handle_offsets[0]
 print("door_asset_path: ", door_asset_path)

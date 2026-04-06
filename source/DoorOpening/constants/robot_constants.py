@@ -48,8 +48,10 @@ DEFAULT_JOINT_POS = {
     "panda_joint5": 0.0,
     "panda_joint6": 0.5 * np.pi,
     "panda_joint7": 0.0,
-    "finger_joint_12": 0.5 * np.pi,
+    "finger_joint_12": 0.0,
     "finger_joint_13": 0.0,
+    "finger_joint_14": 1.0,
+    "finger_joint_15": 1.0
 }
 
 FRANKA_JOINT_NAMES = [

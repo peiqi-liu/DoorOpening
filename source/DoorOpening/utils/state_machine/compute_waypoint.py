@@ -1,5 +1,6 @@
 import argparse
-from DoorOpening.utils.state_machine.api import solve_ik, get_hinge_pos, open_hand
+import math
+from DoorOpening.utils.state_machine.api import compute_base_joint, solve_ik, get_hinge_pos, open_hand
 import torch
 from isaaclab.utils.math import quat_from_euler_xyz, quat_from_matrix, combine_frame_transforms, quat_mul, quat_inv
 from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES, CAMERA_JOINT_DEFAULT_VALUES, DEFAULT_JOINT_POS, OPEN_FINGER_JOINT_VALUES, ROBOT_KEY_BODY_NAMES, DM_JOINT_NAMES
@@ -44,6 +45,35 @@ def get_rotation_quat(roll, pitch, yaw, device):
     return quat_from_euler_xyz(roll = torch.tensor([[roll]]).to(device), pitch = torch.tensor([[pitch]]).to(device), yaw = torch.tensor([[yaw]]).to(device)).squeeze(0)
 
 import torch
+
+
+def sample_robot_initial_base_joints_on_door_ring(
+    robot_initial_pose: torch.Tensor,
+    door_initial_pose: torch.Tensor,
+    *,
+    radius: float = 1.0,
+    angle_range_deg: float = 60.0,
+):
+    """Sample base xy joints for a start pose on a ring around the door while
+    keeping the base rotation joint unchanged."""
+
+    angle_limit = math.radians(angle_range_deg)
+    approach_angle = random.uniform(-angle_limit, angle_limit)
+
+    sampled_x = door_initial_pose[:, 0] + radius * math.cos(approach_angle)
+    sampled_y = door_initial_pose[:, 1] + radius * math.sin(approach_angle)
+
+    sampled_pose = robot_initial_pose.clone()
+    sampled_pose[:, 0] = sampled_x
+    sampled_pose[:, 1] = sampled_y
+
+    sampled_base_joint = compute_base_joint(
+        robot_initial_pose[:, :3],
+        robot_initial_pose[:, 3:],
+        sampled_pose[:, :3],
+    ).squeeze(0)
+
+    return sampled_base_joint, sampled_pose, approach_angle
 
 def state_machine_offline(
     robot_urdf_path,
@@ -564,11 +594,33 @@ def compute_link_twist(pos_traj: torch.Tensor,
     return twist
 
 
-def play_and_save_traj(robot_urdf_path, door_urdf_path, handle_side="right"):
+def play_and_save_traj(
+    robot_urdf_path,
+    door_urdf_path,
+    handle_side="right",
+    randomize_start_base=True,
+    start_base_radius=1.0,
+    start_base_angle_range_deg=60.0,
+):
     dir_path = os.path.dirname(door_urdf_path)
     robot_initial_pose = torch.tensor([[ROBOT_INITIAL_POS[0], ROBOT_INITIAL_POS[1], ROBOT_INITIAL_POS[2], ROBOT_INITIAL_ROT[0], ROBOT_INITIAL_ROT[1], ROBOT_INITIAL_ROT[2], ROBOT_INITIAL_ROT[3]]], device="cpu")
     door_initial_pose = torch.tensor([[DOOR_INITIAL_POS[0], DOOR_INITIAL_POS[1], DOOR_INITIAL_POS[2], DOOR_INITIAL_ROT[0], DOOR_INITIAL_ROT[1], DOOR_INITIAL_ROT[2], DOOR_INITIAL_ROT[3]]], device="cpu")
     robot_constants, robot_initial_q = get_robot_constants()
+    if randomize_start_base:
+        sampled_base_joint, sampled_world_pose, sampled_angle = sample_robot_initial_base_joints_on_door_ring(
+            robot_initial_pose,
+            door_initial_pose,
+            radius=start_base_radius,
+            angle_range_deg=start_base_angle_range_deg,
+        )
+        robot_initial_q[:3] = sampled_base_joint
+        print(
+            "Randomized start base joints:",
+            robot_initial_q[:3],
+            "world pose:",
+            sampled_world_pose,
+            f"(radius={start_base_radius:.2f} m, angle={math.degrees(sampled_angle):.1f} deg)",
+        )
     door_initial_q = torch.tensor([0.0, 0.0], device="cpu")
     start_time = time.time()
     robot_traj, door_traj, key_idx_in_key_indices = state_machine_offline_pull_door(
