@@ -103,7 +103,7 @@ class EventCfg:
 
 @configclass
 class DooropeningEnvCfg(DirectRLEnvCfg):
-    sim_dt = 1/60.
+    sim_dt = 1/40.
     decimation = 1
     episode_length_s = 10.
     num_sim_steps_to_render=2
