@@ -8,7 +8,7 @@ normalize_action: True
 action_space: "absolute"
 action_dim: 19
 
-door_pcd_num_points: 20000
+door_pcd_num_points: 30000
 local_pcd_range: [1.5, 0.25, 0.25]
 x_direction_cutoff: -0.5
 
@@ -149,7 +149,7 @@ dagger:
   reset_progress_total: 100000
   adr_reset_progress_total: 50000
   pointcloud_source: "lidar"
-  robot_num_points: 20000
+  robot_num_points: 30000
   sampler_render:
     inflate_px: 2
     jitter_std_m: 0.004
@@ -159,13 +159,13 @@ dagger:
   lidar_render:
     num_points: 10000
     num_azimuth: 1024
-    num_polar: 192
+    num_polar: 256
     near_m: 0.1
     far_m: 30.0
-    suppress_bins: 2
+    suppress_bins: 3
     occlusion_eps_m: 0.02
     occlusion_eps_rel: 0.01
-    jitter_std_m: 0.001
+    jitter_std_m: 0.0
     use_compile: true
   viser:
     enabled: false  # Mode 1: stream the selected env live to Viser.
