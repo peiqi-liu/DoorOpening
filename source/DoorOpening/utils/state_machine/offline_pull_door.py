@@ -537,9 +537,9 @@ def state_machine_offline_left_pull_door(
 
     pregrasp_base_x_offset = 0.58
     pregrasp_base_y_offset = 0.34
-    pregrasp_palm_x_offset = 0.24
-    pregrasp_palm_y_offset = 0.04
-    pregrasp_palm_z_offset = 0.24
+    pregrasp_palm_x_offset = 0.25
+    pregrasp_palm_y_offset = 0.03
+    pregrasp_palm_z_offset = 0.25
 
     base_target_pos = handle_pos.clone()
     base_target_pos[:, 0] += pregrasp_base_x_offset
@@ -652,10 +652,10 @@ def state_machine_offline_left_pull_door(
 
     pull_palm_x_offset_closed = 0.05
     pull_palm_y_offset_closed = 0.03
-    pull_palm_z_offset = 0.06
+    pull_palm_z_offset = 0.05
 
     pull_rot_roll_base = math.pi
-    pull_rot_roll_per_theta = 0.85
+    pull_rot_roll_per_theta = 0.9
     pull_rot_pitch = math.pi
     pull_rot_yaw = math.pi - 0.15
 
@@ -747,7 +747,7 @@ def state_machine_offline_left_pull_door(
     push_contact_y_offset = -0.2
     push_contact_z_offset = 0.15
     contact_virtual_door_angle = 1.0
-    push_door_open_angle = 1.50
+    push_door_open_angle = 1.5
 
     franka_default_q = torch.tensor(
         [FRANKA_DEFAULT_JOINT_POS[name] for name in FRANKA_JOINT_NAMES],
@@ -884,8 +884,8 @@ def state_machine_offline_left_pull_door(
     ).to(device)
 
     palm_target_pos = board_pos.clone()
-    palm_target_pos[:, 0] += push_contact_x_offset
-    palm_target_pos[:, 1] += push_contact_y_offset
+    # palm_target_pos[:, 0] += push_contact_x_offset
+    # palm_target_pos[:, 1] += push_contact_y_offset
     palm_target_pos[:, 2] += push_contact_z_offset
     palm_target_pose = _make_pose(palm_target_pos, push_palm_rot)
 

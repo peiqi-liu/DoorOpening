@@ -1139,6 +1139,12 @@ class Dagger:
         self.student_model.load_state_dict(state_dict, strict=False)
         print(f"Loaded student checkpoint: {ckpt}")
 
+    def _override_actions_for_pregrasp(self, actions: torch.Tensor) -> torch.Tensor:
+        override_fn = getattr(self.ov_env, "override_pregrasp_actions", None)
+        if override_fn is None:
+            return actions
+        return override_fn(actions)
+
     def _get_teacher_actions(self, obs):
         if self.teacher_model is None:
             raise RuntimeError("Teacher model is not initialized.")
@@ -1150,9 +1156,10 @@ class Dagger:
         with torch.no_grad():
             res_dict = self.teacher_model(batch_dict)
         mus = res_dict["mus"]
+        adjusted_actions = self._override_actions_for_pregrasp(torch.clamp(mus, -1.0, 1.0))
         return {
-            "mus": mus,
-            "actions": torch.clamp(mus, -1.0, 1.0),
+            "mus": adjusted_actions,
+            "actions": adjusted_actions,
         }
 
     def _sync_timing_device(self):
@@ -1760,6 +1767,7 @@ class Dagger:
                     teacher_actions,
                     iteration,
                 )
+                step_actions = self._override_actions_for_pregrasp(step_actions)
                 self._update_last_frame_tracker()
                 self._sync_timing_device()
                 env_step_start_time = time.perf_counter()

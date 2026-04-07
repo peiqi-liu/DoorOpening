@@ -52,7 +52,7 @@ def sample_robot_initial_base_joints_on_door_ring(
     door_initial_pose: torch.Tensor,
     *,
     radius: float = 1.0,
-    angle_range_deg: float = 60.0,
+    angle_range_deg: float = 30.0,
 ):
     """Sample base xy joints for a start pose on a ring around the door while
     keeping the base rotation joint unchanged."""
@@ -600,7 +600,7 @@ def play_and_save_traj(
     handle_side="right",
     randomize_start_base=True,
     start_base_radius=1.0,
-    start_base_angle_range_deg=60.0,
+    start_base_angle_range_deg=30.0,
 ):
     dir_path = os.path.dirname(door_urdf_path)
     robot_initial_pose = torch.tensor([[ROBOT_INITIAL_POS[0], ROBOT_INITIAL_POS[1], ROBOT_INITIAL_POS[2], ROBOT_INITIAL_ROT[0], ROBOT_INITIAL_ROT[1], ROBOT_INITIAL_ROT[2], ROBOT_INITIAL_ROT[3]]], device="cpu")
