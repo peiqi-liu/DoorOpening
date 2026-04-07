@@ -8,7 +8,7 @@ normalize_action: True
 action_space: "absolute"
 action_dim: 19
 
-door_pcd_num_points: 10000
+door_pcd_num_points: 20000
 local_pcd_range: [1.5, 0.25, 0.25]
 x_direction_cutoff: -0.5
 
@@ -147,17 +147,30 @@ dagger:
   log_interval: 100
   save_interval: 5000
   reset_progress_total: 100000
-  pointcloud_source: "sampler"
-  robot_num_points: 10000
+  adr_reset_progress_total: 50000
+  pointcloud_source: "lidar"
+  robot_num_points: 20000
   sampler_render:
     inflate_px: 2
     jitter_std_m: 0.004
     clip_mode: "post"
     jitter_mode: "xyz"
     use_compile: true
+  lidar_render:
+    num_points: 10000
+    num_azimuth: 1024
+    num_polar: 192
+    near_m: 0.1
+    far_m: 30.0
+    suppress_bins: 2
+    occlusion_eps_m: 0.02
+    occlusion_eps_rel: 0.01
+    jitter_std_m: 0.001
+    use_compile: true
   viser:
     enabled: false  # Mode 1: stream the selected env live to Viser.
     update_interval: 1
+    raw_interval: 1000  # Periodically flush raw replay snapshots every N iterations.
     env_id: 0
     show_policy_input: true
     point_size: 0.004

@@ -177,6 +177,7 @@ def crop_local_pcd(
     is_cylindrical: bool = False,
     crop_center: torch.Tensor = None,
     x_direction_cutoff: torch.float = -0.5,
+    max_height_m: float | None = 1.5,
     log_name: str = "",
 ):
     """
@@ -191,6 +192,13 @@ def crop_local_pcd(
 
     if crop_center is None:
         crop_center = torch.zeros((B, 3), device=pcd.device, dtype=pcd.dtype)
+
+    # Remove overhead points in the input frame before local cropping.
+    if max_height_m is not None:
+        pcd = pcd.clone()
+        height_mask = torch.isfinite(pcd[..., 2]) & (pcd[..., 2] <= float(max_height_m))
+        pcd[~height_mask] = float("nan")
+
     crop_center_expanded = crop_center.unsqueeze(1)
     pcd_centered = pcd - crop_center_expanded
 

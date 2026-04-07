@@ -246,6 +246,12 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # contact_sensor_names = ["contact_forces_door1", "contact_forces_door2", "contact_forces_robot_palm_center"]
     contact_sensor_names = ["contact_forces_door2"]
 
+    # Pointcloud render mode:
+    # - "none": no on-robot pointcloud camera sensor (default).
+    # - "depth": enable the x5 depth camera sensor and use its depth map.
+    # - "lidar": no pointcloud camera sensor; render from the lidar body pose.
+    pointcloud_render_mode = "none"
+    pointcloud_lidar_body_name = "lidar"
     enable_pointcloud_camera = False
     pointcloud_camera_height = 480
     pointcloud_camera_width = 640

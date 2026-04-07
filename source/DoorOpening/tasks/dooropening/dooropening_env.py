@@ -258,7 +258,15 @@ class DooropeningEnv(DirectRLEnv):
         self.scene.articulations["door"] = self.door
         self._activate_door_contact_reporters()
         self.pointcloud_camera = None
-        if self.cfg.enable_pointcloud_camera:
+        pointcloud_render_mode = str(getattr(self.cfg, "pointcloud_render_mode", "none")).lower()
+        if pointcloud_render_mode not in {"none", "depth", "lidar"}:
+            raise ValueError(
+                "Unsupported pointcloud_render_mode "
+                f"'{pointcloud_render_mode}'. Expected one of ['none', 'depth', 'lidar']."
+            )
+        # The render mode is the source of truth: only depth mode enables the x5 pointcloud camera.
+        enable_pointcloud_camera = pointcloud_render_mode == "depth"
+        if enable_pointcloud_camera:
             self.pointcloud_camera = Camera(self.cfg.pointcloud_camera_cfg)
             self.scene.sensors["pointcloud_camera"] = self.pointcloud_camera
         # self.scene.sensors["contact_forces_door1"] = ContactSensor(self.cfg.contact_forces_door1)
