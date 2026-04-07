@@ -745,7 +745,7 @@ def state_machine_offline_left_pull_door(
     retreat_z_lift = 0.04
     push_contact_x_offset = -0.3
     push_contact_y_offset = -0.2
-    push_contact_z_offset = 0.15
+    push_contact_z_offset = 0.1
     contact_virtual_door_angle = 1.0
     push_door_open_angle = 1.5
 
@@ -754,7 +754,7 @@ def state_machine_offline_left_pull_door(
         device=device,
         dtype=q_robot.dtype,
     )
-    traverse_mid_x = 0.4
+    traverse_mid_x = 0.45
     traverse_mid_y = -0.05
     traverse_far_x = -0.5
 
