@@ -188,6 +188,7 @@ class DooropeningEnv(DirectRLEnv):
         self.step_count = 0
         self.reset_progress_total = self.cfg.reset_progress_total
         self.adr_reset_progress_total = self.cfg.adr_reset_progress_total
+        self._wandb_step = 0
 
         self.alive_base = self.cfg.alive_base
         self.alive_bonus = self.cfg.alive_bonus
@@ -210,6 +211,10 @@ class DooropeningEnv(DirectRLEnv):
         self._door_nominal_joint_damping = self.door.data.joint_damping.clone()
         self._dr_metrics_interval = max(int(self.cfg.dr_metrics_interval), 1)
         self._log_verbose_dr_metrics = bool(self.cfg.log_verbose_dr_metrics)
+
+    def set_train_info(self, _env_frames: int, algo=None, **kwargs):
+        self._wandb_step = int(getattr(algo, "dooropening_wandb_step", self._wandb_step)) if algo is not None else 0
+        self.step_count = self._wandb_step
 
     def _initialize_runtime_event_terms(self):
         if not self.cfg.events:
@@ -552,8 +557,7 @@ class DooropeningEnv(DirectRLEnv):
         return adjusted_actions
 
     def _pre_physics_step(self, actions: torch.Tensor):
-        self.step_count = self._sim_step_counter
-        actions = self.override_pregrasp_actions(actions)
+        self.step_count = self._wandb_step
         # delta actions
         self.scaled_actions = self._scale_actions(actions)
         targets = self.robot_dof_targets + self.dt * self.scaled_actions
@@ -1197,7 +1201,7 @@ class DooropeningEnv(DirectRLEnv):
         door_joint_vel = self.door.data.default_joint_vel[env_ids].clone()
 
         self.door.write_joint_state_to_sim(door_joint_pos, door_joint_vel, None, env_ids)
-        self.door.set_joint_position_target(door_joint_pos, None, env_ids)
+        # self.door.set_joint_position_target(door_joint_pos, None, env_ids)
 
         # self.last_actions[env_ids] = 0.0
         self.robot_dof_targets[env_ids, :] = self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]]
