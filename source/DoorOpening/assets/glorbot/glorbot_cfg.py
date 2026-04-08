@@ -17,7 +17,7 @@ import torch
 import isaaclab.sim as sim_utils
 from isaaclab.actuators.actuator_cfg import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
-from DoorOpening.assets.cache_utils import resolve_converter_cache_dir
+from DoorOpening.assets.cache_utils import resolve_converter_cache_dir, should_force_usd_conversion
 
 module_path = Path(__file__).resolve().parent
 root_path = module_path.parent
@@ -52,7 +52,7 @@ GLORBOT_CONFIG = ArticulationCfg(
             solver_position_iteration_count=ROBOT_SOLVER_POSITION_ITERS,
             solver_velocity_iteration_count=ROBOT_SOLVER_VELOCITY_ITERS,
         ),
-        force_usd_conversion=True,
+        force_usd_conversion=should_force_usd_conversion(),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             enabled_self_collisions=False,
             solver_position_iteration_count=ROBOT_SOLVER_POSITION_ITERS,
