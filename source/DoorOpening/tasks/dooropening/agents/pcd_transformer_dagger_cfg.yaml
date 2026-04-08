@@ -146,8 +146,8 @@ dagger:
   teacher_forcing_min_beta: 0.0
   log_interval: 100
   save_interval: 5000
-  reset_progress_total: 50000
-  adr_reset_progress_total: 25000
+  reset_progress_total: 100000
+  adr_reset_progress_total: 50000
   pointcloud_source: "lidar"
   robot_num_points: 30000
   sampler_render:
@@ -170,7 +170,7 @@ dagger:
   viser:
     enabled: false  # Mode 1: stream the selected env live to Viser.
     update_interval: 1
-    raw_interval: 1000  # Periodically flush raw replay snapshots every N iterations.
+    raw_interval: 5000  # Periodically flush raw replay snapshots every N iterations.
     env_id: 0
     show_policy_input: true
     point_size: 0.004
