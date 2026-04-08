@@ -185,10 +185,9 @@ class DooropeningEnv(DirectRLEnv):
 
         torch.set_printoptions(precision=4, sci_mode=False)
 
-        self.step_count = 0
         self.reset_progress_total = self.cfg.reset_progress_total
         self.adr_reset_progress_total = self.cfg.adr_reset_progress_total
-        self._wandb_step = 0
+        self._rlgames_env_frames = 0
 
         self.alive_base = self.cfg.alive_base
         self.alive_bonus = self.cfg.alive_bonus
@@ -212,9 +211,12 @@ class DooropeningEnv(DirectRLEnv):
         self._dr_metrics_interval = max(int(self.cfg.dr_metrics_interval), 1)
         self._log_verbose_dr_metrics = bool(self.cfg.log_verbose_dr_metrics)
 
-    def set_train_info(self, _env_frames: int, algo=None, **kwargs):
-        self._wandb_step = int(getattr(algo, "dooropening_wandb_step", self._wandb_step)) if algo is not None else 0
-        self.step_count = self._wandb_step
+    def set_train_info(self, env_frames: int, algo=None, **kwargs):
+        self._rlgames_env_frames = int(env_frames)
+
+    def _get_curriculum_step_count(self) -> int:
+        # Curriculum/reset scheduling should follow actual env progress, not logging side effects.
+        return int(self.common_step_counter)
 
     def _initialize_runtime_event_terms(self):
         if not self.cfg.events:
@@ -297,10 +299,11 @@ class DooropeningEnv(DirectRLEnv):
 
     def _compute_curriculum_progress(self, progress_total: float) -> float:
         progress_total = max(float(progress_total), 1.0)
-        return min(float(self.step_count) / progress_total, 1.0)
+        return min(float(self._get_curriculum_step_count()) / progress_total, 1.0)
 
     def _log_dr_metrics(self):
-        if self.step_count % self._dr_metrics_interval != 0:
+        step_count = self._get_curriculum_step_count()
+        if step_count % self._dr_metrics_interval != 0:
             return
 
         progress = self._compute_curriculum_progress(self.adr_reset_progress_total)
@@ -328,15 +331,6 @@ class DooropeningEnv(DirectRLEnv):
         )
 
         self.extras["dr/increment"] = float(self.dooropening_adr.increment_counter)
-        # self.extras["dr/fraction"] = self.dooropening_adr.get_increment_fraction()
-        # self.extras["dr/scheduled_increment_from_step"] = float(scheduled_increment)
-        # self.extras["dr/step_count"] = int(self.step_count)
-        # self.extras["dr/common_env_step_count"] = int(self.common_step_counter)
-        # self.extras["dr/rlgames_frame_equivalent_from_sim_steps"] = float(
-        #     self.step_count * self.num_envs / max(self.cfg.decimation, 1)
-        # )
-        # self.extras["dr/frame_per_sim_step_expected"] = float(self.num_envs / max(self.cfg.decimation, 1))
-        # self.extras["dr/scheduled_fraction_from_step"] = progress
         self.extras["dr/robot_stiffness_min"] = float(robot_stiffness[0])
         self.extras["dr/robot_stiffness_max"] = float(robot_stiffness[1])
         self.extras["dr/robot_damping_min"] = float(robot_damping[0])
@@ -565,7 +559,6 @@ class DooropeningEnv(DirectRLEnv):
         return adjusted_actions
 
     def _pre_physics_step(self, actions: torch.Tensor):
-        self.step_count = self._wandb_step
         # delta actions
         self.scaled_actions = self._scale_actions(actions)
         targets = self.robot_dof_targets + self.dt * self.scaled_actions
@@ -1031,14 +1024,6 @@ class DooropeningEnv(DirectRLEnv):
         # self.extras["error/arm_joint_vel_err"] = arm_joint_vel_err.mean()
         # self.extras["error/finger_joint_vel_err"] = finger_joint_vel_err.mean()
 
-        # progress = min(self.step_count / self.reset_progress_total, 1.0)
-        # alpha = 1 - 0.1**(2 ** (2.0 - 4.0 * progress))
-        # probs = torch.tensor(
-        #     [(1 - alpha) * (alpha ** i) for i in range(self.ref_motion_lib.key_indices.shape[1])],
-        #     device=self.ref_motion_lib.key_indices.device
-        # )
-        # probs = probs / probs.sum()
-        # self.extras["reset/prob_get_first_key_frame"] = probs[0]
         if self.prob_get_first_key_frame is not None:
             self.extras["reset/prob_get_first_key_frame"] = float(self.prob_get_first_key_frame)
 
@@ -1138,7 +1123,7 @@ class DooropeningEnv(DirectRLEnv):
         if not self.early_stopping:
             return False, time_out
         self._get_intermediate_values()
-        progress = min(self.step_count / self.reset_progress_total, 1.0)
+        progress = min(self._get_curriculum_step_count() / self.reset_progress_total, 1.0)
         reset_key_body_pos_delta = self.reset_key_body_pos_delta_min + (self.reset_key_body_pos_delta_max - self.reset_key_body_pos_delta_min) * progress
         reset_key_body_quat_delta = self.reset_key_body_quat_delta_min + (self.reset_key_body_quat_delta_max - self.reset_key_body_quat_delta_min) * progress
         reset_door_joint_pos_delta = self.reset_door_joint_pos_delta_min + (self.reset_door_joint_pos_delta_max - self.reset_door_joint_pos_delta_min) * progress
@@ -1184,7 +1169,11 @@ class DooropeningEnv(DirectRLEnv):
             env_ids = self.robot._ALL_INDICES
 
         self._update_adr_ranges()
-        reset_frame_idx, self.prob_get_first_key_frame = self.ref_motion_lib.reset(env_ids, step_count=self.step_count, reset_progress_total=self.reset_progress_total)
+        reset_frame_idx, self.prob_get_first_key_frame = self.ref_motion_lib.reset(
+            env_ids,
+            step_count=self._get_curriculum_step_count(),
+            reset_progress_total=self.reset_progress_total,
+        )
         self.max_trial_steps[env_ids] = ((self.ref_motion_lib.num_frames - reset_frame_idx) // self.ref_motion_lib.velocity).long()
         self._sample_reset_randomization(env_ids)
 
