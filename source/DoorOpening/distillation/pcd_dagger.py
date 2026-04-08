@@ -199,8 +199,7 @@ class Dagger:
                 raise ImportError("wandb logging is enabled, but the 'wandb' package is not installed.")
             self._init_wandb(summaries_dir)
 
-        self.student_action_history = None
-        self.teacher_action_history = None
+        self.implemented_action_history = None
         self.student_proprio_history = None
         self.teacher_forcing_env_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.current_rewards = torch.zeros((self.num_envs, 1), dtype=torch.float32, device=self.device)
@@ -326,7 +325,7 @@ class Dagger:
             raise ValueError("PCDTransformer student config must include q_hand in state_encoders_cfg.")
 
         self.action_history_state_specs = OrderedDict()
-        self.max_student_action_history_lag = 1
+        self.max_implemented_action_history_lag = 1
         for key in self.state_encoders_keys:
             spec = self._parse_action_history_state_key(key)
             if spec is None:
@@ -341,7 +340,7 @@ class Dagger:
                     )
                 )
             self.action_history_state_specs[key] = spec
-            self.max_student_action_history_lag = max(self.max_student_action_history_lag, spec["lag"])
+            self.max_implemented_action_history_lag = max(self.max_implemented_action_history_lag, spec["lag"])
         if student_ckpt is not None and self.action_history_state_specs and self.rank == 0:
             print(
                 "Warning: student checkpoint was loaded while prev_action_* inputs are active. "
@@ -491,13 +490,8 @@ class Dagger:
         }
 
     def _init_history_buffers(self):
-        self.student_action_history = torch.zeros(
-            (self.num_envs, self.max_student_action_history_lag, self.num_actions),
-            dtype=torch.float32,
-            device=self.device,
-        )
-        self.teacher_action_history = torch.zeros(
-            (self.num_envs, 1, self.num_actions),
+        self.implemented_action_history = torch.zeros(
+            (self.num_envs, self.max_implemented_action_history_lag, self.num_actions),
             dtype=torch.float32,
             device=self.device,
         )
@@ -537,11 +531,14 @@ class Dagger:
         history_buffer[env_ids] = 0.0
 
     def _seed_student_histories(self, env_ids=None):
+        prev_action_seed = self._get_implemented_action_vector().detach()
         proprio_seed = self._get_student_proprio_vector().detach()
 
         if env_ids is None:
-            if self.student_action_history is not None:
-                self.student_action_history.zero_()
+            if self.implemented_action_history is not None:
+                self.implemented_action_history[:] = prev_action_seed.unsqueeze(1).expand(
+                    -1, self.implemented_action_history.shape[1], -1
+                )
             if self.student_proprio_history is not None:
                 self.student_proprio_history[:] = proprio_seed.unsqueeze(1).expand(
                     -1, self.student_proprio_history.shape[1], -1
@@ -550,8 +547,10 @@ class Dagger:
 
         if env_ids.numel() == 0:
             return
-        if self.student_action_history is not None:
-            self.student_action_history[env_ids] = 0.0
+        if self.implemented_action_history is not None:
+            self.implemented_action_history[env_ids] = prev_action_seed[env_ids].unsqueeze(1).expand(
+                -1, self.implemented_action_history.shape[1], -1
+            )
         if self.student_proprio_history is not None:
             self.student_proprio_history[env_ids] = proprio_seed[env_ids].unsqueeze(1).expand(
                 -1, self.student_proprio_history.shape[1], -1
@@ -562,6 +561,21 @@ class Dagger:
         if q_pos.ndim != 2:
             raise RuntimeError(f"Expected joint_pos to be rank-2, got shape {tuple(q_pos.shape)}.")
         return q_pos
+
+    def _get_implemented_action_vector(self):
+        # prev_action_* should reflect the actual joint-position targets sent to
+        # the PD controller, not the normalized delta policy actions.
+        pd_targets = getattr(self.ov_env, "applied_robot_dof_targets", None)
+        if pd_targets is None:
+            pd_targets = getattr(self.ov_env, "robot_dof_targets", None)
+        if pd_targets is None:
+            raise RuntimeError(
+                "Expected the environment to expose applied_robot_dof_targets or robot_dof_targets "
+                "for implemented action history features."
+            )
+        if pd_targets.ndim != 2:
+            raise RuntimeError(f"Expected PD target tensor to be rank-2, got shape {tuple(pd_targets.shape)}.")
+        return pd_targets
 
     def _init_pointcloud_assets(self):
         asset_index_by_dir = {
@@ -1213,7 +1227,7 @@ class Dagger:
         batch_dict = {
             "is_train": False,
             "obs": obs[self.teacher_obs_type],
-            "prev_actions": self.teacher_action_history[:, 0, :],
+            "prev_actions": self.implemented_action_history[:, 0, :],
         }
         with torch.no_grad():
             res_dict = self.teacher_model(batch_dict)
@@ -1533,7 +1547,9 @@ class Dagger:
 
         palm_pos_base = world_to_local(palm_pos_w, robot_base_pos_w, robot_base_quat_w).squeeze(1)
         door_pcd_base = self._sample_door_pointcloud_base()
-        current_prev_action = self.student_action_history[:, 0, :] if self.student_action_history is not None else None
+        current_implemented_action = (
+            self.implemented_action_history[:, 0, :] if self.implemented_action_history is not None else None
+        )
 
         obs = OrderedDict()
         for key in self.state_encoders_keys:
@@ -1546,10 +1562,10 @@ class Dagger:
             elif key in self.action_history_state_specs:
                 spec = self.action_history_state_specs[key]
                 obs[key] = self._get_history_tensor(
-                    self.student_action_history,
+                    self.implemented_action_history,
                     lag=spec["lag"],
                     value_indices=spec["indices"],
-                    reference_values=current_prev_action,
+                    reference_values=current_implemented_action,
                 )
             elif key in self.proprio_history_state_specs:
                 spec = self.proprio_history_state_specs[key]
@@ -1818,7 +1834,6 @@ class Dagger:
         try:
             obs = self.env.reset()[0]
             self._seed_student_histories()
-            self.teacher_action_history.zero_()
             self.episode_reached_last_frame.zero_()
             self._resample_teacher_forcing_env_mask(0)
 
@@ -1869,10 +1884,10 @@ class Dagger:
                 self._sync_timing_device()
                 self._record_timing("env_step_ms", time.perf_counter() - env_step_start_time)
                 self.latest_env_metrics = self._collect_env_metrics(info)
+                current_pd_targets = self._get_implemented_action_vector().detach().clone()
 
-                self._push_history(self.student_action_history, step_actions)
+                self._push_history(self.implemented_action_history, current_pd_targets)
                 self._push_history(self.student_proprio_history, current_q_pos)
-                self._push_history(self.teacher_action_history, step_actions)
                 self.frame += self.num_envs
 
                 self.current_rewards += rew.unsqueeze(-1)
@@ -1884,7 +1899,6 @@ class Dagger:
                     self.current_rewards[done_mask] = 0.0
                     self.current_lengths[done_mask] = 0.0
                     self._seed_student_histories(done_mask)
-                    self._reset_history(self.teacher_action_history, done_mask)
                     self.episode_reached_last_frame[done_mask] = False
                     self._resample_teacher_forcing_env_mask(iteration + 1, done_mask)
 
