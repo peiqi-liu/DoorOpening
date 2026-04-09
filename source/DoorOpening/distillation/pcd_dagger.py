@@ -208,10 +208,10 @@ class Dagger:
         self.completed_lengths = deque(maxlen=self.games_to_track)
         self.completed_successes = deque(maxlen=self.games_to_track)
         self.episode_reached_last_frame = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self.latest_env_metrics = {}
         self.student_update_steps = 0
         self.last_local_update_batch_size = 0
         self.last_global_update_batch_size = 0
+        self.latest_student_proprio_vector = None
         self._timing_stats = {
             "iteration_ms": {"sum_ms": 0.0, "count": 0},
             "student_obs_ms": {"sum_ms": 0.0, "count": 0},
@@ -557,7 +557,11 @@ class Dagger:
             )
 
     def _get_student_proprio_vector(self):
-        q_pos = self.ov_env.robot.data.joint_pos
+        get_student_joint_pos_obs = getattr(self.ov_env, "get_student_joint_pos_obs", None)
+        if callable(get_student_joint_pos_obs):
+            q_pos = get_student_joint_pos_obs(use_noise=True)
+        else:
+            q_pos = self.ov_env.robot.data.joint_pos
         if q_pos.ndim != 2:
             raise RuntimeError(f"Expected joint_pos to be rank-2, got shape {tuple(q_pos.shape)}.")
         return q_pos
@@ -1539,11 +1543,13 @@ class Dagger:
         return int(batch_size.item())
 
     def _build_student_obs(self):
-        q_pos = self.ov_env.robot.data.joint_pos
+        q_pos = self._get_student_proprio_vector()
         door_joint_pos = self.ov_env.door.data.joint_pos
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
         palm_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_palm_body_idx].unsqueeze(1)
+
+        self.latest_student_proprio_vector = q_pos.detach().clone()
 
         palm_pos_base = world_to_local(palm_pos_w, robot_base_pos_w, robot_base_quat_w).squeeze(1)
         door_pcd_base = self._sample_door_pointcloud_base()
@@ -1705,25 +1711,6 @@ class Dagger:
             return None
         return float(sum(values) / len(values))
 
-    def _to_loggable_scalar(self, value):
-        if isinstance(value, torch.Tensor):
-            if value.numel() != 1:
-                return None
-            return float(value.detach().cpu().item())
-        if isinstance(value, (int, float, bool)):
-            return float(value)
-        return None
-
-    def _collect_env_metrics(self, info):
-        metrics = {}
-        if isinstance(info, dict):
-            for key, value in info.items():
-                scalar = self._to_loggable_scalar(value)
-                if scalar is not None:
-                    metrics[key] = scalar
-
-        return metrics
-
     def _update_completed_episode_metrics(self, done_mask, timed_out):
         if done_mask.numel() == 0:
             return
@@ -1741,18 +1728,11 @@ class Dagger:
     def _log(self, iteration, total_loss, action_loss, teacher_forcing_beta):
         if iteration % self.log_interval != 0:
             return
-        mean_reward = self.current_rewards.mean().item()
-        mean_length = self.current_lengths.mean().item()
         episode_reward = self._mean_completed_metric(self.completed_rewards)
         episode_length = self._mean_completed_metric(self.completed_lengths)
         success_rate = self._mean_completed_metric(self.completed_successes)
-        active_success_rate = self.episode_reached_last_frame.float().mean().item()
-        mean_ref_frame_idx = self.ov_env.ref_motion_lib.frame_idx.float().mean().item()
         teacher_env_fraction = self._get_teacher_forcing_env_fraction()
         student_env_fraction = 1.0 - teacher_env_fraction
-        success_region = None
-        if hasattr(self.ov_env, "in_success_region"):
-            success_region = self.ov_env.in_success_region.float().mean().item()
         timing_means = self._consume_timing_means()
 
         if self.rank == 0:
@@ -1766,35 +1746,18 @@ class Dagger:
             print("Student Update Steps:", self.student_update_steps)
             print("Last Local Update Batch Size:", self.last_local_update_batch_size)
             print("Last Global Update Batch Size:", self.last_global_update_batch_size)
-            # print("Mean Reward:", mean_reward)
-            # print("Mean Length:", mean_length)
-            # if episode_reward is not None:
-            #     print("Episode Reward:", episode_reward)
+            if episode_reward is not None:
+                print("Episode Reward:", episode_reward)
             if episode_length is not None:
                 print("Episode Length:", episode_length)
             if success_rate is not None:
                 print("Success Rate:", success_rate)
-            # print("Active Success Rate:", active_success_rate)
-            # print("Mean Ref Frame Idx:", mean_ref_frame_idx)
-            if success_region is not None:
-                print("Success Region:", success_region)
             if timing_means["iteration_ms"] is not None:
                 print("Iteration Time (ms):", timing_means["iteration_ms"])
-            # if timing_means["student_obs_ms"] is not None:
-            #     print("Student Obs Time (ms):", timing_means["student_obs_ms"])
-            # if timing_means["pointcloud_ms"] is not None:
-            #     print("Pointcloud Time (ms):", timing_means["pointcloud_ms"])
-            # if timing_means["env_step_ms"] is not None:
-            #     print("Env Step Time (ms):", timing_means["env_step_ms"])
 
         metrics = {
             "loss/total": float(total_loss.detach().cpu()),
             "loss/action": float(action_loss.detach().cpu()),
-            "stats/mean_reward": mean_reward,
-            "stats/mean_length": mean_length,
-            "stats/active_success_rate": active_success_rate,
-            "stats/ref_frame_idx": mean_ref_frame_idx,
-            "stats/completed_episodes": len(self.completed_lengths),
             "dist/world_size": self.world_size,
             "dist/update_steps": self.student_update_steps,
             "dist/last_local_update_batch_size": self.last_local_update_batch_size,
@@ -1806,8 +1769,6 @@ class Dagger:
             metrics["stats/episode_length"] = episode_length
         if success_rate is not None:
             metrics["stats/success_rate"] = success_rate
-        if success_region is not None:
-            metrics["stats/success_region"] = success_region
         if teacher_forcing_beta is not None:
             metrics["stats/teacher_forcing_beta"] = teacher_forcing_beta
         metrics["stats/teacher_rollout_env_fraction"] = teacher_env_fraction
@@ -1820,7 +1781,6 @@ class Dagger:
             metrics["timing/pointcloud_ms"] = timing_means["pointcloud_ms"]
         if timing_means["env_step_ms"] is not None:
             metrics["timing/env_step_ms"] = timing_means["env_step_ms"]
-        metrics.update(self.latest_env_metrics)
         self._wandb_log(metrics, step=iteration)
 
     def distill(self):
@@ -1833,6 +1793,7 @@ class Dagger:
 
         try:
             obs = self.env.reset()[0]
+            self.latest_student_proprio_vector = None
             self._seed_student_histories()
             self.episode_reached_last_frame.zero_()
             self._resample_teacher_forcing_env_mask(0)
@@ -1851,7 +1812,9 @@ class Dagger:
                 student_output = self._student_forward(student_obs)
                 student_actions = torch.clamp(student_output["action"][:, 0, :], -1.0, 1.0)
                 # Capture q_t before stepping so prev_q features align with the next state.
-                current_q_pos = self._get_student_proprio_vector().detach().clone()
+                if self.latest_student_proprio_vector is None:
+                    raise RuntimeError("Expected the latest student proprio vector to be captured while building obs.")
+                current_q_pos = self.latest_student_proprio_vector.detach().clone()
 
                 teacher_actions = None
                 total_loss = None
@@ -1876,14 +1839,12 @@ class Dagger:
                     teacher_actions,
                     iteration,
                 )
-                step_actions = self._override_actions_for_pregrasp(step_actions)
                 self._update_last_frame_tracker()
                 self._sync_timing_device()
                 env_step_start_time = time.perf_counter()
-                obs, rew, out_of_reach, timed_out, info = self.env.step(step_actions)
+                obs, rew, out_of_reach, timed_out, _ = self.env.step(step_actions)
                 self._sync_timing_device()
                 self._record_timing("env_step_ms", time.perf_counter() - env_step_start_time)
-                self.latest_env_metrics = self._collect_env_metrics(info)
                 current_pd_targets = self._get_implemented_action_vector().detach().clone()
 
                 self._push_history(self.implemented_action_history, current_pd_targets)

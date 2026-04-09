@@ -428,7 +428,7 @@ def main(env_cfg, agent_cfg: dict):
         "teacher": {
             "cfg": teacher_cfg,
             "ckpt": teacher_ckpt,
-            "obs_type": "policy",
+            "obs_type": "critic",
         },
         "play_policy": args_cli.play_policy,
         "dagger": dagger_runtime_cfg,

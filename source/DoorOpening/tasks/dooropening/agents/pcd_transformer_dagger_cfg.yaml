@@ -140,14 +140,14 @@ dagger:
   weight_decay: 1.0e-4
   grad_clip: 1.0
   num_iters: 250000
-  teacher_forcing_warmup_iters: 10000
-  teacher_forcing_transition_iters: 40000
+  teacher_forcing_warmup_iters: 5000
+  teacher_forcing_transition_iters: 20000
   teacher_forcing_schedule: "linear"
   teacher_forcing_min_beta: 0.0
   log_interval: 100
   save_interval: 5000
-  reset_progress_total: 100000
-  adr_reset_progress_total: 50000
+  reset_progress_total: 50000
+  adr_reset_progress_total: 25000
   pointcloud_source: "lidar"
   robot_num_points: 30000
   sampler_render:
