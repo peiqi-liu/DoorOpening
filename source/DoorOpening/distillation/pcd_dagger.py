@@ -797,6 +797,8 @@ class Dagger:
         self._viser_record_episode_env_id = 0
         self._viser_record_episode_index = 0
         self._viser_record_episode_start_iteration = None
+        self._viser_record_raw_active = False
+        self._viser_next_raw_capture_iteration = 0
 
         # Keep replay outputs next to checkpoints by default so a run's artifacts stay together.
         default_record_dir = Path(self.nn_dir).parent if self.nn_dir is not None else Path(os.getcwd())
@@ -919,7 +921,7 @@ class Dagger:
                 print(f"Viser live update interval: every {self.viser_update_interval} training iterations.")
             if self.viser_replay_enabled:
                 print(f"Viser replay capture enabled for env {self.viser_env_id}.")
-                print("Replay capture waits for that env to reset, then captures every step until the episode ends.")
+                print("Replay capture starts only at selected-env episode boundaries and records every step until the episode ends.")
             if self.viser_serializer_enabled:
                 print(
                     "Serialized replays will be written as "
@@ -931,8 +933,8 @@ class Dagger:
                     f"{self._format_iterated_record_path(self.viser_raw_path, '<episode_tag>')}"
                 )
                 print(
-                    "Raw replay snapshots will also be flushed every "
-                    f"{self.viser_raw_interval} iterations during active replay capture."
+                    "Raw replay capture will start at most once every "
+                    f"{self.viser_raw_interval} iterations, with the same cadence used for mid-episode snapshots."
                 )
 
     def _get_viser_env_id(self):
@@ -941,12 +943,18 @@ class Dagger:
             return 0
         return max(0, min(int(self.viser_env_id), self.num_envs - 1))
 
-    def _start_viser_record_episode(self, iteration, env_id):
+    def _should_capture_viser_raw_episode(self, iteration):
+        if not self.viser_raw_enabled:
+            return False
+        return int(iteration) >= int(self._viser_next_raw_capture_iteration)
+
+    def _start_viser_record_episode(self, iteration, env_id, capture_raw):
         """Start a fresh replay buffer for the next complete episode of the selected env."""
         self._viser_record_episode_active = True
         self._viser_record_episode_env_id = int(env_id)
         self._viser_record_episode_index += 1
         self._viser_record_episode_start_iteration = int(iteration)
+        self._viser_record_raw_active = bool(capture_raw)
         self._viser_record_frames = []
         self._viser_record_frame_count = 0
         self._viser_record_latest_iteration = None
@@ -954,6 +962,8 @@ class Dagger:
         self._viser_record_last_raw_flush_frame_count = 0
         self._viser_record_limit_reached = False
         self._viser_cached_ground_truth_pcd_world = None
+        if self._viser_record_raw_active:
+            self._viser_next_raw_capture_iteration = int(iteration) + self.viser_raw_interval
         if self.viser_serializer_enabled and self._viser_server is not None:
             # Reset the serializer so each `.viser` file contains exactly one episode.
             self._viser_serializer = self._viser_server.get_scene_serializer()
@@ -994,6 +1004,7 @@ class Dagger:
         self._viser_record_limit_reached = False
         self._viser_record_episode_active = False
         self._viser_record_episode_start_iteration = None
+        self._viser_record_raw_active = False
         self._viser_cached_ground_truth_pcd_world = None
 
     def _build_viser_raw_payload(self, latest_iteration, episode_complete):
@@ -1016,7 +1027,7 @@ class Dagger:
         }
 
     def _maybe_flush_viser_raw_snapshot(self, iteration):
-        if not self.viser_raw_enabled or self.rank != 0:
+        if not self._viser_record_raw_active or self.rank != 0:
             return
         if self._viser_record_frame_count <= 0:
             return
@@ -1033,7 +1044,7 @@ class Dagger:
         self._viser_record_last_raw_flush_frame_count = self._viser_record_frame_count
 
     def _should_capture_viser_replay_step(self, iteration):
-        """Capture every step of one selected-env replay episode, starting only at an episode boundary."""
+        """Capture one selected-env replay episode at a time, starting only at an eligible episode boundary."""
         if not self.viser_replay_enabled:
             return False
 
@@ -1054,7 +1065,11 @@ class Dagger:
         if current_length != 0:
             return False
 
-        self._start_viser_record_episode(iteration, env_id)
+        capture_raw = self._should_capture_viser_raw_episode(iteration)
+        if not self.viser_serializer_enabled and not capture_raw:
+            return False
+
+        self._start_viser_record_episode(iteration, env_id, capture_raw=capture_raw)
         self._viser_capture_env_id = self._viser_record_episode_env_id
         return True
 
@@ -1221,7 +1236,7 @@ class Dagger:
             )
             self._viser_record_limit_reached = True
 
-        if self.viser_raw_enabled:
+        if self._viser_record_raw_active:
             # Raw replay metadata stores world-frame points plus robot/door state for offline playback.
             record_world_points = lambda pts, drop_zero=False: self._prepare_viser_world_points_from_local(
                 pts,
@@ -1301,7 +1316,7 @@ class Dagger:
             if self._viser_server is not None:
                 self._viser_serializer = self._viser_server.get_scene_serializer()
 
-        if self.viser_raw_enabled:
+        if self._viser_record_raw_active:
             # The raw torch payload preserves higher-level metadata for custom offline analysis/reconstruction.
             payload = self._build_viser_raw_payload(
                 latest_iteration=latest_iteration,

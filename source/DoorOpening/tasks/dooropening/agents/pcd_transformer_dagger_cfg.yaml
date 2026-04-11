@@ -179,7 +179,7 @@ dagger:
   viser:
     enabled: false  # Mode 1: stream the selected env live to Viser.
     update_interval: 1
-    raw_interval: 50000  # Periodically flush raw replay snapshots every N iterations.
+    raw_interval: 50000  # Start raw `.pt` replay capture at most once every N iterations; long captures also snapshot at this cadence.
     env_id: 0
     show_policy_input: true
     point_size: 0.004
