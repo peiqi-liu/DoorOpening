@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-from DoorOpening.assets.door.door_cfg import DOOR_CONFIG, ALL_DOOR_CONFIGS
+from DoorOpening.assets.door.door_cfg import ALL_DOOR_CONFIGS
 from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
 from DoorOpening.constants.door_constants import DOOR_BODY_NAMES, DOOR_JOINT_NAMES
@@ -184,29 +184,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         'finger_joint_11',
     ]
 
-    abduction_joints = [
-        # actual abduction joints
-        'finger_joint_0',
-        'finger_joint_12',
-        'finger_joint_4',
-        'finger_joint_8',
-        # additional joints we want to fix at default position
-        'finger_joint_3',
-        'finger_joint_7',
-        'finger_joint_11',
-        'finger_joint_13',
-        'finger_joint_14',
-        'finger_joint_15',
-    ]
-
-    contact_forces_door1 = ContactSensorCfg(
-        prim_path="/World/envs/env_.*/Door/link_1",
-        update_period=0.0,
-        history_length=6,
-        debug_vis=True,
-        filter_prim_paths_expr=["/World/envs/env_.*/Robot", "/World/envs/env_.*/Door/link_2"],
-    )
-
     contact_forces_door2 = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Door/link_2",
         update_period=0.0,
@@ -232,17 +209,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "/World/envs/env_.*/Robot/fingertip_3",
         ],
     )
-
-    contact_forces_robot_palm_center = ContactSensorCfg(
-        prim_path="/World/envs/env_.*/Robot/palm_center",
-        update_period=0.0,
-        history_length=6,
-        debug_vis=True,
-        filter_prim_paths_expr=["/World/envs/env_.*/Door/link_2"],
-    )
-
-    # contact_sensor_names = ["contact_forces_door1", "contact_forces_door2", "contact_forces_robot_palm_center"]
-    contact_sensor_names = ["contact_forces_door2"]
 
     # Pointcloud render mode:
     # - "none": no on-robot pointcloud camera sensor (default).
@@ -300,7 +266,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     actuated_joints_num = len(arm_joints) + len(base_joints) + len(finger_joints)
     action_space = actuated_joints_num * 1
     # action_space = len(arm_joints) + len(base_joints) + 4
-    # observation_space = actuated_joints_num * 2 + len(door_body_names) * 3 + len(robot_key_bodies) * 3 * 2 + len(door_joint_names) + len(door_joint_names) + len(contact_sensor_names) * 3
     twist_observation_space = len(twist_indices) * (
         len(robot_key_bodies) * 3 +
         len(robot_key_bodies) * 6 +
@@ -368,7 +333,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # This variable is used to indicate when we stop increasing the tolerance and reset the env from the first key frame for the greatest probability
     reset_progress_total = 7.5e5
     # ADR should ramp faster than the reference-motion reset curriculum so physics randomization is not lagging behind.
-    adr_reset_progress_total = 3e5
+    adr_reset_progress_total = 2e5
 
     alive_base = 10.0
     alive_bonus = 20.0

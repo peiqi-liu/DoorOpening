@@ -1383,8 +1383,7 @@ class Dagger:
         }
         with torch.no_grad():
             res_dict = self.teacher_model(batch_dict)
-        mus = res_dict["mus"]
-        adjusted_actions = self._override_actions_for_pregrasp(torch.clamp(mus, -1.0, 1.0))
+        adjusted_actions = self._override_actions_for_pregrasp(torch.clamp(res_dict["mus"], -1.0, 1.0))
         return {
             "mus": adjusted_actions,
             "actions": adjusted_actions,
