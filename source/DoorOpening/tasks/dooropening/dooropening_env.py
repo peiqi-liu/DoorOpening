@@ -82,26 +82,6 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_abduction_default_pos = self.robot.data.default_joint_pos[..., robot_abduction_dof_idx]
         self.finger_dof_names_to_id = {name: idx for idx, name in enumerate(finger_joint_names)}
         # self.robot_abduction_dof_idx_in_targets = [self.finger_dof_names_to_id[name] + self.num_base_joints + self.num_arm_joints for name in self.cfg.abduction_joints]
-        self.close_finger_joints = torch.tensor(
-            [self.cfg.close_finger_joints[name] for name in finger_joint_names], device=self.device
-        )
-        self.open_finger_joints = torch.tensor(
-            [self.cfg.open_finger_joints[name] for name in finger_joint_names], device=self.device
-        )
-        self._finger_close_direction = torch.sign(self.close_finger_joints - self.open_finger_joints)
-        self._finger_close_direction = torch.where(
-            self._finger_close_direction == 0.0,
-            torch.ones_like(self._finger_close_direction),
-            self._finger_close_direction,
-        )
-        self._handle_contact_force = torch.zeros(self.num_envs, device=self.device)
-        self.handle_contact_force_threshold = float(self.cfg.handle_contact_force_threshold)
-        self.handle_contact_force_saturation = max(
-            float(self.cfg.handle_contact_force_saturation),
-            self.handle_contact_force_threshold + 1e-6,
-        )
-        self.finger_contact_release_step = float(self.cfg.finger_contact_release_step)
-
         self._robot_base_link_idx, self.robot_base_link_name = self.robot.find_bodies(self.cfg.base_link_name)
         self._door_body_idx, self.door_body_names = self.door.find_bodies(self.cfg.door_body_names)
         self._door_base_link_idx, self.door_base_link_name = self.door.find_bodies(self.cfg.door_base_frame_name)
@@ -570,38 +550,6 @@ class DooropeningEnv(DirectRLEnv):
         )
         return target_noise
 
-    def _compute_handle_contact_force(self) -> torch.Tensor:
-        contact_sensor = self.scene.sensors["contact_forces_door2"]
-        force_matrix = contact_sensor.data.force_matrix_w
-        if force_matrix is not None:
-            return torch.linalg.norm(force_matrix, dim=-1).sum(dim=(-1, -2))
-        return torch.linalg.norm(contact_sensor.data.net_forces_w, dim=-1).sum(dim=-1)
-
-    def _apply_handle_contact_relief(self, targets: torch.Tensor) -> torch.Tensor:
-        if self.finger_contact_release_step <= 0.0:
-            return targets
-
-        overload = (self._handle_contact_force - self.handle_contact_force_threshold) / (
-            self.handle_contact_force_saturation - self.handle_contact_force_threshold
-        )
-        overload = torch.clamp(overload, min=0.0, max=1.0)
-        if not bool(torch.any(overload > 0.0)):
-            return targets
-
-        close_direction = self._finger_close_direction.unsqueeze(0)
-        finger_targets = targets[:, self._target_finger_slice]
-        current_finger_pos = self.robot.data.joint_pos[:, self._robot_finger_dof_idx]
-        relieved_targets = current_finger_pos - overload.unsqueeze(-1) * self.finger_contact_release_step * close_direction
-
-        signed_targets = finger_targets * close_direction
-        signed_relieved_targets = relieved_targets * close_direction
-        targets[:, self._target_finger_slice] = torch.where(
-            overload.unsqueeze(-1) > 0.0,
-            torch.minimum(signed_targets, signed_relieved_targets) * close_direction,
-            finger_targets,
-        )
-        return targets
-
     def _scale_actions(self, actions: torch.Tensor) -> torch.Tensor:
         scaled_actions = actions.clamp(-1.0, 1.0)
         scaled_actions[:, :self.num_base_joints] = scaled_actions[:, :self.num_base_joints] * self.cfg.base_action_scale
@@ -648,12 +596,6 @@ class DooropeningEnv(DirectRLEnv):
         targets = self.robot_dof_targets + self.dt * self.scaled_actions
         # Optional: lock the abduction joints
         # targets[..., self.robot_abduction_dof_idx_in_targets] = self.robot_abduction_default_pos
-        # targets[..., self.num_base_joints + self.num_arm_joints:] = torch.where( \
-        #     (torch.linalg.norm(targets[..., self.num_base_joints + self.num_arm_joints:] - self.close_finger_joints, dim=-1) < \
-        #     torch.linalg.norm(targets[..., self.num_base_joints + self.num_arm_joints:] - self.open_finger_joints, dim=-1)).unsqueeze(-1), \
-        #     self.close_finger_joints[None, :], \
-        #     self.open_finger_joints[None, :] \
-        # )
         # Optional: use tendon actions to control the finger joints
         # tendon_actions = leap_joints_to_tendon(targets[..., self.num_base_joints + self.num_arm_joints:], self.finger_dof_names_to_id, device=self.device)
         # targets[..., self.num_base_joints + self.num_arm_joints:] = tendon_to_joint_angle_utils(self.robot, tendon_actions)[..., self._robot_finger_dof_idx]
@@ -661,8 +603,6 @@ class DooropeningEnv(DirectRLEnv):
         # self.scene.sensors["contact_forces_door1"].update(self.cfg.sim_dt, force_recompute=True)
         self.scene.sensors["contact_forces_door2"].update(self.cfg.sim_dt)
         # self.scene.sensors["contact_forces_robot_palm_center"].update(self.cfg.sim_dt, force_recompute=True)
-        # self._handle_contact_force[:] = self._compute_handle_contact_force()
-        # targets = self._apply_handle_contact_relief(targets)
 
         # print("robot body lin vel: ", self.robot.data.body_link_lin_vel_w[0, self._robot_key_body_idx])
         # print("robot body ang vel: ", self.robot.data.body_link_ang_vel_w[0, self._robot_key_body_idx])
@@ -993,6 +933,34 @@ class DooropeningEnv(DirectRLEnv):
 
         return keypoints_w
 
+    def get_handle_position_in_base_frame(self) -> torch.Tensor:
+        """Return the door handle center position in the robot base frame.
+
+        The handle geometry lives on door body ``link_2``. We approximate the
+        handle center using the midpoint of the two precomputed handle offsets,
+        then transform that point into the robot base frame.
+
+        Returns:
+            torch.Tensor: handle_pos_base with shape (num_envs, 3).
+        """
+        robot_base_pos_w = self.robot.data.body_pos_w[:, self._robot_base_body_link_idx]
+        robot_base_quat_w = self.robot.data.body_quat_w[:, self._robot_base_body_link_idx]
+
+        handle_body_local_idx = self.door_body_names.index("link_2")
+        handle_body_idx = int(self._door_body_idx[handle_body_local_idx])
+        handle_body_pos_w = self.door.data.body_pos_w[:, handle_body_idx]
+        handle_body_quat_w = self.door.data.body_quat_w[:, handle_body_idx]
+
+        handle_center_offset = self.handle_offsets.mean(dim=1)
+        handle_center_pos_w = quat_apply(handle_body_quat_w.float(), handle_center_offset.float()) + handle_body_pos_w
+        handle_center_pos_base = world_to_local(
+            handle_center_pos_w.unsqueeze(1),
+            robot_base_pos_w,
+            robot_base_quat_w,
+        ).squeeze(1)
+
+        return handle_center_pos_base
+
     def _get_intermediate_values(self):
         self.robot_key_body_pos = self.robot.data.body_pos_w[:, self._robot_key_body_idx]\
              - self.scene.env_origins.repeat((1, 1)).reshape(self.num_envs, 1, 3)
@@ -1178,13 +1146,8 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["stats/joint_limit_active_fraction"] = (
             joint_limit_active_fraction.reshape(self.num_envs, -1).mean().item()
         )
-        self.extras["safety/handle_contact_force_mean"] = self._handle_contact_force.mean().item()
-        self.extras["safety/handle_contact_force_max"] = self._handle_contact_force.max().item()
-        self.extras["safety/handle_contact_relief_fraction"] = (
-            (self._handle_contact_force > self.handle_contact_force_threshold).float().mean().item()
-        )
 
-        # 1. Base Alive Reward: Small constant for staying in the safety tunnel
+        # 1. Base alive reward: small constant for remaining active
         alive_base = self.alive_base 
         
         # 2. Difficulty Bonus: Extra points for staying alive during contact
@@ -1287,7 +1250,6 @@ class DooropeningEnv(DirectRLEnv):
         # self.last_actions[env_ids] = 0.0
         self.robot_dof_targets[env_ids, :] = self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]]
         self.applied_robot_dof_targets[env_ids, :] = self.robot_dof_targets[env_ids, :]
-        self._handle_contact_force[env_ids] = 0.0
         super()._reset_idx(env_ids)
         self._refresh_nominal_door_joint_gains(env_ids)
 

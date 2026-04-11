@@ -8,9 +8,7 @@ from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
 from DoorOpening.constants.door_constants import DOOR_BODY_NAMES, DOOR_JOINT_NAMES
 from DoorOpening.constants.robot_constants import (
-    CLOSE_FINGER_JOINT_VALUES,
     DEFAULT_JOINT_POS,
-    OPEN_FINGER_JOINT_VALUES,
     ROBOT_KEY_BODY_NAMES,
     ROBOT_RESET_KEY_BODY_NAMES,
     ROBOT_PALM_LINK_NAME,
@@ -271,10 +269,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         offset=CameraCfg.OffsetCfg(pos=(0.0, 0.0, 0.0), rot=POINTCLOUD_CAMERA_QUAT, convention="world"),
     )
 
-    close_finger_joints = CLOSE_FINGER_JOINT_VALUES
-
-    open_finger_joints = OPEN_FINGER_JOINT_VALUES
-
     door_body_names = DOOR_BODY_NAMES
 
     door_base_frame_name = "base"
@@ -335,9 +329,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     base_action_scale = 1.0
     arm_action_scale = 0.6
     finger_action_scale = 0.5
-    handle_contact_force_threshold = 20.0
-    handle_contact_force_saturation = 60.0
-    finger_contact_release_step = 0.08
 
     # Deep Mimic Reward Parameters
     robot_body_quat_w = 1.0
