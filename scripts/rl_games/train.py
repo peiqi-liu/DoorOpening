@@ -90,6 +90,8 @@ from isaaclab_rl.rl_games import MultiObserver, PbtAlgoObserver, RlGamesGpuEnv, 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
+from DoorOpening.assets.cache_utils import preconvert_shared_urdf_assets
+
 import DoorOpening.tasks # noqa: F401
 
 # import logger
@@ -252,6 +254,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # Let the env observe RL-Games frame/iteration counters without patching IsaacLab itself.
     _install_train_info_bridge()
+
+    # Serialize URDF-to-USD conversion across ranks before all workers build the same shared assets.
+    preconvert_shared_urdf_assets()
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)

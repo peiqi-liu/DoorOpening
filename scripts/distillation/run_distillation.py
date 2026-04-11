@@ -199,6 +199,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 
 from DoorOpening.distillation.pcd_dagger import Dagger
+from DoorOpening.assets.cache_utils import preconvert_shared_urdf_assets
 
 import DoorOpening.tasks # noqa: F401
 
@@ -391,6 +392,9 @@ def main(env_cfg, agent_cfg: dict):
         print(f"Distillation reset_progress_total: {env_cfg.reset_progress_total}")
         print(f"Distillation adr_reset_progress_total: {env_cfg.adr_reset_progress_total}")
 
+    # Serialize URDF-to-USD conversion across ranks before all workers build the same shared assets.
+    preconvert_shared_urdf_assets()
+
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
     ov_env = _configure_rollout_env_mode(env, args_cli.play_policy)
@@ -424,7 +428,7 @@ def main(env_cfg, agent_cfg: dict):
         "teacher": {
             "cfg": teacher_cfg,
             "ckpt": teacher_ckpt,
-            "obs_type": "policy",
+            "obs_type": "critic",
         },
         "play_policy": args_cli.play_policy,
         "dagger": dagger_runtime_cfg,

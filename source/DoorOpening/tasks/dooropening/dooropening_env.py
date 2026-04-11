@@ -183,6 +183,22 @@ class DooropeningEnv(DirectRLEnv):
             [key for key in robot_state_cfg if key.endswith("_noise")]
         )
         self.robot_state_biases = self._make_env_buffer_dict([key for key in robot_state_cfg if key.endswith("_bias")])
+        self.student_joint_pos_noise_widths = self._make_env_buffer_dict(
+            [
+                "base_xy_joint_pos_noise",
+                "base_rot_joint_pos_noise",
+                "arm_joint_pos_noise",
+                "finger_joint_pos_noise",
+            ]
+        )
+        self.student_joint_pos_biases = self._make_env_buffer_dict(
+            [
+                "base_xy_joint_pos_bias",
+                "base_rot_joint_pos_bias",
+                "arm_joint_pos_bias",
+                "finger_joint_pos_bias",
+            ]
+        )
         self._door_nominal_joint_stiffness = self.door.data.joint_stiffness.clone()
         self._door_nominal_joint_damping = self.door.data.joint_damping.clone()
         self._dr_metrics_interval = max(int(self.cfg.dr_metrics_interval), 1)
@@ -255,6 +271,9 @@ class DooropeningEnv(DirectRLEnv):
 
     def _make_env_buffer_dict(self, keys):
         return {key: torch.zeros((self.num_envs, 1), device=self.device) for key in keys}
+
+    def _custom_param_upper_limit(self, group: str, name: str) -> float:
+        return float(self.cfg.adr_custom_cfg_dict[group][name][1])
 
     def _current_custom_param(self, group: str, name: str) -> float:
         if not self._adr_enabled:
@@ -429,17 +448,82 @@ class DooropeningEnv(DirectRLEnv):
             width = value * torch.rand(num_ids, device=self.device)
             self.robot_state_biases[key][env_ids, 0] = width * (torch.rand(num_ids, device=self.device) - 0.5)
 
-    def _uniform_noise_like(self, values: torch.Tensor, width_key: str, bias_key: str | None = None):
-        width = self.robot_state_noise_widths[width_key]
+        for key in self.student_joint_pos_noise_widths:
+            self.student_joint_pos_noise_widths[key][env_ids, 0] = self._custom_param_upper_limit(
+                "robot_state_noise", key
+            )
+
+        for key in self.student_joint_pos_biases:
+            bias_limit = self._custom_param_upper_limit("robot_state_noise", key)
+            self.student_joint_pos_biases[key][env_ids, 0] = bias_limit * (
+                torch.rand(num_ids, device=self.device) - 0.5
+            )
+
+    def _uniform_noise_from_buffers(
+        self,
+        values: torch.Tensor,
+        width_buffers: dict[str, torch.Tensor],
+        width_key: str,
+        bias_buffers: dict[str, torch.Tensor] | None = None,
+        bias_key: str | None = None,
+    ):
+        width = width_buffers[width_key]
         while width.dim() < values.dim():
             width = width.unsqueeze(-1)
         noise = width * 2.0 * (torch.rand_like(values) - 0.5)
         if bias_key is None:
             return values + noise
-        bias = self.robot_state_biases[bias_key]
+        if bias_buffers is None:
+            raise RuntimeError("Bias buffers must be provided when bias_key is set.")
+        bias = bias_buffers[bias_key]
         while bias.dim() < values.dim():
             bias = bias.unsqueeze(-1)
         return values + noise + bias
+
+    def _uniform_noise_like(self, values: torch.Tensor, width_key: str, bias_key: str | None = None):
+        return self._uniform_noise_from_buffers(
+            values,
+            width_buffers=self.robot_state_noise_widths,
+            width_key=width_key,
+            bias_buffers=self.robot_state_biases,
+            bias_key=bias_key,
+        )
+
+    def get_student_joint_pos_obs(self, use_noise: bool = False) -> torch.Tensor:
+        joint_pos = self.robot.data.joint_pos
+        if not use_noise:
+            return joint_pos
+
+        student_joint_pos = joint_pos.clone()
+        student_joint_pos[:, self._robot_base_rot_dof_idx] = self._uniform_noise_from_buffers(
+            student_joint_pos[:, self._robot_base_rot_dof_idx],
+            width_buffers=self.student_joint_pos_noise_widths,
+            width_key="base_rot_joint_pos_noise",
+            bias_buffers=self.student_joint_pos_biases,
+            bias_key="base_rot_joint_pos_bias",
+        )
+        student_joint_pos[:, self._robot_base_xy_dof_idx] = self._uniform_noise_from_buffers(
+            student_joint_pos[:, self._robot_base_xy_dof_idx],
+            width_buffers=self.student_joint_pos_noise_widths,
+            width_key="base_xy_joint_pos_noise",
+            bias_buffers=self.student_joint_pos_biases,
+            bias_key="base_xy_joint_pos_bias",
+        )
+        student_joint_pos[:, self._robot_arm_dof_idx] = self._uniform_noise_from_buffers(
+            student_joint_pos[:, self._robot_arm_dof_idx],
+            width_buffers=self.student_joint_pos_noise_widths,
+            width_key="arm_joint_pos_noise",
+            bias_buffers=self.student_joint_pos_biases,
+            bias_key="arm_joint_pos_bias",
+        )
+        student_joint_pos[:, self._robot_finger_dof_idx] = self._uniform_noise_from_buffers(
+            student_joint_pos[:, self._robot_finger_dof_idx],
+            width_buffers=self.student_joint_pos_noise_widths,
+            width_key="finger_joint_pos_noise",
+            bias_buffers=self.student_joint_pos_biases,
+            bias_key="finger_joint_pos_bias",
+        )
+        return student_joint_pos
 
     def _apply_spawn_noise(self, env_ids: torch.Tensor):
         # Reset disturbance is applied around the reference motion state, with separate scales for base, arm, and fingers.
@@ -855,6 +939,34 @@ class DooropeningEnv(DirectRLEnv):
 
         return keypoints_w
 
+    def get_handle_position_in_base_frame(self) -> torch.Tensor:
+        """Return the door handle center position in the robot base frame.
+
+        The handle geometry lives on door body ``link_2``. We approximate the
+        handle center using the midpoint of the two precomputed handle offsets,
+        then transform that point into the robot base frame.
+
+        Returns:
+            torch.Tensor: handle_pos_base with shape (num_envs, 3).
+        """
+        robot_base_pos_w = self.robot.data.body_pos_w[:, self._robot_base_body_link_idx]
+        robot_base_quat_w = self.robot.data.body_quat_w[:, self._robot_base_body_link_idx]
+
+        handle_body_local_idx = self.door_body_names.index("link_2")
+        handle_body_idx = int(self._door_body_idx[handle_body_local_idx])
+        handle_body_pos_w = self.door.data.body_pos_w[:, handle_body_idx]
+        handle_body_quat_w = self.door.data.body_quat_w[:, handle_body_idx]
+
+        handle_center_offset = self.handle_offsets.mean(dim=1)
+        handle_center_pos_w = quat_apply(handle_body_quat_w.float(), handle_center_offset.float()) + handle_body_pos_w
+        handle_center_pos_base = world_to_local(
+            handle_center_pos_w.unsqueeze(1),
+            robot_base_pos_w,
+            robot_base_quat_w,
+        ).squeeze(1)
+
+        return handle_center_pos_base
+
     def _get_intermediate_values(self):
         self.robot_key_body_pos = self.robot.data.body_pos_w[:, self._robot_key_body_idx]\
              - self.scene.env_origins.repeat((1, 1)).reshape(self.num_envs, 1, 3)
@@ -1041,7 +1153,7 @@ class DooropeningEnv(DirectRLEnv):
         )
         self._update_success_metrics()
 
-        # 1. Base Alive Reward: Small constant for staying in the safety tunnel
+        # 1. Base alive reward: small constant for remaining active
         alive_base = self.alive_base 
         
         # 2. Difficulty Bonus: Extra points for staying alive during contact

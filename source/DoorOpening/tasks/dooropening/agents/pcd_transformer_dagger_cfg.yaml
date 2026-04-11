@@ -7,6 +7,9 @@ normalize_state: True
 normalize_action: True
 action_space: "absolute"
 action_dim: 19
+aux_weight: 0.1
+aux_prediction_mode: "absolute"
+aux_delta_scale: 0.01
 
 door_pcd_num_points: 30000
 local_pcd_range: [1.5, 0.25, 0.25]
@@ -32,6 +35,11 @@ state_encoders_cfg:
     use_state: true
   q_hand:
     input_dim: 9
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  aux_handle_pos:
+    input_dim: 3
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
@@ -140,14 +148,15 @@ dagger:
   weight_decay: 1.0e-4
   grad_clip: 1.0
   num_iters: 250000
-  teacher_forcing_warmup_iters: 10000
-  teacher_forcing_transition_iters: 40000
+  teacher_forcing_warmup_iters: 5000
+  teacher_forcing_transition_iters: 20000
   teacher_forcing_schedule: "linear"
   teacher_forcing_min_beta: 0.0
+  aux_feedback_to_policy: true
   log_interval: 100
   save_interval: 5000
-  reset_progress_total: 100000
-  adr_reset_progress_total: 50000
+  reset_progress_total: 150000
+  adr_reset_progress_total: 5000
   pointcloud_source: "lidar"
   robot_num_points: 30000
   sampler_render:
@@ -170,7 +179,7 @@ dagger:
   viser:
     enabled: false  # Mode 1: stream the selected env live to Viser.
     update_interval: 1
-    raw_interval: 1000  # Periodically flush raw replay snapshots every N iterations.
+    raw_interval: 50000  # Periodically flush raw replay snapshots every N iterations.
     env_id: 0
     show_policy_input: true
     point_size: 0.004

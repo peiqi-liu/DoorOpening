@@ -7,7 +7,6 @@ from pathlib import Path
 
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 import yaml
 from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -208,10 +207,12 @@ class Dagger:
         self.completed_lengths = deque(maxlen=self.games_to_track)
         self.completed_successes = deque(maxlen=self.games_to_track)
         self.episode_reached_last_frame = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self.latest_env_metrics = {}
         self.student_update_steps = 0
         self.last_local_update_batch_size = 0
         self.last_global_update_batch_size = 0
+        self.latest_student_proprio_vector = None
+        self.latest_aux_input_vector = None
+        self.latest_aux_target_vector = None
         self._timing_stats = {
             "iteration_ms": {"sum_ms": 0.0, "count": 0},
             "student_obs_ms": {"sum_ms": 0.0, "count": 0},
@@ -365,6 +366,42 @@ class Dagger:
             self.proprio_history_state_specs[key] = spec
             self.max_student_proprio_history_lag = max(self.max_student_proprio_history_lag, spec["lag"])
 
+        self.aux_state_specs = OrderedDict()
+        self.aux_input_dim = 0
+        for key in self.state_encoders_keys:
+            spec = self._parse_aux_state_key(key)
+            if spec is None:
+                continue
+            input_dim = int(self.student_model.state_encoders_cfg[key]["input_dim"])
+            if input_dim != spec["dim"]:
+                raise ValueError(
+                    "{} must have input_dim={} to match the {} auxiliary state.".format(
+                        key,
+                        spec["dim"],
+                        spec["name"],
+                    )
+                )
+            spec["slice"] = slice(self.aux_input_dim, self.aux_input_dim + spec["dim"])
+            self.aux_input_dim += spec["dim"]
+            self.aux_state_specs[key] = spec
+        self.has_aux_input = len(self.aux_state_specs) > 0
+        self.has_aux_prediction = bool(getattr(self.student_model, "aux_prediction", False))
+        if self.has_aux_prediction and not self.has_aux_input:
+            raise ValueError("Aux prediction requires at least one enabled aux_* state encoder.")
+        self.aux_prediction_mode = str(getattr(self.student_model, "aux_prediction_mode", "absolute")).lower()
+        self.aux_delta_scale = float(getattr(self.student_model, "aux_delta_scale", 0.01))
+        self.aux_feedback_to_policy = self.has_aux_input and self.has_aux_prediction and bool(
+            self.runtime_cfg.get("aux_feedback_to_policy", True)
+        )
+        self.aux_buffer = None
+        if self.has_aux_input:
+            self.aux_buffer = torch.zeros((self.num_envs, self.aux_input_dim), dtype=torch.float32, device=self.device)
+        if student_ckpt is not None and self.has_aux_input and self.rank == 0:
+            print(
+                "Warning: student checkpoint was loaded while aux_handle_* inputs are active. "
+                "If the auxiliary state definition changed, reusing those weights can spike loss."
+            )
+
         local_pcd_cfg = self.student_model.pcd_encoders_cfg.get("local_pcd_t")
         self.local_pcd_points = [0, 0, 0]
         print("local_pcd_cfg", local_pcd_cfg)
@@ -489,6 +526,14 @@ class Dagger:
             "dim": proprio_dim,
         }
 
+    def _parse_aux_state_key(self, key):
+        if key != "aux_handle_pos":
+            return None
+        return {
+            "name": key,
+            "dim": 3,
+        }
+
     def _init_history_buffers(self):
         self.implemented_action_history = torch.zeros(
             (self.num_envs, self.max_implemented_action_history_lag, self.num_actions),
@@ -557,7 +602,11 @@ class Dagger:
             )
 
     def _get_student_proprio_vector(self):
-        q_pos = self.ov_env.robot.data.joint_pos
+        get_student_joint_pos_obs = getattr(self.ov_env, "get_student_joint_pos_obs", None)
+        if callable(get_student_joint_pos_obs):
+            q_pos = get_student_joint_pos_obs(use_noise=True)
+        else:
+            q_pos = self.ov_env.robot.data.joint_pos
         if q_pos.ndim != 2:
             raise RuntimeError(f"Expected joint_pos to be rank-2, got shape {tuple(q_pos.shape)}.")
         return q_pos
@@ -576,6 +625,94 @@ class Dagger:
         if pd_targets.ndim != 2:
             raise RuntimeError(f"Expected PD target tensor to be rank-2, got shape {tuple(pd_targets.shape)}.")
         return pd_targets
+
+    def _get_handle_position_base(self):
+        getter = getattr(self.ov_env, "get_handle_position_in_base_frame", None)
+        if callable(getter):
+            return getter()
+
+        robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
+        robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
+        handle_offsets = getattr(self.ov_env, "handle_offsets", None)
+        if handle_offsets is None:
+            raise RuntimeError("Expected environment to expose handle_offsets for aux handle position prediction.")
+        handle_body_names = list(getattr(self.ov_env, "door_body_names", []))
+        if "link_2" not in handle_body_names:
+            raise RuntimeError("Expected environment door_body_names to include 'link_2' for handle position.")
+
+        handle_body_local_idx = handle_body_names.index("link_2")
+        handle_body_indices = getattr(self.ov_env, "_door_body_idx", None)
+        if handle_body_indices is None:
+            raise RuntimeError("Expected environment to expose _door_body_idx for handle position.")
+        handle_body_idx = int(handle_body_indices[handle_body_local_idx])
+        handle_body_pos_w = self.ov_env.door.data.body_pos_w[:, handle_body_idx]
+        handle_body_quat_w = self.ov_env.door.data.body_quat_w[:, handle_body_idx]
+
+        handle_center_offset = handle_offsets.mean(dim=1)
+        handle_center_pos_w = quat_apply(handle_body_quat_w.float(), handle_center_offset.float()) + handle_body_pos_w
+        handle_center_pos_base = world_to_local(
+            handle_center_pos_w.unsqueeze(1),
+            robot_base_pos_w,
+            robot_base_quat_w,
+        ).squeeze(1)
+        return handle_center_pos_base
+
+    def _get_aux_state_values(self):
+        if not self.has_aux_input:
+            return OrderedDict()
+
+        handle_pos_base = self._get_handle_position_base()
+        aux_state_values = OrderedDict()
+        if "aux_handle_pos" in self.aux_state_specs:
+            aux_state_values["aux_handle_pos"] = handle_pos_base
+        return aux_state_values
+
+    def _stack_aux_state_values(self, aux_state_values):
+        if not self.has_aux_input:
+            return None
+        aux_vector = torch.zeros((self.num_envs, self.aux_input_dim), dtype=torch.float32, device=self.device)
+        for key, spec in self.aux_state_specs.items():
+            aux_vector[:, spec["slice"]] = aux_state_values[key]
+        return aux_vector
+
+    def _aux_to_2d(self, aux_tensor):
+        if aux_tensor is None:
+            return None
+        if aux_tensor.ndim == 3:
+            return aux_tensor[:, 0, :]
+        return aux_tensor
+
+    def _decode_aux_prediction(self, aux_pred, prev_abs_aux):
+        prev_abs_aux_2d = self._aux_to_2d(prev_abs_aux)
+        if prev_abs_aux_2d is None:
+            raise RuntimeError("prev_abs_aux is required to decode auxiliary predictions.")
+        if self.aux_prediction_mode == "delta":
+            aux_delta = torch.clamp(self._aux_to_2d(aux_pred), -1.0, 1.0)
+            return prev_abs_aux_2d + self.aux_delta_scale * aux_delta
+        return self._aux_to_2d(aux_pred)
+
+    def _get_aux_target(self, current_abs_aux, prev_abs_aux):
+        prev_abs_aux_2d = self._aux_to_2d(prev_abs_aux)
+        if self.aux_prediction_mode == "delta":
+            if prev_abs_aux_2d is None:
+                raise RuntimeError("prev_abs_aux is required to build delta auxiliary targets.")
+            target_delta = (current_abs_aux - prev_abs_aux_2d) / self.aux_delta_scale
+            return torch.clamp(target_delta, -1.0, 1.0)
+        return current_abs_aux
+
+    def _use_aux_feedback(self):
+        return self.aux_feedback_to_policy
+
+    def _seed_aux_buffer(self, env_ids=None):
+        if self.aux_buffer is None:
+            return
+        aux_target = self._stack_aux_state_values(self._get_aux_state_values()).detach()
+        if env_ids is None:
+            self.aux_buffer[:] = aux_target
+            return
+        if env_ids.numel() == 0:
+            return
+        self.aux_buffer[env_ids] = aux_target[env_ids]
 
     def _init_pointcloud_assets(self):
         asset_index_by_dir = {
@@ -1539,17 +1676,27 @@ class Dagger:
         return int(batch_size.item())
 
     def _build_student_obs(self):
-        q_pos = self.ov_env.robot.data.joint_pos
+        q_pos = self._get_student_proprio_vector()
         door_joint_pos = self.ov_env.door.data.joint_pos
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
         palm_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_palm_body_idx].unsqueeze(1)
+
+        self.latest_student_proprio_vector = q_pos.detach().clone()
 
         palm_pos_base = world_to_local(palm_pos_w, robot_base_pos_w, robot_base_quat_w).squeeze(1)
         door_pcd_base = self._sample_door_pointcloud_base()
         current_implemented_action = (
             self.implemented_action_history[:, 0, :] if self.implemented_action_history is not None else None
         )
+        aux_state_values = self._get_aux_state_values()
+        aux_target_vector = self._stack_aux_state_values(aux_state_values) if self.has_aux_input else None
+        if aux_target_vector is not None and self._use_aux_feedback():
+            if self.aux_buffer is None:
+                raise RuntimeError("Aux feedback requested but aux_buffer is not initialized.")
+            aux_input_vector = self.aux_buffer.clone()
+        else:
+            aux_input_vector = aux_target_vector
 
         obs = OrderedDict()
         for key in self.state_encoders_keys:
@@ -1575,6 +1722,10 @@ class Dagger:
                     value_indices=spec["indices"],
                     reference_values=q_pos,
                 )
+            elif key in self.aux_state_specs:
+                if aux_input_vector is None:
+                    raise RuntimeError(f"Aux state '{key}' is enabled but aux input vector is unavailable.")
+                obs[key] = aux_input_vector[:, self.aux_state_specs[key]["slice"]]
             else:
                 raise KeyError(f"Unsupported student state key '{key}' in config.")
 
@@ -1603,15 +1754,22 @@ class Dagger:
             self._viser_cached_ground_truth_pcd_world = None
             self._viser_capture_requested = False
 
+        self.latest_aux_input_vector = None if aux_input_vector is None else aux_input_vector.detach().clone()
+        self.latest_aux_target_vector = None if aux_target_vector is None else aux_target_vector.detach().clone()
         return obs
 
     def _student_forward(self, student_obs):
         return self.student_model_ddp(student_obs)
 
-    def _compute_student_loss(self, student_output, teacher_actions):
-        action_loss = F.mse_loss(student_output["action"][:, 0, :], teacher_actions)
-        total_loss = action_loss
-        return total_loss, action_loss
+    def _compute_student_loss(self, student_output, teacher_actions, aux_target=None):
+        target = teacher_actions
+        if aux_target is not None:
+            target = torch.cat([teacher_actions, aux_target], dim=-1)
+        loss = self.student_model.compute_loss(student_output, target.unsqueeze(1))
+        total_loss = loss["total"]
+        action_loss = loss.get("action", total_loss)
+        aux_loss = loss.get("aux")
+        return total_loss, action_loss, aux_loss
 
     def _get_teacher_forcing_beta(self, iteration):
         if self.play_policy or self.teacher_model is None:
@@ -1705,25 +1863,6 @@ class Dagger:
             return None
         return float(sum(values) / len(values))
 
-    def _to_loggable_scalar(self, value):
-        if isinstance(value, torch.Tensor):
-            if value.numel() != 1:
-                return None
-            return float(value.detach().cpu().item())
-        if isinstance(value, (int, float, bool)):
-            return float(value)
-        return None
-
-    def _collect_env_metrics(self, info):
-        metrics = {}
-        if isinstance(info, dict):
-            for key, value in info.items():
-                scalar = self._to_loggable_scalar(value)
-                if scalar is not None:
-                    metrics[key] = scalar
-
-        return metrics
-
     def _update_completed_episode_metrics(self, done_mask, timed_out):
         if done_mask.numel() == 0:
             return
@@ -1738,21 +1877,14 @@ class Dagger:
         self.completed_lengths.extend(float(value) for value in episode_lengths)
         self.completed_successes.extend(float(value) for value in episode_successes)
 
-    def _log(self, iteration, total_loss, action_loss, teacher_forcing_beta):
+    def _log(self, iteration, total_loss, action_loss, aux_loss, teacher_forcing_beta):
         if iteration % self.log_interval != 0:
             return
-        mean_reward = self.current_rewards.mean().item()
-        mean_length = self.current_lengths.mean().item()
         episode_reward = self._mean_completed_metric(self.completed_rewards)
         episode_length = self._mean_completed_metric(self.completed_lengths)
         success_rate = self._mean_completed_metric(self.completed_successes)
-        active_success_rate = self.episode_reached_last_frame.float().mean().item()
-        mean_ref_frame_idx = self.ov_env.ref_motion_lib.frame_idx.float().mean().item()
         teacher_env_fraction = self._get_teacher_forcing_env_fraction()
         student_env_fraction = 1.0 - teacher_env_fraction
-        success_region = None
-        if hasattr(self.ov_env, "in_success_region"):
-            success_region = self.ov_env.in_success_region.float().mean().item()
         timing_means = self._consume_timing_means()
 
         if self.rank == 0:
@@ -1760,54 +1892,39 @@ class Dagger:
             print("ITERATION:", iteration)
             print("Total Loss:", float(total_loss.detach().cpu()))
             print("Action Loss:", float(action_loss.detach().cpu()))
+            if aux_loss is not None:
+                print("Aux Loss:", float(aux_loss.detach().cpu()))
             print("Teacher Forcing Beta:", teacher_forcing_beta)
             print("Teacher Rollout Env Fraction:", teacher_env_fraction)
             print("Student Rollout Env Fraction:", student_env_fraction)
             print("Student Update Steps:", self.student_update_steps)
             print("Last Local Update Batch Size:", self.last_local_update_batch_size)
             print("Last Global Update Batch Size:", self.last_global_update_batch_size)
-            # print("Mean Reward:", mean_reward)
-            # print("Mean Length:", mean_length)
-            # if episode_reward is not None:
-            #     print("Episode Reward:", episode_reward)
+            if episode_reward is not None:
+                print("Episode Reward:", episode_reward)
             if episode_length is not None:
                 print("Episode Length:", episode_length)
             if success_rate is not None:
                 print("Success Rate:", success_rate)
-            # print("Active Success Rate:", active_success_rate)
-            # print("Mean Ref Frame Idx:", mean_ref_frame_idx)
-            if success_region is not None:
-                print("Success Region:", success_region)
             if timing_means["iteration_ms"] is not None:
                 print("Iteration Time (ms):", timing_means["iteration_ms"])
-            # if timing_means["student_obs_ms"] is not None:
-            #     print("Student Obs Time (ms):", timing_means["student_obs_ms"])
-            # if timing_means["pointcloud_ms"] is not None:
-            #     print("Pointcloud Time (ms):", timing_means["pointcloud_ms"])
-            # if timing_means["env_step_ms"] is not None:
-            #     print("Env Step Time (ms):", timing_means["env_step_ms"])
 
         metrics = {
             "loss/total": float(total_loss.detach().cpu()),
             "loss/action": float(action_loss.detach().cpu()),
-            "stats/mean_reward": mean_reward,
-            "stats/mean_length": mean_length,
-            "stats/active_success_rate": active_success_rate,
-            "stats/ref_frame_idx": mean_ref_frame_idx,
-            "stats/completed_episodes": len(self.completed_lengths),
             "dist/world_size": self.world_size,
             "dist/update_steps": self.student_update_steps,
             "dist/last_local_update_batch_size": self.last_local_update_batch_size,
             "dist/last_global_update_batch_size": self.last_global_update_batch_size,
         }
+        if aux_loss is not None:
+            metrics["loss/aux"] = float(aux_loss.detach().cpu())
         if episode_reward is not None:
             metrics["stats/episode_reward"] = episode_reward
         if episode_length is not None:
             metrics["stats/episode_length"] = episode_length
         if success_rate is not None:
             metrics["stats/success_rate"] = success_rate
-        if success_region is not None:
-            metrics["stats/success_region"] = success_region
         if teacher_forcing_beta is not None:
             metrics["stats/teacher_forcing_beta"] = teacher_forcing_beta
         metrics["stats/teacher_rollout_env_fraction"] = teacher_env_fraction
@@ -1820,7 +1937,6 @@ class Dagger:
             metrics["timing/pointcloud_ms"] = timing_means["pointcloud_ms"]
         if timing_means["env_step_ms"] is not None:
             metrics["timing/env_step_ms"] = timing_means["env_step_ms"]
-        metrics.update(self.latest_env_metrics)
         self._wandb_log(metrics, step=iteration)
 
     def distill(self):
@@ -1833,7 +1949,11 @@ class Dagger:
 
         try:
             obs = self.env.reset()[0]
+            self.latest_student_proprio_vector = None
+            self.latest_aux_input_vector = None
+            self.latest_aux_target_vector = None
             self._seed_student_histories()
+            self._seed_aux_buffer()
             self.episode_reached_last_frame.zero_()
             self._resample_teacher_forcing_env_mask(0)
 
@@ -1851,16 +1971,38 @@ class Dagger:
                 student_output = self._student_forward(student_obs)
                 student_actions = torch.clamp(student_output["action"][:, 0, :], -1.0, 1.0)
                 # Capture q_t before stepping so prev_q features align with the next state.
-                current_q_pos = self._get_student_proprio_vector().detach().clone()
+                if self.latest_student_proprio_vector is None:
+                    raise RuntimeError("Expected the latest student proprio vector to be captured while building obs.")
+                current_q_pos = self.latest_student_proprio_vector.detach().clone()
+                if self.has_aux_prediction:
+                    if self.latest_aux_input_vector is None:
+                        raise RuntimeError("Expected the latest auxiliary input vector while aux prediction is enabled.")
+                    self.aux_buffer[:] = self._decode_aux_prediction(
+                        student_output["aux"].detach(),
+                        self.latest_aux_input_vector,
+                    )
 
                 teacher_actions = None
                 total_loss = None
                 action_loss = None
+                aux_loss = None
 
                 if not self.play_policy:
                     teacher_output = self._get_teacher_actions(obs)
                     teacher_actions = teacher_output["actions"]
-                    total_loss, action_loss = self._compute_student_loss(student_output, teacher_output["mus"])
+                    aux_target = None
+                    if self.has_aux_prediction:
+                        if self.latest_aux_target_vector is None or self.latest_aux_input_vector is None:
+                            raise RuntimeError("Expected auxiliary vectors while aux prediction is enabled.")
+                        aux_target = self._get_aux_target(
+                            self.latest_aux_target_vector,
+                            self.latest_aux_input_vector,
+                        )
+                    total_loss, action_loss, aux_loss = self._compute_student_loss(
+                        student_output,
+                        teacher_output["mus"],
+                        aux_target=aux_target,
+                    )
                     local_batch_size = int(student_actions.shape[0])
                     global_batch_size = self._get_global_batch_size(local_batch_size)
                     self.optimizer.zero_grad()
@@ -1876,14 +2018,12 @@ class Dagger:
                     teacher_actions,
                     iteration,
                 )
-                step_actions = self._override_actions_for_pregrasp(step_actions)
                 self._update_last_frame_tracker()
                 self._sync_timing_device()
                 env_step_start_time = time.perf_counter()
-                obs, rew, out_of_reach, timed_out, info = self.env.step(step_actions)
+                obs, rew, out_of_reach, timed_out, _ = self.env.step(step_actions)
                 self._sync_timing_device()
                 self._record_timing("env_step_ms", time.perf_counter() - env_step_start_time)
-                self.latest_env_metrics = self._collect_env_metrics(info)
                 current_pd_targets = self._get_implemented_action_vector().detach().clone()
 
                 self._push_history(self.implemented_action_history, current_pd_targets)
@@ -1899,13 +2039,14 @@ class Dagger:
                     self.current_rewards[done_mask] = 0.0
                     self.current_lengths[done_mask] = 0.0
                     self._seed_student_histories(done_mask)
+                    self._seed_aux_buffer(done_mask)
                     self.episode_reached_last_frame[done_mask] = False
                     self._resample_teacher_forcing_env_mask(iteration + 1, done_mask)
 
                 if total_loss is not None:
                     self._sync_timing_device()
                     self._record_timing("iteration_ms", time.perf_counter() - iteration_start_time)
-                    self._log(iteration, total_loss, action_loss, teacher_forcing_beta)
+                    self._log(iteration, total_loss, action_loss, aux_loss, teacher_forcing_beta)
                 else:
                     self._sync_timing_device()
                     self._record_timing("iteration_ms", time.perf_counter() - iteration_start_time)
