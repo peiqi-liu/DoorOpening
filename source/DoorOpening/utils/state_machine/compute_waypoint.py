@@ -51,8 +51,8 @@ def sample_robot_initial_base_joints_on_door_ring(
     robot_initial_pose: torch.Tensor,
     door_initial_pose: torch.Tensor,
     *,
-    radius: float = 1.0,
-    angle_range_deg: float = 30.0,
+    radius: float = 1.2,
+    angle_range_deg: float = 25.0,
 ):
     """Sample base xy joints for a start pose on a ring around the door while
     keeping the base rotation joint unchanged."""

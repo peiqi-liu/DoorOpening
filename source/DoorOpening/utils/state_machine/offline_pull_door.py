@@ -535,8 +535,8 @@ def state_machine_offline_left_pull_door(
         q_door.unsqueeze(0),
     ).to(device)
 
-    pregrasp_base_x_offset = 0.58
-    pregrasp_base_y_offset = 0.34
+    pregrasp_base_x_offset = 0.55
+    pregrasp_base_y_offset = 0.3
     pregrasp_palm_x_offset = 0.25
     pregrasp_palm_y_offset = 0.03
     pregrasp_palm_z_offset = 0.25
@@ -652,7 +652,7 @@ def state_machine_offline_left_pull_door(
 
     pull_palm_x_offset_closed = 0.05
     pull_palm_y_offset_closed = 0.03
-    pull_palm_z_offset = 0.05
+    pull_palm_z_offset = 0.08
 
     pull_rot_roll_base = math.pi
     pull_rot_roll_per_theta = 0.9
