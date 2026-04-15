@@ -160,7 +160,8 @@ class Dagger:
                 self.viser_serializer_cfg.get("save_raw", legacy_record_cfg.get("save_raw", False)),
             )
         )
-        self.viser_replay_enabled = self.viser_serializer_enabled or self.viser_raw_enabled
+        self.viser_episode_replay_enabled = self.viser_serializer_enabled
+        self.viser_replay_enabled = self.viser_episode_replay_enabled or self.viser_raw_enabled
         self.viser_replay_max_frames = int(
             self.viser_raw_cfg.get(
                 "max_frames",
@@ -219,6 +220,8 @@ class Dagger:
             "pointcloud_ms": {"sum_ms": 0.0, "count": 0},
             "env_step_ms": {"sum_ms": 0.0, "count": 0},
         }
+        self.logged_env_metric_prefixes = ("dr/", "dr_limit/", "dr_sample/", "reset/")
+        self.latest_env_log_metrics = {}
 
         self._init_teacher()
         self._init_student()
@@ -792,13 +795,17 @@ class Dagger:
         self._viser_record_latest_iteration = None
         self._viser_record_limit_reached = False
         self._viser_record_last_flush_frame_count = 0
-        self._viser_record_last_raw_flush_frame_count = 0
         self._viser_record_episode_active = False
         self._viser_record_episode_env_id = 0
         self._viser_record_episode_index = 0
         self._viser_record_episode_start_iteration = None
-        self._viser_record_raw_active = False
-        self._viser_next_raw_capture_iteration = 0
+        self._viser_raw_frames = []
+        self._viser_raw_frame_count = 0
+        self._viser_raw_chunk_index = 0
+        self._viser_raw_chunk_env_id = None
+        self._viser_raw_chunk_start_iteration = None
+        self._viser_raw_latest_iteration = None
+        self._viser_raw_limit_reached = False
 
         # Keep replay outputs next to checkpoints by default so a run's artifacts stay together.
         default_record_dir = Path(self.nn_dir).parent if self.nn_dir is not None else Path(os.getcwd())
@@ -919,8 +926,8 @@ class Dagger:
             if self.viser_enabled:
                 print(f"Viser live streaming enabled for env {self.viser_env_id}.")
                 print(f"Viser live update interval: every {self.viser_update_interval} training iterations.")
-            if self.viser_replay_enabled:
-                print(f"Viser replay capture enabled for env {self.viser_env_id}.")
+            if self.viser_episode_replay_enabled:
+                print(f"Viser serialized replay capture enabled for env {self.viser_env_id}.")
                 print("Replay capture starts only at selected-env episode boundaries and records every step until the episode ends.")
             if self.viser_serializer_enabled:
                 print(
@@ -930,11 +937,11 @@ class Dagger:
             if self.viser_raw_enabled:
                 print(
                     "Raw replay data will be written as "
-                    f"{self._format_iterated_record_path(self.viser_raw_path, '<episode_tag>')}"
+                    f"{self._format_iterated_record_path(self.viser_raw_path, '<chunk_tag>')}"
                 )
                 print(
-                    "Raw replay capture will start at most once every "
-                    f"{self.viser_raw_interval} iterations, with the same cadence used for mid-episode snapshots."
+                    "Raw replay chunks will be written every "
+                    f"{self.viser_raw_interval} iterations, independent of episode boundaries."
                 )
 
     def _get_viser_env_id(self):
@@ -943,27 +950,18 @@ class Dagger:
             return 0
         return max(0, min(int(self.viser_env_id), self.num_envs - 1))
 
-    def _should_capture_viser_raw_episode(self, iteration):
-        if not self.viser_raw_enabled:
-            return False
-        return int(iteration) >= int(self._viser_next_raw_capture_iteration)
-
-    def _start_viser_record_episode(self, iteration, env_id, capture_raw):
+    def _start_viser_record_episode(self, iteration, env_id):
         """Start a fresh replay buffer for the next complete episode of the selected env."""
         self._viser_record_episode_active = True
         self._viser_record_episode_env_id = int(env_id)
         self._viser_record_episode_index += 1
         self._viser_record_episode_start_iteration = int(iteration)
-        self._viser_record_raw_active = bool(capture_raw)
         self._viser_record_frames = []
         self._viser_record_frame_count = 0
         self._viser_record_latest_iteration = None
         self._viser_record_last_flush_frame_count = 0
-        self._viser_record_last_raw_flush_frame_count = 0
         self._viser_record_limit_reached = False
         self._viser_cached_ground_truth_pcd_world = None
-        if self._viser_record_raw_active:
-            self._viser_next_raw_capture_iteration = int(iteration) + self.viser_raw_interval
         if self.viser_serializer_enabled and self._viser_server is not None:
             # Reset the serializer so each `.viser` file contains exactly one episode.
             self._viser_serializer = self._viser_server.get_scene_serializer()
@@ -978,7 +976,7 @@ class Dagger:
 
     def _finish_viser_record_episode(self, episode_complete, reason):
         """Flush the current episode replay to disk and clear the in-memory episode buffer."""
-        if not self.viser_replay_enabled:
+        if not self.viser_episode_replay_enabled:
             return
 
         frame_count = self._viser_record_frame_count
@@ -1000,14 +998,12 @@ class Dagger:
         self._viser_record_frame_count = 0
         self._viser_record_latest_iteration = None
         self._viser_record_last_flush_frame_count = 0
-        self._viser_record_last_raw_flush_frame_count = 0
         self._viser_record_limit_reached = False
         self._viser_record_episode_active = False
         self._viser_record_episode_start_iteration = None
-        self._viser_record_raw_active = False
         self._viser_cached_ground_truth_pcd_world = None
 
-    def _build_viser_raw_payload(self, latest_iteration, episode_complete):
+    def _build_viser_raw_payload(self, latest_iteration, chunk_complete):
         return {
             "format": "dooropening_viser_replay_v1",
             "pointcloud_frame": "world",
@@ -1015,37 +1011,75 @@ class Dagger:
             "glorbot_urdf_path": str(glorbot_urdf_path),
             "robot_joint_names": list(getattr(self.ov_env.robot, "joint_names", [])),
             "door_joint_names": list(getattr(self.ov_env.door, "joint_names", [])),
-            "episode_index": int(self._viser_record_episode_index),
-            "episode_env_id": int(self._viser_record_episode_env_id),
+            "capture_mode": "iteration_chunk",
+            "chunk_index": int(self._viser_raw_chunk_index),
+            "chunk_env_id": None if self._viser_raw_chunk_env_id is None else int(self._viser_raw_chunk_env_id),
+            "chunk_start_iteration": None
+            if self._viser_raw_chunk_start_iteration is None
+            else int(self._viser_raw_chunk_start_iteration),
+            "chunk_end_iteration": int(latest_iteration),
+            "chunk_complete": bool(chunk_complete),
+            "chunk_frame_count": int(self._viser_raw_frame_count),
+            "episode_index": int(self._viser_raw_chunk_index),
+            "episode_env_id": None if self._viser_raw_chunk_env_id is None else int(self._viser_raw_chunk_env_id),
             "episode_start_iteration": None
-            if self._viser_record_episode_start_iteration is None
-            else int(self._viser_record_episode_start_iteration),
+            if self._viser_raw_chunk_start_iteration is None
+            else int(self._viser_raw_chunk_start_iteration),
             "episode_end_iteration": int(latest_iteration),
-            "episode_complete": bool(episode_complete),
-            "episode_frame_count": int(self._viser_record_frame_count),
-            "frames": self._viser_record_frames,
+            "episode_complete": bool(chunk_complete),
+            "episode_frame_count": int(self._viser_raw_frame_count),
+            "frames": self._viser_raw_frames,
         }
 
     def _maybe_flush_viser_raw_snapshot(self, iteration):
-        if not self._viser_record_raw_active or self.rank != 0:
+        if not self.viser_raw_enabled or self.rank != 0:
             return
-        if self._viser_record_frame_count <= 0:
-            return
-        if self._viser_record_frame_count == self._viser_record_last_raw_flush_frame_count:
+        if self._viser_raw_frame_count <= 0:
             return
         if self.viser_raw_interval <= 0:
             return
         if (int(iteration) + 1) % self.viser_raw_interval != 0:
             return
-        latest_iteration = int(self._viser_record_latest_iteration)
-        record_tag = f"episode_{self._viser_record_episode_index:04d}_iter_{latest_iteration}"
-        payload = self._build_viser_raw_payload(latest_iteration=latest_iteration, episode_complete=False)
+        self._flush_viser_raw_recording(
+            chunk_complete=True,
+            reason=f"interval {self.viser_raw_interval} reached at iteration {int(iteration)}",
+        )
+
+    def _flush_viser_raw_recording(self, chunk_complete, reason):
+        if not self.viser_raw_enabled or self.rank != 0:
+            return
+        if self._viser_raw_frame_count <= 0:
+            return
+
+        latest_iteration = int(self._viser_raw_latest_iteration)
+        record_tag = f"chunk_{self._viser_raw_chunk_index:04d}_iter_{latest_iteration}"
+        payload = self._build_viser_raw_payload(
+            latest_iteration=latest_iteration,
+            chunk_complete=chunk_complete,
+        )
         torch.save(payload, self._format_iterated_record_path(self.viser_raw_path, record_tag))
-        self._viser_record_last_raw_flush_frame_count = self._viser_record_frame_count
+        if self.rank == 0:
+            status = "complete" if chunk_complete else "partial"
+            print(
+                "Saved {} Viser raw chunk {} for env {} with {} frames ({}).".format(
+                    status,
+                    self._viser_raw_chunk_index,
+                    self._viser_raw_chunk_env_id,
+                    self._viser_raw_frame_count,
+                    reason,
+                )
+            )
+
+        self._viser_raw_frames = []
+        self._viser_raw_frame_count = 0
+        self._viser_raw_chunk_env_id = None
+        self._viser_raw_chunk_start_iteration = None
+        self._viser_raw_latest_iteration = None
+        self._viser_raw_limit_reached = False
 
     def _should_capture_viser_replay_step(self, iteration):
         """Capture one selected-env replay episode at a time, starting only at an eligible episode boundary."""
-        if not self.viser_replay_enabled:
+        if not self.viser_episode_replay_enabled:
             return False
 
         env_id = self._get_viser_env_id()
@@ -1065,11 +1099,7 @@ class Dagger:
         if current_length != 0:
             return False
 
-        capture_raw = self._should_capture_viser_raw_episode(iteration)
-        if not self.viser_serializer_enabled and not capture_raw:
-            return False
-
-        self._start_viser_record_episode(iteration, env_id, capture_raw=capture_raw)
+        self._start_viser_record_episode(iteration, env_id)
         self._viser_capture_env_id = self._viser_record_episode_env_id
         return True
 
@@ -1083,7 +1113,7 @@ class Dagger:
         self._viser_replay_step_requested = self._should_capture_viser_replay_step(iteration)
         if not self._viser_replay_step_requested:
             self._viser_capture_env_id = self._get_viser_env_id()
-        return self._viser_live_update_requested or self._viser_replay_step_requested
+        return self._viser_live_update_requested or self._viser_replay_step_requested or self.viser_raw_enabled
 
     def _prepare_viser_world_points_from_local(
         self,
@@ -1141,7 +1171,7 @@ class Dagger:
         return points
 
     def _format_iterated_record_path(self, path_str, iteration):
-        """Append a record-specific suffix to replay filenames so each saved episode gets its own file."""
+        """Append a record-specific suffix to replay filenames so each saved capture gets its own file."""
         path = Path(path_str)
         return str(path.with_name(f"{path.stem}_{iteration}{path.suffix}"))
 
@@ -1180,6 +1210,7 @@ class Dagger:
             return
 
         record_active = self._viser_replay_step_requested and self._viser_record_episode_active
+        raw_active = self.viser_raw_enabled
         env_id = (
             max(0, min(int(self._viser_record_episode_env_id), self.num_envs - 1))
             if record_active
@@ -1220,23 +1251,43 @@ class Dagger:
             self._set_viser_pointcloud("robot_obs_points", display_obs_points)
             self._set_viser_pointcloud("policy_input_points", display_policy_points)
 
-        if not record_active:
+        if not record_active and not raw_active:
             return
 
-        self._viser_record_frame_count += 1
-        self._viser_record_latest_iteration = int(iteration)
-        if (
-            self.viser_replay_max_frames > 0
-            and self._viser_record_frame_count > self.viser_replay_max_frames
-            and not self._viser_record_limit_reached
-        ):
-            print(
-                "dagger.viser replay max_frames={} was exceeded; continuing so the saved replay still contains "
-                "the full episode.".format(self.viser_replay_max_frames)
-            )
-            self._viser_record_limit_reached = True
+        if record_active:
+            self._viser_record_frame_count += 1
+            self._viser_record_latest_iteration = int(iteration)
+            if (
+                self.viser_replay_max_frames > 0
+                and self._viser_record_frame_count > self.viser_replay_max_frames
+                and not self._viser_record_limit_reached
+            ):
+                print(
+                    "dagger.viser replay max_frames={} was exceeded; continuing so the saved replay still contains "
+                    "the full episode.".format(self.viser_replay_max_frames)
+                )
+                self._viser_record_limit_reached = True
 
-        if self._viser_record_raw_active:
+        if raw_active:
+            if self._viser_raw_chunk_start_iteration is None:
+                self._viser_raw_chunk_index += 1
+                self._viser_raw_chunk_env_id = int(env_id)
+                self._viser_raw_chunk_start_iteration = int(iteration)
+                self._viser_raw_limit_reached = False
+            elif self._viser_raw_chunk_env_id != int(env_id):
+                self._viser_raw_chunk_env_id = None
+            self._viser_raw_frame_count += 1
+            self._viser_raw_latest_iteration = int(iteration)
+            if (
+                self.viser_replay_max_frames > 0
+                and self._viser_raw_frame_count > self.viser_replay_max_frames
+                and not self._viser_raw_limit_reached
+            ):
+                print(
+                    "dagger.viser.raw max_frames={} was exceeded; continuing so the saved chunk still contains "
+                    "the full interval.".format(self.viser_replay_max_frames)
+                )
+                self._viser_raw_limit_reached = True
             # Raw replay metadata stores world-frame points plus robot/door state for offline playback.
             record_world_points = lambda pts, drop_zero=False: self._prepare_viser_world_points_from_local(
                 pts,
@@ -1269,10 +1320,10 @@ class Dagger:
                 "door_asset_idx": int(self.env_asset_idx[env_id].detach().cpu().item()),
                 "door_asset_path": str(door_asset_paths[int(self.env_asset_idx[env_id].detach().cpu().item())]),
             }
-            self._viser_record_frames.append(frame_record)
+            self._viser_raw_frames.append(frame_record)
             self._maybe_flush_viser_raw_snapshot(iteration)
 
-        if self.viser_serializer_enabled and self._viser_serializer is not None:
+        if record_active and self.viser_serializer_enabled and self._viser_serializer is not None:
             # Keep the serialized scene in sync with the replay timeline written at episode end.
             if not self._viser_live_update_requested:
                 self._set_viser_pointcloud("ground_truth_points", display_gt_points)
@@ -1282,7 +1333,7 @@ class Dagger:
 
     def _maybe_finish_viser_record_episode(self, done_mask):
         """Flush the replay once the selected env finishes its current episode."""
-        if not self.viser_replay_enabled or not self._viser_record_episode_active or done_mask.numel() == 0:
+        if not self.viser_episode_replay_enabled or not self._viser_record_episode_active or done_mask.numel() == 0:
             return
 
         selected_env = int(self._viser_record_episode_env_id)
@@ -1296,7 +1347,7 @@ class Dagger:
 
     def _flush_viser_recordings(self, episode_complete):
         """Write the buffered selected-env episode replay to disk."""
-        if not self.viser_replay_enabled or self.rank != 0:
+        if not self.viser_episode_replay_enabled or self.rank != 0:
             return
 
         if self._viser_record_frame_count <= 0:
@@ -1316,21 +1367,14 @@ class Dagger:
             if self._viser_server is not None:
                 self._viser_serializer = self._viser_server.get_scene_serializer()
 
-        if self._viser_record_raw_active:
-            # The raw torch payload preserves higher-level metadata for custom offline analysis/reconstruction.
-            payload = self._build_viser_raw_payload(
-                latest_iteration=latest_iteration,
-                episode_complete=episode_complete,
-            )
-            torch.save(payload, self._format_iterated_record_path(self.viser_raw_path, record_tag))
-            self._viser_record_last_raw_flush_frame_count = self._viser_record_frame_count
-
         self._viser_record_last_flush_frame_count = self._viser_record_frame_count
 
     def _close_viser_debug_tools(self):
         """Flush any in-progress replay and stop the background Viser server on shutdown."""
         if self._viser_record_episode_active or self._viser_record_frame_count > 0:
             self._finish_viser_record_episode(episode_complete=False, reason="shutdown")
+        if self._viser_raw_frame_count > 0:
+            self._flush_viser_raw_recording(chunk_complete=False, reason="shutdown")
         if self._viser_server is not None:
             self._viser_server.stop()
 
@@ -1677,6 +1721,29 @@ class Dagger:
             return
         wandb.log(metrics, step=step)
 
+    def _to_loggable_scalar(self, value):
+        if isinstance(value, (bool, int, float)):
+            return float(value)
+        if isinstance(value, torch.Tensor) and value.numel() == 1:
+            return float(value.detach().cpu().item())
+        return None
+
+    def _update_logged_env_metrics(self, extras):
+        if not isinstance(extras, dict):
+            return
+
+        metrics = {}
+        for key, value in extras.items():
+            if not any(key.startswith(prefix) for prefix in self.logged_env_metric_prefixes):
+                continue
+            scalar_value = self._to_loggable_scalar(value)
+            if scalar_value is None:
+                continue
+            metrics[key] = scalar_value
+
+        if metrics:
+            self.latest_env_log_metrics.update(metrics)
+
     def _finish_wandb(self):
         if self.wandb_run is None:
             return
@@ -1922,6 +1989,8 @@ class Dagger:
                 print("Success Rate:", success_rate)
             if timing_means["iteration_ms"] is not None:
                 print("Iteration Time (ms):", timing_means["iteration_ms"])
+            # for key, value in sorted(self.latest_env_log_metrics.items()):
+            #     print(f"{key}:", value)
 
         metrics = {
             "loss/total": float(total_loss.detach().cpu()),
@@ -1951,6 +2020,8 @@ class Dagger:
             metrics["timing/pointcloud_ms"] = timing_means["pointcloud_ms"]
         if timing_means["env_step_ms"] is not None:
             metrics["timing/env_step_ms"] = timing_means["env_step_ms"]
+        if self.latest_env_log_metrics:
+            metrics.update(self.latest_env_log_metrics)
         self._wandb_log(metrics, step=iteration)
 
     def distill(self):
@@ -1962,7 +2033,8 @@ class Dagger:
             self.teacher_model.eval()
 
         try:
-            obs = self.env.reset()[0]
+            obs, reset_extras = self.env.reset()
+            self._update_logged_env_metrics(reset_extras)
             self.latest_student_proprio_vector = None
             self.latest_aux_input_vector = None
             self.latest_aux_target_vector = None
@@ -2035,9 +2107,10 @@ class Dagger:
                 self._update_last_frame_tracker()
                 self._sync_timing_device()
                 env_step_start_time = time.perf_counter()
-                obs, rew, out_of_reach, timed_out, _ = self.env.step(step_actions)
+                obs, rew, out_of_reach, timed_out, step_extras = self.env.step(step_actions)
                 self._sync_timing_device()
                 self._record_timing("env_step_ms", time.perf_counter() - env_step_start_time)
+                self._update_logged_env_metrics(step_extras)
                 current_pd_targets = self._get_implemented_action_vector().detach().clone()
 
                 self._push_history(self.implemented_action_history, current_pd_targets)

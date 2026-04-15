@@ -155,8 +155,8 @@ dagger:
   aux_feedback_to_policy: true
   log_interval: 100
   save_interval: 5000
-  reset_progress_total: 150000
-  adr_reset_progress_total: 5000
+  reset_progress_total: 50000
+  adr_reset_progress_total: 60000
   pointcloud_source: "lidar"
   robot_num_points: 30000
   sampler_render:
@@ -179,20 +179,20 @@ dagger:
   viser:
     enabled: false  # Mode 1: stream the selected env live to Viser.
     update_interval: 1
-    raw_interval: 50000  # Start raw `.pt` replay capture at most once every N iterations; long captures also snapshot at this cadence.
+    raw_interval: 5000  # Save one raw `.pt` chunk every N iterations, independent of episode boundaries.
     env_id: 0
     show_policy_input: true
     point_size: 0.004
-    max_points: 12000
+    max_points: 8000
     serializer:
       enabled: false  # Mode 2: save `.viser` episode replays.
       path: "viser_replay.viser"
       frame_dt: 0.0333333333
     raw:
-      enabled: false  # Mode 3: save raw `.pt` episode replays, independent of live/serializer.
+      enabled: false  # Mode 3: save raw `.pt` interval chunks, independent of live/serializer.
       path: "viser_replay.pt"
-      max_points: 12000
-      max_frames: 0  # Warning threshold disabled so complete selected-env episodes are always saved.
+      max_points: 8000
+      max_frames: 0  # Warning threshold disabled so complete interval chunks are always saved.
   # Legacy `dagger.viser.record.*` keys are still accepted, but `serializer` + `raw` are the preferred split.
   # debug_pointcloud_env_id: 0
   wandb:
