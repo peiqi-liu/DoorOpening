@@ -104,7 +104,7 @@ parser.add_argument(
     "--pointcloud_source",
     type=str,
     choices=["sampler", "depth", "lidar"],
-    default=None,
+    default="lidar",
     help="Source used to build the student pointcloud observation. Defaults to dagger.pointcloud_source in the student YAML.",
 )
 parser.add_argument(

@@ -1,10 +1,10 @@
 import torch
 import numpy as np
 CAMERA_JOINT_DEFAULT_VALUES = {
-    "x5_joint1": 0.0, 
-    "x5_joint2": 0.785, 
-    "x5_joint3": 0.785, 
-    "x5_joint4": 0.0, 
+    "x5_joint1": 1.57, 
+    "x5_joint2": 0, 
+    "x5_joint3": 0, 
+    "x5_joint4": 0, 
     "x5_joint5": 0.0, 
     "x5_joint6": 0.0,
 }
@@ -35,7 +35,7 @@ DEFAULT_JOINT_POS = {
     # "x5_joint4": 1.57, 
     # "x5_joint5": 0.0, 
     # "x5_joint6": 0.0,
-    "x5_joint1": 1.57, 
+    "x5_joint1": 0.0, 
     "x5_joint2": 0, 
     "x5_joint3": 0, 
     "x5_joint4": 0, 
