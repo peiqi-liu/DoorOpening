@@ -792,6 +792,11 @@ class Dagger:
             "depth_m",
             [0.06, 0.16],
         )
+        self.wall_distractor_center_offset_min_m, self.wall_distractor_center_offset_max_m = self._get_cfg_range(
+            self.wall_distractor_cfg,
+            "center_offset_m",
+            [0.0, 0.0],
+        )
         self.wall_distractor_side_margin_min_m = float(self.wall_distractor_cfg.get("side_margin_min_m", 0.08))
         self.wall_distractor_top_margin_min_m = float(self.wall_distractor_cfg.get("top_margin_min_m", 0.05))
         self.wall_distractor_face_jitter_m = float(self.wall_distractor_cfg.get("face_jitter_m", 0.004))
@@ -1615,27 +1620,37 @@ class Dagger:
             self.wall_distractor_bottom_margin_scale_max,
             (self.num_envs,),
         )
-        wall_depth = thickness_extent + rand_range(
-            self.wall_distractor_depth_min_m,
-            self.wall_distractor_depth_max_m,
-            (self.num_envs,),
-        )
         thickness_center = 0.5 * (thickness_min + thickness_max)
-        wall_depth_half = 0.5 * wall_depth
 
         left_count = max(1, int(round(num_points * 0.30)))
         right_count = max(1, int(round(num_points * 0.30)))
         top_count = max(1, int(round(num_points * 0.25)))
         return_count = max(0, num_points - left_count - right_count - top_count)
 
-        def sample_main_face(count, width_lo, width_hi, height_lo, height_hi):
-            points = torch.empty((self.num_envs, count, 3), dtype=torch.float32, device=self.device)
-            face_sign = torch.where(
-                torch.rand((self.num_envs, count), device=self.device) > 0.5,
-                torch.ones((self.num_envs, count), device=self.device, dtype=torch.float32),
-                -torch.ones((self.num_envs, count), device=self.device, dtype=torch.float32),
+        def sample_panel_surfaces():
+            panel_depth = thickness_extent + rand_range(
+                self.wall_distractor_depth_min_m,
+                self.wall_distractor_depth_max_m,
+                (self.num_envs,),
             )
-            points[..., 0] = thickness_center.unsqueeze(1) + face_sign * wall_depth_half.unsqueeze(1)
+            # Shift each wall panel independently along the door-thickness axis so
+            # recessed, protruding, and mixed left/right layouts are all represented.
+            panel_center = thickness_center + rand_range(
+                self.wall_distractor_center_offset_min_m,
+                self.wall_distractor_center_offset_max_m,
+                (self.num_envs,),
+            )
+            panel_depth_half = 0.5 * panel_depth
+            return panel_center - panel_depth_half, panel_center + panel_depth_half
+
+        def sample_main_face(count, width_lo, width_hi, height_lo, height_hi, panel_min_surface, panel_max_surface):
+            points = torch.empty((self.num_envs, count, 3), dtype=torch.float32, device=self.device)
+            use_max_surface = torch.rand((self.num_envs, count), device=self.device) > 0.5
+            points[..., 0] = torch.where(
+                use_max_surface,
+                panel_max_surface.unsqueeze(1),
+                panel_min_surface.unsqueeze(1),
+            )
             if self.wall_distractor_face_jitter_m > 0.0:
                 points[..., 0] += rand_range(
                     -self.wall_distractor_face_jitter_m,
@@ -1650,6 +1665,9 @@ class Dagger:
             ).clamp_min(1e-4).unsqueeze(1)
             return points
 
+        left_min_surface, left_max_surface = sample_panel_surfaces()
+        right_min_surface, right_max_surface = sample_panel_surfaces()
+        top_min_surface, top_max_surface = sample_panel_surfaces()
         panels = [
             sample_main_face(
                 left_count,
@@ -1657,6 +1675,8 @@ class Dagger:
                 width_min - edge_gap,
                 height_min - bottom_margin,
                 height_max + 0.4 * top_margin,
+                left_min_surface,
+                left_max_surface,
             ),
             sample_main_face(
                 right_count,
@@ -1664,6 +1684,8 @@ class Dagger:
                 width_max + side_margin_right,
                 height_min - bottom_margin,
                 height_max + 0.4 * top_margin,
+                right_min_surface,
+                right_max_surface,
             ),
             sample_main_face(
                 top_count,
@@ -1671,6 +1693,8 @@ class Dagger:
                 width_max + side_margin_right,
                 height_max + height_gap,
                 height_max + top_margin,
+                top_min_surface,
+                top_max_surface,
             ),
         ]
 
@@ -1678,12 +1702,18 @@ class Dagger:
             return_panel = torch.empty((self.num_envs, return_count, 3), dtype=torch.float32, device=self.device)
             return_on_right = torch.rand((self.num_envs,), device=self.device) > 0.5
             return_width = torch.where(return_on_right, width_max + edge_gap, width_min - edge_gap)
-            return_panel[..., 0] = (
-                thickness_center.unsqueeze(1)
-                + (torch.rand((self.num_envs, return_count), device=self.device) - 0.5) * wall_depth.unsqueeze(1)
-            )
+            return_min_surface = torch.where(return_on_right, right_min_surface, left_min_surface)
+            return_max_surface = torch.where(return_on_right, right_max_surface, left_max_surface)
+            return_panel[..., 0] = return_min_surface.unsqueeze(1) + torch.rand(
+                (self.num_envs, return_count), device=self.device
+            ) * (return_max_surface - return_min_surface).clamp_min(1e-4).unsqueeze(1)
             return_panel[..., 1] = return_width.unsqueeze(1)
             if self.wall_distractor_face_jitter_m > 0.0:
+                return_panel[..., 0] += rand_range(
+                    -self.wall_distractor_face_jitter_m,
+                    self.wall_distractor_face_jitter_m,
+                    (self.num_envs, return_count),
+                )
                 return_panel[..., 1] += rand_range(
                     -self.wall_distractor_face_jitter_m,
                     self.wall_distractor_face_jitter_m,
