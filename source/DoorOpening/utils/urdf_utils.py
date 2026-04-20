@@ -4,6 +4,38 @@ import numpy as np
 import xml.etree.ElementTree as ET
 from scipy.spatial.transform import Rotation as R
 
+
+def origin_to_transform(origin_element):
+    """Convert a URDF <origin> element into a 4x4 transform matrix."""
+    xyz = np.zeros(3, dtype=np.float64)
+    rpy = np.zeros(3, dtype=np.float64)
+    if origin_element is not None:
+        if "xyz" in origin_element.attrib:
+            xyz = np.array([float(x) for x in origin_element.attrib["xyz"].split()], dtype=np.float64)
+        if "rpy" in origin_element.attrib:
+            rpy = np.array([float(x) for x in origin_element.attrib["rpy"].split()], dtype=np.float64)
+
+    transform = np.eye(4, dtype=np.float64)
+    transform[:3, :3] = R.from_euler("xyz", rpy).as_matrix()
+    transform[:3, 3] = xyz
+    return transform
+
+
+def find_joint_by_child(root, child_name):
+    """Return the first joint whose child link matches ``child_name``."""
+    for joint in root.findall(".//joint"):
+        child = joint.find("child")
+        if child is not None and child.attrib.get("link") == child_name:
+            return joint
+    return None
+
+
+def transform_points(points, transform):
+    """Apply a homogeneous transform to an ``(N, 3)`` point array."""
+    homog = np.concatenate([points, np.ones((points.shape[0], 1), dtype=points.dtype)], axis=1)
+    transformed = homog @ transform.T
+    return transformed[:, :3]
+
 def get_visual_transform(visual_element):
     """Extracts xyz, rpy, and scale from a URDF visual element."""
     xyz = np.array([0.0, 0.0, 0.0])
@@ -58,6 +90,12 @@ def compute_exact_door_keypoints(urdf_path):
     root = tree.getroot()
     keypoints = {}
 
+    joint_0 = find_joint_by_child(root, "link_0")
+    joint_1 = find_joint_by_child(root, "link_1")
+    base_to_frame = origin_to_transform(None if joint_0 is None else joint_0.find("origin"))
+    frame_to_board_closed = origin_to_transform(None if joint_1 is None else joint_1.find("origin"))
+    base_to_board_closed = base_to_frame @ frame_to_board_closed
+
     # --- Link 1: Door Board ---
     link_1 = root.find(".//link[@name='link_1']")
     mesh_1 = process_link_mesh(urdf_path, link_1)
@@ -75,6 +113,29 @@ def compute_exact_door_keypoints(urdf_path):
             [(min_b[0] + max_b[0]) / 2.0, center_y, center_z],
             [max_b[0], center_y, center_z]
         ]
+
+        board_bbox_corners = np.array(
+            [
+                [min_b[0], min_b[1], min_b[2]],
+                [min_b[0], min_b[1], max_b[2]],
+                [min_b[0], max_b[1], min_b[2]],
+                [min_b[0], max_b[1], max_b[2]],
+                [max_b[0], min_b[1], min_b[2]],
+                [max_b[0], min_b[1], max_b[2]],
+                [max_b[0], max_b[1], min_b[2]],
+                [max_b[0], max_b[1], max_b[2]],
+            ],
+            dtype=np.float64,
+        )
+        board_bbox_corners_base = transform_points(board_bbox_corners, base_to_board_closed)
+        board_bbox_base = np.stack(
+            [
+                board_bbox_corners_base.min(axis=0),
+                board_bbox_corners_base.max(axis=0),
+            ],
+            axis=0,
+        )
+        keypoints["link_1_bbox_base"] = board_bbox_base.tolist()
 
     # --- Link 2: Handle / Hinge ---
     link_2 = root.find(".//link[@name='link_2']")

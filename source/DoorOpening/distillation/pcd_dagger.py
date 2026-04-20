@@ -20,6 +20,7 @@ from rl_games.algos_torch import torch_ext
 from rl_games.algos_torch.model_builder import ModelBuilder
 
 from DoorOpening.assets.door.door_cfg import asset_paths as door_asset_paths
+from DoorOpening.assets.door.door_cfg import board_bboxes as door_board_bboxes
 from DoorOpening.assets.door.door_cfg import motion_traj_paths
 from DoorOpening.assets.glorbot.glorbot_cfg import glorbot_urdf_path
 from DoorOpening.model.transformer import PCDTransformer, strip_prefix_from_state_dict
@@ -104,6 +105,7 @@ class Dagger:
         self.teacher_cfg = self.config.get("teacher", {})
         self.play_policy = bool(self.config.get("play_policy", False))
         self.runtime_cfg = self.config.get("dagger", {})
+        self.wall_distractor_cfg = dict(self.runtime_cfg.get("wall_distractors", {}))
 
         self.lr = float(self.runtime_cfg.get("learning_rate", 1e-4))
         self.weight_decay = float(self.runtime_cfg.get("weight_decay", 1e-4))
@@ -717,6 +719,16 @@ class Dagger:
             return
         self.aux_buffer[env_ids] = aux_target[env_ids]
 
+    def _get_cfg_range(self, cfg, key, default):
+        values = cfg.get(key, default)
+        if len(values) != 2:
+            raise ValueError(f"Expected '{key}' to have exactly two values, got {values}.")
+        low = float(values[0])
+        high = float(values[1])
+        if low > high:
+            raise ValueError(f"Expected '{key}' to be ordered as [low, high], got {values}.")
+        return low, high
+
     def _init_pointcloud_assets(self):
         asset_index_by_dir = {
             Path(asset_path).resolve().parent: idx for idx, asset_path in enumerate(door_asset_paths)
@@ -731,6 +743,7 @@ class Dagger:
 
         env_motion_idx = self.ov_env.ref_motion_lib.env_to_file_map.to(device=self.device, dtype=torch.long)
         self.env_asset_idx = self.motion_to_asset_idx[env_motion_idx]
+        self.env_board_bboxes = door_board_bboxes.to(device=self.device, dtype=torch.float32)[self.env_asset_idx]
         unique_asset_idx = sorted(set(self.env_asset_idx.detach().cpu().tolist()))
         self.door_samplers = {
             idx: FrankaLeapSampler(door_asset_paths[idx], device=self.device, num_points=self.door_pcd_num_points)
@@ -750,6 +763,38 @@ class Dagger:
         self.robot_palm_body_idx = int(self.ov_env._robot_key_body_idx[self.ov_env._robot_palm_id_in_key_body_idx])
         self.robot_root_body_idx = int(self.ov_env._robot_base_link_idx[0])
         self.door_base_body_idx = int(self.ov_env._door_base_link_idx)
+        self.wall_distractors_enabled = bool(self.wall_distractor_cfg.get("enabled", True))
+        self.wall_distractor_num_points = int(
+            self.wall_distractor_cfg.get("num_points", max(256, self.door_pcd_num_points // 3))
+        )
+        self.wall_distractor_side_margin_scale_min, self.wall_distractor_side_margin_scale_max = self._get_cfg_range(
+            self.wall_distractor_cfg,
+            "side_margin_scale",
+            [0.25, 0.55],
+        )
+        self.wall_distractor_top_margin_scale_min, self.wall_distractor_top_margin_scale_max = self._get_cfg_range(
+            self.wall_distractor_cfg,
+            "top_margin_scale",
+            [0.10, 0.24],
+        )
+        self.wall_distractor_bottom_margin_scale_min, self.wall_distractor_bottom_margin_scale_max = self._get_cfg_range(
+            self.wall_distractor_cfg,
+            "bottom_margin_scale",
+            [0.02, 0.08],
+        )
+        self.wall_distractor_gap_min_m, self.wall_distractor_gap_max_m = self._get_cfg_range(
+            self.wall_distractor_cfg,
+            "edge_gap_m",
+            [0.015, 0.04],
+        )
+        self.wall_distractor_depth_min_m, self.wall_distractor_depth_max_m = self._get_cfg_range(
+            self.wall_distractor_cfg,
+            "depth_m",
+            [0.06, 0.16],
+        )
+        self.wall_distractor_side_margin_min_m = float(self.wall_distractor_cfg.get("side_margin_min_m", 0.08))
+        self.wall_distractor_top_margin_min_m = float(self.wall_distractor_cfg.get("top_margin_min_m", 0.05))
+        self.wall_distractor_face_jitter_m = float(self.wall_distractor_cfg.get("face_jitter_m", 0.004))
 
         self.robot_camera_body_idx = None
         self.camera_offset_pos = None
@@ -1502,6 +1547,166 @@ class Dagger:
         quat = robot_root_quat_w.unsqueeze(1).expand(-1, robot_local_pcd.shape[1], -1)
         return quat_apply(quat, robot_local_pcd) + robot_root_pos_w.unsqueeze(1)
 
+    def _sample_wall_pointcloud_world(self, num_points=None):
+        if not self.wall_distractors_enabled:
+            return torch.zeros((self.num_envs, 0, 3), dtype=torch.float32, device=self.device)
+
+        if num_points is None:
+            num_points = self.wall_distractor_num_points
+        num_points = int(num_points)
+        if num_points <= 0:
+            return torch.zeros((self.num_envs, 0, 3), dtype=torch.float32, device=self.device)
+
+        door_base_pos_w = self.ov_env.door.data.body_pos_w[:, self.door_base_body_idx]
+        door_base_quat_w = self.ov_env.door.data.body_quat_w[:, self.door_base_body_idx]
+        bbox_min = self.env_board_bboxes[:, 0]
+        bbox_max = self.env_board_bboxes[:, 1]
+        bbox_extent = (bbox_max - bbox_min).clamp_min(1e-4)
+
+        # Reorder each asset's board bbox into [thickness, width, height] so the wall sampler
+        # can stay agnostic to how the door axes are oriented in the merged base frame.
+        axis_order = torch.argsort(bbox_extent, dim=-1)
+        bbox_min_ordered = torch.gather(bbox_min, 1, axis_order)
+        bbox_max_ordered = torch.gather(bbox_max, 1, axis_order)
+
+        thickness_min, width_min, height_min = bbox_min_ordered.unbind(dim=-1)
+        thickness_max, width_max, height_max = bbox_max_ordered.unbind(dim=-1)
+        thickness_extent = (thickness_max - thickness_min).clamp_min(1e-4)
+        width_extent = (width_max - width_min).clamp_min(1e-4)
+        height_extent = (height_max - height_min).clamp_min(1e-4)
+
+        def rand_range(low, high, shape):
+            return torch.empty(shape, device=self.device, dtype=torch.float32).uniform_(float(low), float(high))
+
+        edge_gap = rand_range(self.wall_distractor_gap_min_m, self.wall_distractor_gap_max_m, (self.num_envs,))
+        side_margin_left = (
+            width_extent
+            * rand_range(
+                self.wall_distractor_side_margin_scale_min,
+                self.wall_distractor_side_margin_scale_max,
+                (self.num_envs,),
+            )
+            + self.wall_distractor_side_margin_min_m
+        )
+        side_margin_right = (
+            width_extent
+            * rand_range(
+                self.wall_distractor_side_margin_scale_min,
+                self.wall_distractor_side_margin_scale_max,
+                (self.num_envs,),
+            )
+            + self.wall_distractor_side_margin_min_m
+        )
+        side_margin_left = torch.maximum(side_margin_left, edge_gap + self.wall_distractor_side_margin_min_m)
+        side_margin_right = torch.maximum(side_margin_right, edge_gap + self.wall_distractor_side_margin_min_m)
+        top_margin = (
+            height_extent
+            * rand_range(
+                self.wall_distractor_top_margin_scale_min,
+                self.wall_distractor_top_margin_scale_max,
+                (self.num_envs,),
+            )
+            + self.wall_distractor_top_margin_min_m
+        )
+        height_gap = edge_gap * rand_range(0.8, 1.2, (self.num_envs,))
+        top_margin = torch.maximum(top_margin, height_gap + self.wall_distractor_top_margin_min_m)
+        bottom_margin = height_extent * rand_range(
+            self.wall_distractor_bottom_margin_scale_min,
+            self.wall_distractor_bottom_margin_scale_max,
+            (self.num_envs,),
+        )
+        wall_depth = thickness_extent + rand_range(
+            self.wall_distractor_depth_min_m,
+            self.wall_distractor_depth_max_m,
+            (self.num_envs,),
+        )
+        thickness_center = 0.5 * (thickness_min + thickness_max)
+        wall_depth_half = 0.5 * wall_depth
+
+        left_count = max(1, int(round(num_points * 0.30)))
+        right_count = max(1, int(round(num_points * 0.30)))
+        top_count = max(1, int(round(num_points * 0.25)))
+        return_count = max(0, num_points - left_count - right_count - top_count)
+
+        def sample_main_face(count, width_lo, width_hi, height_lo, height_hi):
+            points = torch.empty((self.num_envs, count, 3), dtype=torch.float32, device=self.device)
+            face_sign = torch.where(
+                torch.rand((self.num_envs, count), device=self.device) > 0.5,
+                torch.ones((self.num_envs, count), device=self.device, dtype=torch.float32),
+                -torch.ones((self.num_envs, count), device=self.device, dtype=torch.float32),
+            )
+            points[..., 0] = thickness_center.unsqueeze(1) + face_sign * wall_depth_half.unsqueeze(1)
+            if self.wall_distractor_face_jitter_m > 0.0:
+                points[..., 0] += rand_range(
+                    -self.wall_distractor_face_jitter_m,
+                    self.wall_distractor_face_jitter_m,
+                    (self.num_envs, count),
+                )
+            points[..., 1] = width_lo.unsqueeze(1) + torch.rand((self.num_envs, count), device=self.device) * (
+                width_hi - width_lo
+            ).clamp_min(1e-4).unsqueeze(1)
+            points[..., 2] = height_lo.unsqueeze(1) + torch.rand((self.num_envs, count), device=self.device) * (
+                height_hi - height_lo
+            ).clamp_min(1e-4).unsqueeze(1)
+            return points
+
+        panels = [
+            sample_main_face(
+                left_count,
+                width_min - side_margin_left,
+                width_min - edge_gap,
+                height_min - bottom_margin,
+                height_max + 0.4 * top_margin,
+            ),
+            sample_main_face(
+                right_count,
+                width_max + edge_gap,
+                width_max + side_margin_right,
+                height_min - bottom_margin,
+                height_max + 0.4 * top_margin,
+            ),
+            sample_main_face(
+                top_count,
+                width_min - side_margin_left,
+                width_max + side_margin_right,
+                height_max + height_gap,
+                height_max + top_margin,
+            ),
+        ]
+
+        if return_count > 0:
+            return_panel = torch.empty((self.num_envs, return_count, 3), dtype=torch.float32, device=self.device)
+            return_on_right = torch.rand((self.num_envs,), device=self.device) > 0.5
+            return_width = torch.where(return_on_right, width_max + edge_gap, width_min - edge_gap)
+            return_panel[..., 0] = (
+                thickness_center.unsqueeze(1)
+                + (torch.rand((self.num_envs, return_count), device=self.device) - 0.5) * wall_depth.unsqueeze(1)
+            )
+            return_panel[..., 1] = return_width.unsqueeze(1)
+            if self.wall_distractor_face_jitter_m > 0.0:
+                return_panel[..., 1] += rand_range(
+                    -self.wall_distractor_face_jitter_m,
+                    self.wall_distractor_face_jitter_m,
+                    (self.num_envs, return_count),
+                )
+            return_height_lo = height_min - 0.25 * bottom_margin
+            return_height_hi = height_max + 0.35 * top_margin
+            return_panel[..., 2] = return_height_lo.unsqueeze(1) + torch.rand(
+                (self.num_envs, return_count), device=self.device
+            ) * (return_height_hi - return_height_lo).clamp_min(1e-4).unsqueeze(1)
+            panels.append(return_panel)
+
+        wall_points_ordered = torch.cat(panels, dim=1)
+        wall_points_base = torch.zeros_like(wall_points_ordered)
+        wall_points_base.scatter_(
+            2,
+            axis_order.unsqueeze(1).expand(-1, wall_points_ordered.shape[1], -1),
+            wall_points_ordered,
+        )
+
+        quat = door_base_quat_w.unsqueeze(1).expand(-1, wall_points_base.shape[1], -1)
+        return quat_apply(quat, wall_points_base) + door_base_pos_w.unsqueeze(1)
+
     def _sample_scene_pointcloud_world_sampler(self):
         door_base_pos_w = self.ov_env.door.data.body_pos_w[:, self.door_base_body_idx]
         door_base_quat_w = self.ov_env.door.data.body_quat_w[:, self.door_base_body_idx]
@@ -1521,7 +1726,11 @@ class Dagger:
             world_pcd = quat_apply(quat, local_pcd) + door_base_pos_w[env_ids].unsqueeze(1)
             door_pcd_world[env_ids] = world_pcd
         robot_pcd_world = self._sample_robot_pointcloud_world_sampler()
-        return torch.cat([door_pcd_world, robot_pcd_world], dim=1)
+        scene_parts = [door_pcd_world, robot_pcd_world]
+        wall_pcd_world = self._sample_wall_pointcloud_world()
+        if wall_pcd_world.shape[1] > 0:
+            scene_parts.append(wall_pcd_world)
+        return torch.cat(scene_parts, dim=1)
 
     def _sample_door_pointcloud_base_sampler(self):
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
@@ -1567,7 +1776,13 @@ class Dagger:
             pos=self.pointcloud_camera.data.pos_w,
             quat=self.pointcloud_camera.data.quat_w_ros,
         )
-        door_pcd_base = world_to_local(door_pcd_world, robot_base_pos_w, robot_base_quat_w)
+        scene_pcd_world = door_pcd_world
+        wall_pcd_world = self._sample_wall_pointcloud_world()
+        if wall_pcd_world.shape[1] > 0:
+            scene_pcd_world = torch.cat([scene_pcd_world, wall_pcd_world], dim=1)
+        if self._viser_capture_requested:
+            self._viser_cached_ground_truth_pcd_world = scene_pcd_world[self._viser_capture_env_id].detach().cpu()
+        door_pcd_base = world_to_local(scene_pcd_world, robot_base_pos_w, robot_base_quat_w)
         # Filter floor points while preserving the batched layout expected by the cropper.
         floor_mask = door_pcd_base[..., 2] > 0.1
         door_pcd_base = door_pcd_base.clone()
@@ -2141,7 +2356,6 @@ class Dagger:
                 if (
                     not self.play_policy
                     and self.rank == 0
-                    and iteration > 0
                     and iteration % self.save_interval == 0
                 ):
                     ckpt_path = os.path.join(self.nn_dir, f"pcd_student_{iteration}.pt")

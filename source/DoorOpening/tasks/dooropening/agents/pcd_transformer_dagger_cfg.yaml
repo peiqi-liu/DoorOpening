@@ -156,7 +156,7 @@ dagger:
   log_interval: 100
   save_interval: 5000
   reset_progress_total: 50000
-  adr_reset_progress_total: 60000
+  adr_reset_progress_total: 10000
   pointcloud_source: "lidar"
   robot_num_points: 30000
   sampler_render:
@@ -176,6 +176,17 @@ dagger:
     occlusion_eps_rel: 0.01
     jitter_std_m: 0.0
     use_compile: true
+  wall_distractors:
+    enabled: true
+    num_points: 10000
+    side_margin_scale: [0.25, 0.55]
+    top_margin_scale: [0.10, 0.24]
+    bottom_margin_scale: [0.02, 0.08]
+    edge_gap_m: [0.015, 0.04]
+    depth_m: [0.06, 0.16]
+    side_margin_min_m: 0.08
+    top_margin_min_m: 0.05
+    face_jitter_m: 0.004
   viser:
     enabled: false  # Mode 1: stream the selected env live to Viser.
     update_interval: 1
