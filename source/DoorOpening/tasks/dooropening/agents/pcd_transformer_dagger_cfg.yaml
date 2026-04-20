@@ -192,7 +192,6 @@ dagger:
   viser:
     enabled: false  # Mode 1: stream the selected env live to Viser.
     update_interval: 1
-    raw_interval: 2000  # Raw capture appends one frame per iteration, so this is also roughly frames-per-chunk.
     env_id: 0
     show_policy_input: true
     point_size: 0.004
@@ -204,9 +203,9 @@ dagger:
     raw:
       enabled: false  # Mode 3: save raw `.pt` interval chunks, independent of live/serializer.
       path: "viser_replay.pt"
+      save_interval: 5000  # Write one raw `.pt` file every N iterations.
       max_points: 5000
-      max_frames: 0  # Warning threshold disabled so complete interval chunks are always saved.
+      max_frames: 2000  # Keep at most this many frames in each raw `.pt` file; set 0 to disable the cap.
   # Legacy `dagger.viser.record.*` keys are still accepted, but `serializer` + `raw` are the preferred split.
-  # debug_pointcloud_env_id: 0
   wandb:
     enabled: false

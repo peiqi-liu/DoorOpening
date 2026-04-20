@@ -15,7 +15,7 @@ try:
 except ImportError:
     wandb = None
 
-from isaaclab.utils.math import quat_apply, quat_mul, transform_points
+from isaaclab.utils.math import quat_apply, transform_points
 from rl_games.algos_torch import torch_ext
 from rl_games.algos_torch.model_builder import ModelBuilder
 
@@ -146,15 +146,18 @@ class Dagger:
         # Runtime controls for live Viser inspection plus optional serializer/raw replay outputs.
         self.viser_cfg = dict(self.runtime_cfg.get("viser", {}))
         legacy_record_cfg = dict(self.viser_cfg.get("record", {}))
+        self.viser_serializer_cfg = dict(self.viser_cfg.get("serializer", legacy_record_cfg))
+        self.viser_raw_cfg = dict(self.viser_cfg.get("raw", {}))
         self.viser_enabled = self.rank == 0 and bool(self.viser_cfg.get("enabled", False))
         self.viser_update_interval = max(1, int(self.viser_cfg.get("update_interval", 1)))
         self.viser_env_id = int(self.viser_cfg.get("env_id", self.runtime_cfg.get("debug_pointcloud_env_id", 0)))
         self.viser_show_policy_input = bool(self.viser_cfg.get("show_policy_input", True))
-        self.viser_raw_interval = max(1, int(self.viser_cfg.get("raw_interval", 1000)))
+        self.viser_raw_save_interval = max(
+            1,
+            int(self.viser_raw_cfg.get("save_interval", self.viser_cfg.get("raw_interval", 1000))),
+        )
         self.viser_point_size = float(self.viser_cfg.get("point_size", 0.004))
         self.viser_max_points = int(self.viser_cfg.get("max_points", 12_000))
-        self.viser_serializer_cfg = dict(self.viser_cfg.get("serializer", legacy_record_cfg))
-        self.viser_raw_cfg = dict(self.viser_cfg.get("raw", {}))
         self.viser_serializer_enabled = self.rank == 0 and bool(self.viser_serializer_cfg.get("enabled", False))
         self.viser_raw_enabled = self.rank == 0 and bool(
             self.viser_raw_cfg.get(
@@ -163,13 +166,10 @@ class Dagger:
             )
         )
         self.viser_episode_replay_enabled = self.viser_serializer_enabled
-        self.viser_replay_enabled = self.viser_episode_replay_enabled or self.viser_raw_enabled
-        self.viser_replay_max_frames = int(
-            self.viser_raw_cfg.get(
-                "max_frames",
-                self.viser_serializer_cfg.get("max_frames", legacy_record_cfg.get("max_frames", 500)),
-            )
+        self.viser_serializer_warning_max_frames = int(
+            self.viser_serializer_cfg.get("max_frames", legacy_record_cfg.get("max_frames", 500))
         )
+        self.viser_raw_max_frames = max(0, int(self.viser_raw_cfg.get("max_frames", 0)))
         self.viser_replay_max_points = int(
             self.viser_raw_cfg.get(
                 "max_points",
@@ -410,14 +410,8 @@ class Dagger:
 
         local_pcd_cfg = self.student_model.pcd_encoders_cfg.get("local_pcd_t")
         self.local_pcd_points = [0, 0, 0]
-        print("local_pcd_cfg", local_pcd_cfg)
-        # print(local_pcd_cfg.get("num_points", [self.door_pcd_num_points, 0, 0]))
         if local_pcd_cfg is not None:
             self.local_pcd_points = list(local_pcd_cfg.get("num_points", [self.door_pcd_num_points, 0, 0])[:3])
-            # num_points = local_pcd_cfg.get("num_points", [self.door_pcd_num_points, 0, 0])
-            # if isinstance(num_points, int):
-            #     num_points = [num_points]
-            # self.local_pcd_points = list(num_points[:3])
             # while len(self.local_pcd_points) < 3:
             #     self.local_pcd_points.append(0)
 
@@ -575,11 +569,6 @@ class Dagger:
         if history_buffer.shape[1] > 1:
             history_buffer[:, 1:, :] = history_buffer[:, :-1, :].clone()
         history_buffer[:, 0, :] = values
-
-    def _reset_history(self, history_buffer, env_ids):
-        if history_buffer is None or env_ids.numel() == 0:
-            return
-        history_buffer[env_ids] = 0.0
 
     def _seed_student_histories(self, env_ids=None):
         prev_action_seed = self._get_implemented_action_vector().detach()
@@ -839,15 +828,10 @@ class Dagger:
             )
 
         self.robot_camera_body_idx = None
-        self.camera_offset_pos = None
-        self.camera_offset_quat_world = None
         self.sampler_camera_spec = None
 
         if self.pointcloud_source in {"sampler", "depth"}:
             self.robot_camera_body_idx = int(self.ov_env.robot.find_bodies("x5_camera_link")[0][0])
-            camera_cfg = self.ov_env.cfg.pointcloud_camera_cfg
-            self.camera_offset_pos = torch.tensor(camera_cfg.offset.pos, device=self.device, dtype=torch.float32)
-            self.camera_offset_quat_world = torch.tensor(camera_cfg.offset.rot, device=self.device, dtype=torch.float32)
             self.sampler_camera_spec = self._build_sampler_camera_spec()
 
         self.robot_lidar_body_idx = None
@@ -892,7 +876,6 @@ class Dagger:
         self._viser_raw_chunk_env_id = None
         self._viser_raw_chunk_start_iteration = None
         self._viser_raw_latest_iteration = None
-        self._viser_raw_limit_reached = False
 
         # Keep replay outputs next to checkpoints by default so a run's artifacts stay together.
         default_record_dir = Path(self.nn_dir).parent if self.nn_dir is not None else Path(os.getcwd())
@@ -1028,8 +1011,10 @@ class Dagger:
                 )
                 print(
                     "Raw replay chunks will be written every "
-                    f"{self.viser_raw_interval} iterations, independent of episode boundaries."
+                    f"{self.viser_raw_save_interval} iterations, independent of episode boundaries."
                 )
+                if self.viser_raw_max_frames > 0:
+                    print(f"Each raw replay chunk will keep at most {self.viser_raw_max_frames} frames.")
 
     def _get_viser_env_id(self):
         """Clamp the selected environment index so debug capture never indexes outside the batch."""
@@ -1118,18 +1103,27 @@ class Dagger:
             "frames": self._viser_raw_frames,
         }
 
+    def _trim_viser_raw_frames(self):
+        if self.viser_raw_max_frames > 0 and len(self._viser_raw_frames) > self.viser_raw_max_frames:
+            self._viser_raw_frames = self._viser_raw_frames[-self.viser_raw_max_frames :]
+        self._viser_raw_frame_count = len(self._viser_raw_frames)
+        if self._viser_raw_frame_count > 0:
+            self._viser_raw_chunk_start_iteration = int(self._viser_raw_frames[0]["iteration"])
+        else:
+            self._viser_raw_chunk_start_iteration = None
+
     def _maybe_flush_viser_raw_snapshot(self, iteration):
         if not self.viser_raw_enabled or self.rank != 0:
             return
         if self._viser_raw_frame_count <= 0:
             return
-        if self.viser_raw_interval <= 0:
+        if self.viser_raw_save_interval <= 0:
             return
-        if (int(iteration) + 1) % self.viser_raw_interval != 0:
+        if (int(iteration) + 1) % self.viser_raw_save_interval != 0:
             return
         self._flush_viser_raw_recording(
             chunk_complete=True,
-            reason=f"interval {self.viser_raw_interval} reached at iteration {int(iteration)}",
+            reason=f"save_interval {self.viser_raw_save_interval} reached at iteration {int(iteration)}",
         )
 
     def _flush_viser_raw_recording(self, chunk_complete, reason):
@@ -1162,7 +1156,6 @@ class Dagger:
         self._viser_raw_chunk_env_id = None
         self._viser_raw_chunk_start_iteration = None
         self._viser_raw_latest_iteration = None
-        self._viser_raw_limit_reached = False
 
     def _should_capture_viser_replay_step(self, iteration):
         """Capture one selected-env replay episode at a time, starting only at an eligible episode boundary."""
@@ -1345,13 +1338,13 @@ class Dagger:
             self._viser_record_frame_count += 1
             self._viser_record_latest_iteration = int(iteration)
             if (
-                self.viser_replay_max_frames > 0
-                and self._viser_record_frame_count > self.viser_replay_max_frames
+                self.viser_serializer_warning_max_frames > 0
+                and self._viser_record_frame_count > self.viser_serializer_warning_max_frames
                 and not self._viser_record_limit_reached
             ):
                 print(
                     "dagger.viser replay max_frames={} was exceeded; continuing so the saved replay still contains "
-                    "the full episode.".format(self.viser_replay_max_frames)
+                    "the full episode.".format(self.viser_serializer_warning_max_frames)
                 )
                 self._viser_record_limit_reached = True
 
@@ -1360,21 +1353,9 @@ class Dagger:
                 self._viser_raw_chunk_index += 1
                 self._viser_raw_chunk_env_id = int(env_id)
                 self._viser_raw_chunk_start_iteration = int(iteration)
-                self._viser_raw_limit_reached = False
             elif self._viser_raw_chunk_env_id != int(env_id):
                 self._viser_raw_chunk_env_id = None
-            self._viser_raw_frame_count += 1
             self._viser_raw_latest_iteration = int(iteration)
-            if (
-                self.viser_replay_max_frames > 0
-                and self._viser_raw_frame_count > self.viser_replay_max_frames
-                and not self._viser_raw_limit_reached
-            ):
-                print(
-                    "dagger.viser.raw max_frames={} was exceeded; continuing so the saved chunk still contains "
-                    "the full interval.".format(self.viser_replay_max_frames)
-                )
-                self._viser_raw_limit_reached = True
             # Raw replay metadata stores world-frame points plus robot/door state for offline playback.
             record_world_points = lambda pts, drop_zero=False: self._prepare_viser_world_points_from_local(
                 pts,
@@ -1408,6 +1389,7 @@ class Dagger:
                 "door_asset_path": str(door_asset_paths[int(self.env_asset_idx[env_id].detach().cpu().item())]),
             }
             self._viser_raw_frames.append(frame_record)
+            self._trim_viser_raw_frames()
             self._maybe_flush_viser_raw_snapshot(iteration)
 
         if record_active and self.viser_serializer_enabled and self._viser_serializer is not None:
@@ -1565,12 +1547,7 @@ class Dagger:
     def _get_sampler_camera_pose(self):
         camera_link_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_camera_body_idx]
         camera_link_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_camera_body_idx]
-        offset_pos = self.camera_offset_pos.unsqueeze(0).expand(self.num_envs, -1)
-        offset_quat = self.camera_offset_quat_world.unsqueeze(0).expand(self.num_envs, -1)
-        camera_pos_w = quat_apply(camera_link_quat_w, offset_pos) + camera_link_pos_w
-        camera_quat_w = quat_mul(camera_link_quat_w, offset_quat)
-        quat_xyzw = camera_quat_w[:, [1, 2, 3, 0]]
-        # return torch.cat([camera_pos_w, quat_xyzw], dim=-1)
+        # The sampler render currently uses the camera-link pose directly.
         return torch.cat([camera_link_pos_w, camera_link_quat_w[:, [1, 2, 3, 0]]], dim=-1)
 
     def _get_lidar_pose(self):
