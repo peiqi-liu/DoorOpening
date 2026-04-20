@@ -179,19 +179,20 @@ dagger:
   wall_distractors:
     enabled: true
     num_points: 10000
-    side_margin_scale: [0.25, 0.55]
+    resample_each_step: false  # Faster and more realistic than regenerating wall geometry every simulation step.
+    side_margin_m: [0.35, 0.80]  # Absolute side coverage in meters so the wall can look wider regardless of door width.
     top_margin_scale: [0.10, 0.24]
     bottom_margin_scale: [0.02, 0.08]
     edge_gap_m: [0.015, 0.04]
-    depth_m: [0.06, 0.16]
-    center_offset_m: [-0.10, 0.10]  # Independent thickness-axis shifts let panels be flush, recessed, or protruding.
-    side_margin_min_m: 0.08
+    depth_m: [0.10, 0.35]  # Extra thickness beyond the door slab; a larger range gives thicker jambs/walls.
+    center_offset_m: [-0.30, 0.30]  # Larger thickness-axis shifts produce deeper recessed and protruding layouts.
+    side_margin_min_m: 0.10
     top_margin_min_m: 0.05
     face_jitter_m: 0.004
   viser:
     enabled: false  # Mode 1: stream the selected env live to Viser.
     update_interval: 1
-    raw_interval: 5000  # Save one raw `.pt` chunk every N iterations, independent of episode boundaries.
+    raw_interval: 2000  # Raw capture appends one frame per iteration, so this is also roughly frames-per-chunk.
     env_id: 0
     show_policy_input: true
     point_size: 0.004
