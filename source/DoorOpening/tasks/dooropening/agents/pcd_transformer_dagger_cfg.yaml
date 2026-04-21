@@ -178,14 +178,14 @@ dagger:
     use_compile: true
   wall_distractors:
     enabled: true
-    num_points: 10000
+    num_points: 30000
     resample_each_step: false  # Faster and more realistic than regenerating wall geometry every simulation step.
     side_margin_m: [0.35, 0.80]  # Absolute side coverage in meters so the wall can look wider regardless of door width.
     top_margin_scale: [0.10, 0.24]
     bottom_margin_scale: [0.02, 0.08]
     edge_gap_m: [0.015, 0.04]
     depth_m: [0.10, 0.35]  # Extra thickness beyond the door slab; a larger range gives thicker jambs/walls.
-    center_offset_m: [-0.30, 0.30]  # Larger thickness-axis shifts produce deeper recessed and protruding layouts.
+    center_offset_m: [-0.60, 0.60]  # Larger thickness-axis shifts produce deeper recessed and protruding layouts.
     side_margin_min_m: 0.10
     top_margin_min_m: 0.05
     face_jitter_m: 0.004
