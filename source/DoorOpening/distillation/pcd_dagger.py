@@ -833,11 +833,6 @@ class Dagger:
             self.wall_distractor_side_margin_abs_max_m = None
         else:
             self.wall_distractor_side_margin_abs_min_m, self.wall_distractor_side_margin_abs_max_m = side_margin_abs_range
-        self.wall_distractor_top_margin_scale_min, self.wall_distractor_top_margin_scale_max = self._get_cfg_range(
-            self.wall_distractor_cfg,
-            "top_margin_scale",
-            [0.10, 0.24],
-        )
         self.wall_distractor_bottom_margin_scale_min, self.wall_distractor_bottom_margin_scale_max = self._get_cfg_range(
             self.wall_distractor_cfg,
             "bottom_margin_scale",
@@ -859,7 +854,6 @@ class Dagger:
             [-0.20, 0.20],
         )
         self.wall_distractor_side_margin_min_m = float(self.wall_distractor_cfg.get("side_margin_min_m", 0.10))
-        self.wall_distractor_top_margin_min_m = float(self.wall_distractor_cfg.get("top_margin_min_m", 0.05))
         self.wall_distractor_face_jitter_m = float(self.wall_distractor_cfg.get("face_jitter_m", 0.004))
         self.wall_distractor_resample_each_step = bool(self.wall_distractor_cfg.get("resample_each_step", False))
         self._wall_distractor_local_points = None
@@ -1629,19 +1623,14 @@ class Dagger:
 
         edge_gap = rand_range(self.wall_distractor_gap_min_m, self.wall_distractor_gap_max_m, (env_count,))
         if self.wall_distractor_side_margin_abs_min_m is not None:
-            # Let configs pin side coverage directly in meters when wider wall context is needed.
-            side_margin_left = rand_range(
-                self.wall_distractor_side_margin_abs_min_m,
-                self.wall_distractor_side_margin_abs_max_m,
-                (env_count,),
-            )
-            side_margin_right = rand_range(
+            # In column mode, the side margin range becomes the column width range.
+            column_width = rand_range(
                 self.wall_distractor_side_margin_abs_min_m,
                 self.wall_distractor_side_margin_abs_max_m,
                 (env_count,),
             )
         else:
-            side_margin_left = (
+            column_width = (
                 width_extent
                 * rand_range(
                     self.wall_distractor_side_margin_scale_min,
@@ -1650,28 +1639,7 @@ class Dagger:
                 )
                 + self.wall_distractor_side_margin_min_m
             )
-            side_margin_right = (
-                width_extent
-                * rand_range(
-                    self.wall_distractor_side_margin_scale_min,
-                    self.wall_distractor_side_margin_scale_max,
-                    (env_count,),
-                )
-                + self.wall_distractor_side_margin_min_m
-            )
-        side_margin_left = torch.maximum(side_margin_left, edge_gap + self.wall_distractor_side_margin_min_m)
-        side_margin_right = torch.maximum(side_margin_right, edge_gap + self.wall_distractor_side_margin_min_m)
-        top_margin = (
-            height_extent
-            * rand_range(
-                self.wall_distractor_top_margin_scale_min,
-                self.wall_distractor_top_margin_scale_max,
-                (env_count,),
-            )
-            + self.wall_distractor_top_margin_min_m
-        )
-        height_gap = edge_gap * rand_range(0.8, 1.2, (env_count,))
-        top_margin = torch.maximum(top_margin, height_gap + self.wall_distractor_top_margin_min_m)
+        column_width = torch.maximum(column_width, torch.full_like(column_width, self.wall_distractor_side_margin_min_m))
         bottom_margin = height_extent * rand_range(
             self.wall_distractor_bottom_margin_scale_min,
             self.wall_distractor_bottom_margin_scale_max,
@@ -1679,111 +1647,88 @@ class Dagger:
         )
         thickness_center = 0.5 * (thickness_min + thickness_max)
 
-        left_count = max(1, int(round(num_points * 0.30)))
-        right_count = max(1, int(round(num_points * 0.30)))
-        top_count = max(1, int(round(num_points * 0.25)))
-        return_count = max(0, num_points - left_count - right_count - top_count)
-
-        def sample_panel_surfaces():
-            panel_depth = thickness_extent + rand_range(
+        def sample_column_surfaces():
+            column_depth = thickness_extent + rand_range(
                 self.wall_distractor_depth_min_m,
                 self.wall_distractor_depth_max_m,
                 (env_count,),
             )
-            # Shift each wall panel independently along the door-thickness axis so
-            # recessed, protruding, and mixed left/right layouts are all represented.
-            panel_center = thickness_center + rand_range(
+            # Shift the column along the door-thickness axis so recessed and protruding
+            # jamb-like distractors are both represented.
+            column_center = thickness_center + rand_range(
                 self.wall_distractor_center_offset_min_m,
                 self.wall_distractor_center_offset_max_m,
                 (env_count,),
             )
-            panel_depth_half = 0.5 * panel_depth
-            return panel_center - panel_depth_half, panel_center + panel_depth_half
+            column_depth_half = 0.5 * column_depth
+            return column_center - column_depth_half, column_center + column_depth_half
 
-        def sample_main_face(count, width_lo, width_hi, height_lo, height_hi, panel_min_surface, panel_max_surface):
-            points = torch.empty((env_count, count, 3), dtype=torch.float32, device=self.device)
-            use_max_surface = torch.rand((env_count, count), device=self.device) > 0.5
-            points[..., 0] = torch.where(
-                use_max_surface,
-                panel_max_surface.unsqueeze(1),
-                panel_min_surface.unsqueeze(1),
+        column_min_surface, column_max_surface = sample_column_surfaces()
+        attach_on_right = torch.rand((env_count,), device=self.device) > 0.5
+        column_inner_width = torch.where(attach_on_right, width_max + edge_gap, width_min - edge_gap)
+        column_outer_width = torch.where(
+            attach_on_right,
+            column_inner_width + column_width,
+            column_inner_width - column_width,
+        )
+        column_width_lo = torch.minimum(column_inner_width, column_outer_width)
+        column_width_hi = torch.maximum(column_inner_width, column_outer_width)
+        column_height_lo = height_min - bottom_margin
+        column_height_hi = height_max
+
+        wall_points_ordered = torch.empty((env_count, num_points, 3), dtype=torch.float32, device=self.device)
+        face_ids = torch.randint(0, 4, (env_count, num_points), device=self.device)
+
+        wall_points_ordered[..., 0] = column_min_surface.unsqueeze(1) + torch.rand(
+            (env_count, num_points), device=self.device
+        ) * (column_max_surface - column_min_surface).clamp_min(1e-4).unsqueeze(1)
+        wall_points_ordered[..., 1] = column_width_lo.unsqueeze(1) + torch.rand(
+            (env_count, num_points), device=self.device
+        ) * (column_width_hi - column_width_lo).clamp_min(1e-4).unsqueeze(1)
+        wall_points_ordered[..., 2] = column_height_lo.unsqueeze(1) + torch.rand(
+            (env_count, num_points), device=self.device
+        ) * (column_height_hi - column_height_lo).clamp_min(1e-4).unsqueeze(1)
+
+        thickness_min_face = face_ids == 0
+        thickness_max_face = face_ids == 1
+        width_min_face = face_ids == 2
+        width_max_face = face_ids == 3
+
+        wall_points_ordered[..., 0] = torch.where(
+            thickness_min_face,
+            column_min_surface.unsqueeze(1),
+            wall_points_ordered[..., 0],
+        )
+        wall_points_ordered[..., 0] = torch.where(
+            thickness_max_face,
+            column_max_surface.unsqueeze(1),
+            wall_points_ordered[..., 0],
+        )
+        wall_points_ordered[..., 1] = torch.where(
+            width_min_face,
+            column_width_lo.unsqueeze(1),
+            wall_points_ordered[..., 1],
+        )
+        wall_points_ordered[..., 1] = torch.where(
+            width_max_face,
+            column_width_hi.unsqueeze(1),
+            wall_points_ordered[..., 1],
+        )
+
+        if self.wall_distractor_face_jitter_m > 0.0:
+            thickness_face_mask = (thickness_min_face | thickness_max_face).to(torch.float32)
+            width_face_mask = (width_min_face | width_max_face).to(torch.float32)
+            wall_points_ordered[..., 0] += thickness_face_mask * rand_range(
+                -self.wall_distractor_face_jitter_m,
+                self.wall_distractor_face_jitter_m,
+                (env_count, num_points),
             )
-            if self.wall_distractor_face_jitter_m > 0.0:
-                points[..., 0] += rand_range(
-                    -self.wall_distractor_face_jitter_m,
-                    self.wall_distractor_face_jitter_m,
-                    (env_count, count),
-                )
-            points[..., 1] = width_lo.unsqueeze(1) + torch.rand((env_count, count), device=self.device) * (
-                width_hi - width_lo
-            ).clamp_min(1e-4).unsqueeze(1)
-            points[..., 2] = height_lo.unsqueeze(1) + torch.rand((env_count, count), device=self.device) * (
-                height_hi - height_lo
-            ).clamp_min(1e-4).unsqueeze(1)
-            return points
+            wall_points_ordered[..., 1] += width_face_mask * rand_range(
+                -self.wall_distractor_face_jitter_m,
+                self.wall_distractor_face_jitter_m,
+                (env_count, num_points),
+            )
 
-        left_min_surface, left_max_surface = sample_panel_surfaces()
-        right_min_surface, right_max_surface = sample_panel_surfaces()
-        top_min_surface, top_max_surface = sample_panel_surfaces()
-        panels = [
-            sample_main_face(
-                left_count,
-                width_min - side_margin_left,
-                width_min - edge_gap,
-                height_min - bottom_margin,
-                height_max + 0.4 * top_margin,
-                left_min_surface,
-                left_max_surface,
-            ),
-            sample_main_face(
-                right_count,
-                width_max + edge_gap,
-                width_max + side_margin_right,
-                height_min - bottom_margin,
-                height_max + 0.4 * top_margin,
-                right_min_surface,
-                right_max_surface,
-            ),
-            sample_main_face(
-                top_count,
-                width_min - side_margin_left,
-                width_max + side_margin_right,
-                height_max + height_gap,
-                height_max + top_margin,
-                top_min_surface,
-                top_max_surface,
-            ),
-        ]
-
-        if return_count > 0:
-            return_panel = torch.empty((env_count, return_count, 3), dtype=torch.float32, device=self.device)
-            return_on_right = torch.rand((env_count,), device=self.device) > 0.5
-            return_width = torch.where(return_on_right, width_max + edge_gap, width_min - edge_gap)
-            return_min_surface = torch.where(return_on_right, right_min_surface, left_min_surface)
-            return_max_surface = torch.where(return_on_right, right_max_surface, left_max_surface)
-            return_panel[..., 0] = return_min_surface.unsqueeze(1) + torch.rand(
-                (env_count, return_count), device=self.device
-            ) * (return_max_surface - return_min_surface).clamp_min(1e-4).unsqueeze(1)
-            return_panel[..., 1] = return_width.unsqueeze(1)
-            if self.wall_distractor_face_jitter_m > 0.0:
-                return_panel[..., 0] += rand_range(
-                    -self.wall_distractor_face_jitter_m,
-                    self.wall_distractor_face_jitter_m,
-                    (env_count, return_count),
-                )
-                return_panel[..., 1] += rand_range(
-                    -self.wall_distractor_face_jitter_m,
-                    self.wall_distractor_face_jitter_m,
-                    (env_count, return_count),
-                )
-            return_height_lo = height_min - 0.25 * bottom_margin
-            return_height_hi = height_max + 0.35 * top_margin
-            return_panel[..., 2] = return_height_lo.unsqueeze(1) + torch.rand(
-                (env_count, return_count), device=self.device
-            ) * (return_height_hi - return_height_lo).clamp_min(1e-4).unsqueeze(1)
-            panels.append(return_panel)
-
-        wall_points_ordered = torch.cat(panels, dim=1)
         wall_points_base = torch.zeros_like(wall_points_ordered)
         wall_points_base.scatter_(
             2,
