@@ -399,9 +399,24 @@ class Dagger:
         self.aux_feedback_to_policy = self.has_aux_input and self.has_aux_prediction and bool(
             self.runtime_cfg.get("aux_feedback_to_policy", True)
         )
+        self.aux_pregrasp_dropout_prob = float(self.runtime_cfg.get("aux_pregrasp_dropout_prob", 0.0))
         self.aux_buffer = None
         if self.has_aux_input:
             self.aux_buffer = torch.zeros((self.num_envs, self.aux_input_dim), dtype=torch.float32, device=self.device)
+        if not 0.0 <= self.aux_pregrasp_dropout_prob <= 1.0:
+            raise ValueError("aux_pregrasp_dropout_prob must be in [0, 1].")
+        self.latest_aux_pregrasp_env_fraction = 0.0
+        self.latest_aux_pregrasp_dropout_fraction = 0.0
+        if (
+            self.rank == 0
+            and self.aux_pregrasp_dropout_prob > 0.0
+            and self.has_aux_prediction
+            and self.aux_prediction_mode == "delta"
+        ):
+            print(
+                "Warning: aux_pregrasp_dropout_prob is enabled while aux_prediction_mode='delta'. "
+                "Dropped aux inputs reset the delta reference to zero for those steps."
+            )
         if student_ckpt is not None and self.has_aux_input and self.rank == 0:
             print(
                 "Warning: student checkpoint was loaded while aux_handle_* inputs are active. "
@@ -697,6 +712,38 @@ class Dagger:
 
     def _use_aux_feedback(self):
         return self.aux_feedback_to_policy
+
+    def _maybe_drop_aux_feedback(self, aux_input_vector):
+        self.latest_aux_pregrasp_env_fraction = 0.0
+        self.latest_aux_pregrasp_dropout_fraction = 0.0
+        if aux_input_vector is None or not self._use_aux_feedback() or self.aux_pregrasp_dropout_prob <= 0.0:
+            return aux_input_vector
+
+        ref_motion_lib = getattr(self.ov_env, "ref_motion_lib", None)
+        if ref_motion_lib is None:
+            return aux_input_vector
+
+        get_pregrasp_mask = getattr(ref_motion_lib, "get_before_first_keyframe_mask", None)
+        if not callable(get_pregrasp_mask):
+            return aux_input_vector
+
+        pregrasp_mask = get_pregrasp_mask().to(device=self.device, dtype=torch.bool)
+        self.latest_aux_pregrasp_env_fraction = float(pregrasp_mask.float().mean().item())
+        if not torch.any(pregrasp_mask):
+            return aux_input_vector
+
+        drop_mask = pregrasp_mask & (
+            torch.rand(aux_input_vector.shape[0], device=self.device) < self.aux_pregrasp_dropout_prob
+        )
+        self.latest_aux_pregrasp_dropout_fraction = float(drop_mask.float().mean().item())
+        if not torch.any(drop_mask):
+            return aux_input_vector
+
+        dropped_aux_input = aux_input_vector.clone()
+        # Zeroing the carried-over aux vector forces the student to recover the
+        # handle estimate from the rest of the observation during pregrasp.
+        dropped_aux_input[drop_mask] = 0.0
+        return dropped_aux_input
 
     def _seed_aux_buffer(self, env_ids=None):
         if self.aux_buffer is None:
@@ -2086,6 +2133,7 @@ class Dagger:
             aux_input_vector = self.aux_buffer.clone()
         else:
             aux_input_vector = aux_target_vector
+        aux_input_vector = self._maybe_drop_aux_feedback(aux_input_vector)
 
         obs = OrderedDict()
         for key in self.state_encoders_keys:
@@ -2289,6 +2337,9 @@ class Dagger:
             print("Student Update Steps:", self.student_update_steps)
             print("Last Local Update Batch Size:", self.last_local_update_batch_size)
             print("Last Global Update Batch Size:", self.last_global_update_batch_size)
+            if self.aux_pregrasp_dropout_prob > 0.0:
+                print("Aux Pregrasp Env Fraction:", self.latest_aux_pregrasp_env_fraction)
+                print("Aux Pregrasp Dropout Fraction:", self.latest_aux_pregrasp_dropout_fraction)
             if episode_reward is not None:
                 print("Episode Reward:", episode_reward)
             if episode_length is not None:
@@ -2320,6 +2371,9 @@ class Dagger:
             metrics["stats/teacher_forcing_beta"] = teacher_forcing_beta
         metrics["stats/teacher_rollout_env_fraction"] = teacher_env_fraction
         metrics["stats/student_rollout_env_fraction"] = student_env_fraction
+        if self.aux_pregrasp_dropout_prob > 0.0:
+            metrics["stats/aux_pregrasp_env_fraction"] = self.latest_aux_pregrasp_env_fraction
+            metrics["stats/aux_pregrasp_dropout_fraction"] = self.latest_aux_pregrasp_dropout_fraction
         if timing_means["iteration_ms"] is not None:
             metrics["timing/iteration_ms"] = timing_means["iteration_ms"]
         if timing_means["student_obs_ms"] is not None:
