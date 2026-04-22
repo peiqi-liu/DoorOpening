@@ -120,6 +120,9 @@ class Dagger:
         )
         self.teacher_forcing_min_beta = float(self.runtime_cfg.get("teacher_forcing_min_beta", 0.0))
         self.teacher_forcing_schedule = str(self.runtime_cfg.get("teacher_forcing_schedule", "linear")).lower()
+        self.teacher_forcing_warmup_use_ground_truth_aux = bool(
+            self.runtime_cfg.get("teacher_forcing_warmup_use_ground_truth_aux", True)
+        )
         self.log_interval = int(self.runtime_cfg.get("log_interval", 100))
         self.save_interval = int(self.runtime_cfg.get("save_interval", 5_000))
         self.pointcloud_source = str(self.runtime_cfg.get("pointcloud_source", "sampler")).lower()
@@ -175,6 +178,28 @@ class Dagger:
                 "max_points",
                 self.viser_serializer_cfg.get("max_points", legacy_record_cfg.get("max_points", self.viser_max_points)),
             )
+        )
+        self.viser_raw_include_ground_truth = bool(self.viser_raw_cfg.get("include_ground_truth", True))
+        self.viser_raw_include_robot_obs = bool(self.viser_raw_cfg.get("include_robot_obs", True))
+        self.viser_raw_include_policy_input = bool(
+            self.viser_raw_cfg.get("include_policy_input", self.viser_show_policy_input)
+        )
+        self.viser_raw_ground_truth_max_points = max(
+            0,
+            int(
+                self.viser_raw_cfg.get(
+                    "ground_truth_max_points",
+                    self.viser_raw_cfg.get("gt_max_points", self.viser_replay_max_points),
+                )
+            ),
+        )
+        self.viser_raw_robot_obs_max_points = max(
+            0,
+            int(self.viser_raw_cfg.get("robot_obs_max_points", self.viser_replay_max_points)),
+        )
+        self.viser_raw_policy_input_max_points = max(
+            0,
+            int(self.viser_raw_cfg.get("policy_input_max_points", self.viser_replay_max_points)),
         )
         if self.pointcloud_source not in {"sampler", "depth", "lidar"}:
             raise ValueError(f"Unsupported pointcloud_source '{self.pointcloud_source}'.")
@@ -640,32 +665,10 @@ class Dagger:
         getter = getattr(self.ov_env, "get_handle_position_in_base_frame", None)
         if callable(getter):
             return getter()
-
-        robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
-        robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
-        handle_offsets = getattr(self.ov_env, "handle_offsets", None)
-        if handle_offsets is None:
-            raise RuntimeError("Expected environment to expose handle_offsets for aux handle position prediction.")
-        handle_body_names = list(getattr(self.ov_env, "door_body_names", []))
-        if "link_2" not in handle_body_names:
-            raise RuntimeError("Expected environment door_body_names to include 'link_2' for handle position.")
-
-        handle_body_local_idx = handle_body_names.index("link_2")
-        handle_body_indices = getattr(self.ov_env, "_door_body_idx", None)
-        if handle_body_indices is None:
-            raise RuntimeError("Expected environment to expose _door_body_idx for handle position.")
-        handle_body_idx = int(handle_body_indices[handle_body_local_idx])
-        handle_body_pos_w = self.ov_env.door.data.body_pos_w[:, handle_body_idx]
-        handle_body_quat_w = self.ov_env.door.data.body_quat_w[:, handle_body_idx]
-
-        handle_center_offset = handle_offsets.mean(dim=1)
-        handle_center_pos_w = quat_apply(handle_body_quat_w.float(), handle_center_offset.float()) + handle_body_pos_w
-        handle_center_pos_base = world_to_local(
-            handle_center_pos_w.unsqueeze(1),
-            robot_base_pos_w,
-            robot_base_quat_w,
-        ).squeeze(1)
-        return handle_center_pos_base
+        raise RuntimeError(
+            "Expected environment to expose get_handle_position_in_base_frame() "
+            "for aux handle position prediction."
+        )
 
     def _get_aux_state_values(self):
         if not self.has_aux_input:
@@ -1056,6 +1059,19 @@ class Dagger:
                 )
                 if self.viser_raw_max_frames > 0:
                     print(f"Each raw replay chunk will keep at most {self.viser_raw_max_frames} frames.")
+                print(
+                    "Raw replay point budgets: gt={}, obs={}, policy={}.".format(
+                        "off"
+                        if not self.viser_raw_include_ground_truth or self.viser_raw_ground_truth_max_points <= 0
+                        else self.viser_raw_ground_truth_max_points,
+                        "off"
+                        if not self.viser_raw_include_robot_obs or self.viser_raw_robot_obs_max_points <= 0
+                        else self.viser_raw_robot_obs_max_points,
+                        "off"
+                        if not self.viser_raw_include_policy_input or self.viser_raw_policy_input_max_points <= 0
+                        else self.viser_raw_policy_input_max_points,
+                    )
+                )
 
     def _get_viser_env_id(self):
         """Clamp the selected environment index so debug capture never indexes outside the batch."""
@@ -1121,6 +1137,14 @@ class Dagger:
             "format": "dooropening_viser_replay_v1",
             "pointcloud_frame": "world",
             "pointcloud_source": self.pointcloud_source,
+            "raw_cloud_config": {
+                "include_ground_truth": bool(self.viser_raw_include_ground_truth),
+                "include_robot_obs": bool(self.viser_raw_include_robot_obs),
+                "include_policy_input": bool(self.viser_raw_include_policy_input),
+                "ground_truth_max_points": int(self.viser_raw_ground_truth_max_points),
+                "robot_obs_max_points": int(self.viser_raw_robot_obs_max_points),
+                "policy_input_max_points": int(self.viser_raw_policy_input_max_points),
+            },
             "glorbot_urdf_path": str(glorbot_urdf_path),
             "robot_joint_names": list(getattr(self.ov_env.robot, "joint_names", [])),
             "door_joint_names": list(getattr(self.ov_env.door, "joint_names", [])),
@@ -1398,28 +1422,46 @@ class Dagger:
                 self._viser_raw_chunk_env_id = None
             self._viser_raw_latest_iteration = int(iteration)
             # Raw replay metadata stores world-frame points plus robot/door state for offline playback.
-            record_world_points = lambda pts, drop_zero=False: self._prepare_viser_world_points_from_local(
-                pts,
-                robot_base_pos_w,
-                robot_base_quat_w,
-                env_id,
-                self.viser_replay_max_points,
-                drop_zero_rows=drop_zero,
-            )
+            ground_truth_points_world = None
+            if self.viser_raw_include_ground_truth and self.viser_raw_ground_truth_max_points > 0:
+                ground_truth_points_world = self._prepare_viser_points(
+                    ground_truth_pcd_world,
+                    env_id,
+                    self.viser_raw_ground_truth_max_points,
+                ).to(dtype=torch.float16)
+
+            robot_obs_points_world = None
+            if self.viser_raw_include_robot_obs and self.viser_raw_robot_obs_max_points > 0:
+                robot_obs_points_world = self._prepare_viser_world_points_from_local(
+                    robot_obs_pcd_base,
+                    robot_base_pos_w,
+                    robot_base_quat_w,
+                    env_id,
+                    self.viser_raw_robot_obs_max_points,
+                ).to(dtype=torch.float16)
+
+            policy_input_points_world = None
+            if (
+                self.viser_raw_include_policy_input
+                and policy_input_pcd_base is not None
+                and self.viser_raw_policy_input_max_points > 0
+            ):
+                policy_input_points_world = self._prepare_viser_world_points_from_local(
+                    policy_input_pcd_base,
+                    robot_base_pos_w,
+                    robot_base_quat_w,
+                    env_id,
+                    self.viser_raw_policy_input_max_points,
+                    drop_zero_rows=True,
+                ).to(dtype=torch.float16)
             frame_record = {
                 "iteration": int(iteration),
                 "sim_frame": int(self.frame),
                 "env_id": int(env_id),
                 "pointcloud_source": self.pointcloud_source,
-                "ground_truth_points_world": self._prepare_viser_points(
-                    ground_truth_pcd_world,
-                    env_id,
-                    self.viser_replay_max_points,
-                ).to(dtype=torch.float16),
-                "robot_obs_points_world": record_world_points(robot_obs_pcd_base).to(dtype=torch.float16),
-                "policy_input_points_world": record_world_points(policy_input_pcd_base, drop_zero=True).to(dtype=torch.float16)
-                if show_policy_input
-                else None,
+                "ground_truth_points_world": ground_truth_points_world,
+                "robot_obs_points_world": robot_obs_points_world,
+                "policy_input_points_world": policy_input_points_world,
                 "robot_joint_pos": q_pos[env_id].detach().cpu().to(dtype=torch.float32),
                 "door_joint_pos": door_joint_pos[env_id].detach().cpu().to(dtype=torch.float32),
                 "robot_base_pos_w": self.ov_env.robot.data.body_pos_w[env_id, self.robot_base_body_idx].detach().cpu().to(dtype=torch.float32),
@@ -1621,30 +1663,6 @@ class Dagger:
         def rand_range(low, high, shape):
             return torch.empty(shape, device=self.device, dtype=torch.float32).uniform_(float(low), float(high))
 
-        edge_gap = rand_range(self.wall_distractor_gap_min_m, self.wall_distractor_gap_max_m, (env_count,))
-        if self.wall_distractor_side_margin_abs_min_m is not None:
-            # In column mode, the side margin range becomes the column width range.
-            column_width = rand_range(
-                self.wall_distractor_side_margin_abs_min_m,
-                self.wall_distractor_side_margin_abs_max_m,
-                (env_count,),
-            )
-        else:
-            column_width = (
-                width_extent
-                * rand_range(
-                    self.wall_distractor_side_margin_scale_min,
-                    self.wall_distractor_side_margin_scale_max,
-                    (env_count,),
-                )
-                + self.wall_distractor_side_margin_min_m
-            )
-        column_width = torch.maximum(column_width, torch.full_like(column_width, self.wall_distractor_side_margin_min_m))
-        bottom_margin = height_extent * rand_range(
-            self.wall_distractor_bottom_margin_scale_min,
-            self.wall_distractor_bottom_margin_scale_max,
-            (env_count,),
-        )
         thickness_center = 0.5 * (thickness_min + thickness_max)
 
         def sample_column_surfaces():
@@ -1663,31 +1681,111 @@ class Dagger:
             column_depth_half = 0.5 * column_depth
             return column_center - column_depth_half, column_center + column_depth_half
 
-        column_min_surface, column_max_surface = sample_column_surfaces()
-        attach_on_right = torch.rand((env_count,), device=self.device) > 0.5
-        column_inner_width = torch.where(attach_on_right, width_max + edge_gap, width_min - edge_gap)
-        column_outer_width = torch.where(
-            attach_on_right,
-            column_inner_width + column_width,
-            column_inner_width - column_width,
+        def sample_column_width():
+            if self.wall_distractor_side_margin_abs_min_m is not None:
+                # In column mode, the side margin range becomes the column width range.
+                column_width = rand_range(
+                    self.wall_distractor_side_margin_abs_min_m,
+                    self.wall_distractor_side_margin_abs_max_m,
+                    (env_count,),
+                )
+            else:
+                column_width = (
+                    width_extent
+                    * rand_range(
+                        self.wall_distractor_side_margin_scale_min,
+                        self.wall_distractor_side_margin_scale_max,
+                        (env_count,),
+                    )
+                    + self.wall_distractor_side_margin_min_m
+                )
+            return torch.maximum(column_width, torch.full_like(column_width, self.wall_distractor_side_margin_min_m))
+
+        def sample_column_bounds(attach_on_right):
+            edge_gap = rand_range(self.wall_distractor_gap_min_m, self.wall_distractor_gap_max_m, (env_count,))
+            column_width = sample_column_width()
+            bottom_margin = height_extent * rand_range(
+                self.wall_distractor_bottom_margin_scale_min,
+                self.wall_distractor_bottom_margin_scale_max,
+                (env_count,),
+            )
+            column_min_surface, column_max_surface = sample_column_surfaces()
+            column_inner_width = torch.where(attach_on_right, width_max + edge_gap, width_min - edge_gap)
+            column_outer_width = torch.where(
+                attach_on_right,
+                column_inner_width + column_width,
+                column_inner_width - column_width,
+            )
+            column_width_lo = torch.minimum(column_inner_width, column_outer_width)
+            column_width_hi = torch.maximum(column_inner_width, column_outer_width)
+            column_height_lo = height_min - bottom_margin
+            column_height_hi = height_max
+            return (
+                column_min_surface,
+                column_max_surface,
+                column_width_lo,
+                column_width_hi,
+                column_height_lo,
+                column_height_hi,
+            )
+
+        left_column_bounds = sample_column_bounds(
+            torch.zeros((env_count,), dtype=torch.bool, device=self.device)
         )
-        column_width_lo = torch.minimum(column_inner_width, column_outer_width)
-        column_width_hi = torch.maximum(column_inner_width, column_outer_width)
-        column_height_lo = height_min - bottom_margin
-        column_height_hi = height_max
+        right_column_bounds = sample_column_bounds(
+            torch.ones((env_count,), dtype=torch.bool, device=self.device)
+        )
+        left_column_min_surface, left_column_max_surface, left_column_width_lo, left_column_width_hi, left_column_height_lo, left_column_height_hi = left_column_bounds
+        right_column_min_surface, right_column_max_surface, right_column_width_lo, right_column_width_hi, right_column_height_lo, right_column_height_hi = right_column_bounds
 
         wall_points_ordered = torch.empty((env_count, num_points, 3), dtype=torch.float32, device=self.device)
         face_ids = torch.randint(0, 4, (env_count, num_points), device=self.device)
+        use_right_column = torch.randint(0, 2, (env_count, num_points), device=self.device, dtype=torch.int64).bool()
+        if num_points >= 2:
+            # Keep both jamb sides populated for each env while leaving the top lintel clear.
+            use_right_column[:, 0] = False
+            use_right_column[:, 1] = True
 
-        wall_points_ordered[..., 0] = column_min_surface.unsqueeze(1) + torch.rand(
+        column_min_surface = torch.where(
+            use_right_column,
+            right_column_min_surface.unsqueeze(1),
+            left_column_min_surface.unsqueeze(1),
+        )
+        column_max_surface = torch.where(
+            use_right_column,
+            right_column_max_surface.unsqueeze(1),
+            left_column_max_surface.unsqueeze(1),
+        )
+        column_width_lo = torch.where(
+            use_right_column,
+            right_column_width_lo.unsqueeze(1),
+            left_column_width_lo.unsqueeze(1),
+        )
+        column_width_hi = torch.where(
+            use_right_column,
+            right_column_width_hi.unsqueeze(1),
+            left_column_width_hi.unsqueeze(1),
+        )
+        column_height_lo = torch.where(
+            use_right_column,
+            right_column_height_lo.unsqueeze(1),
+            left_column_height_lo.unsqueeze(1),
+        )
+        column_height_hi = torch.where(
+            use_right_column,
+            right_column_height_hi.unsqueeze(1),
+            left_column_height_hi.unsqueeze(1),
+        )
+
+        wall_points_ordered[..., 0] = column_min_surface + torch.rand(
             (env_count, num_points), device=self.device
-        ) * (column_max_surface - column_min_surface).clamp_min(1e-4).unsqueeze(1)
-        wall_points_ordered[..., 1] = column_width_lo.unsqueeze(1) + torch.rand(
+        ) * (column_max_surface - column_min_surface).clamp_min(1e-4)
+        wall_points_ordered[..., 1] = column_width_lo + torch.rand(
             (env_count, num_points), device=self.device
-        ) * (column_width_hi - column_width_lo).clamp_min(1e-4).unsqueeze(1)
-        wall_points_ordered[..., 2] = column_height_lo.unsqueeze(1) + torch.rand(
+        ) * (column_width_hi - column_width_lo).clamp_min(1e-4)
+        wall_points_ordered[..., 2] = column_height_lo + torch.rand(
             (env_count, num_points), device=self.device
-        ) * (column_height_hi - column_height_lo).clamp_min(1e-4).unsqueeze(1)
+        ) * (column_height_hi - column_height_lo).clamp_min(1e-4)
 
         thickness_min_face = face_ids == 0
         thickness_max_face = face_ids == 1
@@ -1696,22 +1794,22 @@ class Dagger:
 
         wall_points_ordered[..., 0] = torch.where(
             thickness_min_face,
-            column_min_surface.unsqueeze(1),
+            column_min_surface,
             wall_points_ordered[..., 0],
         )
         wall_points_ordered[..., 0] = torch.where(
             thickness_max_face,
-            column_max_surface.unsqueeze(1),
+            column_max_surface,
             wall_points_ordered[..., 0],
         )
         wall_points_ordered[..., 1] = torch.where(
             width_min_face,
-            column_width_lo.unsqueeze(1),
+            column_width_lo,
             wall_points_ordered[..., 1],
         )
         wall_points_ordered[..., 1] = torch.where(
             width_max_face,
-            column_width_hi.unsqueeze(1),
+            column_width_hi,
             wall_points_ordered[..., 1],
         )
 
@@ -2056,7 +2154,29 @@ class Dagger:
             dist.all_reduce(batch_size, op=dist.ReduceOp.SUM)
         return int(batch_size.item())
 
-    def _build_student_obs(self):
+    def _mix_aux_feedback(self, aux_input_vector, aux_target_vector, iteration):
+        if aux_input_vector is None or aux_target_vector is None:
+            return aux_input_vector
+        if (
+            not self.teacher_forcing_warmup_use_ground_truth_aux
+            or self.play_policy
+            or self.teacher_model is None
+            or not self._use_aux_feedback()
+            or iteration is None
+        ):
+            return aux_input_vector
+
+        teacher_mask = self.teacher_forcing_env_mask
+        if not torch.any(teacher_mask):
+            return aux_input_vector
+        if torch.all(teacher_mask):
+            return aux_target_vector.clone()
+
+        mixed_aux_input_vector = aux_input_vector.clone()
+        mixed_aux_input_vector[teacher_mask] = aux_target_vector[teacher_mask]
+        return mixed_aux_input_vector
+
+    def _build_student_obs(self, iteration=None):
         q_pos = self._get_student_proprio_vector()
         door_joint_pos = self.ov_env.door.data.joint_pos
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
@@ -2076,6 +2196,11 @@ class Dagger:
             if self.aux_buffer is None:
                 raise RuntimeError("Aux feedback requested but aux_buffer is not initialized.")
             aux_input_vector = self.aux_buffer.clone()
+            aux_input_vector = self._mix_aux_feedback(
+                aux_input_vector,
+                aux_target_vector,
+                iteration,
+            )
         else:
             aux_input_vector = aux_target_vector
         aux_input_vector = self._maybe_drop_aux_feedback(aux_input_vector)
@@ -2359,7 +2484,7 @@ class Dagger:
                 student_obs_start_time = time.perf_counter()
                 self._viser_capture_iteration = iteration
                 self._viser_capture_requested = self._should_capture_viser_frame(iteration)
-                student_obs = self._build_student_obs()
+                student_obs = self._build_student_obs(iteration=iteration)
                 self._sync_timing_device()
                 self._record_timing("student_obs_ms", time.perf_counter() - student_obs_start_time)
                 student_output = self._student_forward(student_obs)
