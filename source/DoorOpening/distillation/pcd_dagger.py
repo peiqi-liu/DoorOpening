@@ -424,14 +424,33 @@ class Dagger:
         self.aux_feedback_to_policy = self.has_aux_input and self.has_aux_prediction and bool(
             self.runtime_cfg.get("aux_feedback_to_policy", True)
         )
+        self.aux_feedback_seed_source = str(self.runtime_cfg.get("aux_feedback_seed_source", "zero")).lower()
+        default_no_feedback_source = "zero" if self.has_aux_prediction else "ground_truth"
+        self.aux_no_feedback_input_source = str(
+            self.runtime_cfg.get("aux_no_feedback_input_source", default_no_feedback_source)
+        ).lower()
         self.aux_pregrasp_dropout_prob = float(self.runtime_cfg.get("aux_pregrasp_dropout_prob", 0.0))
         self.aux_buffer = None
         if self.has_aux_input:
             self.aux_buffer = torch.zeros((self.num_envs, self.aux_input_dim), dtype=torch.float32, device=self.device)
+        if self.aux_feedback_seed_source not in {"zero", "ground_truth"}:
+            raise ValueError("aux_feedback_seed_source must be one of {'zero', 'ground_truth'}.")
+        if self.aux_no_feedback_input_source not in {"zero", "ground_truth"}:
+            raise ValueError("aux_no_feedback_input_source must be one of {'zero', 'ground_truth'}.")
         if not 0.0 <= self.aux_pregrasp_dropout_prob <= 1.0:
             raise ValueError("aux_pregrasp_dropout_prob must be in [0, 1].")
         self.latest_aux_pregrasp_env_fraction = 0.0
         self.latest_aux_pregrasp_dropout_fraction = 0.0
+        if (
+            self.rank == 0
+            and self.has_aux_prediction
+            and self.aux_prediction_mode == "delta"
+            and self.aux_feedback_seed_source == "zero"
+        ):
+            print(
+                "Warning: aux_feedback_seed_source='zero' with aux_prediction_mode='delta' starts each episode "
+                "from a zero absolute aux reference. Consider absolute aux prediction or a deployable perception seed."
+            )
         if (
             self.rank == 0
             and self.aux_pregrasp_dropout_prob > 0.0
@@ -751,6 +770,15 @@ class Dagger:
     def _seed_aux_buffer(self, env_ids=None):
         if self.aux_buffer is None:
             return
+        if self.aux_feedback_seed_source == "zero":
+            if env_ids is None:
+                self.aux_buffer.zero_()
+                return
+            if env_ids.numel() == 0:
+                return
+            self.aux_buffer[env_ids] = 0.0
+            return
+
         aux_target = self._stack_aux_state_values(self._get_aux_state_values()).detach()
         if env_ids is None:
             self.aux_buffer[:] = aux_target
@@ -2190,17 +2218,25 @@ class Dagger:
         current_implemented_action = (
             self.implemented_action_history[:, 0, :] if self.implemented_action_history is not None else None
         )
-        aux_state_values = self._get_aux_state_values()
-        aux_target_vector = self._stack_aux_state_values(aux_state_values) if self.has_aux_input else None
-        if aux_target_vector is not None and self._use_aux_feedback():
+        need_aux_target_vector = self.has_aux_input and (
+            (not self.play_policy and self.has_aux_prediction)
+            or (not self._use_aux_feedback() and self.aux_no_feedback_input_source == "ground_truth")
+        )
+        aux_target_vector = (
+            self._stack_aux_state_values(self._get_aux_state_values()) if need_aux_target_vector else None
+        )
+        if self.has_aux_input and self._use_aux_feedback():
             if self.aux_buffer is None:
                 raise RuntimeError("Aux feedback requested but aux_buffer is not initialized.")
             aux_input_vector = self.aux_buffer.clone()
-            aux_input_vector = self._mix_aux_feedback(
-                aux_input_vector,
-                aux_target_vector,
-                iteration,
-            )
+            if aux_target_vector is not None:
+                aux_input_vector = self._mix_aux_feedback(
+                    aux_input_vector,
+                    aux_target_vector,
+                    iteration,
+                )
+        elif self.has_aux_input and self.aux_no_feedback_input_source == "zero":
+            aux_input_vector = torch.zeros((self.num_envs, self.aux_input_dim), dtype=torch.float32, device=self.device)
         else:
             aux_input_vector = aux_target_vector
         aux_input_vector = self._maybe_drop_aux_feedback(aux_input_vector)

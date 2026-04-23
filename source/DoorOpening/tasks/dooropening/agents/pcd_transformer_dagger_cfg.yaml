@@ -153,6 +153,9 @@ dagger:
   teacher_forcing_schedule: "linear"
   teacher_forcing_min_beta: 0.0
   aux_feedback_to_policy: true
+  aux_feedback_seed_source: "zero"
+  aux_no_feedback_input_source: "zero"
+  teacher_forcing_warmup_use_ground_truth_aux: false
   aux_pregrasp_dropout_prob: 0.001  # Conservative start: 0.1% per pregrasp step while aux feedback is carried over.
   # aux_pregrasp_dropout_prob: 0
   log_interval: 100
