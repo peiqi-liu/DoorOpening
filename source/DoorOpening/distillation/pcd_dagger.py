@@ -120,9 +120,6 @@ class Dagger:
         )
         self.teacher_forcing_min_beta = float(self.runtime_cfg.get("teacher_forcing_min_beta", 0.0))
         self.teacher_forcing_schedule = str(self.runtime_cfg.get("teacher_forcing_schedule", "linear")).lower()
-        self.teacher_forcing_warmup_use_ground_truth_aux = bool(
-            self.runtime_cfg.get("teacher_forcing_warmup_use_ground_truth_aux", True)
-        )
         self.log_interval = int(self.runtime_cfg.get("log_interval", 100))
         self.save_interval = int(self.runtime_cfg.get("save_interval", 5_000))
         self.pointcloud_source = str(self.runtime_cfg.get("pointcloud_source", "sampler")).lower()
@@ -424,32 +421,18 @@ class Dagger:
         self.aux_feedback_to_policy = self.has_aux_input and self.has_aux_prediction and bool(
             self.runtime_cfg.get("aux_feedback_to_policy", True)
         )
-        self.aux_feedback_seed_source = str(self.runtime_cfg.get("aux_feedback_seed_source", "zero")).lower()
-        default_no_feedback_source = "zero" if self.has_aux_prediction else "ground_truth"
-        self.aux_no_feedback_input_source = str(
-            self.runtime_cfg.get("aux_no_feedback_input_source", default_no_feedback_source)
-        ).lower()
         self.aux_pregrasp_dropout_prob = float(self.runtime_cfg.get("aux_pregrasp_dropout_prob", 0.0))
         self.aux_buffer = None
         if self.has_aux_input:
             self.aux_buffer = torch.zeros((self.num_envs, self.aux_input_dim), dtype=torch.float32, device=self.device)
-        if self.aux_feedback_seed_source not in {"zero", "ground_truth"}:
-            raise ValueError("aux_feedback_seed_source must be one of {'zero', 'ground_truth'}.")
-        if self.aux_no_feedback_input_source not in {"zero", "ground_truth"}:
-            raise ValueError("aux_no_feedback_input_source must be one of {'zero', 'ground_truth'}.")
         if not 0.0 <= self.aux_pregrasp_dropout_prob <= 1.0:
             raise ValueError("aux_pregrasp_dropout_prob must be in [0, 1].")
         self.latest_aux_pregrasp_env_fraction = 0.0
         self.latest_aux_pregrasp_dropout_fraction = 0.0
-        if (
-            self.rank == 0
-            and self.has_aux_prediction
-            and self.aux_prediction_mode == "delta"
-            and self.aux_feedback_seed_source == "zero"
-        ):
+        if self.rank == 0 and self.has_aux_prediction and self.aux_prediction_mode == "delta":
             print(
-                "Warning: aux_feedback_seed_source='zero' with aux_prediction_mode='delta' starts each episode "
-                "from a zero absolute aux reference. Consider absolute aux prediction or a deployable perception seed."
+                "Warning: aux_prediction_mode='delta' starts each episode from a zero absolute aux reference. "
+                "Consider absolute aux prediction if zero-seeded rollout recovery is unstable."
             )
         if (
             self.rank == 0
@@ -770,22 +753,12 @@ class Dagger:
     def _seed_aux_buffer(self, env_ids=None):
         if self.aux_buffer is None:
             return
-        if self.aux_feedback_seed_source == "zero":
-            if env_ids is None:
-                self.aux_buffer.zero_()
-                return
-            if env_ids.numel() == 0:
-                return
-            self.aux_buffer[env_ids] = 0.0
-            return
-
-        aux_target = self._stack_aux_state_values(self._get_aux_state_values()).detach()
         if env_ids is None:
-            self.aux_buffer[:] = aux_target
+            self.aux_buffer.zero_()
             return
         if env_ids.numel() == 0:
             return
-        self.aux_buffer[env_ids] = aux_target[env_ids]
+        self.aux_buffer[env_ids] = 0.0
 
     def _get_cfg_range(self, cfg, key, default):
         values = cfg.get(key, default)
@@ -2182,28 +2155,6 @@ class Dagger:
             dist.all_reduce(batch_size, op=dist.ReduceOp.SUM)
         return int(batch_size.item())
 
-    def _mix_aux_feedback(self, aux_input_vector, aux_target_vector, iteration):
-        if aux_input_vector is None or aux_target_vector is None:
-            return aux_input_vector
-        if (
-            not self.teacher_forcing_warmup_use_ground_truth_aux
-            or self.play_policy
-            or self.teacher_model is None
-            or not self._use_aux_feedback()
-            or iteration is None
-        ):
-            return aux_input_vector
-
-        teacher_mask = self.teacher_forcing_env_mask
-        if not torch.any(teacher_mask):
-            return aux_input_vector
-        if torch.all(teacher_mask):
-            return aux_target_vector.clone()
-
-        mixed_aux_input_vector = aux_input_vector.clone()
-        mixed_aux_input_vector[teacher_mask] = aux_target_vector[teacher_mask]
-        return mixed_aux_input_vector
-
     def _build_student_obs(self, iteration=None):
         q_pos = self._get_student_proprio_vector()
         door_joint_pos = self.ov_env.door.data.joint_pos
@@ -2218,10 +2169,7 @@ class Dagger:
         current_implemented_action = (
             self.implemented_action_history[:, 0, :] if self.implemented_action_history is not None else None
         )
-        need_aux_target_vector = self.has_aux_input and (
-            (not self.play_policy and self.has_aux_prediction)
-            or (not self._use_aux_feedback() and self.aux_no_feedback_input_source == "ground_truth")
-        )
+        need_aux_target_vector = self.has_aux_input and (not self.play_policy and self.has_aux_prediction)
         aux_target_vector = (
             self._stack_aux_state_values(self._get_aux_state_values()) if need_aux_target_vector else None
         )
@@ -2229,16 +2177,10 @@ class Dagger:
             if self.aux_buffer is None:
                 raise RuntimeError("Aux feedback requested but aux_buffer is not initialized.")
             aux_input_vector = self.aux_buffer.clone()
-            if aux_target_vector is not None:
-                aux_input_vector = self._mix_aux_feedback(
-                    aux_input_vector,
-                    aux_target_vector,
-                    iteration,
-                )
-        elif self.has_aux_input and self.aux_no_feedback_input_source == "zero":
+        elif self.has_aux_input:
             aux_input_vector = torch.zeros((self.num_envs, self.aux_input_dim), dtype=torch.float32, device=self.device)
         else:
-            aux_input_vector = aux_target_vector
+            aux_input_vector = None
         aux_input_vector = self._maybe_drop_aux_feedback(aux_input_vector)
 
         obs = OrderedDict()
