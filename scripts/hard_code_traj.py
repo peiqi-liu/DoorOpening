@@ -61,7 +61,7 @@ from isaaclab.assets import ArticulationCfg
 from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, DEFAULT_JOINT_POS
 from DoorOpening.assets.door.door_cfg import DOOR_CONFIG, edit_door_articulation
 
-from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES
+from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES, CAMERA_JOINT_DEFAULT_VALUES
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
 
 from DoorOpening.motion.slider_controller import OmniJointController
@@ -152,7 +152,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     scene.reset()
     print("[INFO]: Resetting robot state...")
 
-    controller = OmniJointController(scene, FULL_JOINT_NAMES)
+    controller = OmniJointController(scene, FULL_JOINT_NAMES + list(CAMERA_JOINT_DEFAULT_VALUES.keys()))
 
     cfg = FRAME_MARKER_CFG.replace(prim_path="/World/GoalFrame")
     cfg.markers["frame"].scale = (0.03, 0.03, 0.03)
@@ -183,31 +183,6 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     # board_cfg = FRAME_MARKER_CFG.replace(prim_path="/World/BoardFrame")
     # board_cfg.markers["frame"].scale = (0.3, 0.3, 0.3)
     while simulation_app.is_running():
-        print(scene["robot"].data.body_link_vel_w[:, body_idx])
-        
-        # if count % 20 == 0:
-        #     from DoorOpening.assets.door.door_cfg import handle_offset, board_offset
-        #     from isaaclab.utils.math import quat_apply
-        #     handle_offset = handle_offset.to(scene["door"].data.body_pos_w)
-        #     board_offset = board_offset.to(scene["door"].data.body_pos_w)
-        #     # print("handle_offsets: ", handle_offset)
-        #     # print("board_offsets: ", board_offset)
-        #     translation = scene["door"].data.body_pos_w[:, scene["door"].find_bodies("link_2")[0]].squeeze(0)
-        #     quaternion = scene["door"].data.body_quat_w[:, scene["door"].find_bodies("link_2")[0]].squeeze(0)
-        #     keypoint_pos_w = translation + quat_apply(quaternion, handle_offset[1]).squeeze(0)
-        #     # translation = scene["door"].data.body_pos_w[:, scene["door"].find_bodies("link_1")[0]].squeeze(0)
-        #     # quaternion = scene["door"].data.body_quat_w[:, scene["door"].find_bodies("link_1")[0]].squeeze(0)
-        #     # keypoint_pos_w = translation + quat_apply(quaternion, board_offset[1]).squeeze(0)
-        #     # board_marker = VisualizationMarkers(board_cfg)
-        #     # board_marker.visualize(
-        #     #     translations=keypoint_pos_w,
-        #     #     orientations=quaternion,
-        #     # )
-        #     handle_marker = VisualizationMarkers(handle_cfg)
-        #     handle_marker.visualize(
-        #         translations=keypoint_pos_w,
-        #         orientations=quaternion,
-        #     )
         count += 1
         slider_pos = controller.q_slider.clone()
         joint_pos = scene["robot"].data.default_joint_pos.clone()

@@ -7,6 +7,7 @@ from isaaclab.controllers import DifferentialIKController, DifferentialIKControl
 from isaaclab.utils.math import euler_xyz_from_quat, quat_from_euler_xyz
 from scipy.interpolate import CubicSpline
 import numpy as np  
+from DoorOpening.constants.robot_constants import BASE_JOINT_NAMES, FRANKA_JOINT_NAMES
 from DoorOpening.utils.finger_utils import tendon_to_joint_angle_utils, joint_angle_to_tendon_utils
 
 class OmniJointController:
@@ -31,9 +32,12 @@ class OmniJointController:
 
         self.q_slider = scene["robot"].data.joint_pos.clone()
         self.door_q_slider = scene["door"].data.joint_pos.clone()
-        self.finger_q_slider = torch.zeros(4)
-        finger_joint_names = [f"finger_joint_{i}" for i in range(15)]
+        finger_joint_names = [f"finger_joint_{i}" for i in range(16)]
         self.finger_joint_ids, finger_joint_names = scene["robot"].find_joints(finger_joint_names)
+        self.finger_q_slider = joint_angle_to_tendon_utils(self.scene["robot"])[0].detach().cpu()
+        self.ik_joint_ids, self.ik_joint_names = scene["robot"].find_joints(BASE_JOINT_NAMES + FRANKA_JOINT_NAMES)
+        self.ik_joint_pos_upper_limit = scene["robot"].data.joint_pos_limits[..., self.ik_joint_ids, 1]
+        self.ik_joint_pos_lower_limit = scene["robot"].data.joint_pos_limits[..., self.ik_joint_ids, 0]
 
         self.xyz = scene["robot"].data.body_pos_w[:, self.key_pose_idx].clone()
         quat = scene["robot"].data.body_quat_w[:, self.key_pose_idx].clone()
@@ -104,8 +108,6 @@ class OmniJointController:
 
                 # robot joint position sliders
                 for i, name in enumerate(self.joint_names):
-                    if name.startswith("finger_joint_"):
-                        continue
                     ui.Label(name)
 
                     if name.startswith("base_"):
@@ -125,15 +127,17 @@ class OmniJointController:
                     )
                     self.joint_sliders.append(slider)
 
+                ui.Separator(height=8)
+                ui.Label("Finger Tendon Control")
                 for i in range(4):
-                    ui.Label(f"finger_joint_{i}")
+                    ui.Label(f"finger_tendon_{i}")
                     slider = ui.FloatSlider(
                         min=0.0,
                         max=3.14,
                         step=0.01,
                         height=18,
                     )
-                    slider.model.set_value(0.0)
+                    slider.model.set_value(float(self.finger_q_slider[i]))
                     slider.model.add_value_changed_fn(partial(self._on_finger_slider_changed, i))
 
                 # door joint position sliders
@@ -264,8 +268,7 @@ class OmniJointController:
         self.finger_q_slider[idx] = value
         new_q_value = tendon_to_joint_angle_utils(self.scene["robot"], self.finger_q_slider)
         self.q_slider[..., self.finger_joint_ids] = new_q_value[..., self.finger_joint_ids]
-
-        test_tendon_value =joint_angle_to_tendon_utils(self.scene["robot"])
+        self._sync_joint_sliders()
 
     def _on_slider_changed(self, idx, model):
         self._initialize_trajectory()
@@ -306,8 +309,8 @@ class OmniJointController:
         quat = quat_from_euler_xyz(roll, pitch, yaw)
         ee_pos = self.scene["robot"].data.body_pos_w[:, self.key_pose_idx]
         ee_quat = self.scene["robot"].data.body_quat_w[:, self.key_pose_idx]
-        hand_jac = self.scene["robot"].root_physx_view.get_jacobians()[:, self.key_pose_idx, :, self.joint_ids[3:]]
-        current_joint_pos = self.scene["robot"].data.joint_pos[:, self.joint_ids[3:]]
+        hand_jac = self.scene["robot"].root_physx_view.get_jacobians()[:, self.key_pose_idx, :, self.ik_joint_ids[3:]]
+        current_joint_pos = self.scene["robot"].data.joint_pos[:, self.ik_joint_ids[3:]]
 
         self.ik_controller.reset()
 
@@ -319,12 +322,12 @@ class OmniJointController:
             current_joint_pos,
         )
 
-        joint_pos_des = torch.clamp(self.joint_pos_des, self.robot_joint_pos_lower_limit[..., 3:], self.robot_joint_pos_upper_limit[..., 3:])
+        joint_pos_des = torch.clamp(self.joint_pos_des, self.ik_joint_pos_lower_limit[..., 3:], self.ik_joint_pos_upper_limit[..., 3:])
 
         # Write joint positions to sim
         # The robot might not reach the pose in the first shot, keep pressing the button to keep reaching the pose
         if joint_pos_des is not None:
-            self.q_slider[0, self.joint_ids[3:]] = joint_pos_des
+            self.q_slider[0, self.ik_joint_ids[3:]] = joint_pos_des
         self._apply_joint_positions(self.q_slider, sync_pose=False)
 
 

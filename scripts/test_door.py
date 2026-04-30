@@ -100,11 +100,11 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             scene.reset()
             # print("joint_pos: ", scene["door"].data.joint_pos)
 
-        # door_target_pos = (scene["door"].data.joint_pos_limits[..., 1] - scene["door"].data.soft_joint_pos_limits[..., 0]) * ((count % 500) / 500) + scene["door"].data.soft_joint_pos_limits[..., 0]
-        # scene["door"].write_joint_position_to_sim(door_target_pos)
-        # if count % 100 == 0:
-        #     print("joint_pos: ", scene["door"].data.joint_pos)
-        #     print("door pos: ", scene["door"].data.body_pos_w)
+        door_target_pos = (scene["door"].data.joint_pos_limits[..., 1] - scene["door"].data.soft_joint_pos_limits[..., 0]) * ((count % 500) / 500) + scene["door"].data.soft_joint_pos_limits[..., 0]
+        scene["door"].write_joint_position_to_sim(door_target_pos)
+        if count % 100 == 0:
+            # print("joint_pos: ", scene["door"].data.joint_pos)
+            print("door pos: ", scene["door"].data.body_pos_w[..., 2, 2].max(), scene["door"].data.body_pos_w[..., 2, 2].min())
         #     print("effort_limit_sim: ", scene["door"].data.effort_limit_sim)
         #     print("velocity_limit_sim: ", scene["door"].data.velocity_limit_sim)
         #     print("position_limit_sim: ", scene["door"].data.position_limit_sim)

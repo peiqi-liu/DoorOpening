@@ -1,4 +1,6 @@
-from DoorOpening.utils.state_machine.api import solve_ik, get_hinge_pos, open_hand
+import argparse
+import math
+from DoorOpening.utils.state_machine.api import compute_base_joint, solve_ik, get_hinge_pos, open_hand
 import torch
 from isaaclab.utils.math import quat_from_euler_xyz, quat_from_matrix, combine_frame_transforms, quat_mul, quat_inv
 from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES, CAMERA_JOINT_DEFAULT_VALUES, DEFAULT_JOINT_POS, OPEN_FINGER_JOINT_VALUES, ROBOT_KEY_BODY_NAMES, DM_JOINT_NAMES
@@ -15,6 +17,7 @@ from viser.extras import ViserUrdf
 
 from yourdfpy import URDF
 from DoorOpening.utils.state_machine.pin import PinocchioIKSolver
+from DoorOpening.utils.state_machine.offline_pull_door import state_machine_offline_pull_door
 import glob
 
 
@@ -42,6 +45,35 @@ def get_rotation_quat(roll, pitch, yaw, device):
     return quat_from_euler_xyz(roll = torch.tensor([[roll]]).to(device), pitch = torch.tensor([[pitch]]).to(device), yaw = torch.tensor([[yaw]]).to(device)).squeeze(0)
 
 import torch
+
+
+def sample_robot_initial_base_joints_on_door_ring(
+    robot_initial_pose: torch.Tensor,
+    door_initial_pose: torch.Tensor,
+    *,
+    radius: float = 1.2,
+    angle_range_deg: float = 25.0,
+):
+    """Sample base xy joints for a start pose on a ring around the door while
+    keeping the base rotation joint unchanged."""
+
+    angle_limit = math.radians(angle_range_deg)
+    approach_angle = random.uniform(-angle_limit, angle_limit)
+
+    sampled_x = door_initial_pose[:, 0] + radius * math.cos(approach_angle)
+    sampled_y = door_initial_pose[:, 1] + radius * math.sin(approach_angle)
+
+    sampled_pose = robot_initial_pose.clone()
+    sampled_pose[:, 0] = sampled_x
+    sampled_pose[:, 1] = sampled_y
+
+    sampled_base_joint = compute_base_joint(
+        robot_initial_pose[:, :3],
+        robot_initial_pose[:, 3:],
+        sampled_pose[:, :3],
+    ).squeeze(0)
+
+    return sampled_base_joint, sampled_pose, approach_angle
 
 def state_machine_offline(
     robot_urdf_path,
@@ -562,14 +594,45 @@ def compute_link_twist(pos_traj: torch.Tensor,
     return twist
 
 
-def play_and_save_traj(robot_urdf_path, door_urdf_path):
+def play_and_save_traj(
+    robot_urdf_path,
+    door_urdf_path,
+    handle_side="right",
+    randomize_start_base=True,
+    start_base_radius=1.0,
+    start_base_angle_range_deg=30.0,
+):
     dir_path = os.path.dirname(door_urdf_path)
     robot_initial_pose = torch.tensor([[ROBOT_INITIAL_POS[0], ROBOT_INITIAL_POS[1], ROBOT_INITIAL_POS[2], ROBOT_INITIAL_ROT[0], ROBOT_INITIAL_ROT[1], ROBOT_INITIAL_ROT[2], ROBOT_INITIAL_ROT[3]]], device="cpu")
     door_initial_pose = torch.tensor([[DOOR_INITIAL_POS[0], DOOR_INITIAL_POS[1], DOOR_INITIAL_POS[2], DOOR_INITIAL_ROT[0], DOOR_INITIAL_ROT[1], DOOR_INITIAL_ROT[2], DOOR_INITIAL_ROT[3]]], device="cpu")
     robot_constants, robot_initial_q = get_robot_constants()
+    if randomize_start_base:
+        sampled_base_joint, sampled_world_pose, sampled_angle = sample_robot_initial_base_joints_on_door_ring(
+            robot_initial_pose,
+            door_initial_pose,
+            radius=start_base_radius,
+            angle_range_deg=start_base_angle_range_deg,
+        )
+        robot_initial_q[:3] = sampled_base_joint
+        print(
+            "Randomized start base joints:",
+            robot_initial_q[:3],
+            "world pose:",
+            sampled_world_pose,
+            f"(radius={start_base_radius:.2f} m, angle={math.degrees(sampled_angle):.1f} deg)",
+        )
     door_initial_q = torch.tensor([0.0, 0.0], device="cpu")
     start_time = time.time()
-    robot_traj, door_traj, key_idx_in_key_indices = state_machine_offline(robot_urdf_path, door_urdf_path, robot_initial_pose, door_initial_pose, robot_initial_q, door_initial_q, device="cpu")
+    robot_traj, door_traj, key_idx_in_key_indices = state_machine_offline_pull_door(
+        robot_urdf_path,
+        door_urdf_path,
+        robot_initial_pose,
+        door_initial_pose,
+        robot_initial_q,
+        door_initial_q,
+        handle_side=handle_side,
+        device="cpu",
+    )
     print(f"Time taken: {time.time() - start_time} seconds")
     torch.set_printoptions(precision=4, sci_mode=False)
     # new_robot_traj = []
@@ -655,6 +718,7 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path):
     mask[key_indices[1]:key_indices[3]] = 1
 
     data = {
+        "handle_side": handle_side,
         "door_traj": door_traj, 
         "robot_body_pos_traj": robot_body_pos_traj,
         "robot_body_quat_traj": robot_body_quat_traj,
@@ -668,21 +732,46 @@ def play_and_save_traj(robot_urdf_path, door_urdf_path):
     }
     print(key_indices)
     # print(torch.tensor(key_indices, dtype=torch.int32)[key_idx_in_key_indices])
-    with open(os.path.join(dir_path, "traj.pkl"), "wb") as f:
+    traj_file = "traj.pkl"
+    traj_path = os.path.join(dir_path, traj_file)
+    with open(traj_path, "wb") as f:
         pkl.dump(data, f)
-        print("Trajectory saved to " + os.path.join(dir_path, "traj.pkl"))
+        print("Trajectory saved to " + traj_path)
 
 
 if __name__ == "__main__":
-    robot_urdf_path = "/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/glorbot/glorbot.urdf"
-    # door_urdf_path = "/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/door/PartNetv4/99650089960001/mobility.urdf"
-    # door_urdf_path = "/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/door/PartNetv4/99655059960012/mobility.urdf"
+    parser = argparse.ArgumentParser(description="Compute and save door waypoint trajectories.")
+    parser.add_argument(
+        "--robot-urdf-path",
+        default="source/DoorOpening/assets/glorbot/glorbot.urdf",
+        help="Path to the robot URDF used for offline IK and playback.",
+    )
+    parser.add_argument(
+        "--asset-base-folder",
+        default="source/DoorOpening/assets/door/PartNetv5",
+        help="Folder to scan recursively for door mobility.urdf files.",
+    )
+    parser.add_argument(
+        "--door-urdf-path",
+        default=None,
+        help="Optional single door URDF path. If set, this overrides --asset-base-folder.",
+    )
+    parser.add_argument(
+        "--handle-side",
+        default="left",
+        choices=["right", "left"],
+        help="Select the pull-door planner variant. 'right' keeps the legacy path; 'left' uses the mirrored planner.",
+    )
+    args = parser.parse_args()
 
-    root_path = "source/DoorOpening/assets/"
-    asset_base_folder = os.path.join(root_path, "door/PartNetv4")
-    asset_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/mobility.urdf"), recursive=True), reverse=False)
+    robot_urdf_path = args.robot_urdf_path
+    if args.door_urdf_path is not None:
+        asset_paths = [args.door_urdf_path]
+    else:
+        asset_base_folder = args.asset_base_folder
+        asset_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/mobility.urdf"), recursive=True), reverse=False)
 
     for i, door_urdf_path in enumerate(asset_paths):
-        play_and_save_traj(robot_urdf_path, door_urdf_path)
+        play_and_save_traj(robot_urdf_path, door_urdf_path, handle_side=args.handle_side)
         print("Finished processing ", door_urdf_path, ", index: ", i)
     

@@ -5,7 +5,6 @@ from isaaclab.utils.math import (
     quat_conjugate,
     quat_apply_inverse,
     quat_apply,
-    quat_inv,
 )
 from typing import Optional
 
@@ -176,54 +175,6 @@ def unbase_goal_tool(articulation, abs_pos, abs_vel):
 
 def wrap_to_pi(x):
     return (x + torch.pi) % (2 * torch.pi) - torch.pi
-
-
-def compute_base_joint(articulation, abs_pos):
-    """
-    Convert desired world-frame base pose to robot-frame (x, y, theta).
-
-    abs_pos:
-      - torch or np array
-      - shape (3,) or (7,)
-    """
-
-    # --- ensure torch ---
-    if not isinstance(abs_pos, torch.Tensor):
-        abs_pos = torch.tensor(abs_pos, dtype=torch.float32)
-
-    # --- current robot base pose (world) ---
-    base_pos_w, base_quat_w = get_base_pos_and_quat(articulation)
-    base_pos_w = base_pos_w.cpu().clone()
-    base_quat_w = base_quat_w.cpu().clone()
-    abs_pos = abs_pos.cpu().clone()
-    # base_pos_w: (3,)
-    # base_quat_w: (4,) (x,y,z,w)
-
-    # --- desired world position ---
-    target_pos_w = abs_pos[:, :3]
-
-    # --- displacement in world frame (planar) ---
-    dp_w = target_pos_w[:, :2] - base_pos_w[:, :2]
-
-    # --- robot yaw from quaternion ---
-    _, _, base_yaw = euler_xyz_from_quat(base_quat_w)
-
-    # --- rotate into robot frame ---
-    c = torch.cos(base_yaw)
-    s = torch.sin(base_yaw)
-
-    x_r =  c * dp_w[:, 0] + s * dp_w[:, 1]
-    y_r = -s * dp_w[:, 0] + c * dp_w[:, 1]
-
-    # --- theta action ---
-    if abs_pos.numel() == 7:
-        target_quat_w = abs_pos[:, 3:7]
-        _, _, target_yaw = euler_xyz_from_quat(target_quat_w)
-        theta_r = wrap_to_pi(target_yaw - base_yaw)
-    else:
-        theta_r = torch.zeros(abs_pos.shape[0], device=abs_pos.device)
-
-    return torch.cat([x_r, y_r, theta_r], dim=-1)
 
 
 def quat_mul_batch(q, r):

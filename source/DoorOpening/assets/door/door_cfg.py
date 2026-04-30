@@ -17,9 +17,17 @@ import torch
 import isaaclab.sim as sim_utils
 from isaaclab.actuators.actuator_cfg import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg, Articulation
+from DoorOpening.assets.cache_utils import resolve_converter_cache_dir, should_force_usd_conversion
 from DoorOpening.constants.env_constants import DOOR_INITIAL_POS, DOOR_INITIAL_ROT
 import json
 from DoorOpening.utils.urdf_utils import compute_exact_door_keypoints
+
+DOOR_SOLVER_POSITION_ITERS = 8
+DOOR_SOLVER_VELOCITY_ITERS = 2
+DOOR_CONTACT_OFFSET = 0.015
+DOOR_REST_OFFSET = 0.002
+DOOR_MAX_DEPENETRATION_VELOCITY = 150.0
+
 
 def load_meta_data(board_meta_data_paths: str, handle_meta_data_paths: str, device: str = "cuda" if torch.cuda.is_available() else "cpu"):
     """
@@ -66,16 +74,23 @@ def create_initial_state():
     )
 
 def create_actuators():
+    # These are the base door gains before any reset-time domain randomization scales them.
+    board_nominal_stiffness = 30.0
+    board_nominal_damping = 10.0
+    handle_nominal_stiffness = 50.0
+    handle_nominal_damping = 0.6
+
     return {
         "joint_1": ImplicitActuatorCfg(
             joint_names_expr=["joint_1"],
-            stiffness=5,
-            damping=1,
+            stiffness=board_nominal_stiffness,
+            damping=board_nominal_damping,
         ),
         "joint_2": ImplicitActuatorCfg(
             joint_names_expr=["joint_2"],
-            stiffness=2.5,
-            damping=1,
+            effort_limit_sim = 100,
+            stiffness=handle_nominal_stiffness,
+            damping=handle_nominal_damping,
         ),
     }
 
@@ -84,27 +99,44 @@ def create_urdf_door_cfg(
     training_mode: bool = False,
     activate_contact_sensors: bool = True,
 ):
+    cache_variant = "_".join(
+        [
+            "training" if training_mode else "eval",
+            "contacts" if activate_contact_sensors else "no_contacts",
+        ]
+    )
     return sim_utils.UrdfFileCfg(
             fix_base=True,
             merge_fixed_joints=True,
             make_instanceable=False,
             asset_path=asset_path,
+            usd_dir=resolve_converter_cache_dir(
+                asset_path,
+                asset_root=asset_base_folder,
+                variant=cache_variant,
+            ),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                max_depenetration_velocity=5,
+                max_depenetration_velocity=DOOR_MAX_DEPENETRATION_VELOCITY,
+                solver_position_iteration_count=DOOR_SOLVER_POSITION_ITERS,
+                solver_velocity_iteration_count=DOOR_SOLVER_VELOCITY_ITERS,
             ),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 enabled_self_collisions=False,
-                solver_position_iteration_count=8,
-                solver_velocity_iteration_count=0,
+                solver_position_iteration_count=DOOR_SOLVER_POSITION_ITERS,
+                solver_velocity_iteration_count=DOOR_SOLVER_VELOCITY_ITERS,
             ),
             joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
                 gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
             ),
+            force_usd_conversion=should_force_usd_conversion(),
             # Note: joint_drive is usually not needed for URDF; PD gains can be in actuators
             # scale = (1.0, 1.2, 1.1),
             activate_contact_sensors=activate_contact_sensors,
             collider_type = "convex_hull" if training_mode else "convex_decomposition",
-            collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.03, rest_offset=0.0),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                contact_offset=DOOR_CONTACT_OFFSET,
+                rest_offset=DOOR_REST_OFFSET,
+            ),
     )
 
 def create_door_cfg(
@@ -130,22 +162,27 @@ def create_door_cfg(
 
 
 root_path = os.path.dirname(os.path.dirname(__file__))
-asset_base_folder = os.path.join(root_path, "door/PartNetv4")
+# asset_base_folder = os.path.join(root_path, "door/PartNetv4")
+asset_base_folder = os.path.join(root_path, "door/PartNetv5")
 asset_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/mobility.urdf"), recursive=True))
 board_offsets = []
+board_bboxes = []
 handle_offsets = []
 
 for asset_path in asset_paths:
     keypoints = compute_exact_door_keypoints(asset_path)
     board_offsets.append(keypoints["link_1"])
+    board_bboxes.append(keypoints["link_1_bbox_base"])
     handle_offsets.append(keypoints["link_2"])
 
 board_offsets = torch.tensor(board_offsets)
+board_bboxes = torch.tensor(board_bboxes)
 handle_offsets = torch.tensor(handle_offsets)
 
 motion_traj_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/traj.pkl"), recursive=True))
 
-door_asset_path = asset_paths[0]
+door_asset_path = asset_paths[32]
+# door_asset_path = asset_paths[0]
 board_offset = board_offsets[0]
 handle_offset = handle_offsets[0]
 print("door_asset_path: ", door_asset_path)
@@ -182,8 +219,12 @@ ALL_DOOR_CONFIGS = setup_doors()
 
 def edit_door_articulation(
     door: Articulation, 
+    nominal_joint_stiffness: torch.Tensor | None = None,
+    nominal_joint_damping: torch.Tensor | None = None,
     door_closed_range = 0.01,     # radians
-    hinge_range = 0.4,
+    hinge_range = 0.8,
+    locked_stiffness = 1e6,
+    locked_damping = 1e5,
     # Optional: disable the latching behavior by setting the hinge range to a negative value
     # hinge_range = -0.1,
 ):
@@ -194,12 +235,22 @@ def edit_door_articulation(
     # joint positions
     q = door.data.joint_pos
 
-    # locked mask: (num_envs,)
+    # Only relock when both joints are still very close to the closed pose.
     locked = (q[:, j1].abs() < door_closed_range) & (q[:, j2].abs() < hinge_range)
 
-    joint_stiffness = door.data.default_joint_stiffness.clone()
-    joint_damping = door.data.default_joint_damping.clone()
-    joint_stiffness[locked, j1] = 1e6
-    joint_damping[locked, j1] = 1e5
+    default_joint_stiffness = door.data.default_joint_stiffness
+    default_joint_damping = door.data.default_joint_damping
+    if nominal_joint_stiffness is None:
+        nominal_joint_stiffness = default_joint_stiffness
+    if nominal_joint_damping is None:
+        nominal_joint_damping = default_joint_damping
+
+    joint_stiffness = door.data.joint_stiffness.clone()
+    joint_damping = door.data.joint_damping.clone()
+    # Restore the normal door-panel gains every step, then temporarily override them only while latched.
+    joint_stiffness[:, j1] = nominal_joint_stiffness[:, j1]
+    joint_damping[:, j1] = nominal_joint_damping[:, j1]
+    joint_stiffness[locked, j1] = locked_stiffness
+    joint_damping[locked, j1] = locked_damping
     door.write_joint_stiffness_to_sim(joint_stiffness)
     door.write_joint_damping_to_sim(joint_damping)

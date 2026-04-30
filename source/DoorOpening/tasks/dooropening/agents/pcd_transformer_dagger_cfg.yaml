@@ -7,20 +7,19 @@ normalize_state: True
 normalize_action: True
 action_space: "absolute"
 action_dim: 19
-
 aux_weight: 0.1
-aux_prediction_mode: "delta"
+aux_prediction_mode: "absolute"
 aux_delta_scale: 0.01
 
-door_pcd_num_points: 10000
-local_pcd_range: [1.5, 0.25, 0.25]
+door_pcd_num_points: 30000
+local_pcd_range: [1.2, 0.25, 0.25]
 x_direction_cutoff: -0.5
 
 pcd_encoders_cfg:
   local_pcd_t:
     type: "pointnet"
     num_output_tokens: 128
-    num_points: [2500, 1000, 1000]
+    num_points: [2500, 1000, 0]
     use_pcd: true
 
 state_encoders_cfg:
@@ -36,6 +35,11 @@ state_encoders_cfg:
     use_state: true
   q_hand:
     input_dim: 9
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  aux_handle_pos:
+    input_dim: 3
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
@@ -69,43 +73,63 @@ state_encoders_cfg:
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  prev_action_base_t10:
+  prev_q_base_t1:
     input_dim: 3
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  prev_action_arm_t10:
+  prev_q_arm_t1:
     input_dim: 7
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  prev_action_hand_t10:
+  prev_q_hand_t1:
     input_dim: 9
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  prev_action_base_t20:
+  prev_q_base_t5:
     input_dim: 3
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  prev_action_arm_t20:
+  prev_q_arm_t5:
     input_dim: 7
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  prev_action_hand_t20:
+  prev_q_hand_t5:
     input_dim: 9
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  aux_object_state:
+  prev_q_base_t10:
     input_dim: 3
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  aux_door_joint_angle:
-    input_dim: 2
+  prev_q_arm_t10:
+    input_dim: 7
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  prev_q_hand_t10:
+    input_dim: 9
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  prev_q_base_t20:
+    input_dim: 3
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  prev_q_arm_t20:
+    input_dim: 7
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  prev_q_hand_t20:
+    input_dim: 9
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
@@ -124,39 +148,67 @@ dagger:
   weight_decay: 1.0e-4
   grad_clip: 1.0
   num_iters: 250000
-  teacher_forcing_warmup_iters: 10000
-  teacher_forcing_transition_iters: 40000
+  teacher_forcing_warmup_iters: 5000
+  teacher_forcing_transition_iters: 20000
   teacher_forcing_schedule: "linear"
   teacher_forcing_min_beta: 0.0
+  aux_feedback_to_policy: true  # When false, aux input stays zero instead of feeding back predictions.
+  aux_pregrasp_dropout_prob: 0.001  # Conservative start: 0.1% per pregrasp step while predicted aux feedback is carried over.
+  # aux_pregrasp_dropout_prob: 0
   log_interval: 100
   save_interval: 5000
-  reset_progress_total: 100000
-  ignore_aux_debug: true
-  pointcloud_source: "sampler"
-  robot_num_points: 10000
+  reset_progress_total: 50000
+  adr_reset_progress_total: 10000
+  pointcloud_source: "lidar"
+  robot_num_points: 30000
   sampler_render:
     inflate_px: 2
     jitter_std_m: 0.004
     clip_mode: "post"
     jitter_mode: "xyz"
     use_compile: true
+  lidar_render:
+    num_points: 10000
+    num_azimuth: 1024
+    num_polar: 256
+    near_m: 0.1
+    far_m: 30.0
+    suppress_bins: 3
+    occlusion_eps_m: 0.02
+    occlusion_eps_rel: 0.01
+    jitter_std_m: 0.0
+    use_compile: true
+  wall_distractors:
+    enabled: true
+    num_points: 30000
+    resample_each_step: false  # Faster and more realistic than regenerating wall geometry every simulation step.
+    side_margin_m: [0.35, 0.80]  # In column mode, this is the sampled column width in meters.
+    bottom_margin_scale: [0.02, 0.08]
+    edge_gap_m: [0.015, 0.04]
+    depth_m: [0.1, 0.8]  # Extra thickness beyond the door slab; a larger range gives thicker jambs/walls.
+    center_offset_m: [-0.30, 0.30]  # Allow both recessed and protruding wall columns along the door-thickness axis.
+    side_margin_min_m: 0.10
+    face_jitter_m: 0.004
   viser:
     enabled: false  # Mode 1: stream the selected env live to Viser.
     update_interval: 1
     env_id: 0
     show_policy_input: true
     point_size: 0.004
-    max_points: 12000
+    max_points: 8000
     serializer:
       enabled: false  # Mode 2: save `.viser` episode replays.
       path: "viser_replay.viser"
-      frame_dt: 0.0333333333
+      frame_dt: 0.025  # Matches DooropeningEnvCfg.sim_dt * decimation (40 Hz).
     raw:
-      enabled: false  # Mode 3: save raw `.pt` episode replays, independent of live/serializer.
+      enabled: false  # Mode 3: save raw `.pt` interval chunks, independent of live/serializer.
       path: "viser_replay.pt"
-      max_points: 12000
-      max_frames: 0  # Warning threshold disabled so complete selected-env episodes are always saved.
+      save_interval: 5000  # Write one raw `.pt` file every N iterations.
+      max_points: 2000  # Raw replay is for debugging, not training; smaller clouds replay much better on laptops.
+      include_ground_truth: true  # GT is the heaviest cloud and usually duplicates what robot_obs already shows.
+      robot_obs_max_points: 2000
+      policy_input_max_points: 1500
+      max_frames: 2000  # Keep at most this many frames in each raw `.pt` file; set 0 to disable the cap.
   # Legacy `dagger.viser.record.*` keys are still accepted, but `serializer` + `raw` are the preferred split.
-  # debug_pointcloud_env_id: 0
   wandb:
     enabled: false

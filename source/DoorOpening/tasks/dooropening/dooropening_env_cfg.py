@@ -3,14 +3,12 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-from DoorOpening.assets.door.door_cfg import DOOR_CONFIG, ALL_DOOR_CONFIGS
+from DoorOpening.assets.door.door_cfg import ALL_DOOR_CONFIGS
 from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
 from DoorOpening.constants.door_constants import DOOR_BODY_NAMES, DOOR_JOINT_NAMES
 from DoorOpening.constants.robot_constants import (
-    CAMERA_JOINT_DEFAULT_VALUES,
-    CLOSE_FINGER_JOINT_VALUES,
-    OPEN_FINGER_JOINT_VALUES,
+    DEFAULT_JOINT_POS,
     ROBOT_KEY_BODY_NAMES,
     ROBOT_RESET_KEY_BODY_NAMES,
     ROBOT_PALM_LINK_NAME,
@@ -18,12 +16,14 @@ from DoorOpening.constants.robot_constants import (
 )
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
+from isaaclab.envs.mdp.events import randomize_actuator_gains, randomize_rigid_body_material
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg, PhysxCfg
 from isaaclab.utils import configclass
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 
 from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import SceneEntityCfg
 from isaaclab.envs.common import ViewerCfg
 import torch
 import numpy as np
@@ -37,13 +37,79 @@ POINTCLOUD_CAMERA_QUAT = quat_from_euler_xyz(euler_angles[0], euler_angles[1], e
 POINTCLOUD_CAMERA_QUAT = tuple(POINTCLOUD_CAMERA_QUAT.tolist())
 
 @configclass
+class EventCfg:
+    """Configuration for reset-time physics randomization."""
+
+    robot_physics_material = EventTerm(
+        func=randomize_rigid_body_material,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "static_friction_range": (0.8, 1.25),
+            "dynamic_friction_range": (0.9, 1.1),
+            "restitution_range": (0.0, 0.0),
+            "num_buckets": 250,
+        },
+    )
+
+    door_physics_material = EventTerm(
+        func=randomize_rigid_body_material,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("door"),
+            "static_friction_range": (0.8, 1.25),
+            "dynamic_friction_range": (0.9, 1.1),
+            "restitution_range": (0.0, 0.0),
+            "num_buckets": 250,
+        },
+    )
+
+    robot_joint_stiffness_and_damping = EventTerm(
+        func=randomize_actuator_gains,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "stiffness_distribution_params": (1.0, 1.0),
+            "damping_distribution_params": (1.0, 1.0),
+            "operation": "scale",
+        },
+    )
+
+    door_board_joint_stiffness_and_damping = EventTerm(
+        func=randomize_actuator_gains,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("door", joint_names="joint_1"),
+            "stiffness_distribution_params": (38.0, 38.0),
+            "damping_distribution_params": (5.0, 5.0),
+            # Use absolute values so the curriculum is expressed in physical gains, not multipliers of the
+            # board actuator defaults (whose damping is 0.2).
+            "operation": "abs",
+        },
+    )
+
+    door_hinge_joint_stiffness_and_damping = EventTerm(
+        func=randomize_actuator_gains,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("door", joint_names="joint_2"),
+            "stiffness_distribution_params": (35.0, 35.0),
+            "damping_distribution_params": (0.6, 0.6),
+            "operation": "abs",
+        },
+    )
+
+@configclass
 class DooropeningEnvCfg(DirectRLEnvCfg):
-    sim_dt = 1/60.
+    sim_dt = 1/40.  # 40 Hz physics/control step when decimation stays at 1.
     decimation = 1
     episode_length_s = 10.
     num_sim_steps_to_render=2
     # - spaces definition
     state_space = 0
+    num_states = 0
+    # Actor gets noisy deployment-style observations while the critic keeps the full clean state.
+    asymmetric_obs = True
 
     viewer: ViewerCfg = ViewerCfg(eye=(1.5, -2.0, 1.0), lookat=(0.4, 0.0, 0.7), origin_type="env")
 
@@ -56,6 +122,12 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             dynamic_friction=1.0,
         ),
         physx=PhysxCfg(
+            solve_articulation_contact_last=True,
+            min_position_iteration_count=4,
+            max_position_iteration_count=64,
+            min_velocity_iteration_count=2,
+            max_velocity_iteration_count=16,
+            enable_ccd=True,
             bounce_threshold_velocity=0.2,
             gpu_max_rigid_patch_count=4 * 5 * 2**15
         ),
@@ -112,32 +184,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         'finger_joint_11',
     ]
 
-    abduction_joints = [
-        # actual abduction joints
-        'finger_joint_0',
-        'finger_joint_12',
-        'finger_joint_4',
-        'finger_joint_8',
-        # additional joints we want to fix at default position
-        'finger_joint_3',
-        'finger_joint_7',
-        'finger_joint_11',
-        'finger_joint_13',
-        'finger_joint_14',
-        'finger_joint_15',
-    ]
-
-    contact_forces_door1 = ContactSensorCfg(
-        prim_path="/World/envs/env_.*/Door/link_1",
-        update_period=0.0,
-        history_length=6,
-        debug_vis=True,
-        filter_prim_paths_expr=["/World/envs/env_.*/Robot", "/World/envs/env_.*/Door/link_2"],
-    )
-
     contact_forces_door2 = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Door/link_2",
-        update_period=0.02,
+        update_period=0.0,
         history_length=1,
         debug_vis=False,
         filter_prim_paths_expr=[
@@ -161,21 +210,16 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         ],
     )
 
-    contact_forces_robot_palm_center = ContactSensorCfg(
-        prim_path="/World/envs/env_.*/Robot/palm_center",
-        update_period=0.0,
-        history_length=6,
-        debug_vis=True,
-        filter_prim_paths_expr=["/World/envs/env_.*/Door/link_2"],
-    )
-
-    # contact_sensor_names = ["contact_forces_door1", "contact_forces_door2", "contact_forces_robot_palm_center"]
-    contact_sensor_names = ["contact_forces_door2"]
-
+    # Pointcloud render mode:
+    # - "none": no on-robot pointcloud camera sensor (default).
+    # - "depth": enable the x5 depth camera sensor and use its depth map.
+    # - "lidar": no pointcloud camera sensor; render from the lidar body pose.
+    pointcloud_render_mode = "none"
+    pointcloud_lidar_body_name = "lidar"
     enable_pointcloud_camera = False
     pointcloud_camera_height = 480
     pointcloud_camera_width = 640
-    pointcloud_camera_update_period = 0.1
+    pointcloud_camera_update_period = 0.1  # Depth camera refreshes at 10 Hz; replay frames still follow env dt.
     pointcloud_camera_data_types = ["distance_to_image_plane"]
     pointcloud_camera_cfg = CameraCfg(
         prim_path="/World/envs/env_.*/Robot/x5_camera_link/cam",
@@ -190,10 +234,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         ),
         offset=CameraCfg.OffsetCfg(pos=(0.0, 0.0, 0.0), rot=POINTCLOUD_CAMERA_QUAT, convention="world"),
     )
-
-    close_finger_joints = CLOSE_FINGER_JOINT_VALUES
-
-    open_finger_joints = OPEN_FINGER_JOINT_VALUES
 
     door_body_names = DOOR_BODY_NAMES
 
@@ -211,7 +251,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_cfg: ArticulationCfg = GLORBOT_CONFIG.replace(
         prim_path="/World/envs/env_.*/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
-            joint_pos=CAMERA_JOINT_DEFAULT_VALUES,
+            # Keep both the Panda arm and the x5 camera arm in an explicit pose at spawn.
+            joint_pos=DEFAULT_JOINT_POS,
             pos=ROBOT_INITIAL_POS,
             rot=ROBOT_INITIAL_ROT
         ),
@@ -225,17 +266,27 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     actuated_joints_num = len(arm_joints) + len(base_joints) + len(finger_joints)
     action_space = actuated_joints_num * 1
     # action_space = len(arm_joints) + len(base_joints) + 4
-    # observation_space = actuated_joints_num * 2 + len(door_body_names) * 3 + len(robot_key_bodies) * 3 * 2 + len(door_joint_names) + len(door_joint_names) + len(contact_sensor_names) * 3
+    twist_observation_space = len(twist_indices) * (
+        len(robot_key_bodies) * 3 +
+        len(robot_key_bodies) * 6 +
+        3 +
+        len(door_joint_names) +
+        len(arm_joints) +
+        len(base_joints)
+    )
+
     observation_space = \
-        actuated_joints_num * 2 +\
-        len(door_body_names) * 3 +\
-        len(arm_joints) + len(base_joints) +\
-        (len(robot_key_bodies) - 1) * (3 + 6) + 6 +\
+        actuated_joints_num * 3 +\
+        len(base_joints) + len(arm_joints) +\
         len(robot_key_bodies) * 3 +\
+        (len(robot_key_bodies) - 1) * (3 + 6) + 6 +\
+        len(door_body_names) * 3 +\
         len(door_joint_names) * 2 +\
-        actuated_joints_num
+        twist_observation_space
+    state_space = observation_space
+    num_observations = observation_space
+    num_states = state_space
     #  5 * 3 +\
-    # len(twist_indices) * (len(robot_key_bodies) * 3 + len(robot_key_bodies) * 6 + 3 + len(door_joint_names) + len(arm_joints) + len(base_joints)) +\
     
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=False)
@@ -257,6 +308,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     hinge_contact_reward_w = 1.0
     robot_body_lin_vel_w = 1.0
     robot_body_ang_vel_w = 0.5
+    joint_limit_penalty_w = 40.0
+    joint_limit_penalty_margin_ratio = 0.05
 
     robot_body_quat_scale = 1.0
     robot_key_body_pos_scale = 3.0
@@ -278,13 +331,78 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     reset_door_joint_pos_delta_max = 0.8
     # We are slowly increasing our tolerance on base position drift and slowly only resettting the env from the first key frame
     # This variable is used to indicate when we stop increasing the tolerance and reset the env from the first key frame for the greatest probability
-    reset_progress_total = 7e5
+    reset_progress_total = 7.5e5
+    # ADR should ramp faster than the reference-motion reset curriculum so physics randomization is not lagging behind.
+    adr_reset_progress_total = 2e5
 
     alive_base = 10.0
     alive_bonus = 20.0
     termination_penalty = -100.0
 
     velocity = 1.0
+
+    # Keep DR opt-in so the default task is the clean baseline.
+    enable_adr = True
+    num_adr_increments = 20
+    starting_adr_increments = 0
+    dr_metrics_interval = 100
+    log_verbose_dr_metrics = True
+
+    events: EventCfg = EventCfg()
+
+    # These are the ADR endpoints for simulator parameters handled by EventTerms at reset.
+    # Robot gains use multipliers on the actuator defaults, while door gains are specified in physical units.
+    # The door board starts at stiffness=100 and damping=10, and the hinge starts at stiffness=1 and damping=1.
+    adr_cfg_dict = {
+        "num_increments": num_adr_increments,
+        "robot_joint_stiffness_and_damping": {
+            "stiffness_distribution_params": (0.8, 1.2),
+            "damping_distribution_params": (0.7, 1.3),
+        },
+        "door_board_joint_stiffness_and_damping": {
+            "stiffness_distribution_params": (1.0, 75.0),
+            "damping_distribution_params": (1.0, 10.0),
+        },
+        "door_hinge_joint_stiffness_and_damping": {
+            "stiffness_distribution_params": (10.0, 60.0),
+            "damping_distribution_params": (0.03, 1.0),
+        },
+    }
+
+    # These terms are sampled inside the env because they perturb reset state, observations, and controller targets.
+    adr_custom_cfg_dict = {
+        "robot_spawn": {
+            "base_xy_joint_pos_noise": (0.0, 0.01),
+            "base_rot_joint_pos_noise": (0.0, 0.03),
+            "arm_joint_pos_noise": (0.0, 0.03),
+            "finger_joint_pos_noise": (0.0, 0.05),
+        },
+        "robot_state_noise": {
+            "base_xy_joint_pos_noise": (0.0, 0.003),
+            "base_xy_joint_pos_bias": (0.0, 0.002),
+            "base_rot_joint_pos_noise": (0.0, 0.01),
+            "base_rot_joint_pos_bias": (0.0, 0.006),
+            "arm_joint_pos_noise": (0.0, 0.01),
+            "arm_joint_pos_bias": (0.0, 0.006),
+            "finger_joint_pos_noise": (0.0, 0.02),
+            "finger_joint_pos_bias": (0.0, 0.01),
+            "base_xy_joint_vel_noise": (0.0, 0.03),
+            "base_xy_joint_vel_bias": (0.0, 0.015),
+            "base_rot_joint_vel_noise": (0.0, 0.08),
+            "base_rot_joint_vel_bias": (0.0, 0.04),
+            "arm_joint_vel_noise": (0.0, 0.1),
+            "arm_joint_vel_bias": (0.0, 0.05),
+            "finger_joint_vel_noise": (0.0, 0.15),
+            "finger_joint_vel_bias": (0.0, 0.08),
+        },
+        "pd_targets": {
+            "base_xy_target_noise": (0.0, 0.0015),
+            "base_rot_target_noise": (0.0, 0.005),
+            "arm_target_noise": (0.0, 0.003),
+            "finger_target_noise": (0.0, 0.005),
+            "target_lag_alpha": (0.0, 0.15),
+        },
+    }
 
     # Change this to where you store your motions
     motion_file = "trajectory.pkl"

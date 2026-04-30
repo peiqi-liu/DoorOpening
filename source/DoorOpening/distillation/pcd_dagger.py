@@ -7,7 +7,6 @@ from pathlib import Path
 
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 import yaml
 from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -16,11 +15,12 @@ try:
 except ImportError:
     wandb = None
 
-from isaaclab.utils.math import quat_apply, quat_mul, transform_points
+from isaaclab.utils.math import quat_apply, transform_points
 from rl_games.algos_torch import torch_ext
 from rl_games.algos_torch.model_builder import ModelBuilder
 
 from DoorOpening.assets.door.door_cfg import asset_paths as door_asset_paths
+from DoorOpening.assets.door.door_cfg import board_bboxes as door_board_bboxes
 from DoorOpening.assets.door.door_cfg import motion_traj_paths
 from DoorOpening.assets.glorbot.glorbot_cfg import glorbot_urdf_path
 from DoorOpening.model.transformer import PCDTransformer, strip_prefix_from_state_dict
@@ -29,6 +29,7 @@ from DoorOpening.utils.camera_utils import (
     crop_local_pcd,
     depth_to_pointcloud,
     simulate_depth_cam_render_from_pose,
+    simulate_lidar_render_from_pose,
 )
 from DoorOpening.utils.extract_pointcloud_from_articulation import FrankaLeapSampler
 from DoorOpening.utils.pose_utils import world_to_local
@@ -91,22 +92,20 @@ class Dagger:
                 ("hand", hand_action_dim),
             ]
         )
-        self.action_component_slices = OrderedDict()
-        action_start_idx = 0
-        for name, dim in self.action_component_dims.items():
-            self.action_component_slices[name] = slice(action_start_idx, action_start_idx + dim)
-            action_start_idx += dim
         self.action_component_aliases = {
             "base": "base",
             "arm": "arm",
             "hand": "hand",
             "finger": "hand",
         }
+        self.action_component_history_indices = self._build_action_component_history_indices()
+        self.proprio_component_history_indices = self._build_proprio_component_history_indices()
 
         self.student_cfg = self.config.get("student", {})
         self.teacher_cfg = self.config.get("teacher", {})
         self.play_policy = bool(self.config.get("play_policy", False))
         self.runtime_cfg = self.config.get("dagger", {})
+        self.wall_distractor_cfg = dict(self.runtime_cfg.get("wall_distractors", {}))
 
         self.lr = float(self.runtime_cfg.get("learning_rate", 1e-4))
         self.weight_decay = float(self.runtime_cfg.get("weight_decay", 1e-4))
@@ -125,24 +124,40 @@ class Dagger:
         self.save_interval = int(self.runtime_cfg.get("save_interval", 5_000))
         self.pointcloud_source = str(self.runtime_cfg.get("pointcloud_source", "sampler")).lower()
         self.robot_pcd_num_points = self.runtime_cfg.get("robot_num_points")
-        self.ignore_aux_debug = bool(self.runtime_cfg.get("ignore_aux_debug", False))
         self.sampler_render_cfg = self.runtime_cfg.get("sampler_render", {})
         self.sampler_render_inflate_px = int(self.sampler_render_cfg.get("inflate_px", 2))
         self.sampler_render_jitter_std_m = float(self.sampler_render_cfg.get("jitter_std_m", 0.004))
         self.sampler_render_clip_mode = str(self.sampler_render_cfg.get("clip_mode", "post"))
         self.sampler_render_jitter_mode = str(self.sampler_render_cfg.get("jitter_mode", "xyz"))
         self.sampler_render_use_compile = bool(self.sampler_render_cfg.get("use_compile", True))
+        self.lidar_render_cfg = self.runtime_cfg.get("lidar_render", {})
+        self.lidar_num_points = self.lidar_render_cfg.get("num_points")
+        self.lidar_num_azimuth = int(self.lidar_render_cfg.get("num_azimuth", 512))
+        self.lidar_num_polar = int(self.lidar_render_cfg.get("num_polar", 128))
+        self.lidar_near_m = float(self.lidar_render_cfg.get("near_m", 0.1))
+        self.lidar_far_m = self.lidar_render_cfg.get("far_m", 30.0)
+        if self.lidar_far_m is not None:
+            self.lidar_far_m = float(self.lidar_far_m)
+        self.lidar_suppress_bins = int(self.lidar_render_cfg.get("suppress_bins", 2))
+        self.lidar_occlusion_eps_m = float(self.lidar_render_cfg.get("occlusion_eps_m", 0.02))
+        self.lidar_occlusion_eps_rel = float(self.lidar_render_cfg.get("occlusion_eps_rel", 0.01))
+        self.lidar_jitter_std_m = float(self.lidar_render_cfg.get("jitter_std_m", 0.001))
+        self.lidar_use_compile = bool(self.lidar_render_cfg.get("use_compile", True))
         # Runtime controls for live Viser inspection plus optional serializer/raw replay outputs.
         self.viser_cfg = dict(self.runtime_cfg.get("viser", {}))
         legacy_record_cfg = dict(self.viser_cfg.get("record", {}))
+        self.viser_serializer_cfg = dict(self.viser_cfg.get("serializer", legacy_record_cfg))
+        self.viser_raw_cfg = dict(self.viser_cfg.get("raw", {}))
         self.viser_enabled = self.rank == 0 and bool(self.viser_cfg.get("enabled", False))
         self.viser_update_interval = max(1, int(self.viser_cfg.get("update_interval", 1)))
         self.viser_env_id = int(self.viser_cfg.get("env_id", self.runtime_cfg.get("debug_pointcloud_env_id", 0)))
         self.viser_show_policy_input = bool(self.viser_cfg.get("show_policy_input", True))
+        self.viser_raw_save_interval = max(
+            1,
+            int(self.viser_raw_cfg.get("save_interval", self.viser_cfg.get("raw_interval", 1000))),
+        )
         self.viser_point_size = float(self.viser_cfg.get("point_size", 0.004))
         self.viser_max_points = int(self.viser_cfg.get("max_points", 12_000))
-        self.viser_serializer_cfg = dict(self.viser_cfg.get("serializer", legacy_record_cfg))
-        self.viser_raw_cfg = dict(self.viser_cfg.get("raw", {}))
         self.viser_serializer_enabled = self.rank == 0 and bool(self.viser_serializer_cfg.get("enabled", False))
         self.viser_raw_enabled = self.rank == 0 and bool(
             self.viser_raw_cfg.get(
@@ -150,20 +165,40 @@ class Dagger:
                 self.viser_serializer_cfg.get("save_raw", legacy_record_cfg.get("save_raw", False)),
             )
         )
-        self.viser_replay_enabled = self.viser_serializer_enabled or self.viser_raw_enabled
-        self.viser_replay_max_frames = int(
-            self.viser_raw_cfg.get(
-                "max_frames",
-                self.viser_serializer_cfg.get("max_frames", legacy_record_cfg.get("max_frames", 500)),
-            )
+        self.viser_episode_replay_enabled = self.viser_serializer_enabled
+        self.viser_serializer_warning_max_frames = int(
+            self.viser_serializer_cfg.get("max_frames", legacy_record_cfg.get("max_frames", 500))
         )
+        self.viser_raw_max_frames = max(0, int(self.viser_raw_cfg.get("max_frames", 0)))
         self.viser_replay_max_points = int(
             self.viser_raw_cfg.get(
                 "max_points",
                 self.viser_serializer_cfg.get("max_points", legacy_record_cfg.get("max_points", self.viser_max_points)),
             )
         )
-        if self.pointcloud_source not in {"sampler", "depth"}:
+        self.viser_raw_include_ground_truth = bool(self.viser_raw_cfg.get("include_ground_truth", True))
+        self.viser_raw_include_robot_obs = bool(self.viser_raw_cfg.get("include_robot_obs", True))
+        self.viser_raw_include_policy_input = bool(
+            self.viser_raw_cfg.get("include_policy_input", self.viser_show_policy_input)
+        )
+        self.viser_raw_ground_truth_max_points = max(
+            0,
+            int(
+                self.viser_raw_cfg.get(
+                    "ground_truth_max_points",
+                    self.viser_raw_cfg.get("gt_max_points", self.viser_replay_max_points),
+                )
+            ),
+        )
+        self.viser_raw_robot_obs_max_points = max(
+            0,
+            int(self.viser_raw_cfg.get("robot_obs_max_points", self.viser_replay_max_points)),
+        )
+        self.viser_raw_policy_input_max_points = max(
+            0,
+            int(self.viser_raw_cfg.get("policy_input_max_points", self.viser_replay_max_points)),
+        )
+        if self.pointcloud_source not in {"sampler", "depth", "lidar"}:
             raise ValueError(f"Unsupported pointcloud_source '{self.pointcloud_source}'.")
         if self.teacher_forcing_warmup_iters < 0:
             raise ValueError("teacher_forcing_warmup_iters must be non-negative.")
@@ -188,8 +223,8 @@ class Dagger:
                 raise ImportError("wandb logging is enabled, but the 'wandb' package is not installed.")
             self._init_wandb(summaries_dir)
 
-        self.student_action_history = None
-        self.teacher_action_history = None
+        self.implemented_action_history = None
+        self.student_proprio_history = None
         self.teacher_forcing_env_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.current_rewards = torch.zeros((self.num_envs, 1), dtype=torch.float32, device=self.device)
         self.current_lengths = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
@@ -197,29 +232,28 @@ class Dagger:
         self.completed_lengths = deque(maxlen=self.games_to_track)
         self.completed_successes = deque(maxlen=self.games_to_track)
         self.episode_reached_last_frame = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self.latest_env_metrics = {}
         self.student_update_steps = 0
         self.last_local_update_batch_size = 0
         self.last_global_update_batch_size = 0
+        self.latest_student_proprio_vector = None
+        self.latest_aux_input_vector = None
+        self.latest_aux_target_vector = None
         self._timing_stats = {
             "iteration_ms": {"sum_ms": 0.0, "count": 0},
             "student_obs_ms": {"sum_ms": 0.0, "count": 0},
             "pointcloud_ms": {"sum_ms": 0.0, "count": 0},
             "env_step_ms": {"sum_ms": 0.0, "count": 0},
         }
+        self.logged_env_metric_prefixes = ("dr/", "dr_limit/", "dr_sample/", "reset/")
+        self.latest_env_log_metrics = {}
+        self.zero_local_pcd_crop_center = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
 
         self._init_teacher()
         self._init_student()
-        self._init_action_history_buffers()
+        self._init_history_buffers()
         self._init_pointcloud_assets()
         self._init_viser_debug_tools()
         self.success_frame_idx = float(self.ov_env.ref_motion_lib.num_frames - 1)
-
-        self.aux_buffer = None
-        if not self.ignore_aux_debug and self.student_model.aux_prediction and self.aux_total_dim > 0:
-            self.aux_buffer = torch.zeros((self.num_envs, 1, self.aux_total_dim), dtype=torch.float32, device=self.device)
-        if self.ignore_aux_debug and self.rank == 0:
-            print("Aux debug bypass enabled: using ground-truth aux inputs and skipping aux loss/rollout.")
 
     def _init_teacher(self):
         self.teacher_model = None
@@ -288,24 +322,14 @@ class Dagger:
         # print(self.student_model)
         # print("state_encoders_cfg", self.student_model.state_encoders_cfg)
 
-        self.student_ddp_find_unused_parameters = bool(
-            self.student_model.aux_prediction and self.ignore_aux_debug
-        )
-
         if self.use_ddp:
             self.student_model_ddp = DDP(
                 self.student_model,
                 device_ids=[self.local_rank],
-                find_unused_parameters=self.student_ddp_find_unused_parameters,
+                find_unused_parameters=False,
             )
         else:
             self.student_model_ddp = self.student_model
-
-        if self.student_ddp_find_unused_parameters and self.rank == 0:
-            print(
-                "DDP unused-parameter detection enabled because aux prediction is active "
-                "while ignore_aux_debug skips the aux loss."
-            )
         self.optimizer = torch.optim.AdamW(
             self.student_model_ddp.parameters(),
             lr=self.lr,
@@ -330,7 +354,7 @@ class Dagger:
             raise ValueError("PCDTransformer student config must include q_hand in state_encoders_cfg.")
 
         self.action_history_state_specs = OrderedDict()
-        self.max_student_action_history_lag = 1
+        self.max_implemented_action_history_lag = 1
         for key in self.state_encoders_keys:
             spec = self._parse_action_history_state_key(key)
             if spec is None:
@@ -345,56 +369,126 @@ class Dagger:
                     )
                 )
             self.action_history_state_specs[key] = spec
-            self.max_student_action_history_lag = max(self.max_student_action_history_lag, spec["lag"])
-
-        self.aux_state_specs = OrderedDict()
-        for key in self.state_encoders_keys:
-            if key == "aux_object_state":
-                input_dim = int(self.student_model.state_encoders_cfg[key]["input_dim"])
-                if input_dim != 3:
-                    raise ValueError("aux_object_state must have input_dim=3.")
-                self.aux_state_specs[key] = {"dim": input_dim, "getter_name": "_get_aux_object_state"}
-            elif key == "aux_door_joint_angle":
-                input_dim = int(self.student_model.state_encoders_cfg[key]["input_dim"])
-                expected_dim = len(self.ov_env._door_joint_idx)
-                if input_dim != expected_dim:
-                    raise ValueError(f"aux_door_joint_angle must have input_dim={expected_dim}.")
-                self.aux_state_specs[key] = {"dim": input_dim, "getter_name": "_get_aux_door_joint_angle"}
-
-        unknown_aux_keys = [
-            key
-            for key in self.state_encoders_keys
-            if key.startswith("aux_") and key not in self.aux_state_specs
-        ]
-        if unknown_aux_keys:
-            raise KeyError(
-                f"Unsupported aux state keys in student config: {unknown_aux_keys}. "
-                "Add a getter in pcd_dagger.py before enabling them."
+            self.max_implemented_action_history_lag = max(self.max_implemented_action_history_lag, spec["lag"])
+        if student_ckpt is not None and self.action_history_state_specs and self.rank == 0:
+            print(
+                "Warning: student checkpoint was loaded while prev_action_* inputs are active. "
+                "If their meaning changed since the checkpoint was trained, reusing those encoder weights can spike loss."
             )
 
-        self.aux_state_keys = tuple(self.aux_state_specs.keys())
-        self.aux_total_dim = sum(spec["dim"] for spec in self.aux_state_specs.values())
-        if self.student_model.aux_prediction and self.student_model.aux_output_dim != self.aux_total_dim:
-            raise ValueError(
-                f"Student aux output dim ({self.student_model.aux_output_dim}) does not match "
-                f"configured aux state dim ({self.aux_total_dim})."
+        self.proprio_history_state_specs = OrderedDict()
+        self.max_student_proprio_history_lag = 1
+        for key in self.state_encoders_keys:
+            spec = self._parse_proprio_history_state_key(key)
+            if spec is None:
+                continue
+            input_dim = int(self.student_model.state_encoders_cfg[key]["input_dim"])
+            if input_dim != spec["dim"]:
+                raise ValueError(
+                    "{} must have input_dim={} to match the {} joint slice.".format(
+                        key,
+                        spec["dim"],
+                        spec["component"],
+                    )
+                )
+            self.proprio_history_state_specs[key] = spec
+            self.max_student_proprio_history_lag = max(self.max_student_proprio_history_lag, spec["lag"])
+
+        self.aux_state_specs = OrderedDict()
+        self.aux_input_dim = 0
+        for key in self.state_encoders_keys:
+            spec = self._parse_aux_state_key(key)
+            if spec is None:
+                continue
+            input_dim = int(self.student_model.state_encoders_cfg[key]["input_dim"])
+            if input_dim != spec["dim"]:
+                raise ValueError(
+                    "{} must have input_dim={} to match the {} auxiliary state.".format(
+                        key,
+                        spec["dim"],
+                        spec["name"],
+                    )
+                )
+            spec["slice"] = slice(self.aux_input_dim, self.aux_input_dim + spec["dim"])
+            self.aux_input_dim += spec["dim"]
+            self.aux_state_specs[key] = spec
+        self.has_aux_input = len(self.aux_state_specs) > 0
+        self.has_aux_prediction = bool(getattr(self.student_model, "aux_prediction", False))
+        if self.has_aux_prediction and not self.has_aux_input:
+            raise ValueError("Aux prediction requires at least one enabled aux_* state encoder.")
+        self.aux_prediction_mode = str(getattr(self.student_model, "aux_prediction_mode", "absolute")).lower()
+        self.aux_delta_scale = float(getattr(self.student_model, "aux_delta_scale", 0.01))
+        self.aux_feedback_to_policy = self.has_aux_input and self.has_aux_prediction and bool(
+            self.runtime_cfg.get("aux_feedback_to_policy", True)
+        )
+        self.aux_pregrasp_dropout_prob = float(self.runtime_cfg.get("aux_pregrasp_dropout_prob", 0.0))
+        self.aux_buffer = None
+        if self.has_aux_input:
+            self.aux_buffer = torch.zeros((self.num_envs, self.aux_input_dim), dtype=torch.float32, device=self.device)
+        if not 0.0 <= self.aux_pregrasp_dropout_prob <= 1.0:
+            raise ValueError("aux_pregrasp_dropout_prob must be in [0, 1].")
+        self.latest_aux_pregrasp_env_fraction = 0.0
+        self.latest_aux_pregrasp_dropout_fraction = 0.0
+        if self.rank == 0 and self.has_aux_prediction and self.aux_prediction_mode == "delta":
+            print(
+                "Warning: aux_prediction_mode='delta' starts each episode from a zero absolute aux reference. "
+                "Consider absolute aux prediction if zero-seeded rollout recovery is unstable."
+            )
+        if (
+            self.rank == 0
+            and self.aux_pregrasp_dropout_prob > 0.0
+            and self.has_aux_prediction
+            and self.aux_prediction_mode == "delta"
+        ):
+            print(
+                "Warning: aux_pregrasp_dropout_prob is enabled while aux_prediction_mode='delta'. "
+                "Dropped aux inputs reset the delta reference to zero for those steps."
+            )
+        if student_ckpt is not None and self.has_aux_input and self.rank == 0:
+            print(
+                "Warning: student checkpoint was loaded while aux_handle_* inputs are active. "
+                "If the auxiliary state definition changed, reusing those weights can spike loss."
             )
 
         local_pcd_cfg = self.student_model.pcd_encoders_cfg.get("local_pcd_t")
         self.local_pcd_points = [0, 0, 0]
-        print("local_pcd_cfg", local_pcd_cfg)
-        # print(local_pcd_cfg.get("num_points", [self.door_pcd_num_points, 0, 0]))
         if local_pcd_cfg is not None:
             self.local_pcd_points = list(local_pcd_cfg.get("num_points", [self.door_pcd_num_points, 0, 0])[:3])
-            # num_points = local_pcd_cfg.get("num_points", [self.door_pcd_num_points, 0, 0])
-            # if isinstance(num_points, int):
-            #     num_points = [num_points]
-            # self.local_pcd_points = list(num_points[:3])
             # while len(self.local_pcd_points) < 3:
             #     self.local_pcd_points.append(0)
 
-        if self.local_pcd_points[2] > 0 and "aux_object_state" not in self.aux_state_specs:
-            raise ValueError("local_pcd_t aux crop requires aux_object_state to be enabled in state_encoders_cfg.")
+    def _build_action_component_history_indices(self):
+        target_joint_ids = torch.as_tensor(self.ov_env._robot_dof_idx, device=self.device, dtype=torch.long)
+        joint_id_to_target_pos = {int(joint_id): pos for pos, joint_id in enumerate(target_joint_ids.tolist())}
+
+        indices = OrderedDict()
+        indices["full"] = torch.arange(self.num_actions, device=self.device, dtype=torch.long)
+        indices["base"] = torch.as_tensor(
+            [joint_id_to_target_pos[int(joint_id)] for joint_id in self.ov_env._robot_base_dof_idx],
+            device=self.device,
+            dtype=torch.long,
+        )
+        indices["arm"] = torch.as_tensor(
+            [joint_id_to_target_pos[int(joint_id)] for joint_id in self.ov_env._robot_arm_dof_idx],
+            device=self.device,
+            dtype=torch.long,
+        )
+        indices["hand"] = torch.as_tensor(
+            [joint_id_to_target_pos[int(joint_id)] for joint_id in self.ov_env._robot_finger_dof_idx],
+            device=self.device,
+            dtype=torch.long,
+        )
+        return indices
+
+    def _build_proprio_component_history_indices(self):
+        return OrderedDict(
+            [
+                ("full", torch.as_tensor(self.ov_env._robot_dof_idx, device=self.device, dtype=torch.long)),
+                ("base", torch.as_tensor(self.ov_env._robot_base_dof_idx, device=self.device, dtype=torch.long)),
+                ("arm", torch.as_tensor(self.ov_env._robot_arm_dof_idx, device=self.device, dtype=torch.long)),
+                ("hand", torch.as_tensor(self.ov_env._robot_finger_dof_idx, device=self.device, dtype=torch.long)),
+            ]
+        )
 
     def _parse_action_history_state_key(self, key):
         if not key.startswith("prev_action"):
@@ -426,51 +520,267 @@ class Dagger:
                 "Expected prev_action[_base|_arm|_hand][_tK]."
             )
 
-        if component == "full":
-            action_slice = slice(0, self.num_actions)
-            action_dim = self.num_actions
-        else:
-            action_slice = self.action_component_slices[component]
-            action_dim = self.action_component_dims[component]
+        action_indices = self.action_component_history_indices[component]
+        action_dim = int(action_indices.numel())
         return {
             "component": component,
             "lag": lag,
-            "slice": action_slice,
+            "indices": action_indices,
             "dim": action_dim,
         }
 
-    def _init_action_history_buffers(self):
-        self.student_action_history = torch.zeros(
-            (self.num_envs, self.max_student_action_history_lag, self.num_actions),
+    def _parse_proprio_history_state_key(self, key):
+        if not key.startswith("prev_q"):
+            return None
+
+        parts = key.split("_")
+        if parts[:2] != ["prev", "q"]:
+            raise KeyError(
+                f"Unsupported proprio history key {key}. "
+                "Expected prev_q[_base|_arm|_hand][_tK]."
+            )
+
+        component = "full"
+        lag = 1
+        for part in parts[2:]:
+            if not part:
+                continue
+            if part.startswith("t") and part[1:].isdigit():
+                parsed_lag = int(part[1:])
+                if parsed_lag < 1:
+                    raise ValueError(f"Proprio history lag in {key} must be >= 1.")
+                lag = parsed_lag
+                continue
+            if part in self.action_component_aliases:
+                component = self.action_component_aliases[part]
+                continue
+            raise KeyError(
+                f"Unsupported proprio history key {key}. "
+                "Expected prev_q[_base|_arm|_hand][_tK]."
+            )
+
+        proprio_indices = self.proprio_component_history_indices[component]
+        proprio_dim = int(proprio_indices.numel())
+        return {
+            "component": component,
+            "lag": lag,
+            "indices": proprio_indices,
+            "dim": proprio_dim,
+        }
+
+    def _parse_aux_state_key(self, key):
+        if key != "aux_handle_pos":
+            return None
+        return {
+            "name": key,
+            "dim": 3,
+        }
+
+    def _init_history_buffers(self):
+        self.implemented_action_history = torch.zeros(
+            (self.num_envs, self.max_implemented_action_history_lag, self.num_actions),
             dtype=torch.float32,
             device=self.device,
         )
-        self.teacher_action_history = torch.zeros(
-            (self.num_envs, 1, self.num_actions),
+        self.student_proprio_history_dim = int(self.ov_env.robot.data.joint_pos.shape[-1])
+        self.student_proprio_history = torch.zeros(
+            (self.num_envs, self.max_student_proprio_history_lag, self.student_proprio_history_dim),
             dtype=torch.float32,
             device=self.device,
         )
 
-    def _get_action_history_tensor(self, history_buffer, lag, action_slice):
+    def _get_history_tensor(self, history_buffer, lag, value_indices, reference_values=None):
         if history_buffer is None:
-            raise RuntimeError("Action history buffer is not initialized.")
+            raise RuntimeError("History buffer is not initialized.")
         if lag < 1 or lag > history_buffer.shape[1]:
             raise IndexError(
-                f"Requested action history lag t-{lag} but buffer only stores {history_buffer.shape[1]} steps."
+                f"Requested history lag t-{lag} but buffer only stores {history_buffer.shape[1]} steps."
             )
-        return history_buffer[:, lag - 1, action_slice]
+        values = history_buffer[:, lag - 1, value_indices]
+        if reference_values is not None:
+            if reference_values.ndim != 2:
+                raise RuntimeError(
+                    f"Expected reference_values to be rank-2, got shape {tuple(reference_values.shape)}."
+                )
+            values = values - reference_values[:, value_indices]
+        return values
 
-    def _push_action_history(self, history_buffer, actions):
+    def _push_history(self, history_buffer, values):
         if history_buffer is None:
             return
         if history_buffer.shape[1] > 1:
             history_buffer[:, 1:, :] = history_buffer[:, :-1, :].clone()
-        history_buffer[:, 0, :] = actions
+        history_buffer[:, 0, :] = values
 
-    def _reset_action_history(self, history_buffer, env_ids):
-        if history_buffer is None or env_ids.numel() == 0:
+    def _seed_student_histories(self, env_ids=None):
+        prev_action_seed = self._get_implemented_action_vector().detach()
+        proprio_seed = self._get_student_proprio_vector().detach()
+
+        if env_ids is None:
+            if self.implemented_action_history is not None:
+                self.implemented_action_history[:] = prev_action_seed.unsqueeze(1).expand(
+                    -1, self.implemented_action_history.shape[1], -1
+                )
+            if self.student_proprio_history is not None:
+                self.student_proprio_history[:] = proprio_seed.unsqueeze(1).expand(
+                    -1, self.student_proprio_history.shape[1], -1
+                )
             return
-        history_buffer[env_ids] = 0.0
+
+        if env_ids.numel() == 0:
+            return
+        if self.implemented_action_history is not None:
+            self.implemented_action_history[env_ids] = prev_action_seed[env_ids].unsqueeze(1).expand(
+                -1, self.implemented_action_history.shape[1], -1
+            )
+        if self.student_proprio_history is not None:
+            self.student_proprio_history[env_ids] = proprio_seed[env_ids].unsqueeze(1).expand(
+                -1, self.student_proprio_history.shape[1], -1
+            )
+
+    def _get_student_proprio_vector(self):
+        get_student_joint_pos_obs = getattr(self.ov_env, "get_student_joint_pos_obs", None)
+        if callable(get_student_joint_pos_obs):
+            q_pos = get_student_joint_pos_obs(use_noise=True)
+        else:
+            q_pos = self.ov_env.robot.data.joint_pos
+        if q_pos.ndim != 2:
+            raise RuntimeError(f"Expected joint_pos to be rank-2, got shape {tuple(q_pos.shape)}.")
+        return q_pos
+
+    def _get_implemented_action_vector(self):
+        # prev_action_* should reflect the actual joint-position targets sent to
+        # the PD controller, not the normalized delta policy actions.
+        pd_targets = getattr(self.ov_env, "applied_robot_dof_targets", None)
+        if pd_targets is None:
+            pd_targets = getattr(self.ov_env, "robot_dof_targets", None)
+        if pd_targets is None:
+            raise RuntimeError(
+                "Expected the environment to expose applied_robot_dof_targets or robot_dof_targets "
+                "for implemented action history features."
+            )
+        if pd_targets.ndim != 2:
+            raise RuntimeError(f"Expected PD target tensor to be rank-2, got shape {tuple(pd_targets.shape)}.")
+        return pd_targets
+
+    def _get_handle_position_base(self):
+        getter = getattr(self.ov_env, "get_handle_position_in_base_frame", None)
+        if callable(getter):
+            return getter()
+        raise RuntimeError(
+            "Expected environment to expose get_handle_position_in_base_frame() "
+            "for aux handle position prediction."
+        )
+
+    def _get_aux_state_values(self):
+        if not self.has_aux_input:
+            return OrderedDict()
+
+        handle_pos_base = self._get_handle_position_base()
+        aux_state_values = OrderedDict()
+        if "aux_handle_pos" in self.aux_state_specs:
+            aux_state_values["aux_handle_pos"] = handle_pos_base
+        return aux_state_values
+
+    def _stack_aux_state_values(self, aux_state_values):
+        if not self.has_aux_input:
+            return None
+        aux_vector = torch.zeros((self.num_envs, self.aux_input_dim), dtype=torch.float32, device=self.device)
+        for key, spec in self.aux_state_specs.items():
+            aux_vector[:, spec["slice"]] = aux_state_values[key]
+        return aux_vector
+
+    def _aux_to_2d(self, aux_tensor):
+        if aux_tensor is None:
+            return None
+        if aux_tensor.ndim == 3:
+            return aux_tensor[:, 0, :]
+        return aux_tensor
+
+    def _decode_aux_prediction(self, aux_pred, prev_abs_aux):
+        prev_abs_aux_2d = self._aux_to_2d(prev_abs_aux)
+        if prev_abs_aux_2d is None:
+            raise RuntimeError("prev_abs_aux is required to decode auxiliary predictions.")
+        if self.aux_prediction_mode == "delta":
+            aux_delta = torch.clamp(self._aux_to_2d(aux_pred), -1.0, 1.0)
+            return prev_abs_aux_2d + self.aux_delta_scale * aux_delta
+        return self._aux_to_2d(aux_pred)
+
+    def _get_aux_target(self, current_abs_aux, prev_abs_aux):
+        prev_abs_aux_2d = self._aux_to_2d(prev_abs_aux)
+        if self.aux_prediction_mode == "delta":
+            if prev_abs_aux_2d is None:
+                raise RuntimeError("prev_abs_aux is required to build delta auxiliary targets.")
+            target_delta = (current_abs_aux - prev_abs_aux_2d) / self.aux_delta_scale
+            return torch.clamp(target_delta, -1.0, 1.0)
+        return current_abs_aux
+
+    def _use_aux_feedback(self):
+        return self.aux_feedback_to_policy
+
+    def _maybe_drop_aux_feedback(self, aux_input_vector):
+        self.latest_aux_pregrasp_env_fraction = 0.0
+        self.latest_aux_pregrasp_dropout_fraction = 0.0
+        if aux_input_vector is None or not self._use_aux_feedback() or self.aux_pregrasp_dropout_prob <= 0.0:
+            return aux_input_vector
+
+        ref_motion_lib = getattr(self.ov_env, "ref_motion_lib", None)
+        if ref_motion_lib is None:
+            return aux_input_vector
+
+        get_pregrasp_mask = getattr(ref_motion_lib, "get_before_first_keyframe_mask", None)
+        if not callable(get_pregrasp_mask):
+            return aux_input_vector
+
+        pregrasp_mask = get_pregrasp_mask().to(device=self.device, dtype=torch.bool)
+        self.latest_aux_pregrasp_env_fraction = float(pregrasp_mask.float().mean().item())
+        if not torch.any(pregrasp_mask):
+            return aux_input_vector
+
+        drop_mask = pregrasp_mask & (
+            torch.rand(aux_input_vector.shape[0], device=self.device) < self.aux_pregrasp_dropout_prob
+        )
+        self.latest_aux_pregrasp_dropout_fraction = float(drop_mask.float().mean().item())
+        if not torch.any(drop_mask):
+            return aux_input_vector
+
+        dropped_aux_input = aux_input_vector.clone()
+        # Zeroing the carried-over aux vector forces the student to recover the
+        # handle estimate from the rest of the observation during pregrasp.
+        dropped_aux_input[drop_mask] = 0.0
+        return dropped_aux_input
+
+    def _seed_aux_buffer(self, env_ids=None):
+        if self.aux_buffer is None:
+            return
+        if env_ids is None:
+            self.aux_buffer.zero_()
+            return
+        if env_ids.numel() == 0:
+            return
+        self.aux_buffer[env_ids] = 0.0
+
+    def _get_cfg_range(self, cfg, key, default):
+        values = cfg.get(key, default)
+        if len(values) != 2:
+            raise ValueError(f"Expected '{key}' to have exactly two values, got {values}.")
+        low = float(values[0])
+        high = float(values[1])
+        if low > high:
+            raise ValueError(f"Expected '{key}' to be ordered as [low, high], got {values}.")
+        return low, high
+
+    def _get_optional_cfg_range(self, cfg, key):
+        values = cfg.get(key)
+        if values is None:
+            return None
+        if len(values) != 2:
+            raise ValueError(f"Expected '{key}' to have exactly two values, got {values}.")
+        low = float(values[0])
+        high = float(values[1])
+        if low > high:
+            raise ValueError(f"Expected '{key}' to be ordered as [low, high], got {values}.")
+        return low, high
 
     def _init_pointcloud_assets(self):
         asset_index_by_dir = {
@@ -486,6 +796,13 @@ class Dagger:
 
         env_motion_idx = self.ov_env.ref_motion_lib.env_to_file_map.to(device=self.device, dtype=torch.long)
         self.env_asset_idx = self.motion_to_asset_idx[env_motion_idx]
+        self.env_board_bboxes = door_board_bboxes.to(device=self.device, dtype=torch.float32)[self.env_asset_idx]
+        bbox_min = self.env_board_bboxes[:, 0]
+        bbox_max = self.env_board_bboxes[:, 1]
+        bbox_extent = (bbox_max - bbox_min).clamp_min(1e-4)
+        self.wall_distractor_axis_order = torch.argsort(bbox_extent, dim=-1)
+        self.wall_distractor_bbox_min_ordered = torch.gather(bbox_min, 1, self.wall_distractor_axis_order)
+        self.wall_distractor_bbox_max_ordered = torch.gather(bbox_max, 1, self.wall_distractor_axis_order)
         unique_asset_idx = sorted(set(self.env_asset_idx.detach().cpu().tolist()))
         self.door_samplers = {
             idx: FrankaLeapSampler(door_asset_paths[idx], device=self.device, num_points=self.door_pcd_num_points)
@@ -501,24 +818,82 @@ class Dagger:
         robot_joint_name_to_idx = {name: idx for idx, name in enumerate(robot_joint_names)}
         self.robot_sampler_joint_reorder = [robot_joint_name_to_idx[name] for name in robot_sampler_joint_names]
 
-        if "link_2" in self.ov_env.door_body_names:
-            handle_name_idx = self.ov_env.door_body_names.index("link_2")
-        else:
-            handle_name_idx = len(self.ov_env.door_body_names) - 1
         self.robot_base_body_idx = int(self.ov_env._robot_base_body_link_idx)
         self.robot_palm_body_idx = int(self.ov_env._robot_key_body_idx[self.ov_env._robot_palm_id_in_key_body_idx])
-        self.robot_camera_body_idx = int(self.ov_env.robot.find_bodies("x5_camera_link")[0][0])
         self.robot_root_body_idx = int(self.ov_env._robot_base_link_idx[0])
         self.door_base_body_idx = int(self.ov_env._door_base_link_idx)
-        self.door_handle_body_idx = int(self.ov_env._door_body_idx[handle_name_idx])
-        self.door_aux_joint_idx = torch.as_tensor(self.ov_env._door_joint_idx, device=self.device, dtype=torch.long)
-        camera_cfg = self.ov_env.cfg.pointcloud_camera_cfg
-        self.camera_offset_pos = torch.tensor(camera_cfg.offset.pos, device=self.device, dtype=torch.float32)
-        self.camera_offset_quat_world = torch.tensor(camera_cfg.offset.rot, device=self.device, dtype=torch.float32)
+        self.wall_distractors_enabled = bool(self.wall_distractor_cfg.get("enabled", True))
+        self.wall_distractor_num_points = int(
+            self.wall_distractor_cfg.get("num_points", max(256, self.door_pcd_num_points // 3))
+        )
+        self.wall_distractor_side_margin_scale_min, self.wall_distractor_side_margin_scale_max = self._get_cfg_range(
+            self.wall_distractor_cfg,
+            "side_margin_scale",
+            [0.35, 0.75],
+        )
+        side_margin_abs_range = self._get_optional_cfg_range(self.wall_distractor_cfg, "side_margin_m")
+        if side_margin_abs_range is None:
+            self.wall_distractor_side_margin_abs_min_m = None
+            self.wall_distractor_side_margin_abs_max_m = None
+        else:
+            self.wall_distractor_side_margin_abs_min_m, self.wall_distractor_side_margin_abs_max_m = side_margin_abs_range
+        self.wall_distractor_bottom_margin_scale_min, self.wall_distractor_bottom_margin_scale_max = self._get_cfg_range(
+            self.wall_distractor_cfg,
+            "bottom_margin_scale",
+            [0.02, 0.08],
+        )
+        self.wall_distractor_gap_min_m, self.wall_distractor_gap_max_m = self._get_cfg_range(
+            self.wall_distractor_cfg,
+            "edge_gap_m",
+            [0.015, 0.04],
+        )
+        self.wall_distractor_depth_min_m, self.wall_distractor_depth_max_m = self._get_cfg_range(
+            self.wall_distractor_cfg,
+            "depth_m",
+            [0.10, 0.26],
+        )
+        self.wall_distractor_center_offset_min_m, self.wall_distractor_center_offset_max_m = self._get_cfg_range(
+            self.wall_distractor_cfg,
+            "center_offset_m",
+            [-0.20, 0.20],
+        )
+        self.wall_distractor_side_margin_min_m = float(self.wall_distractor_cfg.get("side_margin_min_m", 0.10))
+        self.wall_distractor_face_jitter_m = float(self.wall_distractor_cfg.get("face_jitter_m", 0.004))
+        self.wall_distractor_resample_each_step = bool(self.wall_distractor_cfg.get("resample_each_step", False))
+        self._wall_distractor_local_points = None
+        if (
+            self.wall_distractors_enabled
+            and self.wall_distractor_num_points > 0
+            and not self.wall_distractor_resample_each_step
+        ):
+            self._wall_distractor_local_points = torch.zeros(
+                (self.num_envs, self.wall_distractor_num_points, 3),
+                dtype=torch.float32,
+                device=self.device,
+            )
+
+        self.robot_camera_body_idx = None
+        self.sampler_camera_spec = None
+
+        if self.pointcloud_source in {"sampler", "depth"}:
+            self.robot_camera_body_idx = int(self.ov_env.robot.find_bodies("x5_camera_link")[0][0])
+            self.sampler_camera_spec = self._build_sampler_camera_spec()
+
+        self.robot_lidar_body_idx = None
+        if self.pointcloud_source == "lidar":
+            lidar_body_name = str(getattr(self.ov_env.cfg, "pointcloud_lidar_body_name", "lidar"))
+            lidar_body_ids = self.ov_env.robot.find_bodies(lidar_body_name)[0]
+            if len(lidar_body_ids) == 0:
+                raise ValueError(f"Could not find lidar body '{lidar_body_name}' on robot articulation.")
+            self.robot_lidar_body_idx = int(lidar_body_ids[0])
+
+        if self.lidar_num_points is None:
+            self.lidar_num_points = self.door_pcd_num_points
+        self.lidar_num_points = int(self.lidar_num_points)
+
         self.pointcloud_camera = getattr(self.ov_env, "pointcloud_camera", None)
         if self.pointcloud_source == "depth" and self.pointcloud_camera is None:
             raise ValueError("pointcloud_source='depth' requires DooropeningEnv to enable the pointcloud camera.")
-        self.sampler_camera_spec = self._build_sampler_camera_spec()
 
     def _init_viser_debug_tools(self):
         """Create the Viser server, scene objects, and recording state used for debug playback."""
@@ -540,6 +915,12 @@ class Dagger:
         self._viser_record_episode_env_id = 0
         self._viser_record_episode_index = 0
         self._viser_record_episode_start_iteration = None
+        self._viser_raw_frames = []
+        self._viser_raw_frame_count = 0
+        self._viser_raw_chunk_index = 0
+        self._viser_raw_chunk_env_id = None
+        self._viser_raw_chunk_start_iteration = None
+        self._viser_raw_latest_iteration = None
 
         # Keep replay outputs next to checkpoints by default so a run's artifacts stay together.
         default_record_dir = Path(self.nn_dir).parent if self.nn_dir is not None else Path(os.getcwd())
@@ -564,8 +945,22 @@ class Dagger:
 
         sim_cfg = getattr(self.ov_env.cfg, "sim", None)
         sim_dt = getattr(sim_cfg, "dt", None)
+        self.viser_sim_dt = float(sim_dt) if sim_dt is not None else 1.0 / 30.0
+        self.viser_env_step_dt = max(float(getattr(self.ov_env, "dt", self.viser_sim_dt)), 1e-6)
+        self.viser_env_step_fps = 1.0 / self.viser_env_step_dt
+        self.viser_render_interval = max(int(getattr(sim_cfg, "render_interval", 1)), 1)
+        self.viser_render_dt = self.viser_sim_dt * self.viser_render_interval
+        pointcloud_sensor_dt = self.viser_env_step_dt
+        if self.pointcloud_source == "depth":
+            pointcloud_sensor_dt = getattr(
+                self.ov_env.cfg,
+                "pointcloud_camera_update_period",
+                pointcloud_sensor_dt,
+            )
+        self.viser_pointcloud_sensor_dt = max(float(pointcloud_sensor_dt), 1e-6)
+        self.viser_pointcloud_sensor_fps = 1.0 / self.viser_pointcloud_sensor_dt
         self.viser_serializer_frame_dt = float(
-            self.viser_serializer_cfg.get("frame_dt", sim_dt if sim_dt is not None else 1.0 / 30.0)
+            self.viser_serializer_cfg.get("frame_dt", self.viser_env_step_dt)
         )
 
         if not (self.viser_enabled or self.viser_serializer_enabled or self.viser_raw_enabled):
@@ -660,9 +1055,9 @@ class Dagger:
             if self.viser_enabled:
                 print(f"Viser live streaming enabled for env {self.viser_env_id}.")
                 print(f"Viser live update interval: every {self.viser_update_interval} training iterations.")
-            if self.viser_replay_enabled:
-                print(f"Viser replay capture enabled for env {self.viser_env_id}.")
-                print("Replay capture waits for that env to reset, then captures every step until the episode ends.")
+            if self.viser_episode_replay_enabled:
+                print(f"Viser serialized replay capture enabled for env {self.viser_env_id}.")
+                print("Replay capture starts only at selected-env episode boundaries and records every step until the episode ends.")
             if self.viser_serializer_enabled:
                 print(
                     "Serialized replays will be written as "
@@ -671,7 +1066,35 @@ class Dagger:
             if self.viser_raw_enabled:
                 print(
                     "Raw replay data will be written as "
-                    f"{self._format_iterated_record_path(self.viser_raw_path, '<episode_tag>')}"
+                    f"{self._format_iterated_record_path(self.viser_raw_path, '<chunk_tag>')}"
+                )
+                print(
+                    "Raw replay chunks will be written every "
+                    f"{self.viser_raw_save_interval} iterations, independent of episode boundaries."
+                )
+                if self.viser_raw_max_frames > 0:
+                    print(f"Each raw replay chunk will keep at most {self.viser_raw_max_frames} frames.")
+                print(
+                    "Raw replay point budgets: gt={}, obs={}, policy={}.".format(
+                        "off"
+                        if not self.viser_raw_include_ground_truth or self.viser_raw_ground_truth_max_points <= 0
+                        else self.viser_raw_ground_truth_max_points,
+                        "off"
+                        if not self.viser_raw_include_robot_obs or self.viser_raw_robot_obs_max_points <= 0
+                        else self.viser_raw_robot_obs_max_points,
+                        "off"
+                        if not self.viser_raw_include_policy_input or self.viser_raw_policy_input_max_points <= 0
+                        else self.viser_raw_policy_input_max_points,
+                    )
+                )
+            if self.viser_enabled or self.viser_serializer_enabled or self.viser_raw_enabled:
+                print(
+                    "Replay timing: env_step_dt={:.6f}s ({:.2f} FPS), pointcloud_sensor_dt={:.6f}s ({:.2f} FPS).".format(
+                        self.viser_env_step_dt,
+                        self.viser_env_step_fps,
+                        self.viser_pointcloud_sensor_dt,
+                        self.viser_pointcloud_sensor_fps,
+                    )
                 )
 
     def _get_viser_env_id(self):
@@ -706,7 +1129,7 @@ class Dagger:
 
     def _finish_viser_record_episode(self, episode_complete, reason):
         """Flush the current episode replay to disk and clear the in-memory episode buffer."""
-        if not self.viser_replay_enabled:
+        if not self.viser_episode_replay_enabled:
             return
 
         frame_count = self._viser_record_frame_count
@@ -733,9 +1156,110 @@ class Dagger:
         self._viser_record_episode_start_iteration = None
         self._viser_cached_ground_truth_pcd_world = None
 
+    def _build_viser_raw_payload(self, latest_iteration, chunk_complete):
+        return {
+            "format": "dooropening_viser_replay_v1",
+            "pointcloud_frame": "world",
+            "pointcloud_source": self.pointcloud_source,
+            "pointcloud_render_mode": str(getattr(self.ov_env.cfg, "pointcloud_render_mode", "none")).lower(),
+            "sim_dt": float(self.viser_sim_dt),
+            "decimation": int(getattr(self.ov_env.cfg, "decimation", 1)),
+            "render_interval": int(self.viser_render_interval),
+            "render_dt": float(self.viser_render_dt),
+            "env_step_dt": float(self.viser_env_step_dt),
+            "env_step_fps": float(self.viser_env_step_fps),
+            "frame_dt": float(self.viser_env_step_dt),
+            "frame_fps": float(self.viser_env_step_fps),
+            "pointcloud_sensor_dt": float(self.viser_pointcloud_sensor_dt),
+            "pointcloud_sensor_fps": float(self.viser_pointcloud_sensor_fps),
+            "raw_cloud_config": {
+                "include_ground_truth": bool(self.viser_raw_include_ground_truth),
+                "include_robot_obs": bool(self.viser_raw_include_robot_obs),
+                "include_policy_input": bool(self.viser_raw_include_policy_input),
+                "ground_truth_max_points": int(self.viser_raw_ground_truth_max_points),
+                "robot_obs_max_points": int(self.viser_raw_robot_obs_max_points),
+                "policy_input_max_points": int(self.viser_raw_policy_input_max_points),
+            },
+            "glorbot_urdf_path": str(glorbot_urdf_path),
+            "robot_joint_names": list(getattr(self.ov_env.robot, "joint_names", [])),
+            "door_joint_names": list(getattr(self.ov_env.door, "joint_names", [])),
+            "capture_mode": "iteration_chunk",
+            "chunk_index": int(self._viser_raw_chunk_index),
+            "chunk_env_id": None if self._viser_raw_chunk_env_id is None else int(self._viser_raw_chunk_env_id),
+            "chunk_start_iteration": None
+            if self._viser_raw_chunk_start_iteration is None
+            else int(self._viser_raw_chunk_start_iteration),
+            "chunk_end_iteration": int(latest_iteration),
+            "chunk_complete": bool(chunk_complete),
+            "chunk_frame_count": int(self._viser_raw_frame_count),
+            "episode_index": int(self._viser_raw_chunk_index),
+            "episode_env_id": None if self._viser_raw_chunk_env_id is None else int(self._viser_raw_chunk_env_id),
+            "episode_start_iteration": None
+            if self._viser_raw_chunk_start_iteration is None
+            else int(self._viser_raw_chunk_start_iteration),
+            "episode_end_iteration": int(latest_iteration),
+            "episode_complete": bool(chunk_complete),
+            "episode_frame_count": int(self._viser_raw_frame_count),
+            "frames": self._viser_raw_frames,
+        }
+
+    def _trim_viser_raw_frames(self):
+        if self.viser_raw_max_frames > 0 and len(self._viser_raw_frames) > self.viser_raw_max_frames:
+            self._viser_raw_frames = self._viser_raw_frames[-self.viser_raw_max_frames :]
+        self._viser_raw_frame_count = len(self._viser_raw_frames)
+        if self._viser_raw_frame_count > 0:
+            self._viser_raw_chunk_start_iteration = int(self._viser_raw_frames[0]["iteration"])
+        else:
+            self._viser_raw_chunk_start_iteration = None
+
+    def _maybe_flush_viser_raw_snapshot(self, iteration):
+        if not self.viser_raw_enabled or self.rank != 0:
+            return
+        if self._viser_raw_frame_count <= 0:
+            return
+        if self.viser_raw_save_interval <= 0:
+            return
+        if (int(iteration) + 1) % self.viser_raw_save_interval != 0:
+            return
+        self._flush_viser_raw_recording(
+            chunk_complete=True,
+            reason=f"save_interval {self.viser_raw_save_interval} reached at iteration {int(iteration)}",
+        )
+
+    def _flush_viser_raw_recording(self, chunk_complete, reason):
+        if not self.viser_raw_enabled or self.rank != 0:
+            return
+        if self._viser_raw_frame_count <= 0:
+            return
+
+        latest_iteration = int(self._viser_raw_latest_iteration)
+        record_tag = f"chunk_{self._viser_raw_chunk_index:04d}_iter_{latest_iteration}"
+        payload = self._build_viser_raw_payload(
+            latest_iteration=latest_iteration,
+            chunk_complete=chunk_complete,
+        )
+        torch.save(payload, self._format_iterated_record_path(self.viser_raw_path, record_tag))
+        if self.rank == 0:
+            status = "complete" if chunk_complete else "partial"
+            print(
+                "Saved {} Viser raw chunk {} for env {} with {} frames ({}).".format(
+                    status,
+                    self._viser_raw_chunk_index,
+                    self._viser_raw_chunk_env_id,
+                    self._viser_raw_frame_count,
+                    reason,
+                )
+            )
+
+        self._viser_raw_frames = []
+        self._viser_raw_frame_count = 0
+        self._viser_raw_chunk_env_id = None
+        self._viser_raw_chunk_start_iteration = None
+        self._viser_raw_latest_iteration = None
+
     def _should_capture_viser_replay_step(self, iteration):
-        """Capture every step of one selected-env replay episode, starting only at an episode boundary."""
-        if not self.viser_replay_enabled:
+        """Capture one selected-env replay episode at a time, starting only at an eligible episode boundary."""
+        if not self.viser_episode_replay_enabled:
             return False
 
         env_id = self._get_viser_env_id()
@@ -769,7 +1293,7 @@ class Dagger:
         self._viser_replay_step_requested = self._should_capture_viser_replay_step(iteration)
         if not self._viser_replay_step_requested:
             self._viser_capture_env_id = self._get_viser_env_id()
-        return self._viser_live_update_requested or self._viser_replay_step_requested
+        return self._viser_live_update_requested or self._viser_replay_step_requested or self.viser_raw_enabled
 
     def _prepare_viser_world_points_from_local(
         self,
@@ -820,13 +1344,14 @@ class Dagger:
             nonzero_mask = torch.any(points.abs() > 1e-6, dim=-1)
             points = points[nonzero_mask]
         if max_points is not None and max_points > 0 and points.shape[0] > max_points:
-            # Uniform stride sampling keeps the cloud lightweight without changing ordering logic elsewhere.
-            step = max(1, points.shape[0] // max_points)
-            points = points[::step][:max_points]
+            # Use evenly-spaced indexing across the full cloud to avoid prefix bias (e.g., dropping later robot links).
+            sample_idx = torch.linspace(0, points.shape[0] - 1, steps=max_points, dtype=torch.float32)
+            sample_idx = torch.round(sample_idx).to(dtype=torch.long)
+            points = points[sample_idx]
         return points
 
     def _format_iterated_record_path(self, path_str, iteration):
-        """Append a record-specific suffix to replay filenames so each saved episode gets its own file."""
+        """Append a record-specific suffix to replay filenames so each saved capture gets its own file."""
         path = Path(path_str)
         return str(path.with_name(f"{path.stem}_{iteration}{path.suffix}"))
 
@@ -865,6 +1390,7 @@ class Dagger:
             return
 
         record_active = self._viser_replay_step_requested and self._viser_record_episode_active
+        raw_active = self.viser_raw_enabled
         env_id = (
             max(0, min(int(self._viser_record_episode_env_id), self.num_envs - 1))
             if record_active
@@ -905,46 +1431,72 @@ class Dagger:
             self._set_viser_pointcloud("robot_obs_points", display_obs_points)
             self._set_viser_pointcloud("policy_input_points", display_policy_points)
 
-        if not record_active:
+        if not record_active and not raw_active:
             return
 
-        self._viser_record_frame_count += 1
-        self._viser_record_latest_iteration = int(iteration)
-        if (
-            self.viser_replay_max_frames > 0
-            and self._viser_record_frame_count > self.viser_replay_max_frames
-            and not self._viser_record_limit_reached
-        ):
-            print(
-                "dagger.viser replay max_frames={} was exceeded; continuing so the saved replay still contains "
-                "the full episode.".format(self.viser_replay_max_frames)
-            )
-            self._viser_record_limit_reached = True
+        if record_active:
+            self._viser_record_frame_count += 1
+            self._viser_record_latest_iteration = int(iteration)
+            if (
+                self.viser_serializer_warning_max_frames > 0
+                and self._viser_record_frame_count > self.viser_serializer_warning_max_frames
+                and not self._viser_record_limit_reached
+            ):
+                print(
+                    "dagger.viser replay max_frames={} was exceeded; continuing so the saved replay still contains "
+                    "the full episode.".format(self.viser_serializer_warning_max_frames)
+                )
+                self._viser_record_limit_reached = True
 
-        if self.viser_raw_enabled:
+        if raw_active:
+            if self._viser_raw_chunk_start_iteration is None:
+                self._viser_raw_chunk_index += 1
+                self._viser_raw_chunk_env_id = int(env_id)
+                self._viser_raw_chunk_start_iteration = int(iteration)
+            elif self._viser_raw_chunk_env_id != int(env_id):
+                self._viser_raw_chunk_env_id = None
+            self._viser_raw_latest_iteration = int(iteration)
             # Raw replay metadata stores world-frame points plus robot/door state for offline playback.
-            record_world_points = lambda pts, drop_zero=False: self._prepare_viser_world_points_from_local(
-                pts,
-                robot_base_pos_w,
-                robot_base_quat_w,
-                env_id,
-                self.viser_replay_max_points,
-                drop_zero_rows=drop_zero,
-            )
+            ground_truth_points_world = None
+            if self.viser_raw_include_ground_truth and self.viser_raw_ground_truth_max_points > 0:
+                ground_truth_points_world = self._prepare_viser_points(
+                    ground_truth_pcd_world,
+                    env_id,
+                    self.viser_raw_ground_truth_max_points,
+                ).to(dtype=torch.float16)
+
+            robot_obs_points_world = None
+            if self.viser_raw_include_robot_obs and self.viser_raw_robot_obs_max_points > 0:
+                robot_obs_points_world = self._prepare_viser_world_points_from_local(
+                    robot_obs_pcd_base,
+                    robot_base_pos_w,
+                    robot_base_quat_w,
+                    env_id,
+                    self.viser_raw_robot_obs_max_points,
+                ).to(dtype=torch.float16)
+
+            policy_input_points_world = None
+            if (
+                self.viser_raw_include_policy_input
+                and policy_input_pcd_base is not None
+                and self.viser_raw_policy_input_max_points > 0
+            ):
+                policy_input_points_world = self._prepare_viser_world_points_from_local(
+                    policy_input_pcd_base,
+                    robot_base_pos_w,
+                    robot_base_quat_w,
+                    env_id,
+                    self.viser_raw_policy_input_max_points,
+                    drop_zero_rows=True,
+                ).to(dtype=torch.float16)
             frame_record = {
                 "iteration": int(iteration),
                 "sim_frame": int(self.frame),
                 "env_id": int(env_id),
                 "pointcloud_source": self.pointcloud_source,
-                "ground_truth_points_world": self._prepare_viser_points(
-                    ground_truth_pcd_world,
-                    env_id,
-                    self.viser_replay_max_points,
-                ).to(dtype=torch.float16),
-                "robot_obs_points_world": record_world_points(robot_obs_pcd_base).to(dtype=torch.float16),
-                "policy_input_points_world": record_world_points(policy_input_pcd_base, drop_zero=True).to(dtype=torch.float16)
-                if show_policy_input
-                else None,
+                "ground_truth_points_world": ground_truth_points_world,
+                "robot_obs_points_world": robot_obs_points_world,
+                "policy_input_points_world": policy_input_points_world,
                 "robot_joint_pos": q_pos[env_id].detach().cpu().to(dtype=torch.float32),
                 "door_joint_pos": door_joint_pos[env_id].detach().cpu().to(dtype=torch.float32),
                 "robot_base_pos_w": self.ov_env.robot.data.body_pos_w[env_id, self.robot_base_body_idx].detach().cpu().to(dtype=torch.float32),
@@ -954,9 +1506,11 @@ class Dagger:
                 "door_asset_idx": int(self.env_asset_idx[env_id].detach().cpu().item()),
                 "door_asset_path": str(door_asset_paths[int(self.env_asset_idx[env_id].detach().cpu().item())]),
             }
-            self._viser_record_frames.append(frame_record)
+            self._viser_raw_frames.append(frame_record)
+            self._trim_viser_raw_frames()
+            self._maybe_flush_viser_raw_snapshot(iteration)
 
-        if self.viser_serializer_enabled and self._viser_serializer is not None:
+        if record_active and self.viser_serializer_enabled and self._viser_serializer is not None:
             # Keep the serialized scene in sync with the replay timeline written at episode end.
             if not self._viser_live_update_requested:
                 self._set_viser_pointcloud("ground_truth_points", display_gt_points)
@@ -966,7 +1520,7 @@ class Dagger:
 
     def _maybe_finish_viser_record_episode(self, done_mask):
         """Flush the replay once the selected env finishes its current episode."""
-        if not self.viser_replay_enabled or not self._viser_record_episode_active or done_mask.numel() == 0:
+        if not self.viser_episode_replay_enabled or not self._viser_record_episode_active or done_mask.numel() == 0:
             return
 
         selected_env = int(self._viser_record_episode_env_id)
@@ -980,7 +1534,7 @@ class Dagger:
 
     def _flush_viser_recordings(self, episode_complete):
         """Write the buffered selected-env episode replay to disk."""
-        if not self.viser_replay_enabled or self.rank != 0:
+        if not self.viser_episode_replay_enabled or self.rank != 0:
             return
 
         if self._viser_record_frame_count <= 0:
@@ -1000,33 +1554,14 @@ class Dagger:
             if self._viser_server is not None:
                 self._viser_serializer = self._viser_server.get_scene_serializer()
 
-        if self.viser_raw_enabled:
-            # The raw torch payload preserves higher-level metadata for custom offline analysis/reconstruction.
-            payload = {
-                "format": "dooropening_viser_replay_v1",
-                "pointcloud_frame": "world",
-                "pointcloud_source": self.pointcloud_source,
-                "glorbot_urdf_path": str(glorbot_urdf_path),
-                "robot_joint_names": list(getattr(self.ov_env.robot, "joint_names", [])),
-                "door_joint_names": list(getattr(self.ov_env.door, "joint_names", [])),
-                "episode_index": int(self._viser_record_episode_index),
-                "episode_env_id": int(self._viser_record_episode_env_id),
-                "episode_start_iteration": None
-                if self._viser_record_episode_start_iteration is None
-                else int(self._viser_record_episode_start_iteration),
-                "episode_end_iteration": int(latest_iteration),
-                "episode_complete": bool(episode_complete),
-                "episode_frame_count": int(self._viser_record_frame_count),
-                "frames": self._viser_record_frames,
-            }
-            torch.save(payload, self._format_iterated_record_path(self.viser_raw_path, record_tag))
-
         self._viser_record_last_flush_frame_count = self._viser_record_frame_count
 
     def _close_viser_debug_tools(self):
         """Flush any in-progress replay and stop the background Viser server on shutdown."""
         if self._viser_record_episode_active or self._viser_record_frame_count > 0:
             self._finish_viser_record_episode(episode_complete=False, reason="shutdown")
+        if self._viser_raw_frame_count > 0:
+            self._flush_viser_raw_recording(chunk_complete=False, reason="shutdown")
         if self._viser_server is not None:
             self._viser_server.stop()
 
@@ -1063,63 +1598,11 @@ class Dagger:
         self.student_model.load_state_dict(state_dict, strict=False)
         print(f"Loaded student checkpoint: {ckpt}")
 
-    def _aux_to_2d(self, aux_tensor):
-        if aux_tensor is None:
-            return None
-        if aux_tensor.ndim == 3:
-            return aux_tensor[:, 0, :]
-        return aux_tensor
-
-    def _flatten_aux_dict(self, aux_dict):
-        if not self.aux_state_keys:
-            return None
-        aux_parts = []
-        for key in self.aux_state_keys:
-            if key not in aux_dict:
-                raise KeyError(f"Missing aux state '{key}' while flattening aux dict.")
-            aux_parts.append(self._aux_to_2d(aux_dict[key]))
-        return torch.cat(aux_parts, dim=-1)
-
-    def _split_aux_tensor(self, aux_tensor):
-        aux_tensor_2d = self._aux_to_2d(aux_tensor)
-        if aux_tensor_2d is None:
-            return OrderedDict()
-
-        aux_dict = OrderedDict()
-        start_idx = 0
-        for key, spec in self.aux_state_specs.items():
-            end_idx = start_idx + spec["dim"]
-            aux_dict[key] = aux_tensor_2d[:, start_idx:end_idx]
-            start_idx = end_idx
-        return aux_dict
-
-    def _get_aux_state_dict(self):
-        aux_state = OrderedDict()
-        for key, spec in self.aux_state_specs.items():
-            # print("key", key)
-            # print("spec", spec)
-            # print("getter_name", spec["getter_name"])
-            aux_state[key] = getattr(self, spec["getter_name"])()
-            # print("aux_state[key]", aux_state[key])
-        return aux_state
-
-    def _decode_aux_prediction(self, aux_pred, prev_abs_aux):
-        prev_abs_aux = self._aux_to_2d(prev_abs_aux)
-        if prev_abs_aux is None:
-            return aux_pred.detach()
-        if self.student_model.aux_prediction_mode == "delta":
-            aux_delta = torch.clamp(aux_pred, -1.0, 1.0)
-            return prev_abs_aux.unsqueeze(1) + self.student_model.aux_delta_scale * aux_delta
-        return self._aux_to_2d(aux_pred).unsqueeze(1)
-
-    def _get_aux_target(self, current_aux, prev_abs_aux):
-        prev_abs_aux = self._aux_to_2d(prev_abs_aux)
-        if prev_abs_aux is None:
-            return current_aux
-        if self.student_model.aux_prediction_mode == "delta":
-            target_delta = (current_aux - prev_abs_aux) / self.student_model.aux_delta_scale
-            return torch.clamp(target_delta, -1.0, 1.0)
-        return current_aux
+    def _override_actions_for_pregrasp(self, actions: torch.Tensor) -> torch.Tensor:
+        override_fn = getattr(self.ov_env, "override_pregrasp_actions", None)
+        if override_fn is None:
+            return actions
+        return override_fn(actions)
 
     def _get_teacher_actions(self, obs):
         if self.teacher_model is None:
@@ -1127,14 +1610,14 @@ class Dagger:
         batch_dict = {
             "is_train": False,
             "obs": obs[self.teacher_obs_type],
-            "prev_actions": self.teacher_action_history[:, 0, :],
+            "prev_actions": self.implemented_action_history[:, 0, :],
         }
         with torch.no_grad():
             res_dict = self.teacher_model(batch_dict)
-        mus = res_dict["mus"]
+        adjusted_actions = self._override_actions_for_pregrasp(torch.clamp(res_dict["mus"], -1.0, 1.0))
         return {
-            "mus": mus,
-            "actions": torch.clamp(mus, -1.0, 1.0),
+            "mus": adjusted_actions,
+            "actions": adjusted_actions,
         }
 
     def _sync_timing_device(self):
@@ -1182,13 +1665,231 @@ class Dagger:
     def _get_sampler_camera_pose(self):
         camera_link_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_camera_body_idx]
         camera_link_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_camera_body_idx]
-        offset_pos = self.camera_offset_pos.unsqueeze(0).expand(self.num_envs, -1)
-        offset_quat = self.camera_offset_quat_world.unsqueeze(0).expand(self.num_envs, -1)
-        camera_pos_w = quat_apply(camera_link_quat_w, offset_pos) + camera_link_pos_w
-        camera_quat_w = quat_mul(camera_link_quat_w, offset_quat)
-        quat_xyzw = camera_quat_w[:, [1, 2, 3, 0]]
-        # return torch.cat([camera_pos_w, quat_xyzw], dim=-1)
+        # The sampler render currently uses the camera-link pose directly.
         return torch.cat([camera_link_pos_w, camera_link_quat_w[:, [1, 2, 3, 0]]], dim=-1)
+
+    def _get_lidar_pose(self):
+        lidar_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_lidar_body_idx]
+        lidar_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_lidar_body_idx]
+        return torch.cat([lidar_pos_w, lidar_quat_w[:, [1, 2, 3, 0]]], dim=-1)
+
+    def _sample_wall_pointcloud_local(self, env_ids=None, num_points=None):
+        if num_points is None:
+            num_points = self.wall_distractor_num_points
+        num_points = int(num_points)
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+        else:
+            env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+        env_count = int(env_ids.numel())
+        if num_points <= 0 or env_count == 0:
+            return torch.zeros((env_count, 0, 3), dtype=torch.float32, device=self.device)
+
+        axis_order = self.wall_distractor_axis_order[env_ids]
+        bbox_min_ordered = self.wall_distractor_bbox_min_ordered[env_ids]
+        bbox_max_ordered = self.wall_distractor_bbox_max_ordered[env_ids]
+
+        thickness_min, width_min, height_min = bbox_min_ordered.unbind(dim=-1)
+        thickness_max, width_max, height_max = bbox_max_ordered.unbind(dim=-1)
+        thickness_extent = (thickness_max - thickness_min).clamp_min(1e-4)
+        width_extent = (width_max - width_min).clamp_min(1e-4)
+        height_extent = (height_max - height_min).clamp_min(1e-4)
+
+        def rand_range(low, high, shape):
+            return torch.empty(shape, device=self.device, dtype=torch.float32).uniform_(float(low), float(high))
+
+        thickness_center = 0.5 * (thickness_min + thickness_max)
+
+        def sample_column_surfaces():
+            column_depth = thickness_extent + rand_range(
+                self.wall_distractor_depth_min_m,
+                self.wall_distractor_depth_max_m,
+                (env_count,),
+            )
+            # Shift the column along the door-thickness axis so recessed and protruding
+            # jamb-like distractors are both represented.
+            column_center = thickness_center + rand_range(
+                self.wall_distractor_center_offset_min_m,
+                self.wall_distractor_center_offset_max_m,
+                (env_count,),
+            )
+            column_depth_half = 0.5 * column_depth
+            return column_center - column_depth_half, column_center + column_depth_half
+
+        def sample_column_width():
+            if self.wall_distractor_side_margin_abs_min_m is not None:
+                # In column mode, the side margin range becomes the column width range.
+                column_width = rand_range(
+                    self.wall_distractor_side_margin_abs_min_m,
+                    self.wall_distractor_side_margin_abs_max_m,
+                    (env_count,),
+                )
+            else:
+                column_width = (
+                    width_extent
+                    * rand_range(
+                        self.wall_distractor_side_margin_scale_min,
+                        self.wall_distractor_side_margin_scale_max,
+                        (env_count,),
+                    )
+                    + self.wall_distractor_side_margin_min_m
+                )
+            return torch.maximum(column_width, torch.full_like(column_width, self.wall_distractor_side_margin_min_m))
+
+        def sample_column_bounds(attach_on_right):
+            edge_gap = rand_range(self.wall_distractor_gap_min_m, self.wall_distractor_gap_max_m, (env_count,))
+            column_width = sample_column_width()
+            bottom_margin = height_extent * rand_range(
+                self.wall_distractor_bottom_margin_scale_min,
+                self.wall_distractor_bottom_margin_scale_max,
+                (env_count,),
+            )
+            column_min_surface, column_max_surface = sample_column_surfaces()
+            column_inner_width = torch.where(attach_on_right, width_max + edge_gap, width_min - edge_gap)
+            column_outer_width = torch.where(
+                attach_on_right,
+                column_inner_width + column_width,
+                column_inner_width - column_width,
+            )
+            column_width_lo = torch.minimum(column_inner_width, column_outer_width)
+            column_width_hi = torch.maximum(column_inner_width, column_outer_width)
+            column_height_lo = height_min - bottom_margin
+            column_height_hi = height_max
+            return (
+                column_min_surface,
+                column_max_surface,
+                column_width_lo,
+                column_width_hi,
+                column_height_lo,
+                column_height_hi,
+            )
+
+        left_column_bounds = sample_column_bounds(
+            torch.zeros((env_count,), dtype=torch.bool, device=self.device)
+        )
+        right_column_bounds = sample_column_bounds(
+            torch.ones((env_count,), dtype=torch.bool, device=self.device)
+        )
+        left_column_min_surface, left_column_max_surface, left_column_width_lo, left_column_width_hi, left_column_height_lo, left_column_height_hi = left_column_bounds
+        right_column_min_surface, right_column_max_surface, right_column_width_lo, right_column_width_hi, right_column_height_lo, right_column_height_hi = right_column_bounds
+
+        wall_points_ordered = torch.empty((env_count, num_points, 3), dtype=torch.float32, device=self.device)
+        face_ids = torch.randint(0, 4, (env_count, num_points), device=self.device)
+        use_right_column = torch.randint(0, 2, (env_count, num_points), device=self.device, dtype=torch.int64).bool()
+        if num_points >= 2:
+            # Keep both jamb sides populated for each env while leaving the top lintel clear.
+            use_right_column[:, 0] = False
+            use_right_column[:, 1] = True
+
+        column_min_surface = torch.where(
+            use_right_column,
+            right_column_min_surface.unsqueeze(1),
+            left_column_min_surface.unsqueeze(1),
+        )
+        column_max_surface = torch.where(
+            use_right_column,
+            right_column_max_surface.unsqueeze(1),
+            left_column_max_surface.unsqueeze(1),
+        )
+        column_width_lo = torch.where(
+            use_right_column,
+            right_column_width_lo.unsqueeze(1),
+            left_column_width_lo.unsqueeze(1),
+        )
+        column_width_hi = torch.where(
+            use_right_column,
+            right_column_width_hi.unsqueeze(1),
+            left_column_width_hi.unsqueeze(1),
+        )
+        column_height_lo = torch.where(
+            use_right_column,
+            right_column_height_lo.unsqueeze(1),
+            left_column_height_lo.unsqueeze(1),
+        )
+        column_height_hi = torch.where(
+            use_right_column,
+            right_column_height_hi.unsqueeze(1),
+            left_column_height_hi.unsqueeze(1),
+        )
+
+        wall_points_ordered[..., 0] = column_min_surface + torch.rand(
+            (env_count, num_points), device=self.device
+        ) * (column_max_surface - column_min_surface).clamp_min(1e-4)
+        wall_points_ordered[..., 1] = column_width_lo + torch.rand(
+            (env_count, num_points), device=self.device
+        ) * (column_width_hi - column_width_lo).clamp_min(1e-4)
+        wall_points_ordered[..., 2] = column_height_lo + torch.rand(
+            (env_count, num_points), device=self.device
+        ) * (column_height_hi - column_height_lo).clamp_min(1e-4)
+
+        thickness_min_face = face_ids == 0
+        thickness_max_face = face_ids == 1
+        width_min_face = face_ids == 2
+        width_max_face = face_ids == 3
+
+        wall_points_ordered[..., 0] = torch.where(
+            thickness_min_face,
+            column_min_surface,
+            wall_points_ordered[..., 0],
+        )
+        wall_points_ordered[..., 0] = torch.where(
+            thickness_max_face,
+            column_max_surface,
+            wall_points_ordered[..., 0],
+        )
+        wall_points_ordered[..., 1] = torch.where(
+            width_min_face,
+            column_width_lo,
+            wall_points_ordered[..., 1],
+        )
+        wall_points_ordered[..., 1] = torch.where(
+            width_max_face,
+            column_width_hi,
+            wall_points_ordered[..., 1],
+        )
+
+        if self.wall_distractor_face_jitter_m > 0.0:
+            thickness_face_mask = (thickness_min_face | thickness_max_face).to(torch.float32)
+            width_face_mask = (width_min_face | width_max_face).to(torch.float32)
+            wall_points_ordered[..., 0] += thickness_face_mask * rand_range(
+                -self.wall_distractor_face_jitter_m,
+                self.wall_distractor_face_jitter_m,
+                (env_count, num_points),
+            )
+            wall_points_ordered[..., 1] += width_face_mask * rand_range(
+                -self.wall_distractor_face_jitter_m,
+                self.wall_distractor_face_jitter_m,
+                (env_count, num_points),
+            )
+
+        wall_points_base = torch.zeros_like(wall_points_ordered)
+        wall_points_base.scatter_(
+            2,
+            axis_order.unsqueeze(1).expand(-1, wall_points_ordered.shape[1], -1),
+            wall_points_ordered,
+        )
+        return wall_points_base
+
+    def _resample_wall_distractors(self, env_ids=None):
+        if (
+            not self.wall_distractors_enabled
+            or self.wall_distractor_num_points <= 0
+            or self.wall_distractor_resample_each_step
+        ):
+            return
+        if self._wall_distractor_local_points is None:
+            self._wall_distractor_local_points = torch.zeros(
+                (self.num_envs, self.wall_distractor_num_points, 3),
+                dtype=torch.float32,
+                device=self.device,
+            )
+        if env_ids is None:
+            self._wall_distractor_local_points[:] = self._sample_wall_pointcloud_local()
+            return
+        env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+        if env_ids.numel() == 0:
+            return
+        self._wall_distractor_local_points[env_ids] = self._sample_wall_pointcloud_local(env_ids=env_ids)
 
     def _sample_robot_pointcloud_world_sampler(self):
         robot_joint_pos = self.ov_env.robot.data.joint_pos[:, self.robot_sampler_joint_ids]
@@ -1200,6 +1901,29 @@ class Dagger:
         robot_root_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_root_body_idx]
         quat = robot_root_quat_w.unsqueeze(1).expand(-1, robot_local_pcd.shape[1], -1)
         return quat_apply(quat, robot_local_pcd) + robot_root_pos_w.unsqueeze(1)
+
+    def _sample_wall_pointcloud_world(self, num_points=None):
+        if not self.wall_distractors_enabled:
+            return torch.zeros((self.num_envs, 0, 3), dtype=torch.float32, device=self.device)
+
+        if num_points is None:
+            num_points = self.wall_distractor_num_points
+        num_points = int(num_points)
+        if num_points <= 0:
+            return torch.zeros((self.num_envs, 0, 3), dtype=torch.float32, device=self.device)
+
+        door_base_pos_w = self.ov_env.door.data.body_pos_w[:, self.door_base_body_idx]
+        door_base_quat_w = self.ov_env.door.data.body_quat_w[:, self.door_base_body_idx]
+        if (
+            self.wall_distractor_resample_each_step
+            or self._wall_distractor_local_points is None
+            or num_points != self.wall_distractor_num_points
+        ):
+            wall_points_base = self._sample_wall_pointcloud_local(num_points=num_points)
+        else:
+            wall_points_base = self._wall_distractor_local_points
+        quat = door_base_quat_w.unsqueeze(1).expand(-1, wall_points_base.shape[1], -1)
+        return quat_apply(quat, wall_points_base) + door_base_pos_w.unsqueeze(1)
 
     def _sample_scene_pointcloud_world_sampler(self):
         door_base_pos_w = self.ov_env.door.data.body_pos_w[:, self.door_base_body_idx]
@@ -1220,7 +1944,11 @@ class Dagger:
             world_pcd = quat_apply(quat, local_pcd) + door_base_pos_w[env_ids].unsqueeze(1)
             door_pcd_world[env_ids] = world_pcd
         robot_pcd_world = self._sample_robot_pointcloud_world_sampler()
-        return torch.cat([door_pcd_world, robot_pcd_world], dim=1)
+        scene_parts = [door_pcd_world, robot_pcd_world]
+        wall_pcd_world = self._sample_wall_pointcloud_world()
+        if wall_pcd_world.shape[1] > 0:
+            scene_parts.append(wall_pcd_world)
+        return torch.cat(scene_parts, dim=1)
 
     def _sample_door_pointcloud_base_sampler(self):
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
@@ -1266,7 +1994,13 @@ class Dagger:
             pos=self.pointcloud_camera.data.pos_w,
             quat=self.pointcloud_camera.data.quat_w_ros,
         )
-        door_pcd_base = world_to_local(door_pcd_world, robot_base_pos_w, robot_base_quat_w)
+        scene_pcd_world = door_pcd_world
+        wall_pcd_world = self._sample_wall_pointcloud_world()
+        if wall_pcd_world.shape[1] > 0:
+            scene_pcd_world = torch.cat([scene_pcd_world, wall_pcd_world], dim=1)
+        if self._viser_capture_requested:
+            self._viser_cached_ground_truth_pcd_world = scene_pcd_world[self._viser_capture_env_id].detach().cpu()
+        door_pcd_base = world_to_local(scene_pcd_world, robot_base_pos_w, robot_base_quat_w)
         # Filter floor points while preserving the batched layout expected by the cropper.
         floor_mask = door_pcd_base[..., 2] > 0.1
         door_pcd_base = door_pcd_base.clone()
@@ -1274,14 +2008,39 @@ class Dagger:
         # self._debug_visualize_pointcloud(door_pcd_base, "depth_door_pointcloud")
         return door_pcd_base
 
+    def _sample_door_pointcloud_base_lidar(self):
+        robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
+        robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
+        gt_scene_pcd_world = self._sample_scene_pointcloud_world_sampler()
+        if self._viser_capture_requested:
+            self._viser_cached_ground_truth_pcd_world = gt_scene_pcd_world[self._viser_capture_env_id].detach().cpu()
+
+        rendered_pcd_world, _ = simulate_lidar_render_from_pose(
+            pcd=gt_scene_pcd_world,
+            lidar_pose=self._get_lidar_pose(),
+            num_points=self.lidar_num_points,
+            num_azimuth=self.lidar_num_azimuth,
+            num_polar=self.lidar_num_polar,
+            near_m=self.lidar_near_m,
+            far_m=self.lidar_far_m,
+            suppress_bins=self.lidar_suppress_bins,
+            occlusion_eps_m=self.lidar_occlusion_eps_m,
+            occlusion_eps_rel=self.lidar_occlusion_eps_rel,
+            jitter_std_m=self.lidar_jitter_std_m,
+            use_compile=self.lidar_use_compile,
+        )
+        return world_to_local(rendered_pcd_world, robot_base_pos_w, robot_base_quat_w)
+
     def _sample_door_pointcloud_base(self):
         self._sync_timing_device()
         start_time = time.perf_counter()
         self._viser_cached_ground_truth_pcd_world = None
         if self.pointcloud_source == "sampler":
             door_pcd_base = self._sample_door_pointcloud_base_sampler()
-        else:
+        elif self.pointcloud_source == "depth":
             door_pcd_base = self._sample_door_pointcloud_base_depth()
+        else:
+            door_pcd_base = self._sample_door_pointcloud_base_lidar()
         self._sync_timing_device()
         self._record_timing("pointcloud_ms", time.perf_counter() - start_time)
         return door_pcd_base
@@ -1315,21 +2074,7 @@ class Dagger:
         except Exception as exc:
             print(f"Skipping pointcloud visualization for {filename}: {exc}")
 
-    def _get_aux_object_state(self):
-        robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
-        robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
-        handle_pos_w = self.ov_env.door.data.body_pos_w[:, self.door_handle_body_idx].unsqueeze(1)
-        return world_to_local(handle_pos_w, robot_base_pos_w, robot_base_quat_w).squeeze(1)
-
-    def _get_aux_door_joint_angle(self):
-        return self.ov_env.door.data.joint_pos[:, self.door_aux_joint_idx]
-
-    def _get_aux_crop_center(self, aux_state_dict):
-        if "aux_object_state" not in aux_state_dict:
-            raise KeyError("aux_object_state is required to crop the auxiliary local pointcloud.")
-        return aux_state_dict["aux_object_state"]
-
-    def _build_local_pcd(self, door_pcd_base, palm_pos_base, aux_crop_center):
+    def _build_local_pcd(self, door_pcd_base, palm_pos_base):
         pcd_parts = []
 
         if self.local_pcd_points[0] > 0:
@@ -1338,7 +2083,7 @@ class Dagger:
                 local_range=self.local_pcd_range[0],
                 num_local_points=self.local_pcd_points[0],
                 is_cylindrical=True,
-                crop_center=torch.zeros((self.num_envs, 3), device=self.device, dtype=door_pcd_base.dtype),
+                crop_center=self.zero_local_pcd_crop_center,
                 x_direction_cutoff=self.local_pcd_x_direction_cutoff,
                 log_name="base",
             )
@@ -1355,18 +2100,6 @@ class Dagger:
                 log_name="palm",
             )
             pcd_parts.append(palm_crop)
-
-        if self.local_pcd_points[2] > 0:
-            aux_crop, _ = crop_local_pcd(
-                door_pcd_base,
-                local_range=self.local_pcd_range[2],
-                num_local_points=self.local_pcd_points[2],
-                is_cylindrical=False,
-                crop_center=aux_crop_center,
-                x_direction_cutoff=None,
-                log_name="aux",
-            )
-            pcd_parts.append(aux_crop)
 
         if not pcd_parts:
             raise ValueError("Student config requested local_pcd_t but no local point counts were configured.")
@@ -1421,6 +2154,29 @@ class Dagger:
             return
         wandb.log(metrics, step=step)
 
+    def _to_loggable_scalar(self, value):
+        if isinstance(value, (bool, int, float)):
+            return float(value)
+        if isinstance(value, torch.Tensor) and value.numel() == 1:
+            return float(value.detach().cpu().item())
+        return None
+
+    def _update_logged_env_metrics(self, extras):
+        if not isinstance(extras, dict):
+            return
+
+        metrics = {}
+        for key, value in extras.items():
+            if not any(key.startswith(prefix) for prefix in self.logged_env_metric_prefixes):
+                continue
+            scalar_value = self._to_loggable_scalar(value)
+            if scalar_value is None:
+                continue
+            metrics[key] = scalar_value
+
+        if metrics:
+            self.latest_env_log_metrics.update(metrics)
+
     def _finish_wandb(self):
         if self.wandb_run is None:
             return
@@ -1433,28 +2189,33 @@ class Dagger:
             dist.all_reduce(batch_size, op=dist.ReduceOp.SUM)
         return int(batch_size.item())
 
-    def _build_student_obs(self):
-        q_pos = self.ov_env.robot.data.joint_pos
+    def _build_student_obs(self, iteration=None):
+        q_pos = self._get_student_proprio_vector()
         door_joint_pos = self.ov_env.door.data.joint_pos
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
         palm_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_palm_body_idx].unsqueeze(1)
 
-        aux_gt_dict = self._get_aux_state_dict()
-        aux_gt = self._flatten_aux_dict(aux_gt_dict)
-        if self.ignore_aux_debug and aux_gt is not None:
-            aux_input = torch.zeros_like(aux_gt)
-        elif self.aux_buffer is not None:
-            aux_input = self._aux_to_2d(self.aux_buffer)
-            if torch.count_nonzero(self.aux_buffer) == 0:
-                aux_input = aux_gt
-        else:
-            aux_input = aux_gt
-        aux_input_dict = self._split_aux_tensor(aux_input)
+        self.latest_student_proprio_vector = q_pos.detach().clone()
 
         palm_pos_base = world_to_local(palm_pos_w, robot_base_pos_w, robot_base_quat_w).squeeze(1)
         door_pcd_base = self._sample_door_pointcloud_base()
-        aux_crop_center = palm_pos_base if self.ignore_aux_debug else self._get_aux_crop_center(aux_gt_dict)
+        current_implemented_action = (
+            self.implemented_action_history[:, 0, :] if self.implemented_action_history is not None else None
+        )
+        need_aux_target_vector = self.has_aux_input and (not self.play_policy and self.has_aux_prediction)
+        aux_target_vector = (
+            self._stack_aux_state_values(self._get_aux_state_values()) if need_aux_target_vector else None
+        )
+        if self.has_aux_input and self._use_aux_feedback():
+            if self.aux_buffer is None:
+                raise RuntimeError("Aux feedback requested but aux_buffer is not initialized.")
+            aux_input_vector = self.aux_buffer.clone()
+        elif self.has_aux_input:
+            aux_input_vector = torch.zeros((self.num_envs, self.aux_input_dim), dtype=torch.float32, device=self.device)
+        else:
+            aux_input_vector = None
+        aux_input_vector = self._maybe_drop_aux_feedback(aux_input_vector)
 
         obs = OrderedDict()
         for key in self.state_encoders_keys:
@@ -1466,13 +2227,24 @@ class Dagger:
                 obs[key] = q_pos[:, self.ov_env._robot_finger_dof_idx]
             elif key in self.action_history_state_specs:
                 spec = self.action_history_state_specs[key]
-                obs[key] = self._get_action_history_tensor(
-                    self.student_action_history,
+                obs[key] = self._get_history_tensor(
+                    self.implemented_action_history,
                     lag=spec["lag"],
-                    action_slice=spec["slice"],
+                    value_indices=spec["indices"],
+                    reference_values=current_implemented_action,
+                )
+            elif key in self.proprio_history_state_specs:
+                spec = self.proprio_history_state_specs[key]
+                obs[key] = self._get_history_tensor(
+                    self.student_proprio_history,
+                    lag=spec["lag"],
+                    value_indices=spec["indices"],
+                    reference_values=q_pos,
                 )
             elif key in self.aux_state_specs:
-                obs[key] = aux_input_dict[key]
+                if aux_input_vector is None:
+                    raise RuntimeError(f"Aux state '{key}' is enabled but aux input vector is unavailable.")
+                obs[key] = aux_input_vector[:, self.aux_state_specs[key]["slice"]]
             else:
                 raise KeyError(f"Unsupported student state key '{key}' in config.")
 
@@ -1482,7 +2254,6 @@ class Dagger:
                 obs[key] = self._build_local_pcd(
                     door_pcd_base,
                     palm_pos_base,
-                    aux_crop_center,
                 )
                 # self._debug_visualize_pointcloud(obs[key], "local_pcd_t")
             else:
@@ -1502,22 +2273,21 @@ class Dagger:
             self._viser_cached_ground_truth_pcd_world = None
             self._viser_capture_requested = False
 
-        return obs, aux_gt
+        self.latest_aux_input_vector = None if aux_input_vector is None else aux_input_vector.detach().clone()
+        self.latest_aux_target_vector = None if aux_target_vector is None else aux_target_vector.detach().clone()
+        return obs
 
     def _student_forward(self, student_obs):
         return self.student_model_ddp(student_obs)
 
-    def _compute_student_loss(self, student_output, teacher_actions, aux_gt, student_obs):
-        action_loss = F.mse_loss(student_output["action"][:, 0, :], teacher_actions)
-        total_loss = action_loss
-        aux_loss = None
-        if not self.ignore_aux_debug and self.student_model.aux_prediction and "aux" in student_output:
-            prev_aux = None
-            if self.aux_state_keys and all(key in student_obs for key in self.aux_state_keys):
-                prev_aux = self._flatten_aux_dict(OrderedDict((key, student_obs[key]) for key in self.aux_state_keys))
-            aux_target = self._get_aux_target(aux_gt, prev_aux)
-            aux_loss = F.mse_loss(student_output["aux"][:, 0, :], aux_target)
-            total_loss = total_loss + self.student_model.aux_weight * aux_loss
+    def _compute_student_loss(self, student_output, teacher_actions, aux_target=None):
+        target = teacher_actions
+        if aux_target is not None:
+            target = torch.cat([teacher_actions, aux_target], dim=-1)
+        loss = self.student_model.compute_loss(student_output, target.unsqueeze(1))
+        total_loss = loss["total"]
+        action_loss = loss.get("action", total_loss)
+        aux_loss = loss.get("aux")
         return total_loss, action_loss, aux_loss
 
     def _get_teacher_forcing_beta(self, iteration):
@@ -1597,12 +2367,6 @@ class Dagger:
         step_actions[teacher_mask] = teacher_actions[teacher_mask]
         return step_actions, beta
 
-    def _reset_aux_buffer(self, done_mask):
-        if self.aux_buffer is None or done_mask.numel() == 0:
-            return
-        aux_gt = self._flatten_aux_dict(self._get_aux_state_dict())
-        self.aux_buffer[done_mask, 0, :] = aux_gt[done_mask]
-
     def _update_last_frame_tracker(self):
         ref_motion_lib = getattr(self.ov_env, "ref_motion_lib", None)
         if ref_motion_lib is None:
@@ -1617,25 +2381,6 @@ class Dagger:
         if not values:
             return None
         return float(sum(values) / len(values))
-
-    def _to_loggable_scalar(self, value):
-        if isinstance(value, torch.Tensor):
-            if value.numel() != 1:
-                return None
-            return float(value.detach().cpu().item())
-        if isinstance(value, (int, float, bool)):
-            return float(value)
-        return None
-
-    def _collect_env_metrics(self, info):
-        metrics = {}
-        if isinstance(info, dict):
-            for key, value in info.items():
-                scalar = self._to_loggable_scalar(value)
-                if scalar is not None:
-                    metrics[key] = scalar
-
-        return metrics
 
     def _update_completed_episode_metrics(self, done_mask, timed_out):
         if done_mask.numel() == 0:
@@ -1654,18 +2399,11 @@ class Dagger:
     def _log(self, iteration, total_loss, action_loss, aux_loss, teacher_forcing_beta):
         if iteration % self.log_interval != 0:
             return
-        mean_reward = self.current_rewards.mean().item()
-        mean_length = self.current_lengths.mean().item()
         episode_reward = self._mean_completed_metric(self.completed_rewards)
         episode_length = self._mean_completed_metric(self.completed_lengths)
         success_rate = self._mean_completed_metric(self.completed_successes)
-        active_success_rate = self.episode_reached_last_frame.float().mean().item()
-        mean_ref_frame_idx = self.ov_env.ref_motion_lib.frame_idx.float().mean().item()
         teacher_env_fraction = self._get_teacher_forcing_env_fraction()
         student_env_fraction = 1.0 - teacher_env_fraction
-        success_region = None
-        if hasattr(self.ov_env, "in_success_region"):
-            success_region = self.ov_env.in_success_region.float().mean().item()
         timing_means = self._consume_timing_means()
 
         if self.rank == 0:
@@ -1673,43 +2411,31 @@ class Dagger:
             print("ITERATION:", iteration)
             print("Total Loss:", float(total_loss.detach().cpu()))
             print("Action Loss:", float(action_loss.detach().cpu()))
+            if aux_loss is not None:
+                print("Aux Loss:", float(aux_loss.detach().cpu()))
             print("Teacher Forcing Beta:", teacher_forcing_beta)
             print("Teacher Rollout Env Fraction:", teacher_env_fraction)
             print("Student Rollout Env Fraction:", student_env_fraction)
             print("Student Update Steps:", self.student_update_steps)
             print("Last Local Update Batch Size:", self.last_local_update_batch_size)
             print("Last Global Update Batch Size:", self.last_global_update_batch_size)
-            if aux_loss is not None:
-                print("Aux Loss:", float(aux_loss.detach().cpu()))
-            # print("Mean Reward:", mean_reward)
-            # print("Mean Length:", mean_length)
-            # if episode_reward is not None:
-            #     print("Episode Reward:", episode_reward)
+            if self.aux_pregrasp_dropout_prob > 0.0:
+                print("Aux Pregrasp Env Fraction:", self.latest_aux_pregrasp_env_fraction)
+                print("Aux Pregrasp Dropout Fraction:", self.latest_aux_pregrasp_dropout_fraction)
+            if episode_reward is not None:
+                print("Episode Reward:", episode_reward)
             if episode_length is not None:
                 print("Episode Length:", episode_length)
             if success_rate is not None:
                 print("Success Rate:", success_rate)
-            # print("Active Success Rate:", active_success_rate)
-            # print("Mean Ref Frame Idx:", mean_ref_frame_idx)
-            if success_region is not None:
-                print("Success Region:", success_region)
             if timing_means["iteration_ms"] is not None:
                 print("Iteration Time (ms):", timing_means["iteration_ms"])
-            # if timing_means["student_obs_ms"] is not None:
-            #     print("Student Obs Time (ms):", timing_means["student_obs_ms"])
-            # if timing_means["pointcloud_ms"] is not None:
-            #     print("Pointcloud Time (ms):", timing_means["pointcloud_ms"])
-            # if timing_means["env_step_ms"] is not None:
-            #     print("Env Step Time (ms):", timing_means["env_step_ms"])
+            # for key, value in sorted(self.latest_env_log_metrics.items()):
+            #     print(f"{key}:", value)
 
         metrics = {
             "loss/total": float(total_loss.detach().cpu()),
             "loss/action": float(action_loss.detach().cpu()),
-            "stats/mean_reward": mean_reward,
-            "stats/mean_length": mean_length,
-            "stats/active_success_rate": active_success_rate,
-            "stats/ref_frame_idx": mean_ref_frame_idx,
-            "stats/completed_episodes": len(self.completed_lengths),
             "dist/world_size": self.world_size,
             "dist/update_steps": self.student_update_steps,
             "dist/last_local_update_batch_size": self.last_local_update_batch_size,
@@ -1723,12 +2449,13 @@ class Dagger:
             metrics["stats/episode_length"] = episode_length
         if success_rate is not None:
             metrics["stats/success_rate"] = success_rate
-        if success_region is not None:
-            metrics["stats/success_region"] = success_region
         if teacher_forcing_beta is not None:
             metrics["stats/teacher_forcing_beta"] = teacher_forcing_beta
         metrics["stats/teacher_rollout_env_fraction"] = teacher_env_fraction
         metrics["stats/student_rollout_env_fraction"] = student_env_fraction
+        if self.aux_pregrasp_dropout_prob > 0.0:
+            metrics["stats/aux_pregrasp_env_fraction"] = self.latest_aux_pregrasp_env_fraction
+            metrics["stats/aux_pregrasp_dropout_fraction"] = self.latest_aux_pregrasp_dropout_fraction
         if timing_means["iteration_ms"] is not None:
             metrics["timing/iteration_ms"] = timing_means["iteration_ms"]
         if timing_means["student_obs_ms"] is not None:
@@ -1737,7 +2464,8 @@ class Dagger:
             metrics["timing/pointcloud_ms"] = timing_means["pointcloud_ms"]
         if timing_means["env_step_ms"] is not None:
             metrics["timing/env_step_ms"] = timing_means["env_step_ms"]
-        metrics.update(self.latest_env_metrics)
+        if self.latest_env_log_metrics:
+            metrics.update(self.latest_env_log_metrics)
         self._wandb_log(metrics, step=iteration)
 
     def distill(self):
@@ -1749,11 +2477,14 @@ class Dagger:
             self.teacher_model.eval()
 
         try:
-            obs = self.env.reset()[0]
-            self.student_action_history.zero_()
-            self.teacher_action_history.zero_()
-            if self.aux_buffer is not None:
-                self.aux_buffer[:, 0, :] = self._flatten_aux_dict(self._get_aux_state_dict())
+            obs, reset_extras = self.env.reset()
+            self._update_logged_env_metrics(reset_extras)
+            self.latest_student_proprio_vector = None
+            self.latest_aux_input_vector = None
+            self.latest_aux_target_vector = None
+            self._resample_wall_distractors()
+            self._seed_student_histories()
+            self._seed_aux_buffer()
             self.episode_reached_last_frame.zero_()
             self._resample_teacher_forcing_env_mask(0)
 
@@ -1765,11 +2496,22 @@ class Dagger:
                 student_obs_start_time = time.perf_counter()
                 self._viser_capture_iteration = iteration
                 self._viser_capture_requested = self._should_capture_viser_frame(iteration)
-                student_obs, aux_gt = self._build_student_obs()
+                student_obs = self._build_student_obs(iteration=iteration)
                 self._sync_timing_device()
                 self._record_timing("student_obs_ms", time.perf_counter() - student_obs_start_time)
                 student_output = self._student_forward(student_obs)
                 student_actions = torch.clamp(student_output["action"][:, 0, :], -1.0, 1.0)
+                # Capture q_t before stepping so prev_q features align with the next state.
+                if self.latest_student_proprio_vector is None:
+                    raise RuntimeError("Expected the latest student proprio vector to be captured while building obs.")
+                current_q_pos = self.latest_student_proprio_vector.detach().clone()
+                if self.has_aux_prediction:
+                    if self.latest_aux_input_vector is None:
+                        raise RuntimeError("Expected the latest auxiliary input vector while aux prediction is enabled.")
+                    self.aux_buffer[:] = self._decode_aux_prediction(
+                        student_output["aux"].detach(),
+                        self.latest_aux_input_vector,
+                    )
 
                 teacher_actions = None
                 total_loss = None
@@ -1779,8 +2521,18 @@ class Dagger:
                 if not self.play_policy:
                     teacher_output = self._get_teacher_actions(obs)
                     teacher_actions = teacher_output["actions"]
+                    aux_target = None
+                    if self.has_aux_prediction:
+                        if self.latest_aux_target_vector is None or self.latest_aux_input_vector is None:
+                            raise RuntimeError("Expected auxiliary vectors while aux prediction is enabled.")
+                        aux_target = self._get_aux_target(
+                            self.latest_aux_target_vector,
+                            self.latest_aux_input_vector,
+                        )
                     total_loss, action_loss, aux_loss = self._compute_student_loss(
-                        student_output, teacher_output["mus"], aux_gt, student_obs
+                        student_output,
+                        teacher_output["mus"],
+                        aux_target=aux_target,
                     )
                     local_batch_size = int(student_actions.shape[0])
                     global_batch_size = self._get_global_batch_size(local_batch_size)
@@ -1792,10 +2544,6 @@ class Dagger:
                     self.last_local_update_batch_size = local_batch_size
                     self.last_global_update_batch_size = global_batch_size
 
-                if self.student_model.aux_prediction and self.aux_buffer is not None and self.aux_state_keys:
-                    prev_aux = self._flatten_aux_dict(OrderedDict((key, student_obs[key]) for key in self.aux_state_keys))
-                    self.aux_buffer[:] = self._decode_aux_prediction(student_output["aux"].detach(), prev_aux)
-
                 step_actions, teacher_forcing_beta = self._mix_actions(
                     student_actions.detach(),
                     teacher_actions,
@@ -1804,13 +2552,14 @@ class Dagger:
                 self._update_last_frame_tracker()
                 self._sync_timing_device()
                 env_step_start_time = time.perf_counter()
-                obs, rew, out_of_reach, timed_out, info = self.env.step(step_actions)
+                obs, rew, out_of_reach, timed_out, step_extras = self.env.step(step_actions)
                 self._sync_timing_device()
                 self._record_timing("env_step_ms", time.perf_counter() - env_step_start_time)
-                self.latest_env_metrics = self._collect_env_metrics(info)
+                self._update_logged_env_metrics(step_extras)
+                current_pd_targets = self._get_implemented_action_vector().detach().clone()
 
-                self._push_action_history(self.student_action_history, step_actions)
-                self._push_action_history(self.teacher_action_history, step_actions)
+                self._push_history(self.implemented_action_history, current_pd_targets)
+                self._push_history(self.student_proprio_history, current_q_pos)
                 self.frame += self.num_envs
 
                 self.current_rewards += rew.unsqueeze(-1)
@@ -1821,10 +2570,10 @@ class Dagger:
                     self._update_completed_episode_metrics(done_mask, timed_out)
                     self.current_rewards[done_mask] = 0.0
                     self.current_lengths[done_mask] = 0.0
-                    self._reset_action_history(self.student_action_history, done_mask)
-                    self._reset_action_history(self.teacher_action_history, done_mask)
+                    self._resample_wall_distractors(done_mask)
+                    self._seed_student_histories(done_mask)
+                    self._seed_aux_buffer(done_mask)
                     self.episode_reached_last_frame[done_mask] = False
-                    self._reset_aux_buffer(done_mask)
                     self._resample_teacher_forcing_env_mask(iteration + 1, done_mask)
 
                 if total_loss is not None:
@@ -1838,7 +2587,6 @@ class Dagger:
                 if (
                     not self.play_policy
                     and self.rank == 0
-                    and iteration > 0
                     and iteration % self.save_interval == 0
                 ):
                     ckpt_path = os.path.join(self.nn_dir, f"pcd_student_{iteration}.pt")

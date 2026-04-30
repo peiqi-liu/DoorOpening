@@ -103,8 +103,8 @@ parser.add_argument(
 parser.add_argument(
     "--pointcloud_source",
     type=str,
-    choices=["sampler", "depth"],
-    default=None,
+    choices=["sampler", "depth", "lidar"],
+    default="lidar",
     help="Source used to build the student pointcloud observation. Defaults to dagger.pointcloud_source in the student YAML.",
 )
 parser.add_argument(
@@ -148,6 +148,12 @@ parser.add_argument(
     type=str,
     default=None,
     help="Base output path for raw `.pt` replays.",
+)
+parser.add_argument(
+    "--viser_raw_interval",
+    type=int,
+    default=None,
+    help="Iteration interval for periodic raw `.pt` replay snapshots. Defaults to dagger.viser.raw_interval.",
 )
 
 # append AppLauncher cli args
@@ -193,6 +199,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 
 from DoorOpening.distillation.pcd_dagger import Dagger
+from DoorOpening.assets.cache_utils import preconvert_shared_urdf_assets
 
 import DoorOpening.tasks # noqa: F401
 
@@ -272,9 +279,19 @@ def main(env_cfg, agent_cfg: dict):
     else:
         dagger_runtime_cfg.setdefault("pointcloud_source", "sampler")
     dagger_runtime_cfg["pointcloud_source"] = str(dagger_runtime_cfg["pointcloud_source"]).lower()
+    if dagger_runtime_cfg["pointcloud_source"] not in {"sampler", "depth", "lidar"}:
+        raise ValueError(
+            "dagger.pointcloud_source must be one of ['sampler', 'depth', 'lidar'], "
+            f"got '{dagger_runtime_cfg['pointcloud_source']}'."
+        )
 
     if "reset_progress_total" in dagger_runtime_cfg:
         env_cfg.reset_progress_total = dagger_runtime_cfg["reset_progress_total"]
+    if "adr_reset_progress_total" in dagger_runtime_cfg:
+        env_cfg.adr_reset_progress_total = dagger_runtime_cfg["adr_reset_progress_total"]
+    else:
+        # Distillation default: ADR schedule progresses twice as fast as reset curriculum.
+        env_cfg.adr_reset_progress_total = 0.5 * float(env_cfg.reset_progress_total)
 
     viser_cfg = dagger_runtime_cfg.get("viser", {})
     if not isinstance(viser_cfg, dict):
@@ -303,11 +320,19 @@ def main(env_cfg, agent_cfg: dict):
         serializer_cfg["path"] = args_cli.viser_serializer_path
     if args_cli.viser_raw_path is not None:
         raw_cfg["path"] = args_cli.viser_raw_path
+    if args_cli.viser_raw_interval is not None:
+        viser_cfg["raw_interval"] = max(1, int(args_cli.viser_raw_interval))
     viser_cfg["serializer"] = serializer_cfg
     viser_cfg["raw"] = raw_cfg
     dagger_runtime_cfg["viser"] = viser_cfg
 
-    env_cfg.enable_pointcloud_camera = dagger_runtime_cfg["pointcloud_source"] == "depth"
+    if dagger_runtime_cfg["pointcloud_source"] == "depth":
+        env_cfg.pointcloud_render_mode = "depth"
+    elif dagger_runtime_cfg["pointcloud_source"] == "lidar":
+        env_cfg.pointcloud_render_mode = "lidar"
+    else:
+        env_cfg.pointcloud_render_mode = "none"
+    env_cfg.enable_pointcloud_camera = env_cfg.pointcloud_render_mode == "depth"
 
     # Determine teacher checkpoint path
     teacher_ckpt = None if args_cli.play_policy else resolve_checkpoint(
@@ -319,7 +344,7 @@ def main(env_cfg, agent_cfg: dict):
     if rank == 0:
         train_dir = "runs"
         default_project_name = "DoorOpening-Distillation"
-        experiment_name = default_project_name + datetime.now().strftime("_%d-%H-%M-%S")
+        experiment_name = default_project_name + datetime.now().strftime("_%Y-%m-%d-%H-%M-%S")
         experiment_dir = os.path.join(train_dir, experiment_name)
         nn_dir = os.path.join(experiment_dir, "nn")
         summaries_dir = os.path.join(experiment_dir, "summaries")
@@ -365,6 +390,10 @@ def main(env_cfg, agent_cfg: dict):
 
     if rank == 0:
         print(f"Distillation reset_progress_total: {env_cfg.reset_progress_total}")
+        print(f"Distillation adr_reset_progress_total: {env_cfg.adr_reset_progress_total}")
+
+    # Serialize URDF-to-USD conversion across ranks before all workers build the same shared assets.
+    preconvert_shared_urdf_assets()
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
@@ -399,7 +428,7 @@ def main(env_cfg, agent_cfg: dict):
         "teacher": {
             "cfg": teacher_cfg,
             "ckpt": teacher_ckpt,
-            "obs_type": "policy",
+            "obs_type": "critic",
         },
         "play_policy": args_cli.play_policy,
         "dagger": dagger_runtime_cfg,

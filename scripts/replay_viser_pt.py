@@ -20,7 +20,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("recording", type=Path, help="Path to a raw .pt replay file.")
     parser.add_argument("--host", default="0.0.0.0", help="Host interface for the Viser server.")
     parser.add_argument("--port", type=int, default=8080, help="Port for the Viser server.")
-    parser.add_argument("--fps", type=float, default=2.0, help="Playback speed in frames per second.")
+    parser.add_argument(
+        "--fps",
+        type=float,
+        default=None,
+        help="Playback speed in frames per second. Defaults to recorded metadata when available.",
+    )
     parser.add_argument("--point-size", type=float, default=0.004, help="Rendered point size.")
     return parser.parse_args()
 
@@ -46,6 +51,40 @@ def _first_nonempty_cloud(frames: list[dict]) -> np.ndarray:
     return np.zeros((0, 3), dtype=np.float32)
 
 
+def _positive_float(value: object) -> float | None:
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0.0 else None
+
+
+def _infer_payload_fps(payload: dict) -> tuple[float, str]:
+    for key in ("frame_fps", "env_step_fps", "replay_fps"):
+        value = _positive_float(payload.get(key))
+        if value is not None:
+            return value, key
+
+    for key in ("frame_dt", "env_step_dt", "replay_frame_dt"):
+        value = _positive_float(payload.get(key))
+        if value is not None:
+            return 1.0 / value, key
+
+    sim_dt = _positive_float(payload.get("sim_dt"))
+    if sim_dt is not None:
+        decimation = _positive_float(payload.get("decimation")) or 1.0
+        return 1.0 / (sim_dt * decimation), "sim_dt"
+
+    # Legacy DoorOpening payloads predate timing metadata; the control step is 40 Hz.
+    return 40.0, "legacy_dooropening_default"
+
+
+def _format_fps_source_label(source: str) -> str:
+    if source == "legacy_dooropening_default":
+        return "legacy DoorOpening default (40 Hz)"
+    return f"payload {source}"
+
+
 def main() -> None:
     args = _parse_args()
     recording = args.recording.expanduser().resolve()
@@ -64,6 +103,10 @@ def main() -> None:
     frames = payload["frames"]
     if not isinstance(frames, list) or len(frames) == 0:
         raise SystemExit(f"Replay payload has no frames: {recording}")
+
+    payload_fps, payload_fps_source = _infer_payload_fps(payload)
+    initial_fps = float(args.fps) if args.fps is not None else payload_fps
+    fps_slider_max = max(60.0, initial_fps * 2.0)
 
     server = viser.ViserServer(host=args.host, port=args.port)
     server.gui.configure_theme(control_width="medium")
@@ -100,7 +143,7 @@ def main() -> None:
     with server.gui.add_folder("Playback"):
         play = server.gui.add_checkbox("Play", initial_value=True)
         loop = server.gui.add_checkbox("Loop", initial_value=True)
-        fps = server.gui.add_slider("FPS", min=0.25, max=30.0, step=0.25, initial_value=args.fps)
+        fps = server.gui.add_slider("FPS", min=0.25, max=fps_slider_max, step=0.25, initial_value=initial_fps)
         frame_slider = server.gui.add_slider("Frame", min=0, max=len(frames) - 1, step=1, initial_value=0)
         prev_button = server.gui.add_button("Prev")
         next_button = server.gui.add_button("Next")
@@ -146,6 +189,19 @@ def main() -> None:
 
     _apply_frame(0)
     print(f"Loaded {len(frames)} frames from {recording}")
+    if args.fps is None:
+        print(f"Playback FPS: {initial_fps:.2f} (from {_format_fps_source_label(payload_fps_source)})")
+    else:
+        print(f"Playback FPS: {initial_fps:.2f} (from --fps override)")
+    frame_dt = _positive_float(payload.get("frame_dt")) or _positive_float(payload.get("env_step_dt"))
+    sensor_dt = _positive_float(payload.get("pointcloud_sensor_dt"))
+    if frame_dt is not None and sensor_dt is not None and sensor_dt > frame_dt * 1.5:
+        print(
+            "Pointcloud sensor dt is {:.4f}s ({:.2f} FPS), so clouds may repeat between replay frames.".format(
+                sensor_dt,
+                1.0 / sensor_dt,
+            )
+        )
     if args.host == "0.0.0.0":
         print(f"For SSH use: ssh -L {args.port}:127.0.0.1:{args.port} <remote-host>")
 

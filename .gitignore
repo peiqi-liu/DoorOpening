@@ -57,6 +57,7 @@ _build
 **/runs/*
 **/logs/*
 **/recordings/*
+IsaacLab_tmp/
 
 # Pre-Trained Checkpoints
 /.pretrained_checkpoints/

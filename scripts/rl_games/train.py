@@ -69,6 +69,7 @@ import os
 import random
 from datetime import datetime
 
+import rl_games.torch_runner as rl_games_torch_runner
 from rl_games.common import env_configurations, vecenv
 from rl_games.common.algo_observer import IsaacAlgoObserver
 from rl_games.torch_runner import Runner
@@ -89,12 +90,75 @@ from isaaclab_rl.rl_games import MultiObserver, PbtAlgoObserver, RlGamesGpuEnv, 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
+from DoorOpening.assets.cache_utils import preconvert_shared_urdf_assets
+
 import DoorOpening.tasks # noqa: F401
 
 # import logger
 logger = logging.getLogger(__name__)
 
 # PLACEHOLDER: Extension template (do not remove this comment)
+
+
+def _install_train_info_bridge():
+    """Forward RL-Games frame/epoch counters into the unwrapped IsaacLab env."""
+
+    def _wrapper_set_train_info(self, env_frames, *args, **kwargs):
+        if hasattr(self.unwrapped, "set_train_info"):
+            return self.unwrapped.set_train_info(env_frames, *args, **kwargs)
+
+    def _gpu_env_set_train_info(self, env_frames, *args, **kwargs):
+        if hasattr(self.env, "set_train_info"):
+            return self.env.set_train_info(env_frames, *args, **kwargs)
+
+    RlGamesVecEnvWrapper.set_train_info = _wrapper_set_train_info
+    RlGamesGpuEnv.set_train_info = _gpu_env_set_train_info
+
+
+def _install_writer_step_counter(agent):
+    """Expose a stable writer-step counter and mirror RL-Games scalars to W&B when enabled."""
+    writer = agent.writer
+    if writer is None or getattr(writer, "_dooropening_wandb_step_counter_installed", False):
+        return
+
+    try:
+        import wandb
+    except ImportError:
+        wandb = None
+
+    agent.dooropening_wandb_step = 0
+    original_add_scalar = writer.add_scalar
+
+    def _to_scalar(value):
+        if hasattr(value, "item"):
+            try:
+                return value.item()
+            except Exception:
+                pass
+        return value
+
+    def _counting_add_scalar(tag, scalar_value, global_step=None, *args, **kwargs):
+        current_wandb_step = agent.dooropening_wandb_step
+        result = original_add_scalar(tag, scalar_value, global_step, *args, **kwargs)
+        if wandb is not None and wandb.run is not None:
+            wandb.log({tag: _to_scalar(scalar_value)}, step=current_wandb_step)
+        agent.dooropening_wandb_step = current_wandb_step + 1
+        return result
+
+    writer.add_scalar = _counting_add_scalar
+    writer._dooropening_wandb_step_counter_installed = True
+
+
+class DoorOpeningRunner(Runner):
+    """Runner that installs local instrumentation before training starts."""
+
+    def run_train(self, args):
+        print("Started to train")
+        agent = self.algo_factory.create(self.algo_name, base_name="run", params=self.params)
+        _install_writer_step_counter(agent)
+        rl_games_torch_runner._restore(agent, args)
+        rl_games_torch_runner._override_sigma(agent, args)
+        agent.train()
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -188,6 +252,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = os.path.join(log_root_path, log_dir)
 
+    # Let the env observe RL-Games frame/iteration counters without patching IsaacLab itself.
+    _install_train_info_bridge()
+
+    # Serialize URDF-to-USD conversion across ranks before all workers build the same shared assets.
+    preconvert_shared_urdf_assets()
+
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 
@@ -228,9 +298,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 "MultiObserver/PbtAlgoObserver. Disable PBT or install a compatible Isaac Lab version."
             )
         observers = MultiObserver([IsaacAlgoObserver(), PbtAlgoObserver(agent_cfg, args_cli)])
-        runner = Runner(observers)
+        runner = DoorOpeningRunner(observers)
     else:
-        runner = Runner(IsaacAlgoObserver())
+        runner = DoorOpeningRunner(IsaacAlgoObserver())
 
     runner.load(agent_cfg)
 
@@ -248,7 +318,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             project=wandb_project,
             entity=args_cli.wandb_entity,
             name=experiment_name,
-            sync_tensorboard=True,
+            sync_tensorboard=False,
             monitor_gym=True,
             save_code=True,
         )
