@@ -205,7 +205,7 @@ dagger:
       path: "viser_replay.pt"
       save_interval: 5000  # Write one raw `.pt` file every N iterations.
       max_points: 2000  # Raw replay is for debugging, not training; smaller clouds replay much better on laptops.
-      include_ground_truth: false  # GT is the heaviest cloud and usually duplicates what robot_obs already shows.
+      include_ground_truth: true  # GT is the heaviest cloud and usually duplicates what robot_obs already shows.
       robot_obs_max_points: 2000
       policy_input_max_points: 1500
       max_frames: 2000  # Keep at most this many frames in each raw `.pt` file; set 0 to disable the cap.
