@@ -945,8 +945,22 @@ class Dagger:
 
         sim_cfg = getattr(self.ov_env.cfg, "sim", None)
         sim_dt = getattr(sim_cfg, "dt", None)
+        self.viser_sim_dt = float(sim_dt) if sim_dt is not None else 1.0 / 30.0
+        self.viser_env_step_dt = max(float(getattr(self.ov_env, "dt", self.viser_sim_dt)), 1e-6)
+        self.viser_env_step_fps = 1.0 / self.viser_env_step_dt
+        self.viser_render_interval = max(int(getattr(sim_cfg, "render_interval", 1)), 1)
+        self.viser_render_dt = self.viser_sim_dt * self.viser_render_interval
+        pointcloud_sensor_dt = self.viser_env_step_dt
+        if self.pointcloud_source == "depth":
+            pointcloud_sensor_dt = getattr(
+                self.ov_env.cfg,
+                "pointcloud_camera_update_period",
+                pointcloud_sensor_dt,
+            )
+        self.viser_pointcloud_sensor_dt = max(float(pointcloud_sensor_dt), 1e-6)
+        self.viser_pointcloud_sensor_fps = 1.0 / self.viser_pointcloud_sensor_dt
         self.viser_serializer_frame_dt = float(
-            self.viser_serializer_cfg.get("frame_dt", sim_dt if sim_dt is not None else 1.0 / 30.0)
+            self.viser_serializer_cfg.get("frame_dt", self.viser_env_step_dt)
         )
 
         if not (self.viser_enabled or self.viser_serializer_enabled or self.viser_raw_enabled):
@@ -1073,6 +1087,15 @@ class Dagger:
                         else self.viser_raw_policy_input_max_points,
                     )
                 )
+            if self.viser_enabled or self.viser_serializer_enabled or self.viser_raw_enabled:
+                print(
+                    "Replay timing: env_step_dt={:.6f}s ({:.2f} FPS), pointcloud_sensor_dt={:.6f}s ({:.2f} FPS).".format(
+                        self.viser_env_step_dt,
+                        self.viser_env_step_fps,
+                        self.viser_pointcloud_sensor_dt,
+                        self.viser_pointcloud_sensor_fps,
+                    )
+                )
 
     def _get_viser_env_id(self):
         """Clamp the selected environment index so debug capture never indexes outside the batch."""
@@ -1138,6 +1161,17 @@ class Dagger:
             "format": "dooropening_viser_replay_v1",
             "pointcloud_frame": "world",
             "pointcloud_source": self.pointcloud_source,
+            "pointcloud_render_mode": str(getattr(self.ov_env.cfg, "pointcloud_render_mode", "none")).lower(),
+            "sim_dt": float(self.viser_sim_dt),
+            "decimation": int(getattr(self.ov_env.cfg, "decimation", 1)),
+            "render_interval": int(self.viser_render_interval),
+            "render_dt": float(self.viser_render_dt),
+            "env_step_dt": float(self.viser_env_step_dt),
+            "env_step_fps": float(self.viser_env_step_fps),
+            "frame_dt": float(self.viser_env_step_dt),
+            "frame_fps": float(self.viser_env_step_fps),
+            "pointcloud_sensor_dt": float(self.viser_pointcloud_sensor_dt),
+            "pointcloud_sensor_fps": float(self.viser_pointcloud_sensor_fps),
             "raw_cloud_config": {
                 "include_ground_truth": bool(self.viser_raw_include_ground_truth),
                 "include_robot_obs": bool(self.viser_raw_include_robot_obs),

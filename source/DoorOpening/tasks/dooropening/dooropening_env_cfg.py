@@ -101,7 +101,7 @@ class EventCfg:
 
 @configclass
 class DooropeningEnvCfg(DirectRLEnvCfg):
-    sim_dt = 1/40.
+    sim_dt = 1/40.  # 40 Hz physics/control step when decimation stays at 1.
     decimation = 1
     episode_length_s = 10.
     num_sim_steps_to_render=2
@@ -219,7 +219,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     enable_pointcloud_camera = False
     pointcloud_camera_height = 480
     pointcloud_camera_width = 640
-    pointcloud_camera_update_period = 0.1
+    pointcloud_camera_update_period = 0.1  # Depth camera refreshes at 10 Hz; replay frames still follow env dt.
     pointcloud_camera_data_types = ["distance_to_image_plane"]
     pointcloud_camera_cfg = CameraCfg(
         prim_path="/World/envs/env_.*/Robot/x5_camera_link/cam",

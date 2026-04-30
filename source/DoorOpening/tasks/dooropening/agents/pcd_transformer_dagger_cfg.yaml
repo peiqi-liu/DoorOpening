@@ -199,7 +199,7 @@ dagger:
     serializer:
       enabled: false  # Mode 2: save `.viser` episode replays.
       path: "viser_replay.viser"
-      frame_dt: 0.0333333333
+      frame_dt: 0.025  # Matches DooropeningEnvCfg.sim_dt * decimation (40 Hz).
     raw:
       enabled: false  # Mode 3: save raw `.pt` interval chunks, independent of live/serializer.
       path: "viser_replay.pt"
