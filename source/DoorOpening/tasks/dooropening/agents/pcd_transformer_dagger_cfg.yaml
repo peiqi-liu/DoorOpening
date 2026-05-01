@@ -161,6 +161,11 @@ dagger:
   adr_reset_progress_total: 10000
   pointcloud_source: "lidar"
   robot_num_points: 30000
+  append_robot_gt_to_policy_cloud: true
+  robot_pointcloud_filter:
+    enabled: true
+    sdf_cutoff: 0.02
+    max_points_per_process: 5000
   sampler_render:
     inflate_px: 2
     jitter_std_m: 0.004

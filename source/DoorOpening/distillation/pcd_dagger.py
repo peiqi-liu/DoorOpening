@@ -32,6 +32,7 @@ from DoorOpening.utils.camera_utils import (
     simulate_lidar_render_from_pose,
 )
 from DoorOpening.utils.extract_pointcloud_from_articulation import FrankaLeapSampler
+from DoorOpening.utils.glorbot_collision_checker import GlorbotCollisionChecker
 from DoorOpening.utils.pose_utils import world_to_local
 
 
@@ -143,6 +144,13 @@ class Dagger:
         self.lidar_occlusion_eps_rel = float(self.lidar_render_cfg.get("occlusion_eps_rel", 0.01))
         self.lidar_jitter_std_m = float(self.lidar_render_cfg.get("jitter_std_m", 0.001))
         self.lidar_use_compile = bool(self.lidar_render_cfg.get("use_compile", True))
+        self.robot_pointcloud_filter_cfg = dict(self.runtime_cfg.get("robot_pointcloud_filter", {}))
+        self.robot_pointcloud_filter_enabled = bool(self.robot_pointcloud_filter_cfg.get("enabled", True))
+        self.robot_pointcloud_sdf_cutoff = float(self.robot_pointcloud_filter_cfg.get("sdf_cutoff", 0.02))
+        self.robot_pointcloud_filter_max_points_per_process = int(
+            self.robot_pointcloud_filter_cfg.get("max_points_per_process", 5000)
+        )
+        self.append_robot_gt_to_policy_cloud = bool(self.runtime_cfg.get("append_robot_gt_to_policy_cloud", True))
         # Runtime controls for live Viser inspection plus optional serializer/raw replay outputs.
         self.viser_cfg = dict(self.runtime_cfg.get("viser", {}))
         legacy_record_cfg = dict(self.viser_cfg.get("record", {}))
@@ -817,6 +825,19 @@ class Dagger:
         self.robot_sampler_joint_ids = torch.tensor(robot_joint_ids, device=self.device, dtype=torch.long)
         robot_joint_name_to_idx = {name: idx for idx, name in enumerate(robot_joint_names)}
         self.robot_sampler_joint_reorder = [robot_joint_name_to_idx[name] for name in robot_sampler_joint_names]
+        self.robot_collision_checker = None
+        self.robot_collision_checker_base_joint_indices = []
+        if self.robot_pointcloud_filter_enabled:
+            self.robot_collision_checker = GlorbotCollisionChecker(
+                glorbot_urdf_path,
+                device=self.device,
+                input_joint_names=robot_sampler_joint_names,
+            )
+            self.robot_collision_checker_base_joint_indices = [
+                idx
+                for idx, joint_name in enumerate(robot_sampler_joint_names)
+                if joint_name in {"base_x_joint", "base_y_joint", "base_rotation_joint"}
+            ]
 
         self.robot_base_body_idx = int(self.ov_env._robot_base_body_link_idx)
         self.robot_palm_body_idx = int(self.ov_env._robot_key_body_idx[self.ov_env._robot_palm_id_in_key_body_idx])
@@ -1902,6 +1923,37 @@ class Dagger:
         quat = robot_root_quat_w.unsqueeze(1).expand(-1, robot_local_pcd.shape[1], -1)
         return quat_apply(quat, robot_local_pcd) + robot_root_pos_w.unsqueeze(1)
 
+    def _sample_robot_pointcloud_base_sampler(self):
+        robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
+        robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
+        robot_pcd_world = self._sample_robot_pointcloud_world_sampler()
+        return world_to_local(robot_pcd_world, robot_base_pos_w, robot_base_quat_w)
+
+    def _get_robot_filter_joint_pos_base_frame(self):
+        robot_joint_pos = self.ov_env.robot.data.joint_pos[:, self.robot_sampler_joint_ids]
+        robot_joint_pos = robot_joint_pos[:, self.robot_sampler_joint_reorder].clone()
+        # The observation cloud is already in tidybot2_base_link, so zero the floating-base
+        # joints before evaluating the same Glorbot sphere model in that local frame.
+        if self.robot_collision_checker_base_joint_indices:
+            robot_joint_pos[:, self.robot_collision_checker_base_joint_indices] = 0.0
+        return robot_joint_pos
+
+    def _filter_robot_points_base(self, pointcloud_base):
+        if (
+            not self.robot_pointcloud_filter_enabled
+            or self.robot_collision_checker is None
+            or pointcloud_base is None
+            or pointcloud_base.numel() == 0
+        ):
+            return pointcloud_base
+
+        return self.robot_collision_checker.filter_pointcloud_outside_spheres(
+            pointclouds=pointcloud_base,
+            joint_angles=self._get_robot_filter_joint_pos_base_frame(),
+            sdf_cutoff=self.robot_pointcloud_sdf_cutoff,
+            max_points_per_process=self.robot_pointcloud_filter_max_points_per_process,
+        )
+
     def _sample_wall_pointcloud_world(self, num_points=None):
         if not self.wall_distractors_enabled:
             return torch.zeros((self.num_envs, 0, 3), dtype=torch.float32, device=self.device)
@@ -2041,6 +2093,7 @@ class Dagger:
             door_pcd_base = self._sample_door_pointcloud_base_depth()
         else:
             door_pcd_base = self._sample_door_pointcloud_base_lidar()
+        door_pcd_base = self._filter_robot_points_base(door_pcd_base)
         self._sync_timing_device()
         self._record_timing("pointcloud_ms", time.perf_counter() - start_time)
         return door_pcd_base
@@ -2074,7 +2127,7 @@ class Dagger:
         except Exception as exc:
             print(f"Skipping pointcloud visualization for {filename}: {exc}")
 
-    def _build_local_pcd(self, door_pcd_base, palm_pos_base):
+    def _build_local_pcd(self, door_pcd_base, palm_pos_base, robot_pcd_base=None):
         pcd_parts = []
 
         if self.local_pcd_points[0] > 0:
@@ -2100,6 +2153,9 @@ class Dagger:
                 log_name="palm",
             )
             pcd_parts.append(palm_crop)
+
+        if robot_pcd_base is not None and robot_pcd_base.numel() > 0:
+            pcd_parts.append(robot_pcd_base)
 
         if not pcd_parts:
             raise ValueError("Student config requested local_pcd_t but no local point counts were configured.")
@@ -2200,6 +2256,7 @@ class Dagger:
 
         palm_pos_base = world_to_local(palm_pos_w, robot_base_pos_w, robot_base_quat_w).squeeze(1)
         door_pcd_base = self._sample_door_pointcloud_base()
+        robot_pcd_base = self._sample_robot_pointcloud_base_sampler() if self.append_robot_gt_to_policy_cloud else None
         current_implemented_action = (
             self.implemented_action_history[:, 0, :] if self.implemented_action_history is not None else None
         )
@@ -2254,6 +2311,7 @@ class Dagger:
                 obs[key] = self._build_local_pcd(
                     door_pcd_base,
                     palm_pos_base,
+                    robot_pcd_base=robot_pcd_base,
                 )
                 # self._debug_visualize_pointcloud(obs[key], "local_pcd_t")
             else:

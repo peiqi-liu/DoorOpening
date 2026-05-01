@@ -340,6 +340,25 @@ class TorchJoint(Joint):
         else:
             raise ValueError("Invalid configuration")
 
+class TorchSpheres:
+    """Minimal batched sphere helper for robot-point filtering."""
+
+    def __init__(self, centers: torch.Tensor, radii: torch.Tensor):
+        if centers.ndim != 3 or radii.ndim != 3:
+            raise ValueError(
+                f"Expected centers/radii with shape (B, M, 3)/(B, M, 1), got {centers.shape}/{radii.shape}."
+            )
+        self.centers = centers
+        self.radii = radii
+
+    def sdf(self, points: torch.Tensor) -> torch.Tensor:
+        if points.ndim != 3 or points.shape[-1] != 3:
+            raise ValueError(f"Expected points with shape (B, N, 3), got {points.shape}.")
+        return torch.min(
+            torch.linalg.norm(points[:, None, :, :] - self.centers[:, :, None, :], dim=-1)
+            - self.radii,
+            dim=1,
+        )[0]
 
 class TorchURDF(URDF):
 

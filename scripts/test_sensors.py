@@ -468,7 +468,8 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
 
         if lidar_state is not None:
             current_camera_frame = int(camera.frame[0].item())
-            if current_camera_frame != lidar_state["last_camera_frame"]:
+            # if current_camera_frame != lidar_state["last_camera_frame"]:
+            if True:
                 lidar_state["last_camera_frame"] = current_camera_frame
                 door_joint_pos = scene["door"].data.joint_pos
                 sampled_local_pcd = lidar_state["sampler"].sample(door_joint_pos)
@@ -494,6 +495,9 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
                 lidar_pose7 = torch.cat([lidar_pos_w, lidar_quat_xyzw], dim=-1)
                 print("lidar_pose7: ", lidar_pose7)
 
+                import time
+                _sync_timing_device(torch.device(args_cli.device))
+                start_time = time.perf_counter()
                 lidar_pcd, lidar_logs = simulate_lidar_render_from_pose(
                     pcd=source_pcd_world,
                     lidar_pose=lidar_pose7,
@@ -506,6 +510,9 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
                     jitter_std_m=LIDAR_JITTER_STD_M,
                     use_compile=LIDAR_USE_COMPILE,
                 )
+                _sync_timing_device(torch.device(args_cli.device))
+                end_time = time.perf_counter()
+                print(f"Lidar render time: {end_time - start_time} seconds")
 
                 lidar_state["rendered_frames"] += 1
                 env_id = max(0, min(LIDAR_ENV_ID, scene.num_envs - 1))
