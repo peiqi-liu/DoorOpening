@@ -255,7 +255,7 @@ class GlorbotCollisionChecker:
         ]
 
         for i in [1, 2, 3]:
-            model[f"mcp_{i}"] = [([-0.025, 0.04, 0.015], 0.025)]
+            model[f"mcp_joint_{i}"] = [([-0.025, 0.04, 0.015], 0.025)]
             model[f"pip_{i}"] = [([0.01, 0.0, -0.01], 0.02)]
             model[f"dip_{i}"] = [([0.01, -0.035, 0.015], 0.02)]
             model[f"fingertip_{i}"] = [([0.0, -0.035, 0.015], 0.02)]

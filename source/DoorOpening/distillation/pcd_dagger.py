@@ -464,8 +464,6 @@ class Dagger:
         self.local_pcd_points = [0, 0, 0]
         if local_pcd_cfg is not None:
             self.local_pcd_points = list(local_pcd_cfg.get("num_points", [self.door_pcd_num_points, 0, 0])[:3])
-            # while len(self.local_pcd_points) < 3:
-            #     self.local_pcd_points.append(0)
 
     def _build_action_component_history_indices(self):
         target_joint_ids = torch.as_tensor(self.ov_env._robot_dof_idx, device=self.device, dtype=torch.long)
