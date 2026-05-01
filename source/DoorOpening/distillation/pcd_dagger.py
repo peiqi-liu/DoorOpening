@@ -220,6 +220,8 @@ class Dagger:
         self.games_to_track = 100
         self.frame = 0
         self.epoch_num = 0
+        self.resume_iteration = 0
+        self._resumed_from_student_ckpt = False
 
         self.nn_dir = nn_dir
         self.debug_pointcloud_dir = os.path.join(self.nn_dir if self.nn_dir is not None else os.getcwd(), "debug_pointclouds")
@@ -1617,7 +1619,50 @@ class Dagger:
         state_dict, _ = self._extract_model_state(weights)
         state_dict = strip_prefix_from_state_dict(state_dict)
         self.student_model.load_state_dict(state_dict, strict=False)
+        if isinstance(weights, dict):
+            if "optimizer_state_dict" in weights and not self.play_policy:
+                try:
+                    self.optimizer.load_state_dict(weights["optimizer_state_dict"])
+                except Exception as exc:
+                    if self.rank == 0:
+                        print(f"Warning: failed to load optimizer state from '{ckpt}': {exc}")
+            if "frame" in weights:
+                self.frame = int(weights["frame"])
+            if "epoch" in weights:
+                self.epoch_num = int(weights["epoch"])
+            if "student_update_steps" in weights:
+                self.student_update_steps = int(weights["student_update_steps"])
+
+            resume_iteration = weights.get("iteration")
+            if resume_iteration is None:
+                saved_num_envs = int(weights.get("num_envs_at_save", self.num_envs))
+                if saved_num_envs <= 0:
+                    saved_num_envs = int(self.num_envs)
+                resume_iteration = self.frame // max(1, saved_num_envs)
+            if resume_iteration is None and not self.play_policy and "student_update_steps" in weights:
+                resume_iteration = int(weights["student_update_steps"])
+            self.resume_iteration = int(resume_iteration)
+            self._resumed_from_student_ckpt = True
+
+            curriculum_step_count = weights.get("curriculum_step_count")
+            if curriculum_step_count is None:
+                curriculum_step_count = self.resume_iteration
+
+            # Curriculum/reset scheduling in DooropeningEnv uses common_step_counter.
+            if hasattr(self.ov_env, "common_step_counter"):
+                self.ov_env.common_step_counter = int(curriculum_step_count)
+            if hasattr(self.ov_env, "set_train_info"):
+                self.ov_env.set_train_info(int(self.frame))
+            elif hasattr(self.ov_env, "_rlgames_env_frames"):
+                self.ov_env._rlgames_env_frames = int(self.frame)
+
         print(f"Loaded student checkpoint: {ckpt}")
+        if self.rank == 0 and self._resumed_from_student_ckpt:
+            print(
+                "Resuming student training state from checkpoint: "
+                f"iteration={self.resume_iteration}, curriculum_step_count={int(curriculum_step_count)}, frame={self.frame}, "
+                f"student_update_steps={self.student_update_steps}"
+            )
 
     def _override_actions_for_pregrasp(self, actions: torch.Tensor) -> torch.Tensor:
         override_fn = getattr(self.ov_env, "override_pregrasp_actions", None)
@@ -2544,9 +2589,11 @@ class Dagger:
             self._seed_student_histories()
             self._seed_aux_buffer()
             self.episode_reached_last_frame.zero_()
-            self._resample_teacher_forcing_env_mask(0)
+            self._resample_teacher_forcing_env_mask(self.resume_iteration)
 
-            for iteration in range(self.num_iters):
+            start_iteration = int(self.resume_iteration)
+            end_iteration = start_iteration + int(self.num_iters)
+            for iteration in range(start_iteration, end_iteration):
                 self._sync_timing_device()
                 iteration_start_time = time.perf_counter()
 
@@ -2648,7 +2695,7 @@ class Dagger:
                     and iteration % self.save_interval == 0
                 ):
                     ckpt_path = os.path.join(self.nn_dir, f"pcd_student_{iteration}.pt")
-                    self.save(ckpt_path)
+                    self.save(ckpt_path, iteration=iteration)
         finally:
             self._close_viser_debug_tools()
             if not self.play_policy and self.rank == 0:
@@ -2657,12 +2704,19 @@ class Dagger:
                 print("Student Update Steps:", self.student_update_steps)
             self._finish_wandb()
 
-    def save(self, filename):
+    def save(self, filename, iteration=None):
+        if iteration is None:
+            iteration = int(self.frame // max(1, int(self.num_envs)))
+        curriculum_step_count = int(getattr(self.ov_env, "common_step_counter", int(iteration)))
         checkpoint = {
             "model_state_dict": self.student_model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "frame": self.frame,
             "epoch": self.epoch_num,
+            "iteration": int(iteration),
+            "curriculum_step_count": curriculum_step_count,
+            "student_update_steps": int(self.student_update_steps),
+            "num_envs_at_save": int(self.num_envs),
             "config": self.config,
             "student_cfg_path": self.student_cfg.get("cfg"),
             "teacher_cfg_path": self.teacher_cfg.get("cfg"),
