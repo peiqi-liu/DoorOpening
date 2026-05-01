@@ -2663,8 +2663,18 @@ class Dagger:
             "optimizer_state_dict": self.optimizer.state_dict(),
             "frame": self.frame,
             "epoch": self.epoch_num,
+            "config": self.config,
+            "student_cfg_path": self.student_cfg.get("cfg"),
+            "teacher_cfg_path": self.teacher_cfg.get("cfg"),
         }
         torch.save(checkpoint, filename)
+        try:
+            config_filename = str(pathlib.Path(filename).with_suffix(".yaml"))
+            with open(config_filename, "w", encoding="utf-8") as f:
+                yaml.safe_dump(self.config, f, sort_keys=False)
+        except Exception as exc:
+            if self.rank == 0:
+                print(f"Warning: failed to save checkpoint config YAML next to '{filename}': {exc}")
 
     def load_networks(self, params):
         builder = ModelBuilder()
