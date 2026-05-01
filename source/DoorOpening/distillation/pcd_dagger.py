@@ -32,6 +32,7 @@ from DoorOpening.utils.camera_utils import (
     simulate_lidar_render_from_pose,
 )
 from DoorOpening.utils.extract_pointcloud_from_articulation import FrankaLeapSampler
+from DoorOpening.utils.glorbot_collision_checker import GlorbotCollisionChecker
 from DoorOpening.utils.pose_utils import world_to_local
 
 
@@ -143,6 +144,14 @@ class Dagger:
         self.lidar_occlusion_eps_rel = float(self.lidar_render_cfg.get("occlusion_eps_rel", 0.01))
         self.lidar_jitter_std_m = float(self.lidar_render_cfg.get("jitter_std_m", 0.001))
         self.lidar_use_compile = bool(self.lidar_render_cfg.get("use_compile", True))
+        self.robot_pointcloud_filter_cfg = dict(self.runtime_cfg.get("robot_pointcloud_filter", {}))
+        self.robot_pointcloud_filter_enabled = bool(self.robot_pointcloud_filter_cfg.get("enabled", True))
+        self.robot_pointcloud_sdf_cutoff = float(self.robot_pointcloud_filter_cfg.get("sdf_cutoff", 0.02))
+        self.robot_pointcloud_filter_max_points_per_process = int(
+            self.robot_pointcloud_filter_cfg.get("max_points_per_process", 5000)
+        )
+        self.append_robot_gt_to_policy_cloud = bool(self.runtime_cfg.get("append_robot_gt_to_policy_cloud", True))
+        self.robot_gt_policy_points = self.runtime_cfg.get("robot_gt_policy_points")
         # Runtime controls for live Viser inspection plus optional serializer/raw replay outputs.
         self.viser_cfg = dict(self.runtime_cfg.get("viser", {}))
         legacy_record_cfg = dict(self.viser_cfg.get("record", {}))
@@ -212,6 +221,8 @@ class Dagger:
         self.games_to_track = 100
         self.frame = 0
         self.epoch_num = 0
+        self.resume_iteration = 0
+        self._resumed_from_student_ckpt = False
 
         self.nn_dir = nn_dir
         self.debug_pointcloud_dir = os.path.join(self.nn_dir if self.nn_dir is not None else os.getcwd(), "debug_pointclouds")
@@ -454,8 +465,11 @@ class Dagger:
         self.local_pcd_points = [0, 0, 0]
         if local_pcd_cfg is not None:
             self.local_pcd_points = list(local_pcd_cfg.get("num_points", [self.door_pcd_num_points, 0, 0])[:3])
-            # while len(self.local_pcd_points) < 3:
-            #     self.local_pcd_points.append(0)
+        if self.robot_gt_policy_points is None and len(self.local_pcd_points) >= 3:
+            self.robot_gt_policy_points = int(self.local_pcd_points[2])
+        if self.robot_gt_policy_points is None:
+            self.robot_gt_policy_points = 0
+        self.robot_gt_policy_points = max(0, int(self.robot_gt_policy_points))
 
     def _build_action_component_history_indices(self):
         target_joint_ids = torch.as_tensor(self.ov_env._robot_dof_idx, device=self.device, dtype=torch.long)
@@ -817,6 +831,19 @@ class Dagger:
         self.robot_sampler_joint_ids = torch.tensor(robot_joint_ids, device=self.device, dtype=torch.long)
         robot_joint_name_to_idx = {name: idx for idx, name in enumerate(robot_joint_names)}
         self.robot_sampler_joint_reorder = [robot_joint_name_to_idx[name] for name in robot_sampler_joint_names]
+        self.robot_collision_checker = None
+        self.robot_collision_checker_base_joint_indices = []
+        if self.robot_pointcloud_filter_enabled:
+            self.robot_collision_checker = GlorbotCollisionChecker(
+                glorbot_urdf_path,
+                device=self.device,
+                input_joint_names=robot_sampler_joint_names,
+            )
+            self.robot_collision_checker_base_joint_indices = [
+                idx
+                for idx, joint_name in enumerate(robot_sampler_joint_names)
+                if joint_name in {"base_x_joint", "base_y_joint", "base_rotation_joint"}
+            ]
 
         self.robot_base_body_idx = int(self.ov_env._robot_base_body_link_idx)
         self.robot_palm_body_idx = int(self.ov_env._robot_key_body_idx[self.ov_env._robot_palm_id_in_key_body_idx])
@@ -1596,7 +1623,50 @@ class Dagger:
         state_dict, _ = self._extract_model_state(weights)
         state_dict = strip_prefix_from_state_dict(state_dict)
         self.student_model.load_state_dict(state_dict, strict=False)
+        if isinstance(weights, dict):
+            if "optimizer_state_dict" in weights and not self.play_policy:
+                try:
+                    self.optimizer.load_state_dict(weights["optimizer_state_dict"])
+                except Exception as exc:
+                    if self.rank == 0:
+                        print(f"Warning: failed to load optimizer state from '{ckpt}': {exc}")
+            if "frame" in weights:
+                self.frame = int(weights["frame"])
+            if "epoch" in weights:
+                self.epoch_num = int(weights["epoch"])
+            if "student_update_steps" in weights:
+                self.student_update_steps = int(weights["student_update_steps"])
+
+            resume_iteration = weights.get("iteration")
+            if resume_iteration is None:
+                saved_num_envs = int(weights.get("num_envs_at_save", self.num_envs))
+                if saved_num_envs <= 0:
+                    saved_num_envs = int(self.num_envs)
+                resume_iteration = self.frame // max(1, saved_num_envs)
+            if resume_iteration is None and not self.play_policy and "student_update_steps" in weights:
+                resume_iteration = int(weights["student_update_steps"])
+            self.resume_iteration = int(resume_iteration)
+            self._resumed_from_student_ckpt = True
+
+            curriculum_step_count = weights.get("curriculum_step_count")
+            if curriculum_step_count is None:
+                curriculum_step_count = self.resume_iteration
+
+            # Curriculum/reset scheduling in DooropeningEnv uses common_step_counter.
+            if hasattr(self.ov_env, "common_step_counter"):
+                self.ov_env.common_step_counter = int(curriculum_step_count)
+            if hasattr(self.ov_env, "set_train_info"):
+                self.ov_env.set_train_info(int(self.frame))
+            elif hasattr(self.ov_env, "_rlgames_env_frames"):
+                self.ov_env._rlgames_env_frames = int(self.frame)
+
         print(f"Loaded student checkpoint: {ckpt}")
+        if self.rank == 0 and self._resumed_from_student_ckpt:
+            print(
+                "Resuming student training state from checkpoint: "
+                f"iteration={self.resume_iteration}, curriculum_step_count={int(curriculum_step_count)}, frame={self.frame}, "
+                f"student_update_steps={self.student_update_steps}"
+            )
 
     def _override_actions_for_pregrasp(self, actions: torch.Tensor) -> torch.Tensor:
         override_fn = getattr(self.ov_env, "override_pregrasp_actions", None)
@@ -1902,6 +1972,37 @@ class Dagger:
         quat = robot_root_quat_w.unsqueeze(1).expand(-1, robot_local_pcd.shape[1], -1)
         return quat_apply(quat, robot_local_pcd) + robot_root_pos_w.unsqueeze(1)
 
+    def _sample_robot_pointcloud_base_sampler(self):
+        robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
+        robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
+        robot_pcd_world = self._sample_robot_pointcloud_world_sampler()
+        return world_to_local(robot_pcd_world, robot_base_pos_w, robot_base_quat_w)
+
+    def _get_robot_filter_joint_pos_base_frame(self):
+        robot_joint_pos = self.ov_env.robot.data.joint_pos[:, self.robot_sampler_joint_ids]
+        robot_joint_pos = robot_joint_pos[:, self.robot_sampler_joint_reorder].clone()
+        # The observation cloud is already in tidybot2_base_link, so zero the floating-base
+        # joints before evaluating the same Glorbot sphere model in that local frame.
+        if self.robot_collision_checker_base_joint_indices:
+            robot_joint_pos[:, self.robot_collision_checker_base_joint_indices] = 0.0
+        return robot_joint_pos
+
+    def _filter_robot_points_base(self, pointcloud_base):
+        if (
+            not self.robot_pointcloud_filter_enabled
+            or self.robot_collision_checker is None
+            or pointcloud_base is None
+            or pointcloud_base.numel() == 0
+        ):
+            return pointcloud_base
+
+        return self.robot_collision_checker.filter_pointcloud_outside_spheres(
+            pointclouds=pointcloud_base,
+            joint_angles=self._get_robot_filter_joint_pos_base_frame(),
+            sdf_cutoff=self.robot_pointcloud_sdf_cutoff,
+            max_points_per_process=self.robot_pointcloud_filter_max_points_per_process,
+        )
+
     def _sample_wall_pointcloud_world(self, num_points=None):
         if not self.wall_distractors_enabled:
             return torch.zeros((self.num_envs, 0, 3), dtype=torch.float32, device=self.device)
@@ -2041,6 +2142,7 @@ class Dagger:
             door_pcd_base = self._sample_door_pointcloud_base_depth()
         else:
             door_pcd_base = self._sample_door_pointcloud_base_lidar()
+        door_pcd_base = self._filter_robot_points_base(door_pcd_base)
         self._sync_timing_device()
         self._record_timing("pointcloud_ms", time.perf_counter() - start_time)
         return door_pcd_base
@@ -2074,7 +2176,7 @@ class Dagger:
         except Exception as exc:
             print(f"Skipping pointcloud visualization for {filename}: {exc}")
 
-    def _build_local_pcd(self, door_pcd_base, palm_pos_base):
+    def _build_local_pcd(self, door_pcd_base, palm_pos_base, robot_pcd_base=None):
         pcd_parts = []
 
         if self.local_pcd_points[0] > 0:
@@ -2100,6 +2202,22 @@ class Dagger:
                 log_name="palm",
             )
             pcd_parts.append(palm_crop)
+
+        if (
+            robot_pcd_base is not None
+            and robot_pcd_base.numel() > 0
+            and self.robot_gt_policy_points > 0
+        ):
+            if robot_pcd_base.shape[1] > self.robot_gt_policy_points:
+                sample_idx = torch.linspace(
+                    0,
+                    robot_pcd_base.shape[1] - 1,
+                    steps=self.robot_gt_policy_points,
+                    device=robot_pcd_base.device,
+                    dtype=torch.float32,
+                ).round().to(dtype=torch.long)
+                robot_pcd_base = robot_pcd_base[:, sample_idx]
+            pcd_parts.append(robot_pcd_base)
 
         if not pcd_parts:
             raise ValueError("Student config requested local_pcd_t but no local point counts were configured.")
@@ -2200,6 +2318,7 @@ class Dagger:
 
         palm_pos_base = world_to_local(palm_pos_w, robot_base_pos_w, robot_base_quat_w).squeeze(1)
         door_pcd_base = self._sample_door_pointcloud_base()
+        robot_pcd_base = self._sample_robot_pointcloud_base_sampler() if self.append_robot_gt_to_policy_cloud else None
         current_implemented_action = (
             self.implemented_action_history[:, 0, :] if self.implemented_action_history is not None else None
         )
@@ -2254,6 +2373,7 @@ class Dagger:
                 obs[key] = self._build_local_pcd(
                     door_pcd_base,
                     palm_pos_base,
+                    robot_pcd_base=robot_pcd_base,
                 )
                 # self._debug_visualize_pointcloud(obs[key], "local_pcd_t")
             else:
@@ -2486,9 +2606,11 @@ class Dagger:
             self._seed_student_histories()
             self._seed_aux_buffer()
             self.episode_reached_last_frame.zero_()
-            self._resample_teacher_forcing_env_mask(0)
+            self._resample_teacher_forcing_env_mask(self.resume_iteration)
 
-            for iteration in range(self.num_iters):
+            start_iteration = int(self.resume_iteration)
+            end_iteration = start_iteration + int(self.num_iters)
+            for iteration in range(start_iteration, end_iteration):
                 self._sync_timing_device()
                 iteration_start_time = time.perf_counter()
 
@@ -2590,7 +2712,7 @@ class Dagger:
                     and iteration % self.save_interval == 0
                 ):
                     ckpt_path = os.path.join(self.nn_dir, f"pcd_student_{iteration}.pt")
-                    self.save(ckpt_path)
+                    self.save(ckpt_path, iteration=iteration)
         finally:
             self._close_viser_debug_tools()
             if not self.play_policy and self.rank == 0:
@@ -2599,14 +2721,31 @@ class Dagger:
                 print("Student Update Steps:", self.student_update_steps)
             self._finish_wandb()
 
-    def save(self, filename):
+    def save(self, filename, iteration=None):
+        if iteration is None:
+            iteration = int(self.frame // max(1, int(self.num_envs)))
+        curriculum_step_count = int(getattr(self.ov_env, "common_step_counter", int(iteration)))
         checkpoint = {
             "model_state_dict": self.student_model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "frame": self.frame,
             "epoch": self.epoch_num,
+            "iteration": int(iteration),
+            "curriculum_step_count": curriculum_step_count,
+            "student_update_steps": int(self.student_update_steps),
+            "num_envs_at_save": int(self.num_envs),
+            "config": self.config,
+            "student_cfg_path": self.student_cfg.get("cfg"),
+            "teacher_cfg_path": self.teacher_cfg.get("cfg"),
         }
         torch.save(checkpoint, filename)
+        try:
+            config_filename = str(pathlib.Path(filename).with_suffix(".yaml"))
+            with open(config_filename, "w", encoding="utf-8") as f:
+                yaml.safe_dump(self.config, f, sort_keys=False)
+        except Exception as exc:
+            if self.rank == 0:
+                print(f"Warning: failed to save checkpoint config YAML next to '{filename}': {exc}")
 
     def load_networks(self, params):
         builder = ModelBuilder()
