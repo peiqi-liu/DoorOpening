@@ -151,6 +151,7 @@ class Dagger:
             self.robot_pointcloud_filter_cfg.get("max_points_per_process", 5000)
         )
         self.append_robot_gt_to_policy_cloud = bool(self.runtime_cfg.get("append_robot_gt_to_policy_cloud", True))
+        self.robot_gt_policy_points = self.runtime_cfg.get("robot_gt_policy_points")
         # Runtime controls for live Viser inspection plus optional serializer/raw replay outputs.
         self.viser_cfg = dict(self.runtime_cfg.get("viser", {}))
         legacy_record_cfg = dict(self.viser_cfg.get("record", {}))
@@ -464,6 +465,11 @@ class Dagger:
         self.local_pcd_points = [0, 0, 0]
         if local_pcd_cfg is not None:
             self.local_pcd_points = list(local_pcd_cfg.get("num_points", [self.door_pcd_num_points, 0, 0])[:3])
+        if self.robot_gt_policy_points is None and len(self.local_pcd_points) >= 3:
+            self.robot_gt_policy_points = int(self.local_pcd_points[2])
+        if self.robot_gt_policy_points is None:
+            self.robot_gt_policy_points = 0
+        self.robot_gt_policy_points = max(0, int(self.robot_gt_policy_points))
 
     def _build_action_component_history_indices(self):
         target_joint_ids = torch.as_tensor(self.ov_env._robot_dof_idx, device=self.device, dtype=torch.long)
@@ -2197,7 +2203,20 @@ class Dagger:
             )
             pcd_parts.append(palm_crop)
 
-        if robot_pcd_base is not None and robot_pcd_base.numel() > 0:
+        if (
+            robot_pcd_base is not None
+            and robot_pcd_base.numel() > 0
+            and self.robot_gt_policy_points > 0
+        ):
+            if robot_pcd_base.shape[1] > self.robot_gt_policy_points:
+                sample_idx = torch.linspace(
+                    0,
+                    robot_pcd_base.shape[1] - 1,
+                    steps=self.robot_gt_policy_points,
+                    device=robot_pcd_base.device,
+                    dtype=torch.float32,
+                ).round().to(dtype=torch.long)
+                robot_pcd_base = robot_pcd_base[:, sample_idx]
             pcd_parts.append(robot_pcd_base)
 
         if not pcd_parts:
