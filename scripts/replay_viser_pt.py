@@ -42,6 +42,49 @@ def _to_numpy_points(value: object) -> np.ndarray:
     return points[finite]
 
 
+def _to_numpy_vector(value: object) -> np.ndarray | None:
+    if value is None:
+        return None
+    if isinstance(value, torch.Tensor):
+        vector = value.detach().cpu().to(dtype=torch.float32).numpy()
+    else:
+        vector = np.asarray(value, dtype=np.float32)
+    vector = vector.reshape(-1)
+    if vector.size == 0 or not np.isfinite(vector).all():
+        return None
+    return vector
+
+
+def _quat_rotate_points(quat_wxyz: np.ndarray, points: np.ndarray) -> np.ndarray:
+    quat = np.asarray(quat_wxyz, dtype=np.float32).reshape(4)
+    quat_norm = np.linalg.norm(quat)
+    if quat_norm <= 0.0:
+        return points
+    quat = quat / quat_norm
+    w = quat[0]
+    q_xyz = quat[1:]
+    uv = np.cross(q_xyz[None, :], points)
+    uuv = np.cross(q_xyz[None, :], uv)
+    return points + 2.0 * (w * uv + uuv)
+
+
+def _aux_prediction_world_points(frame: dict) -> np.ndarray:
+    aux_prediction = _to_numpy_vector(frame.get("aux_prediction"))
+    if aux_prediction is None or aux_prediction.size != 3:
+        return np.zeros((0, 3), dtype=np.float32)
+
+    robot_base_pos_w = _to_numpy_vector(frame.get("robot_base_pos_w"))
+    robot_base_quat_w = _to_numpy_vector(frame.get("robot_base_quat_w"))
+    if robot_base_pos_w is None or robot_base_pos_w.size != 3:
+        return np.zeros((0, 3), dtype=np.float32)
+    if robot_base_quat_w is None or robot_base_quat_w.size != 4:
+        return np.zeros((0, 3), dtype=np.float32)
+
+    aux_base_points = aux_prediction.reshape(1, 3)
+    aux_world_points = _quat_rotate_points(robot_base_quat_w, aux_base_points) + robot_base_pos_w.reshape(1, 3)
+    return aux_world_points.astype(np.float32, copy=False)
+
+
 def _first_nonempty_cloud(frames: list[dict]) -> np.ndarray:
     for frame in frames:
         for key in ("ground_truth_points_world", "robot_obs_points_world", "policy_input_points_world"):
@@ -139,6 +182,12 @@ def main() -> None:
         colors=(0, 170, 120),
         point_size=args.point_size,
     )
+    aux_handle = server.scene.add_point_cloud(
+        "/aux_prediction",
+        points=np.zeros((0, 3), dtype=np.float32),
+        colors=(255, 140, 0),
+        point_size=args.point_size * 3.0,
+    )
 
     with server.gui.add_folder("Playback"):
         play = server.gui.add_checkbox("Play", initial_value=True)
@@ -152,16 +201,19 @@ def main() -> None:
         show_gt = server.gui.add_checkbox("Show GT", initial_value=True)
         show_obs = server.gui.add_checkbox("Show Robot Obs", initial_value=True)
         show_policy = server.gui.add_checkbox("Show Policy Input", initial_value=True)
+        show_aux = server.gui.add_checkbox("Show Aux Prediction", initial_value=True)
 
     def _apply_frame(frame_idx: int) -> None:
         frame = frames[frame_idx]
         gt_points = _to_numpy_points(frame.get("ground_truth_points_world"))
         obs_points = _to_numpy_points(frame.get("robot_obs_points_world"))
         policy_points = _to_numpy_points(frame.get("policy_input_points_world"))
+        aux_points = _aux_prediction_world_points(frame)
 
         gt_handle.points = gt_points if show_gt.value else np.zeros((0, 3), dtype=np.float32)
         obs_handle.points = obs_points if show_obs.value else np.zeros((0, 3), dtype=np.float32)
         policy_handle.points = policy_points if show_policy.value else np.zeros((0, 3), dtype=np.float32)
+        aux_handle.points = aux_points if show_aux.value else np.zeros((0, 3), dtype=np.float32)
 
     @frame_slider.on_update
     def _(_event):
@@ -184,6 +236,10 @@ def main() -> None:
         _apply_frame(int(frame_slider.value))
 
     @show_policy.on_update
+    def _(_event):
+        _apply_frame(int(frame_slider.value))
+
+    @show_aux.on_update
     def _(_event):
         _apply_frame(int(frame_slider.value))
 

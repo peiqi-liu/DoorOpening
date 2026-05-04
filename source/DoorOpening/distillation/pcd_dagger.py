@@ -1,7 +1,6 @@
 import os
 import pathlib
 import time
-import math
 from collections import OrderedDict, deque
 from pathlib import Path
 
@@ -120,7 +119,6 @@ class Dagger:
             )
         )
         self.teacher_forcing_min_beta = float(self.runtime_cfg.get("teacher_forcing_min_beta", 0.0))
-        self.teacher_forcing_schedule = str(self.runtime_cfg.get("teacher_forcing_schedule", "linear")).lower()
         self.log_interval = int(self.runtime_cfg.get("log_interval", 100))
         self.save_interval = int(self.runtime_cfg.get("save_interval", 5_000))
         self.pointcloud_source = str(self.runtime_cfg.get("pointcloud_source", "sampler")).lower()
@@ -152,60 +150,22 @@ class Dagger:
         )
         self.append_robot_gt_to_policy_cloud = bool(self.runtime_cfg.get("append_robot_gt_to_policy_cloud", True))
         self.robot_gt_policy_points = self.runtime_cfg.get("robot_gt_policy_points")
-        # Runtime controls for live Viser inspection plus optional serializer/raw replay outputs.
+        # Runtime controls for optional raw point-cloud replay dumps.
         self.viser_cfg = dict(self.runtime_cfg.get("viser", {}))
-        legacy_record_cfg = dict(self.viser_cfg.get("record", {}))
-        self.viser_serializer_cfg = dict(self.viser_cfg.get("serializer", legacy_record_cfg))
         self.viser_raw_cfg = dict(self.viser_cfg.get("raw", {}))
-        self.viser_enabled = self.rank == 0 and bool(self.viser_cfg.get("enabled", False))
-        self.viser_update_interval = max(1, int(self.viser_cfg.get("update_interval", 1)))
-        self.viser_env_id = int(self.viser_cfg.get("env_id", self.runtime_cfg.get("debug_pointcloud_env_id", 0)))
+        self.viser_env_id = int(self.viser_cfg.get("env_id", 0))
         self.viser_show_policy_input = bool(self.viser_cfg.get("show_policy_input", True))
+        self.viser_raw_enabled = self.rank == 0 and bool(self.viser_raw_cfg.get("enabled", False))
         self.viser_raw_save_interval = max(
             1,
             int(self.viser_raw_cfg.get("save_interval", self.viser_cfg.get("raw_interval", 1000))),
         )
-        self.viser_point_size = float(self.viser_cfg.get("point_size", 0.004))
-        self.viser_max_points = int(self.viser_cfg.get("max_points", 12_000))
-        self.viser_serializer_enabled = self.rank == 0 and bool(self.viser_serializer_cfg.get("enabled", False))
-        self.viser_raw_enabled = self.rank == 0 and bool(
-            self.viser_raw_cfg.get(
-                "enabled",
-                self.viser_serializer_cfg.get("save_raw", legacy_record_cfg.get("save_raw", False)),
-            )
-        )
-        self.viser_episode_replay_enabled = self.viser_serializer_enabled
-        self.viser_serializer_warning_max_frames = int(
-            self.viser_serializer_cfg.get("max_frames", legacy_record_cfg.get("max_frames", 500))
-        )
+        self.viser_raw_max_points = int(self.viser_raw_cfg.get("max_points", 12_000))
         self.viser_raw_max_frames = max(0, int(self.viser_raw_cfg.get("max_frames", 0)))
-        self.viser_replay_max_points = int(
-            self.viser_raw_cfg.get(
-                "max_points",
-                self.viser_serializer_cfg.get("max_points", legacy_record_cfg.get("max_points", self.viser_max_points)),
-            )
-        )
         self.viser_raw_include_ground_truth = bool(self.viser_raw_cfg.get("include_ground_truth", True))
         self.viser_raw_include_robot_obs = bool(self.viser_raw_cfg.get("include_robot_obs", True))
         self.viser_raw_include_policy_input = bool(
             self.viser_raw_cfg.get("include_policy_input", self.viser_show_policy_input)
-        )
-        self.viser_raw_ground_truth_max_points = max(
-            0,
-            int(
-                self.viser_raw_cfg.get(
-                    "ground_truth_max_points",
-                    self.viser_raw_cfg.get("gt_max_points", self.viser_replay_max_points),
-                )
-            ),
-        )
-        self.viser_raw_robot_obs_max_points = max(
-            0,
-            int(self.viser_raw_cfg.get("robot_obs_max_points", self.viser_replay_max_points)),
-        )
-        self.viser_raw_policy_input_max_points = max(
-            0,
-            int(self.viser_raw_cfg.get("policy_input_max_points", self.viser_replay_max_points)),
         )
         if self.pointcloud_source not in {"sampler", "depth", "lidar"}:
             raise ValueError(f"Unsupported pointcloud_source '{self.pointcloud_source}'.")
@@ -215,8 +175,6 @@ class Dagger:
             raise ValueError("teacher_forcing_transition_iters must be non-negative.")
         if not 0.0 <= self.teacher_forcing_min_beta <= 1.0:
             raise ValueError("teacher_forcing_min_beta must be in [0, 1].")
-        if self.teacher_forcing_schedule not in {"linear", "cosine"}:
-            raise ValueError("teacher_forcing_schedule must be one of {'linear', 'cosine'}.")
 
         self.games_to_track = 100
         self.frame = 0
@@ -242,19 +200,13 @@ class Dagger:
         self.completed_rewards = deque(maxlen=self.games_to_track)
         self.completed_lengths = deque(maxlen=self.games_to_track)
         self.completed_successes = deque(maxlen=self.games_to_track)
-        self.episode_reached_last_frame = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.student_update_steps = 0
         self.last_local_update_batch_size = 0
         self.last_global_update_batch_size = 0
         self.latest_student_proprio_vector = None
         self.latest_aux_input_vector = None
         self.latest_aux_target_vector = None
-        self._timing_stats = {
-            "iteration_ms": {"sum_ms": 0.0, "count": 0},
-            "student_obs_ms": {"sum_ms": 0.0, "count": 0},
-            "pointcloud_ms": {"sum_ms": 0.0, "count": 0},
-            "env_step_ms": {"sum_ms": 0.0, "count": 0},
-        }
+        self._timing_stats = {"sum_ms": 0.0, "count": 0}
         self.logged_env_metric_prefixes = ("dr/", "dr_limit/", "dr_sample/", "reset/")
         self.latest_env_log_metrics = {}
         self.zero_local_pcd_crop_center = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
@@ -264,7 +216,6 @@ class Dagger:
         self._init_history_buffers()
         self._init_pointcloud_assets()
         self._init_viser_debug_tools()
-        self.success_frame_idx = float(self.ov_env.ref_motion_lib.num_frames - 1)
 
     def _init_teacher(self):
         self.teacher_model = None
@@ -322,8 +273,6 @@ class Dagger:
             if not str(key).startswith("_")
         }
         self.student_model = PCDTransformer(**student_model_kwargs).to(self.device)
-        if self.student_model.chunk_size != 1:
-            raise ValueError("The current pointcloud DAgger loop only supports chunk_size=1.")
         if self.student_model.action_head.out_features != self.num_actions:
             raise ValueError(
                 f"Student action_dim ({self.student_model.action_head.out_features}) "
@@ -427,8 +376,6 @@ class Dagger:
         self.has_aux_prediction = bool(getattr(self.student_model, "aux_prediction", False))
         if self.has_aux_prediction and not self.has_aux_input:
             raise ValueError("Aux prediction requires at least one enabled aux_* state encoder.")
-        self.aux_prediction_mode = str(getattr(self.student_model, "aux_prediction_mode", "absolute")).lower()
-        self.aux_delta_scale = float(getattr(self.student_model, "aux_delta_scale", 0.01))
         self.aux_feedback_to_policy = self.has_aux_input and self.has_aux_prediction and bool(
             self.runtime_cfg.get("aux_feedback_to_policy", True)
         )
@@ -440,21 +387,6 @@ class Dagger:
             raise ValueError("aux_pregrasp_dropout_prob must be in [0, 1].")
         self.latest_aux_pregrasp_env_fraction = 0.0
         self.latest_aux_pregrasp_dropout_fraction = 0.0
-        if self.rank == 0 and self.has_aux_prediction and self.aux_prediction_mode == "delta":
-            print(
-                "Warning: aux_prediction_mode='delta' starts each episode from a zero absolute aux reference. "
-                "Consider absolute aux prediction if zero-seeded rollout recovery is unstable."
-            )
-        if (
-            self.rank == 0
-            and self.aux_pregrasp_dropout_prob > 0.0
-            and self.has_aux_prediction
-            and self.aux_prediction_mode == "delta"
-        ):
-            print(
-                "Warning: aux_pregrasp_dropout_prob is enabled while aux_prediction_mode='delta'. "
-                "Dropped aux inputs reset the delta reference to zero for those steps."
-            )
         if student_ckpt is not None and self.has_aux_input and self.rank == 0:
             print(
                 "Warning: student checkpoint was loaded while aux_handle_* inputs are active. "
@@ -711,31 +643,16 @@ class Dagger:
             return aux_tensor[:, 0, :]
         return aux_tensor
 
-    def _decode_aux_prediction(self, aux_pred, prev_abs_aux):
-        prev_abs_aux_2d = self._aux_to_2d(prev_abs_aux)
-        if prev_abs_aux_2d is None:
-            raise RuntimeError("prev_abs_aux is required to decode auxiliary predictions.")
-        if self.aux_prediction_mode == "delta":
-            aux_delta = torch.clamp(self._aux_to_2d(aux_pred), -1.0, 1.0)
-            return prev_abs_aux_2d + self.aux_delta_scale * aux_delta
+    def _decode_aux_prediction(self, aux_pred):
         return self._aux_to_2d(aux_pred)
 
-    def _get_aux_target(self, current_abs_aux, prev_abs_aux):
-        prev_abs_aux_2d = self._aux_to_2d(prev_abs_aux)
-        if self.aux_prediction_mode == "delta":
-            if prev_abs_aux_2d is None:
-                raise RuntimeError("prev_abs_aux is required to build delta auxiliary targets.")
-            target_delta = (current_abs_aux - prev_abs_aux_2d) / self.aux_delta_scale
-            return torch.clamp(target_delta, -1.0, 1.0)
+    def _get_aux_target(self, current_abs_aux):
         return current_abs_aux
-
-    def _use_aux_feedback(self):
-        return self.aux_feedback_to_policy
 
     def _maybe_drop_aux_feedback(self, aux_input_vector):
         self.latest_aux_pregrasp_env_fraction = 0.0
         self.latest_aux_pregrasp_dropout_fraction = 0.0
-        if aux_input_vector is None or not self._use_aux_feedback() or self.aux_pregrasp_dropout_prob <= 0.0:
+        if aux_input_vector is None or not self.aux_feedback_to_policy or self.aux_pregrasp_dropout_prob <= 0.0:
             return aux_input_vector
 
         ref_motion_lib = getattr(self.ov_env, "ref_motion_lib", None)
@@ -923,25 +840,9 @@ class Dagger:
             raise ValueError("pointcloud_source='depth' requires DooropeningEnv to enable the pointcloud camera.")
 
     def _init_viser_debug_tools(self):
-        """Create the Viser server, scene objects, and recording state used for debug playback."""
-        self._viser_server = None
-        self._viser_serializer = None
-        self._viser_pointcloud_handles = {}
-        self._viser_capture_requested = False
-        self._viser_live_update_requested = False
-        self._viser_replay_step_requested = False
-        self._viser_capture_iteration = 0
-        self._viser_capture_env_id = 0
+        """Initialize optional raw replay capture state used for point-cloud debugging."""
         self._viser_cached_ground_truth_pcd_world = None
-        self._viser_record_frames = []
-        self._viser_record_frame_count = 0
-        self._viser_record_latest_iteration = None
-        self._viser_record_limit_reached = False
-        self._viser_record_last_flush_frame_count = 0
-        self._viser_record_episode_active = False
-        self._viser_record_episode_env_id = 0
-        self._viser_record_episode_index = 0
-        self._viser_record_episode_start_iteration = None
+        self._viser_pending_debug_frame = None
         self._viser_raw_frames = []
         self._viser_raw_frame_count = 0
         self._viser_raw_chunk_index = 0
@@ -951,19 +852,9 @@ class Dagger:
 
         # Keep replay outputs next to checkpoints by default so a run's artifacts stay together.
         default_record_dir = Path(self.nn_dir).parent if self.nn_dir is not None else Path(os.getcwd())
-        default_serializer_path = default_record_dir / "viser_replay.viser"
-        configured_serializer_path = self.viser_serializer_cfg.get("path")
-        if configured_serializer_path is None:
-            self.viser_serializer_path = str(default_serializer_path)
-        else:
-            configured_serializer_path = Path(str(configured_serializer_path))
-            if not configured_serializer_path.is_absolute():
-                configured_serializer_path = default_record_dir / configured_serializer_path
-            self.viser_serializer_path = str(configured_serializer_path)
-
         configured_raw_path = self.viser_raw_cfg.get("path", self.viser_raw_cfg.get("raw_path"))
         if configured_raw_path is None:
-            self.viser_raw_path = str(Path(self.viser_serializer_path).with_suffix(".pt"))
+            self.viser_raw_path = str(default_record_dir / "viser_replay.pt")
         else:
             configured_raw_path = Path(str(configured_raw_path))
             if not configured_raw_path.is_absolute():
@@ -986,202 +877,53 @@ class Dagger:
             )
         self.viser_pointcloud_sensor_dt = max(float(pointcloud_sensor_dt), 1e-6)
         self.viser_pointcloud_sensor_fps = 1.0 / self.viser_pointcloud_sensor_dt
-        self.viser_serializer_frame_dt = float(
-            self.viser_serializer_cfg.get("frame_dt", self.viser_env_step_dt)
-        )
-
-        if not (self.viser_enabled or self.viser_serializer_enabled or self.viser_raw_enabled):
+        if not self.viser_raw_enabled:
             return
 
-        if self.viser_serializer_enabled:
-            serializer_dir = os.path.dirname(self.viser_serializer_path)
-            if serializer_dir:
-                os.makedirs(serializer_dir, exist_ok=True)
-        if self.viser_raw_enabled:
-            raw_dir = os.path.dirname(self.viser_raw_path)
-            if raw_dir:
-                os.makedirs(raw_dir, exist_ok=True)
-
-        needs_viser_server = self.viser_enabled or self.viser_serializer_enabled
-        if needs_viser_server:
-            try:
-                import viser
-            except ImportError:
-                if self.viser_enabled:
-                    raise ImportError(
-                        "dagger.viser.enabled=True requires the optional 'viser' package."
-                    )
-                if self.viser_serializer_enabled and not self.viser_raw_enabled:
-                    raise ImportError(
-                        "dagger.viser.serializer.enabled=True requires the optional 'viser' package."
-                    )
-                if self.rank == 0:
-                    print("Viser is not installed; serializer/live are unavailable, saving raw replay data only.")
-                return
-
-        if needs_viser_server:
-            # Start the browser-backed Viser server. It owns the GUI widgets and 3D scene below.
-            self._viser_server = viser.ViserServer()
-            self._viser_server.gui.configure_theme(control_width="medium")
-            # Add a small origin frame so the user can tell which way the display axes point.
-            self._viser_server.scene.add_frame(
-                "/base_axes",
-                show_axes=True,
-                axes_length=0.15,
-                axes_radius=0.01,
-                visible=True,
-            )
-            # Add a reference ground plane to make motion and scale easier to read by eye.
-            self._viser_server.scene.add_grid(
-                "/grid",
-                width=4,
-                height=4,
-                position=(0.0, 0.0, 0.0),
-                shadow_opacity=0.1,
-            )
-            # Pre-create point-cloud nodes once, then update only their `.points` arrays every frame.
-            self._viser_pointcloud_handles["ground_truth_points"] = self._viser_server.scene.add_point_cloud(
-                "/ground_truth_points",
-                points=torch.zeros((0, 3), dtype=torch.float32).cpu().numpy(),
-                colors=(120, 120, 120),
-                point_size=self.viser_point_size,
-            )
-            self._viser_pointcloud_handles["robot_obs_points"] = self._viser_server.scene.add_point_cloud(
-                "/robot_obs_points",
-                points=torch.zeros((0, 3), dtype=torch.float32).cpu().numpy(),
-                colors=(79, 195, 247),
-                point_size=self.viser_point_size,
-            )
-            self._viser_pointcloud_handles["policy_input_points"] = self._viser_server.scene.add_point_cloud(
-                "/policy_input_points",
-                points=torch.zeros((0, 3), dtype=torch.float32).cpu().numpy(),
-                colors=(0, 170, 120),
-                point_size=self.viser_point_size,
-            )
-
-            # Expose the currently visualized vectorized environment as a GUI control in the browser.
-            env_id_handle = self._viser_server.gui.add_number(
-                label="Env ID",
-                initial_value=self.viser_env_id,
-                min=0,
-                max=self.num_envs - 1,
-                step=1,
-                hint="Select environment index for point-cloud playback.",
-            )
-
-            @env_id_handle.on_update
-            def _(_event):
-                # Mirror GUI edits back into trainer state so subsequent captures use the new env id.
-                self.viser_env_id = int(env_id_handle.value)
-
-            if self.viser_serializer_enabled:
-                # This serializer captures the scene updates so they can be exported as a `.viser` replay.
-                self._viser_serializer = self._viser_server.get_scene_serializer()
+        raw_dir = os.path.dirname(self.viser_raw_path)
+        if raw_dir:
+            os.makedirs(raw_dir, exist_ok=True)
 
         if self.rank == 0:
-            if self.viser_enabled:
-                print(f"Viser live streaming enabled for env {self.viser_env_id}.")
-                print(f"Viser live update interval: every {self.viser_update_interval} training iterations.")
-            if self.viser_episode_replay_enabled:
-                print(f"Viser serialized replay capture enabled for env {self.viser_env_id}.")
-                print("Replay capture starts only at selected-env episode boundaries and records every step until the episode ends.")
-            if self.viser_serializer_enabled:
-                print(
-                    "Serialized replays will be written as "
-                    f"{self._format_iterated_record_path(self.viser_serializer_path, '<episode_tag>')}"
+            print(f"Viser raw replay capture enabled for env {self.viser_env_id}.")
+            print(
+                "Raw replay data will be written as "
+                f"{self._format_iterated_record_path(self.viser_raw_path, '<chunk_tag>')}"
+            )
+            print(
+                "Raw replay chunks will be written every "
+                f"{self.viser_raw_save_interval} iterations."
+            )
+            if self.viser_raw_max_frames > 0:
+                print(f"Each raw replay chunk will keep at most {self.viser_raw_max_frames} frames.")
+            print(
+                "Raw replay point budget: max_points={} (gt={}, obs={}, policy={}).".format(
+                    self.viser_raw_max_points,
+                    "off"
+                    if not self.viser_raw_include_ground_truth or self.viser_raw_max_points <= 0
+                    else "on",
+                    "off"
+                    if not self.viser_raw_include_robot_obs or self.viser_raw_max_points <= 0
+                    else "on",
+                    "off"
+                    if not self.viser_raw_include_policy_input or self.viser_raw_max_points <= 0
+                    else "on",
                 )
-            if self.viser_raw_enabled:
-                print(
-                    "Raw replay data will be written as "
-                    f"{self._format_iterated_record_path(self.viser_raw_path, '<chunk_tag>')}"
+            )
+            print(
+                "Replay timing: env_step_dt={:.6f}s ({:.2f} FPS), pointcloud_sensor_dt={:.6f}s ({:.2f} FPS).".format(
+                    self.viser_env_step_dt,
+                    self.viser_env_step_fps,
+                    self.viser_pointcloud_sensor_dt,
+                    self.viser_pointcloud_sensor_fps,
                 )
-                print(
-                    "Raw replay chunks will be written every "
-                    f"{self.viser_raw_save_interval} iterations, independent of episode boundaries."
-                )
-                if self.viser_raw_max_frames > 0:
-                    print(f"Each raw replay chunk will keep at most {self.viser_raw_max_frames} frames.")
-                print(
-                    "Raw replay point budgets: gt={}, obs={}, policy={}.".format(
-                        "off"
-                        if not self.viser_raw_include_ground_truth or self.viser_raw_ground_truth_max_points <= 0
-                        else self.viser_raw_ground_truth_max_points,
-                        "off"
-                        if not self.viser_raw_include_robot_obs or self.viser_raw_robot_obs_max_points <= 0
-                        else self.viser_raw_robot_obs_max_points,
-                        "off"
-                        if not self.viser_raw_include_policy_input or self.viser_raw_policy_input_max_points <= 0
-                        else self.viser_raw_policy_input_max_points,
-                    )
-                )
-            if self.viser_enabled or self.viser_serializer_enabled or self.viser_raw_enabled:
-                print(
-                    "Replay timing: env_step_dt={:.6f}s ({:.2f} FPS), pointcloud_sensor_dt={:.6f}s ({:.2f} FPS).".format(
-                        self.viser_env_step_dt,
-                        self.viser_env_step_fps,
-                        self.viser_pointcloud_sensor_dt,
-                        self.viser_pointcloud_sensor_fps,
-                    )
-                )
+            )
 
     def _get_viser_env_id(self):
-        """Clamp the selected environment index so debug capture never indexes outside the batch."""
+        """Clamp the configured replay env index so debug capture never indexes outside the batch."""
         if self.num_envs <= 0:
             return 0
         return max(0, min(int(self.viser_env_id), self.num_envs - 1))
-
-    def _start_viser_record_episode(self, iteration, env_id):
-        """Start a fresh replay buffer for the next complete episode of the selected env."""
-        self._viser_record_episode_active = True
-        self._viser_record_episode_env_id = int(env_id)
-        self._viser_record_episode_index += 1
-        self._viser_record_episode_start_iteration = int(iteration)
-        self._viser_record_frames = []
-        self._viser_record_frame_count = 0
-        self._viser_record_latest_iteration = None
-        self._viser_record_last_flush_frame_count = 0
-        self._viser_record_limit_reached = False
-        self._viser_cached_ground_truth_pcd_world = None
-        if self.viser_serializer_enabled and self._viser_server is not None:
-            # Reset the serializer so each `.viser` file contains exactly one episode.
-            self._viser_serializer = self._viser_server.get_scene_serializer()
-        if self.rank == 0:
-            print(
-                "Started Viser replay episode {} for env {} at iteration {}.".format(
-                    self._viser_record_episode_index,
-                    self._viser_record_episode_env_id,
-                    self._viser_record_episode_start_iteration,
-                )
-            )
-
-    def _finish_viser_record_episode(self, episode_complete, reason):
-        """Flush the current episode replay to disk and clear the in-memory episode buffer."""
-        if not self.viser_episode_replay_enabled:
-            return
-
-        frame_count = self._viser_record_frame_count
-        if frame_count > 0:
-            self._flush_viser_recordings(episode_complete=episode_complete)
-            if self.rank == 0:
-                status = "complete" if episode_complete else "partial"
-                print(
-                    "Saved {} Viser episode {} for env {} with {} frames ({}).".format(
-                        status,
-                        self._viser_record_episode_index,
-                        self._viser_record_episode_env_id,
-                        frame_count,
-                        reason,
-                    )
-                )
-
-        self._viser_record_frames = []
-        self._viser_record_frame_count = 0
-        self._viser_record_latest_iteration = None
-        self._viser_record_last_flush_frame_count = 0
-        self._viser_record_limit_reached = False
-        self._viser_record_episode_active = False
-        self._viser_record_episode_start_iteration = None
-        self._viser_cached_ground_truth_pcd_world = None
 
     def _build_viser_raw_payload(self, latest_iteration, chunk_complete):
         return {
@@ -1203,9 +945,7 @@ class Dagger:
                 "include_ground_truth": bool(self.viser_raw_include_ground_truth),
                 "include_robot_obs": bool(self.viser_raw_include_robot_obs),
                 "include_policy_input": bool(self.viser_raw_include_policy_input),
-                "ground_truth_max_points": int(self.viser_raw_ground_truth_max_points),
-                "robot_obs_max_points": int(self.viser_raw_robot_obs_max_points),
-                "policy_input_max_points": int(self.viser_raw_policy_input_max_points),
+                "max_points": int(self.viser_raw_max_points),
             },
             "glorbot_urdf_path": str(glorbot_urdf_path),
             "robot_joint_names": list(getattr(self.ov_env.robot, "joint_names", [])),
@@ -1284,44 +1024,6 @@ class Dagger:
         self._viser_raw_chunk_start_iteration = None
         self._viser_raw_latest_iteration = None
 
-    def _should_capture_viser_replay_step(self, iteration):
-        """Capture one selected-env replay episode at a time, starting only at an eligible episode boundary."""
-        if not self.viser_episode_replay_enabled:
-            return False
-
-        env_id = self._get_viser_env_id()
-        self._viser_capture_env_id = env_id
-
-        if self._viser_record_episode_active and env_id != self._viser_record_episode_env_id:
-            self._finish_viser_record_episode(
-                episode_complete=False,
-                reason=f"selected env changed from {self._viser_record_episode_env_id} to {env_id}",
-            )
-
-        if self._viser_record_episode_active:
-            self._viser_capture_env_id = self._viser_record_episode_env_id
-            return True
-
-        current_length = int(self.current_lengths[env_id].detach().cpu().item())
-        if current_length != 0:
-            return False
-
-        self._start_viser_record_episode(iteration, env_id)
-        self._viser_capture_env_id = self._viser_record_episode_env_id
-        return True
-
-    def _should_capture_viser_frame(self, iteration):
-        """Decide whether this step needs live Viser streaming, replay capture, or both."""
-        self._viser_live_update_requested = (
-            self.viser_enabled
-            and self._viser_server is not None
-            and (iteration % self.viser_update_interval == 0)
-        )
-        self._viser_replay_step_requested = self._should_capture_viser_replay_step(iteration)
-        if not self._viser_replay_step_requested:
-            self._viser_capture_env_id = self._get_viser_env_id()
-        return self._viser_live_update_requested or self._viser_replay_step_requested or self.viser_raw_enabled
-
     def _prepare_viser_world_points_from_local(
         self,
         pointcloud_local,
@@ -1331,7 +1033,7 @@ class Dagger:
         max_points,
         drop_zero_rows=False,
     ):
-        """Convert a base-frame point cloud for one env into world coordinates and move it to CPU for Viser."""
+        """Convert a base-frame point cloud for one env into world coordinates for raw replay output."""
         if pointcloud_local is None:
             return torch.zeros((0, 3), dtype=torch.float32)
 
@@ -1352,7 +1054,7 @@ class Dagger:
         return world_points.to(dtype=torch.float32).cpu()
 
     def _prepare_viser_points(self, pointcloud, env_id, max_points, drop_zero_rows=False):
-        """Extract one env's point cloud, sanitize it, and downsample it to a Viser-friendly CPU tensor."""
+        """Extract one env's point cloud, sanitize it, and downsample it on CPU for replay export."""
         if pointcloud is None:
             return torch.zeros((0, 3), dtype=torch.float32)
         if pointcloud.ndim == 2 and pointcloud.shape[-1] == 3:
@@ -1363,11 +1065,11 @@ class Dagger:
             raise ValueError(f"Expected pointcloud with shape (N, 3) or (B, N, 3), got {tuple(pointcloud.shape)}.")
 
         points = points.to(dtype=torch.float32, device="cpu")
-        # Remove NaN/Inf rows before passing anything to the viewer.
+        # Remove NaN/Inf rows before exporting debug captures.
         finite_mask = torch.isfinite(points).all(dim=-1)
         points = points[finite_mask]
         if drop_zero_rows and points.numel() > 0:
-            # Policy inputs may be padded with zeros; hide those rows in the viewer.
+            # Policy inputs may be padded with zeros; drop those rows from replay output.
             nonzero_mask = torch.any(points.abs() > 1e-6, dim=-1)
             points = points[nonzero_mask]
         if max_points is not None and max_points > 0 and points.shape[0] > max_points:
@@ -1382,25 +1084,6 @@ class Dagger:
         path = Path(path_str)
         return str(path.with_name(f"{path.stem}_{iteration}{path.suffix}"))
 
-    def _set_viser_pointcloud(self, handle_name, points_cpu):
-        """Push a new numpy point array into an existing Viser scene node."""
-        if self._viser_server is None:
-            return
-        handle = self._viser_pointcloud_handles[handle_name]
-        handle.points = points_cpu.numpy()
-
-    def _to_viser_display_frame(self, points_cpu, env_id):
-        """Express world points in the robot-root frame so Viser shows motion relative to the robot body."""
-        if points_cpu is None or points_cpu.numel() == 0:
-            return points_cpu
-        root_pos_w = self.ov_env.robot.data.body_pos_w[env_id, self.robot_root_body_idx].detach().to(device="cpu", dtype=torch.float32)
-        root_quat_w = self.ov_env.robot.data.body_quat_w[env_id, self.robot_root_body_idx].detach().to(device="cpu", dtype=torch.float32)
-        return world_to_local(
-            points_cpu.unsqueeze(0),
-            root_pos_w.unsqueeze(0),
-            root_quat_w.unsqueeze(0),
-        ).squeeze(0)
-
     def _maybe_update_viser_debug(
         self,
         iteration,
@@ -1411,186 +1094,83 @@ class Dagger:
         ground_truth_pcd_world,
         robot_obs_pcd_base,
         policy_input_pcd_base,
+        aux_prediction=None,
     ):
-        """Stream the selected env live and/or append the current step to replay outputs."""
-        if not self._viser_capture_requested:
+        """Append the selected env to the raw replay output."""
+        if not self.viser_raw_enabled:
             return
 
-        record_active = self._viser_replay_step_requested and self._viser_record_episode_active
-        raw_active = self.viser_raw_enabled
-        env_id = (
-            max(0, min(int(self._viser_record_episode_env_id), self.num_envs - 1))
-            if record_active
-            else max(0, min(int(self._viser_capture_env_id), self.num_envs - 1))
-        )
+        env_id = self._get_viser_env_id()
         show_policy_input = self.viser_show_policy_input and policy_input_pcd_base is not None
-        needs_scene_points = self._viser_live_update_requested or (record_active and self.viser_serializer_enabled)
+        if self._viser_raw_chunk_start_iteration is None:
+            self._viser_raw_chunk_index += 1
+            self._viser_raw_chunk_env_id = int(env_id)
+            self._viser_raw_chunk_start_iteration = int(iteration)
+        elif self._viser_raw_chunk_env_id != int(env_id):
+            self._viser_raw_chunk_env_id = None
+        self._viser_raw_latest_iteration = int(iteration)
 
-        display_gt_points = None
-        display_obs_points = None
-        display_policy_points = None
-        if needs_scene_points:
-            # Ground-truth points already live in world space; the other clouds must be lifted from base space first.
-            gt_points = self._prepare_viser_points(ground_truth_pcd_world, env_id, self.viser_max_points)
-            obs_points = self._prepare_viser_world_points_from_local(
+        # Raw replay metadata stores world-frame points plus robot/door state for offline playback.
+        ground_truth_points_world = None
+        if self.viser_raw_include_ground_truth and self.viser_raw_max_points > 0:
+            ground_truth_points_world = self._prepare_viser_points(
+                ground_truth_pcd_world,
+                env_id,
+                self.viser_raw_max_points,
+            ).to(dtype=torch.float16)
+
+        robot_obs_points_world = None
+        if self.viser_raw_include_robot_obs and self.viser_raw_max_points > 0:
+            robot_obs_points_world = self._prepare_viser_world_points_from_local(
                 robot_obs_pcd_base,
                 robot_base_pos_w,
                 robot_base_quat_w,
                 env_id,
-                self.viser_max_points,
-            )
-            policy_points = self._prepare_viser_world_points_from_local(
+                self.viser_raw_max_points,
+            ).to(dtype=torch.float16)
+
+        policy_input_points_world = None
+        if (
+            self.viser_raw_include_policy_input
+            and policy_input_pcd_base is not None
+            and self.viser_raw_max_points > 0
+        ):
+            policy_input_points_world = self._prepare_viser_world_points_from_local(
                 policy_input_pcd_base,
                 robot_base_pos_w,
                 robot_base_quat_w,
                 env_id,
-                self.viser_max_points,
+                self.viser_raw_max_points,
                 drop_zero_rows=True,
-            ) if show_policy_input else torch.zeros((0, 3), dtype=torch.float32)
-
-            # Display in robot-root coordinates so the point clouds stay centered around the agent in the browser.
-            display_gt_points = self._to_viser_display_frame(gt_points, env_id)
-            display_obs_points = self._to_viser_display_frame(obs_points, env_id)
-            display_policy_points = self._to_viser_display_frame(policy_points, env_id)
-
-        if self._viser_live_update_requested and self._viser_server is not None:
-            self._set_viser_pointcloud("ground_truth_points", display_gt_points)
-            self._set_viser_pointcloud("robot_obs_points", display_obs_points)
-            self._set_viser_pointcloud("policy_input_points", display_policy_points)
-
-        if not record_active and not raw_active:
-            return
-
-        if record_active:
-            self._viser_record_frame_count += 1
-            self._viser_record_latest_iteration = int(iteration)
-            if (
-                self.viser_serializer_warning_max_frames > 0
-                and self._viser_record_frame_count > self.viser_serializer_warning_max_frames
-                and not self._viser_record_limit_reached
-            ):
-                print(
-                    "dagger.viser replay max_frames={} was exceeded; continuing so the saved replay still contains "
-                    "the full episode.".format(self.viser_serializer_warning_max_frames)
-                )
-                self._viser_record_limit_reached = True
-
-        if raw_active:
-            if self._viser_raw_chunk_start_iteration is None:
-                self._viser_raw_chunk_index += 1
-                self._viser_raw_chunk_env_id = int(env_id)
-                self._viser_raw_chunk_start_iteration = int(iteration)
-            elif self._viser_raw_chunk_env_id != int(env_id):
-                self._viser_raw_chunk_env_id = None
-            self._viser_raw_latest_iteration = int(iteration)
-            # Raw replay metadata stores world-frame points plus robot/door state for offline playback.
-            ground_truth_points_world = None
-            if self.viser_raw_include_ground_truth and self.viser_raw_ground_truth_max_points > 0:
-                ground_truth_points_world = self._prepare_viser_points(
-                    ground_truth_pcd_world,
-                    env_id,
-                    self.viser_raw_ground_truth_max_points,
-                ).to(dtype=torch.float16)
-
-            robot_obs_points_world = None
-            if self.viser_raw_include_robot_obs and self.viser_raw_robot_obs_max_points > 0:
-                robot_obs_points_world = self._prepare_viser_world_points_from_local(
-                    robot_obs_pcd_base,
-                    robot_base_pos_w,
-                    robot_base_quat_w,
-                    env_id,
-                    self.viser_raw_robot_obs_max_points,
-                ).to(dtype=torch.float16)
-
-            policy_input_points_world = None
-            if (
-                self.viser_raw_include_policy_input
-                and policy_input_pcd_base is not None
-                and self.viser_raw_policy_input_max_points > 0
-            ):
-                policy_input_points_world = self._prepare_viser_world_points_from_local(
-                    policy_input_pcd_base,
-                    robot_base_pos_w,
-                    robot_base_quat_w,
-                    env_id,
-                    self.viser_raw_policy_input_max_points,
-                    drop_zero_rows=True,
-                ).to(dtype=torch.float16)
-            frame_record = {
-                "iteration": int(iteration),
-                "sim_frame": int(self.frame),
-                "env_id": int(env_id),
-                "pointcloud_source": self.pointcloud_source,
-                "ground_truth_points_world": ground_truth_points_world,
-                "robot_obs_points_world": robot_obs_points_world,
-                "policy_input_points_world": policy_input_points_world,
-                "robot_joint_pos": q_pos[env_id].detach().cpu().to(dtype=torch.float32),
-                "door_joint_pos": door_joint_pos[env_id].detach().cpu().to(dtype=torch.float32),
-                "robot_base_pos_w": self.ov_env.robot.data.body_pos_w[env_id, self.robot_base_body_idx].detach().cpu().to(dtype=torch.float32),
-                "robot_base_quat_w": self.ov_env.robot.data.body_quat_w[env_id, self.robot_base_body_idx].detach().cpu().to(dtype=torch.float32),
-                "door_base_pos_w": self.ov_env.door.data.body_pos_w[env_id, self.door_base_body_idx].detach().cpu().to(dtype=torch.float32),
-                "door_base_quat_w": self.ov_env.door.data.body_quat_w[env_id, self.door_base_body_idx].detach().cpu().to(dtype=torch.float32),
-                "door_asset_idx": int(self.env_asset_idx[env_id].detach().cpu().item()),
-                "door_asset_path": str(door_asset_paths[int(self.env_asset_idx[env_id].detach().cpu().item())]),
-            }
-            self._viser_raw_frames.append(frame_record)
-            self._trim_viser_raw_frames()
-            self._maybe_flush_viser_raw_snapshot(iteration)
-
-        if record_active and self.viser_serializer_enabled and self._viser_serializer is not None:
-            # Keep the serialized scene in sync with the replay timeline written at episode end.
-            if not self._viser_live_update_requested:
-                self._set_viser_pointcloud("ground_truth_points", display_gt_points)
-                self._set_viser_pointcloud("robot_obs_points", display_obs_points)
-                self._set_viser_pointcloud("policy_input_points", display_policy_points)
-            self._viser_serializer.insert_sleep(self.viser_serializer_frame_dt)
-
-    def _maybe_finish_viser_record_episode(self, done_mask):
-        """Flush the replay once the selected env finishes its current episode."""
-        if not self.viser_episode_replay_enabled or not self._viser_record_episode_active or done_mask.numel() == 0:
-            return
-
-        selected_env = int(self._viser_record_episode_env_id)
-        if not bool(torch.any(done_mask == selected_env).item()):
-            return
-
-        self._finish_viser_record_episode(
-            episode_complete=True,
-            reason=f"env {selected_env} terminated",
-        )
-
-    def _flush_viser_recordings(self, episode_complete):
-        """Write the buffered selected-env episode replay to disk."""
-        if not self.viser_episode_replay_enabled or self.rank != 0:
-            return
-
-        if self._viser_record_frame_count <= 0:
-            return
-
-        if self._viser_record_frame_count == self._viser_record_last_flush_frame_count:
-            return
-
-        latest_iteration = int(self._viser_record_latest_iteration)
-        record_tag = f"episode_{self._viser_record_episode_index:04d}_iter_{latest_iteration}"
-
-        if self.viser_serializer_enabled and self._viser_serializer is not None:
-            # `.viser` files contain the scene update stream and can be replayed directly in Viser tooling.
-            Path(self._format_iterated_record_path(self.viser_serializer_path, record_tag)).write_bytes(
-                self._viser_serializer.serialize()
-            )
-            if self._viser_server is not None:
-                self._viser_serializer = self._viser_server.get_scene_serializer()
-
-        self._viser_record_last_flush_frame_count = self._viser_record_frame_count
+            ).to(dtype=torch.float16)
+        frame_record = {
+            "iteration": int(iteration),
+            "sim_frame": int(self.frame),
+            "env_id": int(env_id),
+            "pointcloud_source": self.pointcloud_source,
+            "ground_truth_points_world": ground_truth_points_world,
+            "robot_obs_points_world": robot_obs_points_world,
+            "policy_input_points_world": policy_input_points_world,
+            "aux_prediction": None
+            if aux_prediction is None
+            else self._aux_to_2d(aux_prediction)[env_id].detach().cpu().to(dtype=torch.float32),
+            "robot_joint_pos": q_pos[env_id].detach().cpu().to(dtype=torch.float32),
+            "door_joint_pos": door_joint_pos[env_id].detach().cpu().to(dtype=torch.float32),
+            "robot_base_pos_w": self.ov_env.robot.data.body_pos_w[env_id, self.robot_base_body_idx].detach().cpu().to(dtype=torch.float32),
+            "robot_base_quat_w": self.ov_env.robot.data.body_quat_w[env_id, self.robot_base_body_idx].detach().cpu().to(dtype=torch.float32),
+            "door_base_pos_w": self.ov_env.door.data.body_pos_w[env_id, self.door_base_body_idx].detach().cpu().to(dtype=torch.float32),
+            "door_base_quat_w": self.ov_env.door.data.body_quat_w[env_id, self.door_base_body_idx].detach().cpu().to(dtype=torch.float32),
+            "door_asset_idx": int(self.env_asset_idx[env_id].detach().cpu().item()),
+            "door_asset_path": str(door_asset_paths[int(self.env_asset_idx[env_id].detach().cpu().item())]),
+        }
+        self._viser_raw_frames.append(frame_record)
+        self._trim_viser_raw_frames()
+        self._maybe_flush_viser_raw_snapshot(iteration)
 
     def _close_viser_debug_tools(self):
-        """Flush any in-progress replay and stop the background Viser server on shutdown."""
-        if self._viser_record_episode_active or self._viser_record_frame_count > 0:
-            self._finish_viser_record_episode(episode_complete=False, reason="shutdown")
+        """Flush any in-progress raw replay chunk on shutdown."""
         if self._viser_raw_frame_count > 0:
             self._flush_viser_raw_recording(chunk_complete=False, reason="shutdown")
-        if self._viser_server is not None:
-            self._viser_server.stop()
 
     def _extract_model_state(self, weights):
         if isinstance(weights, dict):
@@ -1694,18 +1274,17 @@ class Dagger:
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
 
-    def _record_timing(self, name, elapsed_s):
-        stats = self._timing_stats[name]
-        stats["sum_ms"] += elapsed_s * 1000.0
-        stats["count"] += 1
+    def _record_timing(self, elapsed_s):
+        self._timing_stats["sum_ms"] += elapsed_s * 1000.0
+        self._timing_stats["count"] += 1
 
     def _consume_timing_means(self):
-        means = {}
-        for name, stats in self._timing_stats.items():
-            means[name] = None if stats["count"] == 0 else stats["sum_ms"] / stats["count"]
-            stats["sum_ms"] = 0.0
-            stats["count"] = 0
-        return means
+        if self._timing_stats["count"] == 0:
+            return None
+        mean_ms = self._timing_stats["sum_ms"] / self._timing_stats["count"]
+        self._timing_stats["sum_ms"] = 0.0
+        self._timing_stats["count"] = 0
+        return mean_ms
 
     def _build_sampler_camera_spec(self):
         camera_cfg = self.ov_env.cfg.pointcloud_camera_cfg
@@ -2055,11 +1634,10 @@ class Dagger:
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
         gt_scene_pcd_world = self._sample_scene_pointcloud_world_sampler()
-        if self._viser_capture_requested:
+        if self.viser_raw_enabled:
             # Keep only the selected env on CPU so Viser debug does not retain an extra
             # full batched scene pointcloud on GPU during training/debug runs.
-            self._viser_cached_ground_truth_pcd_world = gt_scene_pcd_world[self._viser_capture_env_id].detach().cpu()
-        # self._debug_visualize_pointcloud(gt_scene_pcd_world, "gt_scene_pointcloud_before_render")
+            self._viser_cached_ground_truth_pcd_world = gt_scene_pcd_world[self._get_viser_env_id()].detach().cpu()
         rendered_pcd_world, _ = simulate_depth_cam_render_from_pose(
             pcd=gt_scene_pcd_world,
             camera_pose=self._get_sampler_camera_pose(),
@@ -2071,7 +1649,6 @@ class Dagger:
             jitter_mode=self.sampler_render_jitter_mode,
             use_compile=self.sampler_render_use_compile,
         )
-        # self._debug_visualize_pointcloud(rendered_pcd_world, "sampler_scene_pointcloud")
         scene_pointcloud_base = world_to_local(rendered_pcd_world, robot_base_pos_w, robot_base_quat_w)
         return scene_pointcloud_base
 
@@ -2099,22 +1676,21 @@ class Dagger:
         wall_pcd_world = self._sample_wall_pointcloud_world()
         if wall_pcd_world.shape[1] > 0:
             scene_pcd_world = torch.cat([scene_pcd_world, wall_pcd_world], dim=1)
-        if self._viser_capture_requested:
-            self._viser_cached_ground_truth_pcd_world = scene_pcd_world[self._viser_capture_env_id].detach().cpu()
+        if self.viser_raw_enabled:
+            self._viser_cached_ground_truth_pcd_world = scene_pcd_world[self._get_viser_env_id()].detach().cpu()
         door_pcd_base = world_to_local(scene_pcd_world, robot_base_pos_w, robot_base_quat_w)
         # Filter floor points while preserving the batched layout expected by the cropper.
         floor_mask = door_pcd_base[..., 2] > 0.1
         door_pcd_base = door_pcd_base.clone()
         door_pcd_base[~floor_mask] = float("nan")
-        # self._debug_visualize_pointcloud(door_pcd_base, "depth_door_pointcloud")
         return door_pcd_base
 
     def _sample_door_pointcloud_base_lidar(self):
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
         gt_scene_pcd_world = self._sample_scene_pointcloud_world_sampler()
-        if self._viser_capture_requested:
-            self._viser_cached_ground_truth_pcd_world = gt_scene_pcd_world[self._viser_capture_env_id].detach().cpu()
+        if self.viser_raw_enabled:
+            self._viser_cached_ground_truth_pcd_world = gt_scene_pcd_world[self._get_viser_env_id()].detach().cpu()
 
         rendered_pcd_world, _ = simulate_lidar_render_from_pose(
             pcd=gt_scene_pcd_world,
@@ -2133,8 +1709,6 @@ class Dagger:
         return world_to_local(rendered_pcd_world, robot_base_pos_w, robot_base_quat_w)
 
     def _sample_door_pointcloud_base(self):
-        self._sync_timing_device()
-        start_time = time.perf_counter()
         self._viser_cached_ground_truth_pcd_world = None
         if self.pointcloud_source == "sampler":
             door_pcd_base = self._sample_door_pointcloud_base_sampler()
@@ -2143,38 +1717,7 @@ class Dagger:
         else:
             door_pcd_base = self._sample_door_pointcloud_base_lidar()
         door_pcd_base = self._filter_robot_points_base(door_pcd_base)
-        self._sync_timing_device()
-        self._record_timing("pointcloud_ms", time.perf_counter() - start_time)
         return door_pcd_base
-
-    def _debug_visualize_pointcloud(self, pointcloud, tag):
-        env_id = 0
-        if env_id is None:
-            return
-        if pointcloud.ndim != 3:
-            raise ValueError(f"Expected batched pointcloud with shape (B, N, 3), got {tuple(pointcloud.shape)}.")
-        env_id = int(env_id)
-        if env_id < 0 or env_id >= pointcloud.shape[0]:
-            raise IndexError(f"debug_pointcloud_env_id={env_id} is out of range for batch size {pointcloud.shape[0]}.")
-
-        import numpy as np
-        import open3d as o3d
-
-        np_points = pointcloud[env_id].detach().cpu().numpy().astype(np.float64)
-        finite_mask = np.isfinite(np_points).all(axis=-1)
-        np_points = np_points[finite_mask]
-
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(np.ascontiguousarray(np_points))
-
-        os.makedirs(self.debug_pointcloud_dir, exist_ok=True)
-        filename = os.path.join(self.debug_pointcloud_dir, f"{tag}_env{env_id}.ply")
-        print(f"Saving pointcloud to {filename}")
-        o3d.io.write_point_cloud(filename, pcd)
-        try:
-            o3d.visualization.draw_geometries([pcd], window_name=f"{tag} env {env_id}")
-        except Exception as exc:
-            print(f"Skipping pointcloud visualization for {filename}: {exc}")
 
     def _build_local_pcd(self, door_pcd_base, palm_pos_base, robot_pcd_base=None):
         pcd_parts = []
@@ -2326,7 +1869,7 @@ class Dagger:
         aux_target_vector = (
             self._stack_aux_state_values(self._get_aux_state_values()) if need_aux_target_vector else None
         )
-        if self.has_aux_input and self._use_aux_feedback():
+        if self.has_aux_input and self.aux_feedback_to_policy:
             if self.aux_buffer is None:
                 raise RuntimeError("Aux feedback requested but aux_buffer is not initialized.")
             aux_input_vector = self.aux_buffer.clone()
@@ -2369,29 +1912,26 @@ class Dagger:
 
         for key in self.pcd_encoders_keys:
             if key == "local_pcd_t":
-                # self._debug_visualize_pointcloud(door_pcd_base, "door_pcd_base")
                 obs[key] = self._build_local_pcd(
                     door_pcd_base,
                     palm_pos_base,
                     robot_pcd_base=robot_pcd_base,
                 )
-                # self._debug_visualize_pointcloud(obs[key], "local_pcd_t")
             else:
                 raise KeyError(f"Unsupported student pointcloud key '{key}' in config.")
 
-        if self._viser_capture_requested:
-            self._maybe_update_viser_debug(
-                iteration=self._viser_capture_iteration,
-                q_pos=q_pos,
-                door_joint_pos=door_joint_pos,
-                robot_base_pos_w=robot_base_pos_w,
-                robot_base_quat_w=robot_base_quat_w,
-                ground_truth_pcd_world=self._viser_cached_ground_truth_pcd_world,
-                robot_obs_pcd_base=door_pcd_base,
-                policy_input_pcd_base=obs.get("local_pcd_t"),
-            )
+        if self.viser_raw_enabled:
+            self._viser_pending_debug_frame = {
+                "iteration": iteration,
+                "q_pos": q_pos,
+                "door_joint_pos": door_joint_pos,
+                "robot_base_pos_w": robot_base_pos_w,
+                "robot_base_quat_w": robot_base_quat_w,
+                "ground_truth_pcd_world": self._viser_cached_ground_truth_pcd_world,
+                "robot_obs_pcd_base": door_pcd_base,
+                "policy_input_pcd_base": obs.get("local_pcd_t"),
+            }
             self._viser_cached_ground_truth_pcd_world = None
-            self._viser_capture_requested = False
 
         self.latest_aux_input_vector = None if aux_input_vector is None else aux_input_vector.detach().clone()
         self.latest_aux_target_vector = None if aux_target_vector is None else aux_target_vector.detach().clone()
@@ -2423,11 +1963,7 @@ class Dagger:
             return self.teacher_forcing_min_beta
 
         progress = transition_iteration / float(self.teacher_forcing_transition_iters)
-        if self.teacher_forcing_schedule == "linear":
-            schedule_value = 1.0 - progress
-        else:
-            schedule_value = 0.5 * (1.0 + math.cos(math.pi * progress))
-
+        schedule_value = 1.0 - progress
         beta = self.teacher_forcing_min_beta + (1.0 - self.teacher_forcing_min_beta) * schedule_value
         return float(max(self.teacher_forcing_min_beta, min(1.0, beta)))
 
@@ -2487,16 +2023,6 @@ class Dagger:
         step_actions[teacher_mask] = teacher_actions[teacher_mask]
         return step_actions, beta
 
-    def _update_last_frame_tracker(self):
-        ref_motion_lib = getattr(self.ov_env, "ref_motion_lib", None)
-        if ref_motion_lib is None:
-            return
-        next_frame_idx = torch.clamp(
-            ref_motion_lib.frame_idx.to(device=self.device, dtype=torch.float32) + float(ref_motion_lib.velocity),
-            max=self.success_frame_idx,
-        )
-        self.episode_reached_last_frame |= next_frame_idx >= self.success_frame_idx
-
     def _mean_completed_metric(self, values):
         if not values:
             return None
@@ -2508,9 +2034,7 @@ class Dagger:
 
         episode_rewards = self.current_rewards[done_mask, 0].detach().cpu().tolist()
         episode_lengths = self.current_lengths[done_mask].detach().cpu().tolist()
-        episode_successes = (
-            self.episode_reached_last_frame[done_mask] | timed_out[done_mask]
-        ).to(dtype=torch.float32).detach().cpu().tolist()
+        episode_successes = timed_out[done_mask].to(dtype=torch.float32).detach().cpu().tolist()
 
         self.completed_rewards.extend(float(value) for value in episode_rewards)
         self.completed_lengths.extend(float(value) for value in episode_lengths)
@@ -2524,7 +2048,7 @@ class Dagger:
         success_rate = self._mean_completed_metric(self.completed_successes)
         teacher_env_fraction = self._get_teacher_forcing_env_fraction()
         student_env_fraction = 1.0 - teacher_env_fraction
-        timing_means = self._consume_timing_means()
+        iteration_time_ms = self._consume_timing_means()
 
         if self.rank == 0:
             print("=" * 10)
@@ -2548,8 +2072,8 @@ class Dagger:
                 print("Episode Length:", episode_length)
             if success_rate is not None:
                 print("Success Rate:", success_rate)
-            if timing_means["iteration_ms"] is not None:
-                print("Iteration Time (ms):", timing_means["iteration_ms"])
+            if iteration_time_ms is not None:
+                print("Iteration Time (ms):", iteration_time_ms)
             # for key, value in sorted(self.latest_env_log_metrics.items()):
             #     print(f"{key}:", value)
 
@@ -2576,14 +2100,8 @@ class Dagger:
         if self.aux_pregrasp_dropout_prob > 0.0:
             metrics["stats/aux_pregrasp_env_fraction"] = self.latest_aux_pregrasp_env_fraction
             metrics["stats/aux_pregrasp_dropout_fraction"] = self.latest_aux_pregrasp_dropout_fraction
-        if timing_means["iteration_ms"] is not None:
-            metrics["timing/iteration_ms"] = timing_means["iteration_ms"]
-        if timing_means["student_obs_ms"] is not None:
-            metrics["timing/student_obs_ms"] = timing_means["student_obs_ms"]
-        if timing_means["pointcloud_ms"] is not None:
-            metrics["timing/pointcloud_ms"] = timing_means["pointcloud_ms"]
-        if timing_means["env_step_ms"] is not None:
-            metrics["timing/env_step_ms"] = timing_means["env_step_ms"]
+        if iteration_time_ms is not None:
+            metrics["timing/iteration_ms"] = iteration_time_ms
         if self.latest_env_log_metrics:
             metrics.update(self.latest_env_log_metrics)
         self._wandb_log(metrics, step=iteration)
@@ -2605,7 +2123,6 @@ class Dagger:
             self._resample_wall_distractors()
             self._seed_student_histories()
             self._seed_aux_buffer()
-            self.episode_reached_last_frame.zero_()
             self._resample_teacher_forcing_env_mask(self.resume_iteration)
 
             start_iteration = int(self.resume_iteration)
@@ -2614,26 +2131,31 @@ class Dagger:
                 self._sync_timing_device()
                 iteration_start_time = time.perf_counter()
 
-                self._sync_timing_device()
-                student_obs_start_time = time.perf_counter()
-                self._viser_capture_iteration = iteration
-                self._viser_capture_requested = self._should_capture_viser_frame(iteration)
                 student_obs = self._build_student_obs(iteration=iteration)
-                self._sync_timing_device()
-                self._record_timing("student_obs_ms", time.perf_counter() - student_obs_start_time)
                 student_output = self._student_forward(student_obs)
                 student_actions = torch.clamp(student_output["action"][:, 0, :], -1.0, 1.0)
                 # Capture q_t before stepping so prev_q features align with the next state.
                 if self.latest_student_proprio_vector is None:
                     raise RuntimeError("Expected the latest student proprio vector to be captured while building obs.")
                 current_q_pos = self.latest_student_proprio_vector.detach().clone()
+                aux_prediction_for_replay = None
                 if self.has_aux_prediction:
-                    if self.latest_aux_input_vector is None:
-                        raise RuntimeError("Expected the latest auxiliary input vector while aux prediction is enabled.")
-                    self.aux_buffer[:] = self._decode_aux_prediction(
-                        student_output["aux"].detach(),
-                        self.latest_aux_input_vector,
+                    aux_prediction_for_replay = self._decode_aux_prediction(student_output["aux"].detach())
+                    self.aux_buffer[:] = aux_prediction_for_replay
+
+                if self.viser_raw_enabled and self._viser_pending_debug_frame is not None:
+                    self._maybe_update_viser_debug(
+                        iteration=self._viser_pending_debug_frame["iteration"],
+                        q_pos=self._viser_pending_debug_frame["q_pos"],
+                        door_joint_pos=self._viser_pending_debug_frame["door_joint_pos"],
+                        robot_base_pos_w=self._viser_pending_debug_frame["robot_base_pos_w"],
+                        robot_base_quat_w=self._viser_pending_debug_frame["robot_base_quat_w"],
+                        ground_truth_pcd_world=self._viser_pending_debug_frame["ground_truth_pcd_world"],
+                        robot_obs_pcd_base=self._viser_pending_debug_frame["robot_obs_pcd_base"],
+                        policy_input_pcd_base=self._viser_pending_debug_frame["policy_input_pcd_base"],
+                        aux_prediction=aux_prediction_for_replay,
                     )
+                    self._viser_pending_debug_frame = None
 
                 teacher_actions = None
                 total_loss = None
@@ -2645,12 +2167,9 @@ class Dagger:
                     teacher_actions = teacher_output["actions"]
                     aux_target = None
                     if self.has_aux_prediction:
-                        if self.latest_aux_target_vector is None or self.latest_aux_input_vector is None:
-                            raise RuntimeError("Expected auxiliary vectors while aux prediction is enabled.")
-                        aux_target = self._get_aux_target(
-                            self.latest_aux_target_vector,
-                            self.latest_aux_input_vector,
-                        )
+                        if self.latest_aux_target_vector is None:
+                            raise RuntimeError("Expected the latest auxiliary target vector while aux prediction is enabled.")
+                        aux_target = self._get_aux_target(self.latest_aux_target_vector)
                     total_loss, action_loss, aux_loss = self._compute_student_loss(
                         student_output,
                         teacher_output["mus"],
@@ -2671,12 +2190,7 @@ class Dagger:
                     teacher_actions,
                     iteration,
                 )
-                self._update_last_frame_tracker()
-                self._sync_timing_device()
-                env_step_start_time = time.perf_counter()
                 obs, rew, out_of_reach, timed_out, step_extras = self.env.step(step_actions)
-                self._sync_timing_device()
-                self._record_timing("env_step_ms", time.perf_counter() - env_step_start_time)
                 self._update_logged_env_metrics(step_extras)
                 current_pd_targets = self._get_implemented_action_vector().detach().clone()
 
@@ -2687,7 +2201,6 @@ class Dagger:
                 self.current_rewards += rew.unsqueeze(-1)
                 self.current_lengths += 1
                 done_mask = torch.nonzero(out_of_reach | timed_out, as_tuple=False).squeeze(-1)
-                self._maybe_finish_viser_record_episode(done_mask)
                 if done_mask.numel() > 0:
                     self._update_completed_episode_metrics(done_mask, timed_out)
                     self.current_rewards[done_mask] = 0.0
@@ -2695,16 +2208,15 @@ class Dagger:
                     self._resample_wall_distractors(done_mask)
                     self._seed_student_histories(done_mask)
                     self._seed_aux_buffer(done_mask)
-                    self.episode_reached_last_frame[done_mask] = False
                     self._resample_teacher_forcing_env_mask(iteration + 1, done_mask)
 
                 if total_loss is not None:
                     self._sync_timing_device()
-                    self._record_timing("iteration_ms", time.perf_counter() - iteration_start_time)
+                    self._record_timing(time.perf_counter() - iteration_start_time)
                     self._log(iteration, total_loss, action_loss, aux_loss, teacher_forcing_beta)
                 else:
                     self._sync_timing_device()
-                    self._record_timing("iteration_ms", time.perf_counter() - iteration_start_time)
+                    self._record_timing(time.perf_counter() - iteration_start_time)
 
                 if (
                     not self.play_policy
@@ -2714,6 +2226,7 @@ class Dagger:
                     ckpt_path = os.path.join(self.nn_dir, f"pcd_student_{iteration}.pt")
                     self.save(ckpt_path, iteration=iteration)
         finally:
+            self._viser_pending_debug_frame = None
             self._close_viser_debug_tools()
             if not self.play_policy and self.rank == 0:
                 print("=" * 10)
