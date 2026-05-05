@@ -2,7 +2,6 @@ import torch
 import pickle as pkl
 from typing import Optional, Sequence
 from DoorOpening.utils.pose_utils import normalize_to_center_frame
-import os
 
 class ReferenceMotionManager:
     def __init__(
@@ -60,11 +59,10 @@ class ReferenceMotionManager:
     # Load motion data (moved from Env)
     # --------------------------------------------------
     def _load_motion_pkl_from_list(self):
-        # from DoorOpening.assets.door.door_cfg import motion_traj_paths
-        import glob
-        root_path = os.path.dirname(os.path.dirname(__file__))
-        asset_base_folder = os.path.join(root_path, "assets/door/PartNetv5")
-        motion_traj_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/traj.pkl"), recursive=True))
+        from DoorOpening.assets.door.door_cfg import asset_base_folder, motion_traj_paths
+
+        if len(motion_traj_paths) == 0:
+            raise FileNotFoundError(f"No traj.pkl files found under {asset_base_folder}")
 
         robot_joint_pos_trajs = []
         door_trajs = []
@@ -77,16 +75,34 @@ class ReferenceMotionManager:
         robot_body_pos_vel_list = []
         door_body_pos_trajs = []
         for motion_file in motion_traj_paths:
-            (robot_joint_pos_traj,\
-                door_traj,\
-                robot_body_pos_traj,\
-                robot_body_quat_traj,\
-                robot_joint_vel_traj,\
-                key_indices,\
-                self.num_frames,\
-                hinge_contact_mask,\
-                robot_body_pos_vel,\
-                door_body_pos_traj) = self._load_motion_pkl(motion_file)
+            loaded_motion = self._load_motion_pkl(motion_file)
+            if len(loaded_motion) == 10:
+                (
+                    robot_joint_pos_traj,
+                    door_traj,
+                    robot_body_pos_traj,
+                    robot_body_quat_traj,
+                    robot_joint_vel_traj,
+                    key_indices,
+                    self.num_frames,
+                    hinge_contact_mask,
+                    robot_body_pos_vel,
+                    door_body_pos_traj,
+                ) = loaded_motion
+            else:
+                (
+                    robot_joint_pos_traj,
+                    door_traj,
+                    robot_body_pos_traj,
+                    robot_body_quat_traj,
+                    robot_joint_vel_traj,
+                    key_indices,
+                    self.num_frames,
+                    robot_body_pos_vel,
+                    door_body_pos_traj,
+                ) = loaded_motion
+                hinge_contact_mask = torch.zeros(self.num_frames, device=self.device)
+
             robot_joint_pos_trajs.append(robot_joint_pos_traj)
             door_trajs.append(door_traj)
             robot_body_pos_trajs.append(robot_body_pos_traj)
@@ -100,6 +116,7 @@ class ReferenceMotionManager:
             robot_body_pos_vel_list.append(robot_body_pos_vel)
             door_body_pos_trajs.append(door_body_pos_traj)
         # stack motions: [M, T, ...]
+        self.motion_traj_paths = list(motion_traj_paths)
         self.robot_joint_pos_traj = torch.stack(robot_joint_pos_trajs, dim=0)
         self.robot_joint_vel_traj = torch.stack(robot_joint_vel_trajs, dim=0)
         self.robot_body_pos_traj = torch.stack(robot_body_pos_trajs, dim=0)
@@ -529,11 +546,9 @@ class ReferenceMotionManager:
 
 
 if __name__ == "__main__":
-    import glob
-    root_path = os.path.dirname(os.path.dirname(__file__))
-    asset_base_folder = os.path.join(root_path, "assets/door/PartNetv5")
+    from DoorOpening.assets.door.door_cfg import asset_base_folder, motion_traj_paths
+
     print("asset_base_folder: ", asset_base_folder)
-    motion_traj_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/traj.pkl"), recursive=True))
     num_envs = 200
     device = torch.device("cpu")
     velocity = 1.0

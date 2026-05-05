@@ -84,12 +84,21 @@ class PinocchioIKSolver():
     DAMP = 1e-4
 
     def __init__(
-        self, urdf_path: str, ee_link_name: str, controlled_joints: List[str], verbose: bool = False
+        self,
+        urdf_path: str,
+        ee_link_name: str,
+        controlled_joints: List[str],
+        verbose: bool = False,
+        reference_joint_pos: Optional[Union[np.ndarray, Dict[str, float]]] = None,
+        reference_joint_gain: float = 0.05,
     ):
         """
         urdf_path: path to urdf file
         ee_link_name: name of the end-effector link
         controlled_joints: list of joint names to control
+        reference_joint_pos: optional joint configuration to bias redundant IK solutions toward.
+            Dict inputs may contain any subset of model joint names.
+        reference_joint_gain: null-space gain for the reference joint bias.
         """
         if verbose:
             print(f"{urdf_path=}")
@@ -116,8 +125,17 @@ class PinocchioIKSolver():
                     idx = self.model.idx_qs[jid]
             self.controlled_joints.append(idx)
             self.controlled_joints_by_name[joint] = idx
-            if joint not in ["base_x_joint", "base_y_joint", "base_rotation_joint"]:
+            if idx >= 0 and joint not in ["base_x_joint", "base_y_joint", "base_rotation_joint"]:
                 self.arm_joint_indices.append(idx)
+
+        self.has_joint_reference = reference_joint_pos is not None
+        self.reference_joint_gain = reference_joint_gain if self.has_joint_reference else 0.0
+        self.q_ref = self.q_neutral.copy()
+        if reference_joint_pos is not None:
+            self.q_ref = self._qmap_control2model(
+                reference_joint_pos,
+                ignore_missing_joints=True,
+            )
 
         logger.info(f"{controlled_joints=}")
         for j in controlled_joints:
@@ -252,11 +270,13 @@ class PinocchioIKSolver():
     ) -> Tuple[np.ndarray, bool, dict]:
         """given end-effector position and quaternion, return joint values.
 
-        Two parameters are currently unused and might be implemented in the future:
-            q_init: initial configuration for the optimization to start in; especially useful for
-                    arms with redundant degrees of freedom
-            num_attempts: start from multiple initial configs; included for compatibility with pb
-            max iterations: time budget in number of steps; included for compatibility with pb
+        q_init seeds the optimization when provided. If the solver was constructed with
+        reference_joint_pos, that configuration is used as the seed when q_init is absent and
+        as a null-space preference for redundant arm joints.
+
+        Two parameters are kept for compatibility with pybullet-style IK solvers:
+            num_attempts: start from multiple initial configs
+            max_iterations: time budget in number of steps
         """
         i = 0
         if custom_ee_frame is not None:
@@ -272,7 +292,7 @@ class PinocchioIKSolver():
             quat_desired = quat if quat_desired is None else quat_desired
 
         if q_init is None:
-            q = self.q_neutral.copy()
+            q = self.q_ref.copy() if self.has_joint_reference else self.q_neutral.copy()
             if num_attempts > 1:
                 raise NotImplementedError(
                     "Sampling multiple initial configs not yet supported by Pinocchio solver."
@@ -308,7 +328,14 @@ class PinocchioIKSolver():
                 pinocchio.ReferenceFrame.LOCAL,
             )
             J_arm = J[:, self.arm_joint_indices]
-            v = -J_arm.T.dot(np.linalg.solve(J_arm.dot(J_arm.T) + self.DAMP * np.eye(6), err))
+            damping = J_arm.dot(J_arm.T) + self.DAMP * np.eye(J_arm.shape[0])
+            v = -J_arm.T.dot(np.linalg.solve(damping, err))
+            if self.reference_joint_gain > 0.0 and len(self.arm_joint_indices) > 0:
+                J_arm_pinv = np.linalg.pinv(J_arm, rcond=1e-4)
+                nullspace = np.eye(len(self.arm_joint_indices)) - J_arm_pinv.dot(J_arm)
+                q_ref_delta = self.q_ref[self.arm_joint_indices] - q[self.arm_joint_indices]
+                q_ref_delta = (q_ref_delta + np.pi) % (2 * np.pi) - np.pi
+                v += nullspace.dot(self.reference_joint_gain * q_ref_delta)
             # v = v.clip(-0.1, 0.1)
             v_full = np.zeros(self.model.nv)
 

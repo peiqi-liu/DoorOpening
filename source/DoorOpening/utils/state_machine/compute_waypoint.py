@@ -437,6 +437,7 @@ def play_trajectories_in_viser(
     robot_world_quat: torch.Tensor,                  # (T, 4)
     door_world_quat: torch.Tensor,                   # (T, 4)
     hz: float = 60.0,
+    playback_speed: float = 4.0,
 ):
     """
     robot_traj: (T, Ndof) torch.Tensor or list of tensors
@@ -482,13 +483,19 @@ def play_trajectories_in_viser(
     # GUI controls
     # -------------------------
     playing = True
-    speed = 1.0
+    initial_speed = min(max(float(playback_speed), 0.5), 20.0)
 
     with server.gui.add_folder("Playback"):
         play_btn = server.gui.add_button("Play")
         pause_btn = server.gui.add_button("Pause")
         reset_btn = server.gui.add_button("Reset")
-        speed_slider = server.gui.add_slider("Speed", min=0.1, max=3.0, step=0.1, initial_value=1.0)
+        speed_slider = server.gui.add_slider(
+            "Speed",
+            min=0.5,
+            max=20.0,
+            step=0.1,
+            initial_value=initial_speed,
+        )
 
     @play_btn.on_click
     def _(_):
@@ -510,7 +517,7 @@ def play_trajectories_in_viser(
     # -------------------------
     t_idx = 0
 
-    print("Viser running. Open the URL in your browser.")
+    print(f"Viser running at {initial_speed:.1f}x. Open the URL in your browser.")
 
     # timestamp = time.time()
 
@@ -601,6 +608,7 @@ def play_and_save_traj(
     randomize_start_base=True,
     start_base_radius=1.0,
     start_base_angle_range_deg=30.0,
+    playback_speed=4.0,
 ):
     dir_path = os.path.dirname(door_urdf_path)
     robot_initial_pose = torch.tensor([[ROBOT_INITIAL_POS[0], ROBOT_INITIAL_POS[1], ROBOT_INITIAL_POS[2], ROBOT_INITIAL_ROT[0], ROBOT_INITIAL_ROT[1], ROBOT_INITIAL_ROT[2], ROBOT_INITIAL_ROT[3]]], device="cpu")
@@ -650,13 +658,13 @@ def play_and_save_traj(
     print(robot_traj_d.shape)
     print(door_traj_d.shape)
 
-    robot_urdf = URDF.load(robot_urdf_path)
-    door_urdf  = URDF.load(door_urdf_path)
-
     robot_world_pos = robot_initial_pose[:, :3].squeeze(0).numpy()
     door_world_pos = door_initial_pose[:, :3].squeeze(0).numpy()
     robot_world_quat = robot_initial_pose[:, 3:].squeeze(0).numpy()
     door_world_quat = door_initial_pose[:, 3:].squeeze(0).numpy()
+
+    robot_urdf = URDF.load(robot_urdf_path)
+    door_urdf  = URDF.load(door_urdf_path)
 
     play_trajectories_in_viser(
         robot_urdf=robot_urdf,
@@ -668,6 +676,7 @@ def play_and_save_traj(
         robot_world_quat=robot_world_quat,
         door_world_quat=door_world_quat,
         hz=60,
+        playback_speed=playback_speed,
     )
 
     robot_ik_solver = PinocchioIKSolver(
@@ -762,6 +771,12 @@ if __name__ == "__main__":
         choices=["right", "left"],
         help="Select the pull-door planner variant. 'right' keeps the legacy path; 'left' uses the mirrored planner.",
     )
+    parser.add_argument(
+        "--playback-speed",
+        type=float,
+        default=8.0,
+        help="Initial viser playback speed multiplier.",
+    )
     args = parser.parse_args()
 
     robot_urdf_path = args.robot_urdf_path
@@ -772,6 +787,11 @@ if __name__ == "__main__":
         asset_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/mobility.urdf"), recursive=True), reverse=False)
 
     for i, door_urdf_path in enumerate(asset_paths):
-        play_and_save_traj(robot_urdf_path, door_urdf_path, handle_side=args.handle_side)
+        play_and_save_traj(
+            robot_urdf_path,
+            door_urdf_path,
+            handle_side=args.handle_side,
+            playback_speed=args.playback_speed,
+        )
         print("Finished processing ", door_urdf_path, ", index: ", i)
     

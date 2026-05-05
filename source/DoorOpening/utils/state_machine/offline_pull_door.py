@@ -304,8 +304,8 @@ def state_machine_offline_right_pull_door(
     _, _, robot_initial_yaw = euler_xyz_from_quat(base_target_rot)
 
     release_base_x_delta_1 = -0.12
-    release_base_y = 0.25
-    release_palm_x_delta = 0.3
+    release_base_y = 0.05
+    release_palm_x_delta = 0.15
     release_palm_y_delta = 0.0
     release_base_x_delta_2 = -0.18
     release_door_open_angle = 1.35
@@ -323,9 +323,9 @@ def state_machine_offline_right_pull_door(
     retreat_local_x = 0.10
     retreat_local_y = 0.4
     retreat_z_lift = -0.03
-    push_contact_x_offset = 0.5
+    push_contact_x_offset = -0.2
     push_contact_y_offset = 0.0
-    push_contact_z_offset = 0.1
+    push_contact_z_offset = 0.25
     contact_virtual_door_angle = 1.1
     push_door_open_angle = 1.5
 
@@ -463,6 +463,7 @@ def state_machine_offline_right_pull_door(
     ).to(device)
 
     palm_target_pos = board_pos.clone()
+    palm_target_pos[:, 0] += push_contact_x_offset
     palm_target_pos[:, 2] += push_contact_z_offset
     palm_target_pose = _make_pose(palm_target_pos, push_palm_rot)
 

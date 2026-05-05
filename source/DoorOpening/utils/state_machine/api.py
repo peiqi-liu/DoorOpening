@@ -2,7 +2,13 @@
 import pinocchio as pin
 import numpy as np
 from DoorOpening.utils.state_machine.pin import PinocchioIKSolver
-from DoorOpening.constants.robot_constants import BASE_JOINT_NAMES, FRANKA_JOINT_NAMES, OPEN_FINGER_JOINT_VALUES, CLOSE_FINGER_JOINT_VALUES
+from DoorOpening.constants.robot_constants import (
+    BASE_JOINT_NAMES,
+    FRANKA_DEFAULT_JOINT_POS,
+    FRANKA_JOINT_NAMES,
+    OPEN_FINGER_JOINT_VALUES,
+    CLOSE_FINGER_JOINT_VALUES,
+)
 from DoorOpening.utils.pose_utils import get_base_pos_and_quat, world_to_base_frame, wrap_to_pi
 import torch
 from DoorOpening.utils.extract_pointcloud_from_articulation import sample_pointcloud, sample_pointcloud_from_link_name
@@ -63,7 +69,8 @@ def solve_ik(robot_urdf_path, q, palm_pose, base_pose, robot_initial_pose):
     ik_solver = PinocchioIKSolver(
         urdf_path=robot_urdf_path, 
         ee_link_name="palm_lower", 
-        controlled_joints=BASE_JOINT_NAMES + FRANKA_JOINT_NAMES
+        controlled_joints=BASE_JOINT_NAMES + FRANKA_JOINT_NAMES,
+        reference_joint_pos=FRANKA_DEFAULT_JOINT_POS,
     )
     # if palm_pose is not None:
     #     palm_pose[:, 0] += 0.08
@@ -269,7 +276,12 @@ def solve_ik_iter(robot, palm_pose, base_pose, iters=15):
     current_palm_pos = robot.data.body_pos_w[:, robot.find_bodies("palm_center")[0]].cpu().clone().detach().squeeze().numpy()
     current_palm_quat = robot.data.body_quat_w[:, robot.find_bodies("palm_center")[0]].cpu().clone().detach().squeeze().numpy()
 
-    ik_solver = PinocchioIKSolver(urdf_path=robot.cfg.spawn.asset_path, ee_link_name="palm_center", controlled_joints=["base_x_joint", "base_y_joint", "base_rotation_joint", "panda_joint1", "panda_joint2", "panda_joint3", "panda_joint4", "panda_joint5", "panda_joint6", "panda_joint7"])
+    ik_solver = PinocchioIKSolver(
+        urdf_path=robot.cfg.spawn.asset_path,
+        ee_link_name="palm_center",
+        controlled_joints=BASE_JOINT_NAMES + FRANKA_JOINT_NAMES,
+        reference_joint_pos=FRANKA_DEFAULT_JOINT_POS,
+    )
     # ik_solver = PositionIKOptimizer(
     #     ik_solver=PinocchioIKSolver(urdf_path=robot.cfg.spawn.asset_path, ee_link_name="palm_center", controlled_joints=["base_x_joint", "base_y_joint", "base_rotation_joint", "panda_joint1", "panda_joint2", "panda_joint3", "panda_joint4", "panda_joint5", "panda_joint6", "panda_joint7"]),
     #     pos_error_tol=0.01,
