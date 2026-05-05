@@ -16,7 +16,7 @@ pcd_encoders_cfg:
   local_pcd_t:
     type: "pointnet"
     num_output_tokens: 128
-    num_points: [6000, 2500, 0]  # Policy door input = base crop + palm crop; robot points are configured below.
+    num_points: [2500, 1000, 0]  # Policy door input = base crop + palm crop; robot points are configured below.
     use_pcd: true
 
 state_encoders_cfg:
@@ -158,7 +158,7 @@ dagger:
   pointcloud_source: "lidar"
   robot_num_points: 30000
   append_robot_gt_to_policy_cloud: true
-  robot_gt_policy_points: 4000  # Policy robot input appended after the two door crops above.
+  robot_gt_policy_points: 2000  # Policy robot input appended after the two door crops above.
   robot_pointcloud_filter:
     enabled: true
     sdf_cutoff: 0.02

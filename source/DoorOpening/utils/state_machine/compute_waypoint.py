@@ -748,7 +748,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--asset-base-folder",
-        default="source/DoorOpening/assets/door/PartNetv5",
+        default="source/DoorOpening/assets/door/PartNetv6",
         help="Folder to scan recursively for door mobility.urdf files.",
     )
     parser.add_argument(
@@ -758,7 +758,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--handle-side",
-        default="left",
+        default="right",
         choices=["right", "left"],
         help="Select the pull-door planner variant. 'right' keeps the legacy path; 'left' uses the mirrored planner.",
     )
