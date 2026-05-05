@@ -17,7 +17,7 @@ import torch
 import isaaclab.sim as sim_utils
 from isaaclab.actuators.actuator_cfg import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg, Articulation
-from DoorOpening.assets.cache_utils import resolve_converter_cache_dir, should_force_usd_conversion
+from DoorOpening.assets.cache_utils import resolve_converter_cache_dir, should_force_asset_usd_conversion
 from DoorOpening.constants.env_constants import DOOR_INITIAL_POS, DOOR_INITIAL_ROT
 import json
 from DoorOpening.utils.urdf_utils import compute_exact_door_keypoints
@@ -105,16 +105,18 @@ def create_urdf_door_cfg(
             "contacts" if activate_contact_sensors else "no_contacts",
         ]
     )
+    usd_dir = resolve_converter_cache_dir(
+        asset_path,
+        asset_root=asset_base_folder,
+        variant=cache_variant,
+    )
+
     return sim_utils.UrdfFileCfg(
             fix_base=True,
             merge_fixed_joints=True,
             make_instanceable=False,
             asset_path=asset_path,
-            usd_dir=resolve_converter_cache_dir(
-                asset_path,
-                asset_root=asset_base_folder,
-                variant=cache_variant,
-            ),
+            usd_dir=usd_dir,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 max_depenetration_velocity=DOOR_MAX_DEPENETRATION_VELOCITY,
                 solver_position_iteration_count=DOOR_SOLVER_POSITION_ITERS,
@@ -128,7 +130,7 @@ def create_urdf_door_cfg(
             joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
                 gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
             ),
-            force_usd_conversion=should_force_usd_conversion(),
+            force_usd_conversion=should_force_asset_usd_conversion(asset_path, usd_dir),
             # Note: joint_drive is usually not needed for URDF; PD gains can be in actuators
             # scale = (1.0, 1.2, 1.1),
             activate_contact_sensors=activate_contact_sensors,

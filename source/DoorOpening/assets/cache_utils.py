@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import os
 import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
@@ -60,6 +61,59 @@ def should_force_usd_conversion(default: bool = False) -> bool:
     if configured is None:
         return default
     return configured.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def should_force_asset_usd_conversion(
+    asset_path: str | Path,
+    usd_dir: str | Path,
+    *,
+    default: bool = False,
+) -> bool:
+    """Force reconversion when the source asset tree is newer than the cached USD."""
+    if should_force_usd_conversion(default=default):
+        return True
+    return _is_source_asset_newer_than_cache(str(asset_path), str(usd_dir))
+
+
+@lru_cache(maxsize=None)
+def _is_source_asset_newer_than_cache(asset_path: str, usd_dir: str) -> bool:
+    asset_path_obj = Path(asset_path).expanduser().resolve()
+    usd_dir_obj = Path(usd_dir).expanduser().resolve()
+
+    if not asset_path_obj.exists() or not usd_dir_obj.exists():
+        return False
+
+    cached_usd_files = [path for path in usd_dir_obj.rglob("*.usd") if path.is_file()]
+    if not cached_usd_files:
+        return False
+
+    newest_cached_usd_mtime = max(path.stat().st_mtime for path in cached_usd_files)
+    source_root = asset_path_obj.parent
+    relevant_suffixes = {
+        ".urdf",
+        ".obj",
+        ".stl",
+        ".dae",
+        ".fbx",
+        ".gltf",
+        ".glb",
+        ".mtl",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".bmp",
+        ".tga",
+    }
+    source_files = [
+        path
+        for path in source_root.rglob("*")
+        if path.is_file() and path.suffix.lower() in relevant_suffixes
+    ]
+    if not source_files:
+        source_files = [asset_path_obj]
+    newest_source_mtime = max(path.stat().st_mtime for path in source_files)
+
+    return newest_source_mtime > newest_cached_usd_mtime + 1e-6
 
 
 def configure_distributed_run_tag() -> None:
