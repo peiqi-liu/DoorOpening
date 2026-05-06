@@ -183,33 +183,6 @@ handle_offsets = torch.tensor(handle_offsets)
 
 motion_traj_paths = [os.path.join(os.path.dirname(asset_path), "traj.pkl") for asset_path in asset_paths]
 
-
-def _validate_motion_traj_paths():
-    asset_dirs = {os.path.dirname(asset_path) for asset_path in asset_paths}
-    expected_motion_paths = set(motion_traj_paths)
-    discovered_motion_paths = set(glob.glob(os.path.join(asset_base_folder, "**/traj.pkl"), recursive=True))
-    motion_dirs = {os.path.dirname(motion_path) for motion_path in discovered_motion_paths}
-
-    missing_motion_paths = sorted(path for path in motion_traj_paths if not os.path.isfile(path))
-    orphan_motion_paths = sorted(discovered_motion_paths - expected_motion_paths)
-    orphan_motion_dirs = sorted(motion_dirs - asset_dirs)
-
-    if missing_motion_paths:
-        missing = "\n".join(missing_motion_paths[:5])
-        raise FileNotFoundError(
-            "Door assets are missing matching traj.pkl files. "
-            f"First missing files:\n{missing}"
-        )
-    if orphan_motion_paths or orphan_motion_dirs:
-        orphaned = "\n".join((orphan_motion_paths or orphan_motion_dirs)[:5])
-        raise FileNotFoundError(
-            "Found traj.pkl files without matching mobility.urdf assets. "
-            f"First orphaned paths:\n{orphaned}"
-        )
-
-
-_validate_motion_traj_paths()
-
 door_asset_path = asset_paths[32]
 # door_asset_path = asset_paths[0]
 board_offset = board_offsets[0]

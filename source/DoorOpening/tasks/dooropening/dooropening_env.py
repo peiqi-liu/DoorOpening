@@ -153,7 +153,7 @@ class DooropeningEnv(DirectRLEnv):
         self.handle_offsets = torch.stack(self.handle_offsets).to(self.device)
         self.board_offsets = torch.stack(self.board_offsets).to(self.device)
         env_to_file_map = [i % len(motion_traj_paths) for i in range(self.num_envs)]
-        self.ref_motion_lib = ReferenceMotionManager(num_envs=self.num_envs, device=self.device, velocity=self.cfg.velocity, reset_from_start = False, env_to_file_map=env_to_file_map, twist_indices=self.twist_indices)
+        self.ref_motion_lib = ReferenceMotionManager(num_envs=self.num_envs, device=self.device, velocity=self.cfg.velocity, reset_from_start = True, env_to_file_map=env_to_file_map, twist_indices=self.twist_indices)
         self.prob_get_first_key_frame = None
         self.max_trial_steps = self.ref_motion_lib.num_frames * torch.ones_like(self.episode_length_buf, device=self.device)
         self.games_to_track = 100
@@ -625,6 +625,17 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
 
     def _apply_action(self):
+        # self.ref_motion_lib.step()
+        # joint_pos = self.robot.data.default_joint_pos.clone()
+        # ref_robot_joint_pos = self.ref_motion_lib.get_robot_joint_pos().to(joint_pos)
+        # joint_pos[:, self._robot_dof_idx] = ref_robot_joint_pos[:, self.ref_robot_dof_idx]
+        # self.robot.write_joint_position_to_sim(joint_pos)
+        # self.robot_dof_targets[:] = joint_pos[:, self._robot_dof_idx]
+        # self.applied_robot_dof_targets[:] = self.robot_dof_targets
+        # door_pos = self.door.data.joint_pos.clone()
+        # door_pos[:] = self.ref_motion_lib.get_door_joint_pos()
+        # self.door.write_joint_position_to_sim(door_pos)
+
         edit_door_articulation(
             self.door,
             nominal_joint_stiffness=self._door_nominal_joint_stiffness,
@@ -641,12 +652,6 @@ class DooropeningEnv(DirectRLEnv):
             applied_targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits
         )
         self.robot.set_joint_position_target(self.applied_robot_dof_targets, joint_ids=self._robot_dof_idx)
-        # joint_pos = self.robot.data.default_joint_pos.clone()
-        # joint_pos[:] = self.ref_motion_lib.get_robot_joint_pos()
-        # self.robot.write_joint_position_to_sim(joint_pos)
-        # door_pos = self.door.data.joint_pos.clone()
-        # door_pos[:] = self.ref_motion_lib.get_door_joint_pos()
-        # self.door.write_joint_position_to_sim(door_pos)
 
     def _get_observations(self) -> dict:
         self._get_intermediate_values()
