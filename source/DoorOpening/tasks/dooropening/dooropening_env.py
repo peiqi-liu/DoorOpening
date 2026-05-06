@@ -153,7 +153,14 @@ class DooropeningEnv(DirectRLEnv):
         self.handle_offsets = torch.stack(self.handle_offsets).to(self.device)
         self.board_offsets = torch.stack(self.board_offsets).to(self.device)
         env_to_file_map = [i % len(motion_traj_paths) for i in range(self.num_envs)]
-        self.ref_motion_lib = ReferenceMotionManager(num_envs=self.num_envs, device=self.device, velocity=self.cfg.velocity, reset_from_start = True, env_to_file_map=env_to_file_map, twist_indices=self.twist_indices)
+        self.ref_motion_lib = ReferenceMotionManager(
+            num_envs=self.num_envs,
+            device=self.device,
+            reset_from_start=False,
+            env_to_file_map=env_to_file_map,
+            twist_indices=self.twist_indices,
+            step_dt=self.dt,
+        )
         self.prob_get_first_key_frame = None
         self.max_trial_steps = self.ref_motion_lib.num_frames * torch.ones_like(self.episode_length_buf, device=self.device)
         self.games_to_track = 100
@@ -623,6 +630,7 @@ class DooropeningEnv(DirectRLEnv):
         self.scene.sensors["contact_forces_door2"].update(self.cfg.sim_dt)
 
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
+
 
     def _apply_action(self):
         # self.ref_motion_lib.step()
@@ -1236,11 +1244,11 @@ class DooropeningEnv(DirectRLEnv):
             step_count=self._get_curriculum_step_count(),
             reset_progress_total=self.reset_progress_total,
         )
-        self.max_trial_steps[env_ids] = ((self.ref_motion_lib.num_frames - reset_frame_idx) // self.ref_motion_lib.velocity).long()
+        self.max_trial_steps[env_ids] = ((self.ref_motion_lib.num_frames - reset_frame_idx) // self.ref_motion_lib.frame_step).long()
         self._sample_reset_randomization(env_ids)
 
         deep_mimic_initial_joint_pos = self.ref_motion_lib.get_robot_joint_pos(env_ids)
-        deep_mimic_initial_joint_vel = self.ref_motion_lib.get_robot_joint_vel(env_ids)
+        deep_mimic_initial_joint_vel = torch.zeros_like(deep_mimic_initial_joint_pos)
 
         default_root_state = self.robot.data.default_root_state[env_ids]
         default_root_state[:, :3] += self.scene.env_origins[env_ids]
