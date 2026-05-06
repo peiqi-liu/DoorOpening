@@ -101,8 +101,8 @@ class EventCfg:
 
 @configclass
 class DooropeningEnvCfg(DirectRLEnvCfg):
-    sim_dt = 1/40.  # 40 Hz physics/control step when decimation stays at 1.
-    decimation = 1
+    sim_dt = 1/60
+    decimation = 4
     episode_length_s = 10.
     num_sim_steps_to_render=2
     # - spaces definition
