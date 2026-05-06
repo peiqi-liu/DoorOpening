@@ -21,6 +21,9 @@ from DoorOpening.utils.state_machine.offline_pull_door import state_machine_offl
 import glob
 
 
+DEFAULT_TRAJ_DT = 1.0 / 40.0
+
+
 def get_robot_constants():
     all_joint_names = FULL_JOINT_NAMES + list(CAMERA_JOINT_DEFAULT_VALUES.keys())
     default_joint_pos_dict = {}
@@ -362,7 +365,6 @@ def collocate_and_playback(robot_traj, door_traj, key_idx_in_key_indices, length
 
     # ---- Interpolation ----
     traj_out = []
-    traj_d_out = []
     key_indices = [0]
     samples_used = 0
 
@@ -387,7 +389,6 @@ def collocate_and_playback(robot_traj, door_traj, key_idx_in_key_indices, length
         if len(ps) == 1:
             # Degenerate case: repeat point
             seg_traj = np.repeat(ps, seg_len, axis=0)
-            seg_traj_d = np.zeros_like(seg_traj)
         else:
             dists = np.linalg.norm(ps[1:] - ps[:-1], axis=1)
             t_local = np.concatenate([[0.0], np.cumsum(dists)])
@@ -402,27 +403,24 @@ def collocate_and_playback(robot_traj, door_traj, key_idx_in_key_indices, length
             )
 
             seg_traj = cs(t_samples)
-            seg_traj_d = cs(t_samples, 1)
 
         traj_out.append(seg_traj)
-        traj_d_out.append(seg_traj_d)
 
     # ---- Concatenate segments ----
     traj_interp = np.concatenate(traj_out, axis=0)
-    traj_d_interp = np.concatenate(traj_d_out, axis=0)
 
     traj_interp = torch.tensor(traj_interp, dtype=torch.float32)
-    traj_d_interp = torch.tensor(traj_d_interp, dtype=torch.float32)
 
     # ---- Split robot / door ----
     robot_traj = traj_interp[:, :-2]
     door_traj = traj_interp[:, -2:]
-    robot_traj_d = traj_d_interp[:, :-2]
-    door_traj_d = traj_d_interp[:, -2:]
 
     # clamp door values
     door_traj[:, 0] = door_traj[:, 0].clamp(min=0.0, max=1.5)
     door_traj[:, 1] = door_traj[:, 1].clamp(min=0.0, max=1.0)
+    # MotionLib recomputes reference velocities from positions and sim_dt on load.
+    robot_traj_d = torch.zeros_like(robot_traj)
+    door_traj_d = torch.zeros_like(door_traj)
 
     return robot_traj, door_traj, robot_traj_d, door_traj_d, key_indices
 
@@ -609,6 +607,7 @@ def play_and_save_traj(
     start_base_radius=1.0,
     start_base_angle_range_deg=30.0,
     playback_speed=4.0,
+    traj_dt=DEFAULT_TRAJ_DT,
 ):
     dir_path = os.path.dirname(door_urdf_path)
     robot_initial_pose = torch.tensor([[ROBOT_INITIAL_POS[0], ROBOT_INITIAL_POS[1], ROBOT_INITIAL_POS[2], ROBOT_INITIAL_ROT[0], ROBOT_INITIAL_ROT[1], ROBOT_INITIAL_ROT[2], ROBOT_INITIAL_ROT[3]]], device="cpu")
@@ -652,7 +651,12 @@ def play_and_save_traj(
     #             new_door_traj.append(door_point)
     # robot_traj = new_robot_traj
     # door_traj = new_door_traj
-    robot_traj, door_traj, robot_traj_d, door_traj_d, key_indices = collocate_and_playback(robot_traj, door_traj, key_idx_in_key_indices, length=1000)
+    robot_traj, door_traj, robot_traj_d, door_traj_d, key_indices = collocate_and_playback(
+        robot_traj,
+        door_traj,
+        key_idx_in_key_indices,
+        length=1000,
+    )
     print(robot_traj.shape)
     print(door_traj.shape)
     print(robot_traj_d.shape)
@@ -728,6 +732,7 @@ def play_and_save_traj(
 
     data = {
         "handle_side": handle_side,
+        "sim_dt": float(traj_dt),
         "door_traj": door_traj, 
         "robot_body_pos_traj": robot_body_pos_traj,
         "robot_body_quat_traj": robot_body_quat_traj,
@@ -777,6 +782,12 @@ if __name__ == "__main__":
         default=8.0,
         help="Initial viser playback speed multiplier.",
     )
+    parser.add_argument(
+        "--traj-dt",
+        type=float,
+        default=DEFAULT_TRAJ_DT,
+        help="Time step represented by adjacent trajectory samples.",
+    )
     args = parser.parse_args()
 
     robot_urdf_path = args.robot_urdf_path
@@ -792,6 +803,7 @@ if __name__ == "__main__":
             door_urdf_path,
             handle_side=args.handle_side,
             playback_speed=args.playback_speed,
+            traj_dt=args.traj_dt,
         )
         print("Finished processing ", door_urdf_path, ", index: ", i)
     

@@ -1248,12 +1248,6 @@ class Dagger:
                 f"student_update_steps={self.student_update_steps}"
             )
 
-    def _override_actions_for_pregrasp(self, actions: torch.Tensor) -> torch.Tensor:
-        override_fn = getattr(self.ov_env, "override_pregrasp_actions", None)
-        if override_fn is None:
-            return actions
-        return override_fn(actions)
-
     def _get_teacher_actions(self, obs):
         if self.teacher_model is None:
             raise RuntimeError("Teacher model is not initialized.")
@@ -1264,7 +1258,7 @@ class Dagger:
         }
         with torch.no_grad():
             res_dict = self.teacher_model(batch_dict)
-        adjusted_actions = self._override_actions_for_pregrasp(torch.clamp(res_dict["mus"], -1.0, 1.0))
+        adjusted_actions = torch.clamp(res_dict["mus"], -1.0, 1.0)
         return {
             "mus": adjusted_actions,
             "actions": adjusted_actions,

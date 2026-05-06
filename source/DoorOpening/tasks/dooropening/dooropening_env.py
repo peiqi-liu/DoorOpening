@@ -153,7 +153,14 @@ class DooropeningEnv(DirectRLEnv):
         self.handle_offsets = torch.stack(self.handle_offsets).to(self.device)
         self.board_offsets = torch.stack(self.board_offsets).to(self.device)
         env_to_file_map = [i % len(motion_traj_paths) for i in range(self.num_envs)]
-        self.ref_motion_lib = ReferenceMotionManager(num_envs=self.num_envs, device=self.device, velocity=self.cfg.velocity, reset_from_start = False, env_to_file_map=env_to_file_map, twist_indices=self.twist_indices)
+        self.ref_motion_lib = ReferenceMotionManager(
+            num_envs=self.num_envs,
+            device=self.device,
+            reset_from_start=False,
+            env_to_file_map=env_to_file_map,
+            twist_indices=self.twist_indices,
+            step_dt=self.dt,
+        )
         self.prob_get_first_key_frame = None
         self.max_trial_steps = self.ref_motion_lib.num_frames * torch.ones_like(self.episode_length_buf, device=self.device)
         self.games_to_track = 100
@@ -584,39 +591,7 @@ class DooropeningEnv(DirectRLEnv):
         )
         return scaled_actions
 
-    def _compute_pregrasp_delta_actions(self) -> torch.Tensor:
-        next_ref_joint_pos = self.ref_motion_lib.get_next_robot_joint_pos().to(self.robot_dof_targets)
-        next_ref_targets = next_ref_joint_pos[..., self.ref_robot_dof_idx]
-        target_delta = next_ref_targets - self.robot_dof_targets
-
-        dt = max(float(self.dt), 1e-6)
-        base_scale = max(float(self.cfg.base_action_scale), 1e-6)
-        arm_scale = max(float(self.cfg.arm_action_scale), 1e-6)
-        finger_scale = max(float(self.cfg.finger_action_scale), 1e-6)
-
-        delta_actions = torch.zeros_like(self.robot_dof_targets)
-        delta_actions[:, :self.num_base_joints] = target_delta[:, :self.num_base_joints] / (dt * base_scale)
-        delta_actions[:, self.num_base_joints:self.num_base_joints + self.num_arm_joints] = (
-            target_delta[:, self.num_base_joints:self.num_base_joints + self.num_arm_joints] / (dt * arm_scale)
-        )
-        delta_actions[:, self.num_base_joints + self.num_arm_joints:] = (
-            target_delta[:, self.num_base_joints + self.num_arm_joints:] / (dt * finger_scale)
-        )
-        return delta_actions.clamp(-1.0, 1.0)
-
-    def override_pregrasp_actions(self, actions: torch.Tensor) -> torch.Tensor:
-        pregrasp_mask = self.ref_motion_lib.get_before_first_keyframe_mask()
-        if not torch.any(pregrasp_mask):
-            return actions
-        adjusted_actions = actions.clone()
-        delta_actions = self._compute_pregrasp_delta_actions()
-        adjusted_actions[pregrasp_mask] = delta_actions[pregrasp_mask]
-        return adjusted_actions
-
     def _pre_physics_step(self, actions: torch.Tensor):
-        # Pregrasp reference tracking is part of the environment transition, so teacher
-        # RL, DAgger rollouts, and play mode all share the same executed action path.
-        actions = self.override_pregrasp_actions(actions)
         # delta actions
         self.scaled_actions = self._scale_actions(actions)
         targets = self.robot_dof_targets + self.dt * self.scaled_actions
@@ -1231,11 +1206,11 @@ class DooropeningEnv(DirectRLEnv):
             step_count=self._get_curriculum_step_count(),
             reset_progress_total=self.reset_progress_total,
         )
-        self.max_trial_steps[env_ids] = ((self.ref_motion_lib.num_frames - reset_frame_idx) // self.ref_motion_lib.velocity).long()
+        self.max_trial_steps[env_ids] = ((self.ref_motion_lib.num_frames - reset_frame_idx) // self.ref_motion_lib.frame_step).long()
         self._sample_reset_randomization(env_ids)
 
         deep_mimic_initial_joint_pos = self.ref_motion_lib.get_robot_joint_pos(env_ids)
-        deep_mimic_initial_joint_vel = self.ref_motion_lib.get_robot_joint_vel(env_ids)
+        deep_mimic_initial_joint_vel = torch.zeros_like(deep_mimic_initial_joint_pos)
 
         default_root_state = self.robot.data.default_root_state[env_ids]
         default_root_state[:, :3] += self.scene.env_origins[env_ids]
