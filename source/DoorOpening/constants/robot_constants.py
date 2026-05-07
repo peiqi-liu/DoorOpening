@@ -104,9 +104,7 @@ ROBOT_KEY_BODY_NAMES = [
 
 ROBOT_RESET_KEY_BODY_NAMES = [
     "tidybot2_base_link",
-    "panda_link2",
     "panda_link4",
-    "panda_link6",
     "palm_lower",
 ]
 

@@ -2045,6 +2045,8 @@ class Dagger:
             return
         episode_reward = self._mean_completed_metric(self.completed_rewards)
         episode_length = self._mean_completed_metric(self.completed_lengths)
+        env_step_dt = max(float(getattr(self.ov_env, "dt", 0.0)), 1e-6)
+        episode_length_seconds = episode_length * env_step_dt if episode_length is not None else None
         success_rate = self._mean_completed_metric(self.completed_successes)
         teacher_env_fraction = self._get_teacher_forcing_env_fraction()
         student_env_fraction = 1.0 - teacher_env_fraction
@@ -2070,6 +2072,8 @@ class Dagger:
                 print("Episode Reward:", episode_reward)
             if episode_length is not None:
                 print("Episode Length:", episode_length)
+            if episode_length_seconds is not None:
+                print("Episode Length (s):", episode_length_seconds)
             if success_rate is not None:
                 print("Success Rate:", success_rate)
             if iteration_time_ms is not None:
@@ -2091,6 +2095,8 @@ class Dagger:
             metrics["stats/episode_reward"] = episode_reward
         if episode_length is not None:
             metrics["stats/episode_length"] = episode_length
+        if episode_length_seconds is not None:
+            metrics["stats/episode_length_seconds"] = episode_length_seconds
         if success_rate is not None:
             metrics["stats/success_rate"] = success_rate
         if teacher_forcing_beta is not None:

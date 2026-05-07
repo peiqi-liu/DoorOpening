@@ -162,7 +162,10 @@ class DooropeningEnv(DirectRLEnv):
             step_dt=self.dt,
         )
         self.prob_get_first_key_frame = None
-        self.max_trial_steps = self.ref_motion_lib.num_frames * torch.ones_like(self.episode_length_buf, device=self.device)
+        default_trial_steps = math.ceil(
+            max(float(self.ref_motion_lib.num_frames - 1), 0.0) / max(float(self.ref_motion_lib.frame_step), 1e-6)
+        ) + 1
+        self.max_trial_steps = default_trial_steps * torch.ones_like(self.episode_length_buf, device=self.device)
         self.games_to_track = 100
         self.completed_successes = deque(maxlen=self.games_to_track)
         self.episode_reached_last_frame = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -314,6 +317,13 @@ class DooropeningEnv(DirectRLEnv):
             max=self.success_frame_idx,
         )
         self.episode_reached_last_frame |= current_frame_idx >= self.success_frame_idx
+
+    def _get_reached_last_frame_mask(self) -> torch.Tensor:
+        current_frame_idx = torch.clamp(
+            self.ref_motion_lib.frame_idx.to(device=self.device, dtype=torch.float32),
+            max=self.success_frame_idx,
+        )
+        return current_frame_idx >= self.success_frame_idx
 
     def _update_success_metrics(self):
         self._update_last_frame_tracker()
@@ -630,6 +640,10 @@ class DooropeningEnv(DirectRLEnv):
         self.scene.sensors["contact_forces_door2"].update(self.cfg.sim_dt)
 
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
+        # Advance the reference once per RL/env step. IsaacLab will call _apply_action()
+        # decimation times, so stepping here keeps replay duration tied to env dt instead
+        # of being multiplied by decimation again.
+        self.ref_motion_lib.step()
 
 
     def _apply_action(self):
@@ -649,7 +663,6 @@ class DooropeningEnv(DirectRLEnv):
             nominal_joint_stiffness=self._door_nominal_joint_stiffness,
             nominal_joint_damping=self._door_nominal_joint_damping,
         )
-        self.ref_motion_lib.step()
         lag_alpha = self._current_custom_param("pd_targets", "target_lag_alpha")
         applied_targets = self.robot_dof_targets.clone()
         if lag_alpha > 0.0:
@@ -1053,8 +1066,9 @@ class DooropeningEnv(DirectRLEnv):
         self.ref_door_joint_pos = self.ref_motion_lib.get_door_joint_pos()
         self.ref_hinge_contact_mask = self.ref_motion_lib.get_hinge_contact_mask()
         self.ref_door_body_pos_twist = self.ref_motion_lib.get_door_body_pos_twist()
-        self.ref_robot_body_lin_vel = self.ref_motion_lib.get_robot_body_lin_vel()[:, self.ref_key_body_idx] / self.cfg.sim_dt
-        self.ref_robot_body_ang_vel = self.ref_motion_lib.get_robot_body_ang_vel()[:, self.ref_key_body_idx] / self.cfg.sim_dt
+        ref_motion_dt = max(float(self.ref_motion_lib.frame_dt), 1e-6)
+        self.ref_robot_body_lin_vel = self.ref_motion_lib.get_robot_body_lin_vel()[:, self.ref_key_body_idx] / ref_motion_dt
+        self.ref_robot_body_ang_vel = self.ref_motion_lib.get_robot_body_ang_vel()[:, self.ref_key_body_idx] / ref_motion_dt
 
     def _get_rewards(self) -> torch.Tensor:
         self._get_intermediate_values()
@@ -1189,7 +1203,8 @@ class DooropeningEnv(DirectRLEnv):
         return final_reward
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        time_out = self.episode_length_buf >= self.max_trial_steps - 1
+        reached_last_frame = self._get_reached_last_frame_mask()
+        time_out = (self.episode_length_buf >= self.max_trial_steps - 1) | reached_last_frame
         if not self.early_stopping:
             return torch.zeros_like(time_out), time_out
         self._get_intermediate_values()
@@ -1244,7 +1259,12 @@ class DooropeningEnv(DirectRLEnv):
             step_count=self._get_curriculum_step_count(),
             reset_progress_total=self.reset_progress_total,
         )
-        self.max_trial_steps[env_ids] = ((self.ref_motion_lib.num_frames - reset_frame_idx) // self.ref_motion_lib.frame_step).long()
+        remaining_frames = torch.clamp(
+            float(self.ref_motion_lib.num_frames - 1) - reset_frame_idx.to(dtype=torch.float32),
+            min=0.0,
+        )
+        required_steps = torch.ceil(remaining_frames / max(float(self.ref_motion_lib.frame_step), 1e-6)).long() + 1
+        self.max_trial_steps[env_ids] = torch.clamp(required_steps, min=1)
         self._sample_reset_randomization(env_ids)
 
         deep_mimic_initial_joint_pos = self.ref_motion_lib.get_robot_joint_pos(env_ids)
