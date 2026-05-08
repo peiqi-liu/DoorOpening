@@ -633,7 +633,7 @@ class DooropeningEnv(DirectRLEnv):
     def _pre_physics_step(self, actions: torch.Tensor):
         # Pregrasp reference tracking is part of the environment transition, so teacher
         # RL, DAgger rollouts, and play mode all share the same executed action path.
-        actions = self.override_pregrasp_actions(actions)
+        # actions = self.override_pregrasp_actions(actions)
         # delta actions
         self.scaled_actions = self._scale_actions(actions)
         targets = self.robot_dof_targets + self.dt * self.scaled_actions
