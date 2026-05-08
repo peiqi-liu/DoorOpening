@@ -2,6 +2,7 @@ import argparse
 import json
 import random
 import shutil
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -19,8 +20,12 @@ MIN_HANDLE_TOP_CLEARANCE_M = 0.15
 MIN_HANDLE_EDGE_CLEARANCE_M = 0.02
 
 
+def get_repo_root():
+    return Path(__file__).resolve().parents[2]
+
+
 def parse_args():
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = get_repo_root()
     default_asset_root = repo_root / "source" / "DoorOpening" / "assets" / "door" / "PartNetv4"
     default_output_dir = default_asset_root / "generated_randomized"
 
@@ -469,6 +474,31 @@ def prepare_output_dir(output_dir, overwrite):
         output_dir.mkdir(parents=True, exist_ok=True)
 
 
+def validate_variant_geometry(variant_dir, bounds_cache):
+    root = ET.parse(variant_dir / "mobility.urdf").getroot()
+    for link_name in ("link_1", "link_2"):
+        visual = get_link_visual(root, link_name)
+        mesh, _ = get_mesh_and_origin(visual)
+        mesh_path = variant_dir / mesh.attrib["filename"]
+        if mesh_path.suffix.lower() == ".obj":
+            load_obj_bounds(mesh_path, bounds_cache)
+        elif not mesh_path.exists():
+            raise FileNotFoundError(f"Missing mesh {mesh_path}")
+
+    source_root = get_repo_root() / "source"
+    if str(source_root) not in sys.path:
+        sys.path.insert(0, str(source_root))
+
+    from DoorOpening.utils.urdf_utils import compute_exact_door_keypoints
+
+    keypoints = compute_exact_door_keypoints(str(variant_dir / "mobility.urdf"))
+    missing_keys = {"link_1", "link_1_bbox_base", "link_2"} - set(keypoints)
+    if missing_keys:
+        raise ValueError(
+            f"Generated variant {variant_dir.name} is missing computed keypoints: {sorted(missing_keys)}"
+        )
+
+
 def build_variant_name(source_asset_name, variant_idx):
     return f"{source_asset_name}__rnd_{variant_idx:02d}"
 
@@ -495,44 +525,49 @@ def generate_variants(args):
             variant_name = build_variant_name(source_asset_name, variant_idx)
             variant_dir = output_dir / variant_name
             variant_dir.mkdir(parents=True, exist_ok=False)
+            try:
+                root = ET.parse(source_urdf_path).getroot()
+                source_props = get_door_properties(source_dir, root, bounds_cache)
+                target_props = sample_target_properties(rng, source_props)
+                target_props["flip_hinge_side"] = args.flip_hinge_side
+                target_props["opening_direction"] = args.opening_direction
+                source_props, actual_props = apply_variant_to_root(
+                    source_dir,
+                    root,
+                    target_props,
+                    bounds_cache,
+                    source_props=source_props,
+                )
 
-            root = ET.parse(source_urdf_path).getroot()
-            source_props = get_door_properties(source_dir, root, bounds_cache)
-            target_props = sample_target_properties(rng, source_props)
-            target_props["flip_hinge_side"] = args.flip_hinge_side
-            target_props["opening_direction"] = args.opening_direction
-            source_props, actual_props = apply_variant_to_root(
-                source_dir,
-                root,
-                target_props,
-                bounds_cache,
-                source_props=source_props,
-            )
+                attach_variant_files(
+                    source_dir=source_dir,
+                    variant_dir=variant_dir,
+                )
+                if target_props["flip_hinge_side"]:
+                    apply_flipped_mesh_variants(root, variant_dir)
 
-            attach_variant_files(
-                source_dir=source_dir,
-                variant_dir=variant_dir,
-            )
-            if target_props["flip_hinge_side"]:
-                apply_flipped_mesh_variants(root, variant_dir)
+                # Each generated asset is still a normal standalone URDF directory
+                # with the same link/joint structure as the source asset.
+                ET.ElementTree(root).write(
+                    variant_dir / "mobility.urdf",
+                    encoding="utf-8",
+                    xml_declaration=True,
+                )
 
-            # Each generated asset is still a normal standalone URDF directory
-            # with the same link/joint structure as the source asset.
-            ET.ElementTree(root).write(
-                variant_dir / "mobility.urdf",
-                encoding="utf-8",
-                xml_declaration=True,
-            )
+                metadata = {
+                    "source_asset": source_asset_name,
+                    "variant_name": variant_name,
+                    "target_properties": target_props,
+                    "actual_properties": actual_props,
+                    "source_properties": source_props,
+                }
+                with open(variant_dir / "variant_meta.json", "w", encoding="utf-8") as meta_file:
+                    json.dump(metadata, meta_file, indent=2)
 
-            metadata = {
-                "source_asset": source_asset_name,
-                "variant_name": variant_name,
-                "target_properties": target_props,
-                "actual_properties": actual_props,
-                "source_properties": source_props,
-            }
-            with open(variant_dir / "variant_meta.json", "w", encoding="utf-8") as meta_file:
-                json.dump(metadata, meta_file, indent=2)
+                validate_variant_geometry(variant_dir, bounds_cache)
+            except Exception:
+                shutil.rmtree(variant_dir, ignore_errors=True)
+                raise
 
             generated.append(variant_dir)
 
