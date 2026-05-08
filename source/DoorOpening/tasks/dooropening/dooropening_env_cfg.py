@@ -235,6 +235,20 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         offset=CameraCfg.OffsetCfg(pos=(0.0, 0.0, 0.0), rot=POINTCLOUD_CAMERA_QUAT, convention="world"),
     )
 
+    # Raw `.pt` point-cloud replay dumps for teacher RL training on headless/HPC nodes.
+    # This uses geometry samplers, not cameras or renderer video: one robot cloud and one door cloud per saved frame.
+    viser_pointcloud = {
+        "enabled": False,
+        "path": "teacher_viser_replay.pt",
+        "env_id": 0,
+        "capture_interval": 1,
+        "save_interval": 6000,
+        "max_points": 6000,
+        "robot_num_points": 4096,
+        "door_num_points": 4096,
+        "max_frames": 3000,
+    }
+
     door_body_names = DOOR_BODY_NAMES
 
     door_base_frame_name = "base"
