@@ -34,7 +34,6 @@ from DoorOpening.utils.extract_pointcloud_from_articulation import FrankaLeapSam
 from DoorOpening.utils.glorbot_collision_checker import GlorbotCollisionChecker
 from DoorOpening.utils.pose_utils import world_to_local
 from DoorOpening.utils.viser_pt import (
-    ViserPtRecorder,
     format_iterated_record_path,
     prepare_pointcloud,
     prepare_world_points_from_local,
@@ -855,7 +854,6 @@ class Dagger:
         self._viser_raw_chunk_env_id = None
         self._viser_raw_chunk_start_iteration = None
         self._viser_raw_latest_iteration = None
-        self.viser_raw_recorder = None
 
         # Keep replay outputs next to checkpoints by default so a run's artifacts stay together.
         default_record_dir = Path(self.nn_dir).parent if self.nn_dir is not None else Path(os.getcwd())
@@ -886,64 +884,37 @@ class Dagger:
         self.viser_pointcloud_sensor_fps = 1.0 / self.viser_pointcloud_sensor_dt
         if not self.viser_raw_enabled:
             return
-        base_metadata = {
-            "format": "dooropening_viser_replay_v2",
-            "pointcloud_frame": "world",
-            "pointcloud_source": self.pointcloud_source,
-            "pointcloud_render_mode": str(getattr(self.ov_env.cfg, "pointcloud_render_mode", "none")).lower(),
-            "sim_dt": float(self.viser_sim_dt),
-            "decimation": int(getattr(self.ov_env.cfg, "decimation", 1)),
-            "render_interval": int(self.viser_render_interval),
-            "render_dt": float(self.viser_render_dt),
-            "env_step_dt": float(self.viser_env_step_dt),
-            "env_step_fps": float(self.viser_env_step_fps),
-            "frame_dt": float(self.viser_env_step_dt),
-            "frame_fps": float(self.viser_env_step_fps),
-            "pointcloud_sensor_dt": float(self.viser_pointcloud_sensor_dt),
-            "pointcloud_sensor_fps": float(self.viser_pointcloud_sensor_fps),
-            "raw_cloud_config": {
-                "include_ground_truth": bool(self.viser_raw_include_ground_truth),
-                "include_robot_obs": bool(self.viser_raw_include_robot_obs),
-                "include_policy_input": bool(self.viser_raw_include_policy_input),
-                "max_points": int(self.viser_raw_max_points),
-            },
-            "glorbot_urdf_path": str(glorbot_urdf_path),
-            "robot_joint_names": list(getattr(self.ov_env.robot, "joint_names", [])),
-            "door_joint_names": list(getattr(self.ov_env.door, "joint_names", [])),
-        }
-        stream_specs = {
-            "ground_truth": {
-                "label": "Ground Truth",
-                "color": (120, 120, 120),
-                "enabled": bool(self.viser_raw_include_ground_truth),
-                "max_points": self.viser_raw_max_points,
-            },
-            "robot_obs": {
-                "label": "Robot Obs",
-                "color": (79, 195, 247),
-                "enabled": bool(self.viser_raw_include_robot_obs),
-                "max_points": self.viser_raw_max_points,
-            },
-            "policy_input": {
-                "label": "Policy Input",
-                "color": (0, 170, 120),
-                "enabled": bool(self.viser_raw_include_policy_input),
-                "max_points": self.viser_raw_max_points,
-                "drop_zero_rows": True,
-            },
-        }
-        self.viser_raw_recorder = ViserPtRecorder(
-            path=self.viser_raw_path,
-            enabled=self.viser_raw_enabled,
-            rank=self.rank,
-            env_id=self.viser_env_id,
-            save_interval=self.viser_raw_save_interval,
-            max_frames=self.viser_raw_max_frames,
-            max_points=self.viser_raw_max_points,
-            base_metadata=base_metadata,
-            stream_specs=stream_specs,
-        )
+
+        raw_dir = os.path.dirname(self.viser_raw_path)
+        if raw_dir:
+            os.makedirs(raw_dir, exist_ok=True)
+
         if self.rank == 0:
+            print(f"Viser raw replay capture enabled for env {self.viser_env_id}.")
+            print(
+                "Raw replay data will be written as "
+                f"{self._format_iterated_record_path(self.viser_raw_path, '<chunk_tag>')}"
+            )
+            print(
+                "Raw replay chunks will be written every "
+                f"{self.viser_raw_save_interval} iterations."
+            )
+            if self.viser_raw_max_frames > 0:
+                print(f"Each raw replay chunk will keep at most {self.viser_raw_max_frames} frames.")
+            print(
+                "Raw replay point budget: max_points={} (gt={}, obs={}, policy={}).".format(
+                    self.viser_raw_max_points,
+                    "off"
+                    if not self.viser_raw_include_ground_truth or self.viser_raw_max_points <= 0
+                    else "on",
+                    "off"
+                    if not self.viser_raw_include_robot_obs or self.viser_raw_max_points <= 0
+                    else "on",
+                    "off"
+                    if not self.viser_raw_include_policy_input or self.viser_raw_max_points <= 0
+                    else "on",
+                )
+            )
             print(
                 "Replay timing: env_step_dt={:.6f}s ({:.2f} FPS), pointcloud_sensor_dt={:.6f}s ({:.2f} FPS).".format(
                     self.viser_env_step_dt,
@@ -1103,33 +1074,60 @@ class Dagger:
         aux_prediction=None,
     ):
         """Append the selected env to the raw replay output."""
-        if not self.viser_raw_enabled or self.viser_raw_recorder is None:
+        if not self.viser_raw_enabled:
             return
 
         env_id = self._get_viser_env_id()
-        clouds = {}
+        if self._viser_raw_chunk_start_iteration is None:
+            self._viser_raw_chunk_index += 1
+            self._viser_raw_chunk_env_id = int(env_id)
+            self._viser_raw_chunk_start_iteration = int(iteration)
+        elif self._viser_raw_chunk_env_id != int(env_id):
+            self._viser_raw_chunk_env_id = None
+        self._viser_raw_latest_iteration = int(iteration)
+
+        ground_truth_points_world = None
         if self.viser_raw_include_ground_truth and self.viser_raw_max_points > 0:
-            clouds["ground_truth"] = ground_truth_pcd_world
+            ground_truth_points_world = self._prepare_viser_points(
+                ground_truth_pcd_world,
+                env_id,
+                self.viser_raw_max_points,
+            ).to(dtype=torch.float16)
+
+        robot_obs_points_world = None
         if self.viser_raw_include_robot_obs and self.viser_raw_max_points > 0:
-            clouds["robot_obs"] = self._prepare_viser_world_points_from_local(
+            robot_obs_points_world = self._prepare_viser_world_points_from_local(
                 robot_obs_pcd_base,
                 robot_base_pos_w,
                 robot_base_quat_w,
                 env_id,
                 self.viser_raw_max_points,
-            )
+            ).to(dtype=torch.float16)
+
+        policy_input_points_world = None
         if self.viser_raw_include_policy_input and policy_input_pcd_base is not None and self.viser_raw_max_points > 0:
-            clouds["policy_input"] = self._prepare_viser_world_points_from_local(
+            policy_input_points_world = self._prepare_viser_world_points_from_local(
                 policy_input_pcd_base,
                 robot_base_pos_w,
                 robot_base_quat_w,
                 env_id,
                 self.viser_raw_max_points,
                 drop_zero_rows=True,
-            )
+            ).to(dtype=torch.float16)
 
-        frame_metadata = {
+        frame_record = {
+            "iteration": int(iteration),
+            "sim_frame": int(self.frame),
+            "env_id": int(env_id),
             "pointcloud_source": self.pointcloud_source,
+            "ground_truth_points_world": ground_truth_points_world,
+            "robot_obs_points_world": robot_obs_points_world,
+            "policy_input_points_world": policy_input_points_world,
+            "pointclouds": {
+                "ground_truth": ground_truth_points_world,
+                "robot_obs": robot_obs_points_world,
+                "policy_input": policy_input_points_world,
+            },
             "aux_prediction": None
             if aux_prediction is None
             else self._aux_to_2d(aux_prediction)[env_id].detach().cpu().to(dtype=torch.float32),
@@ -1142,19 +1140,12 @@ class Dagger:
             "door_asset_idx": int(self.env_asset_idx[env_id].detach().cpu().item()),
             "door_asset_path": str(door_asset_paths[int(self.env_asset_idx[env_id].detach().cpu().item())]),
         }
-        self.viser_raw_recorder.append_frame(
-            iteration=int(iteration),
-            sim_frame=int(self.frame),
-            env_id=int(env_id),
-            clouds=clouds,
-            frame_metadata=frame_metadata,
-        )
+        self._viser_raw_frames.append(frame_record)
+        self._trim_viser_raw_frames()
+        self._maybe_flush_viser_raw_snapshot(iteration)
 
     def _close_viser_debug_tools(self):
         """Flush any in-progress raw replay chunk on shutdown."""
-        if self.viser_raw_recorder is not None:
-            self.viser_raw_recorder.close(reason="shutdown")
-            return
         if self._viser_raw_frame_count > 0:
             self._flush_viser_raw_recording(chunk_complete=False, reason="shutdown")
 

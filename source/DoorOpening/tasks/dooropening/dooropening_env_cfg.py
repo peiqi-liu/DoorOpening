@@ -242,11 +242,11 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         "path": "teacher_viser_replay.pt",
         "env_id": 0,
         "capture_interval": 1,
-        "save_interval": 6000,
+        "save_interval": 5000,
         "max_points": 6000,
         "robot_num_points": 4096,
         "door_num_points": 4096,
-        "max_frames": 3000,
+        "max_frames": 2000,
     }
 
     door_body_names = DOOR_BODY_NAMES

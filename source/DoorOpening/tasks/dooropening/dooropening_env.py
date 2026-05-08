@@ -24,7 +24,7 @@ from DoorOpening.utils.pose_utils import world_to_local
 from isaaclab.utils.math import quat_conjugate, quat_apply, quat_mul
 from DoorOpening.utils.quat_utils import quat_to_6d
 from DoorOpening.utils.extract_pointcloud_from_articulation import FrankaLeapSampler
-from DoorOpening.utils.viser_pt import ViserPtRecorder
+from DoorOpening.utils.viser_pt import format_iterated_record_path, prepare_pointcloud
 from typing import Tuple
 
 
@@ -232,34 +232,66 @@ class DooropeningEnv(DirectRLEnv):
     def _init_viser_pointcloud_recording(self):
         """Initialize optional teacher-training point-cloud replay dumps."""
 
-        self.viser_pointcloud_recorder = None
-        self._viser_pointcloud_capture_interval = 1
-        self._viser_robot_sampler = None
-        self._viser_door_samplers = {}
-        self._viser_env_asset_idx = None
+        self._reset_viser_pointcloud_runtime_state()
 
         record_cfg = dict(getattr(self.cfg, "viser_pointcloud", {}) or {})
         rank = int(os.environ.get("RANK", "0"))
         if rank != 0 or not bool(record_cfg.get("enabled", False)):
             return
 
-        selected_env_id = max(0, min(int(record_cfg.get("env_id", 0)), self.num_envs - 1))
+        self.viser_pointcloud_enabled = True
+        self._configure_viser_pointcloud_from_cfg(record_cfg)
+
+        self._init_viser_pointcloud_asset_samplers()
+        self._init_viser_pointcloud_metadata()
+
+        print(f"Viser .pt point-cloud capture enabled for env {self._viser_pointcloud_env_id}.")
+        print(
+            "Replay chunks will be written as "
+            f"{format_iterated_record_path(self.viser_pointcloud_path, '<chunk_tag>')}"
+        )
+        print(f"Replay chunks will flush every {self._viser_pointcloud_save_interval} iterations.")
+        if self._viser_pointcloud_max_frames > 0:
+            print(f"Each replay chunk will keep at most {self._viser_pointcloud_max_frames} frames.")
+
+    def _reset_viser_pointcloud_runtime_state(self):
+        self.viser_pointcloud_enabled = False
+        self.viser_pointcloud_path = ""
+        self.viser_pointcloud_frames = []
+        self.viser_pointcloud_frame_count = 0
+        self.viser_pointcloud_chunk_index = 0
+        self.viser_pointcloud_chunk_start_iteration = None
+        self.viser_pointcloud_latest_iteration = None
+        self._viser_pointcloud_metadata = {}
+        self._viser_robot_sampler = None
+        self._viser_door_samplers = {}
+        self._viser_env_asset_idx = None
+
+    def _configure_viser_pointcloud_from_cfg(self, record_cfg: dict):
+        self._viser_pointcloud_env_id = max(0, min(int(record_cfg["env_id"]), self.num_envs - 1))
         self._viser_pointcloud_capture_interval = max(
             1,
             int(record_cfg.get("capture_interval", record_cfg.get("record_interval", 1))),
         )
-        save_interval = max(1, int(record_cfg.get("save_interval", record_cfg.get("raw_interval", 1000))))
-        max_frames = max(0, int(record_cfg.get("max_frames", 3000)))
-        max_points = int(record_cfg.get("max_points", 6000))
-        robot_num_points = int(record_cfg.get("robot_num_points", record_cfg.get("num_points", 4096)))
-        door_num_points = int(record_cfg.get("door_num_points", record_cfg.get("num_points", 4096)))
-        self._viser_door_num_points = door_num_points
+        self._viser_pointcloud_save_interval = max(
+            1,
+            int(record_cfg.get("save_interval", record_cfg.get("raw_interval", 5000))),
+        )
+        self._viser_pointcloud_max_frames = max(0, int(record_cfg.get("max_frames", 2000)))
+        self._viser_pointcloud_max_points = int(record_cfg.get("max_points", 6000))
+        self._viser_robot_num_points = int(record_cfg.get("robot_num_points", record_cfg.get("num_points", 4096)))
+        self._viser_door_num_points = int(record_cfg.get("door_num_points", record_cfg.get("num_points", 4096)))
 
         configured_path = Path(str(record_cfg.get("path", record_cfg.get("raw_path", "teacher_viser_replay.pt")))).expanduser()
         if not configured_path.is_absolute():
             log_dir = Path(str(getattr(self.cfg, "log_dir", os.getcwd())))
             configured_path = log_dir / configured_path
+        self.viser_pointcloud_path = str(configured_path)
+        raw_dir = os.path.dirname(self.viser_pointcloud_path)
+        if raw_dir:
+            os.makedirs(raw_dir, exist_ok=True)
 
+    def _init_viser_pointcloud_asset_samplers(self):
         asset_index_by_dir = {Path(asset_path).resolve().parent: idx for idx, asset_path in enumerate(door_asset_paths)}
         motion_to_asset_idx = []
         for motion_path in motion_traj_paths:
@@ -271,16 +303,20 @@ class DooropeningEnv(DirectRLEnv):
         env_motion_idx = self.ref_motion_lib.env_to_file_map.to(device=self.device, dtype=torch.long)
         self._viser_env_asset_idx = motion_to_asset_idx[env_motion_idx]
 
-        selected_asset_idx = int(self._viser_env_asset_idx[selected_env_id].detach().cpu().item())
+        selected_asset_idx = int(self._viser_env_asset_idx[self._viser_pointcloud_env_id].detach().cpu().item())
         self._viser_door_samplers = {
             selected_asset_idx: FrankaLeapSampler(
                 door_asset_paths[selected_asset_idx],
                 device=self.device,
-                num_points=door_num_points,
+                num_points=self._viser_door_num_points,
             )
         }
 
-        self._viser_robot_sampler = FrankaLeapSampler(glorbot_urdf_path, device=self.device, num_points=robot_num_points)
+        self._viser_robot_sampler = FrankaLeapSampler(
+            glorbot_urdf_path,
+            device=self.device,
+            num_points=self._viser_robot_num_points,
+        )
         robot_sampler_joint_names = list(self._viser_robot_sampler.robot.actuated_joint_names)
         robot_joint_ids, robot_joint_names = self.robot.find_joints(robot_sampler_joint_names)
         if len(robot_joint_ids) != len(robot_sampler_joint_names):
@@ -290,13 +326,18 @@ class DooropeningEnv(DirectRLEnv):
         self._viser_robot_sampler_joint_reorder = [robot_joint_name_to_idx[name] for name in robot_sampler_joint_names]
         self._viser_robot_root_body_idx = int(self._robot_base_link_idx[0])
 
+    def _init_viser_pointcloud_metadata(self):
         sim_cfg = getattr(self.cfg, "sim", None)
         sim_dt = float(getattr(sim_cfg, "dt", self.cfg.sim_dt))
         env_step_dt = max(float(getattr(self, "dt", sim_dt * int(getattr(self.cfg, "decimation", 1)))), 1e-6)
-        base_metadata = {
+        self._viser_pointcloud_metadata = {
             "format": "dooropening_viser_replay_v2",
             "capture_mode": "teacher_training_pointcloud_chunk",
             "pointcloud_frame": "world",
+            "pointcloud_streams": [
+                {"name": "robot", "label": "Robot", "color": (79, 195, 247), "point_size_scale": 1.0},
+                {"name": "door", "label": "Door", "color": (255, 193, 7), "point_size_scale": 1.0},
+            ],
             "pointcloud_source": "articulation_sampler",
             "sim_dt": sim_dt,
             "decimation": int(getattr(self.cfg, "decimation", 1)),
@@ -307,38 +348,15 @@ class DooropeningEnv(DirectRLEnv):
             "pointcloud_sensor_dt": env_step_dt * self._viser_pointcloud_capture_interval,
             "pointcloud_sensor_fps": 1.0 / (env_step_dt * self._viser_pointcloud_capture_interval),
             "raw_cloud_config": {
-                "max_points": max_points,
-                "robot_num_points": robot_num_points,
-                "door_num_points": door_num_points,
+                "max_points": self._viser_pointcloud_max_points,
+                "robot_num_points": self._viser_robot_num_points,
+                "door_num_points": self._viser_door_num_points,
                 "capture_interval": self._viser_pointcloud_capture_interval,
             },
             "glorbot_urdf_path": str(glorbot_urdf_path),
             "robot_joint_names": list(getattr(self.robot, "joint_names", [])),
             "door_joint_names": list(getattr(self.door, "joint_names", [])),
         }
-        stream_specs = {
-            "robot": {
-                "label": "Robot",
-                "color": (79, 195, 247),
-                "max_points": max_points,
-            },
-            "door": {
-                "label": "Door",
-                "color": (255, 193, 7),
-                "max_points": max_points,
-            },
-        }
-        self.viser_pointcloud_recorder = ViserPtRecorder(
-            path=str(configured_path),
-            enabled=True,
-            rank=rank,
-            env_id=selected_env_id,
-            save_interval=save_interval,
-            max_frames=max_frames,
-            max_points=max_points,
-            base_metadata=base_metadata,
-            stream_specs=stream_specs,
-        )
 
     def _sample_viser_robot_pointcloud_world(self, env_id: int) -> torch.Tensor:
         robot_joint_pos = self.robot.data.joint_pos[env_id : env_id + 1, self._viser_robot_sampler_joint_ids]
@@ -367,20 +385,114 @@ class DooropeningEnv(DirectRLEnv):
         quat = door_base_quat_w.unsqueeze(1).expand(-1, local_pcd.shape[1], -1)
         return (quat_apply(quat, local_pcd) + door_base_pos_w.unsqueeze(1))[0]
 
+    def _trim_viser_pointcloud_frames(self):
+        if (
+            self._viser_pointcloud_max_frames > 0
+            and len(self.viser_pointcloud_frames) > self._viser_pointcloud_max_frames
+        ):
+            self.viser_pointcloud_frames = self.viser_pointcloud_frames[-self._viser_pointcloud_max_frames :]
+        self.viser_pointcloud_frame_count = len(self.viser_pointcloud_frames)
+        if self.viser_pointcloud_frame_count > 0:
+            self.viser_pointcloud_chunk_start_iteration = int(self.viser_pointcloud_frames[0]["iteration"])
+        else:
+            self.viser_pointcloud_chunk_start_iteration = None
+
+    def _build_viser_pointcloud_payload(self, chunk_complete: bool) -> dict:
+        latest_iteration = int(self.viser_pointcloud_latest_iteration or 0)
+        payload = {
+            **self._viser_pointcloud_metadata,
+            "chunk_index": int(self.viser_pointcloud_chunk_index),
+            "chunk_env_id": int(self._viser_pointcloud_env_id),
+            "chunk_start_iteration": None
+            if self.viser_pointcloud_chunk_start_iteration is None
+            else int(self.viser_pointcloud_chunk_start_iteration),
+            "chunk_end_iteration": latest_iteration,
+            "chunk_complete": bool(chunk_complete),
+            "chunk_frame_count": int(self.viser_pointcloud_frame_count),
+            "episode_index": int(self.viser_pointcloud_chunk_index),
+            "episode_env_id": int(self._viser_pointcloud_env_id),
+            "episode_start_iteration": None
+            if self.viser_pointcloud_chunk_start_iteration is None
+            else int(self.viser_pointcloud_chunk_start_iteration),
+            "episode_end_iteration": latest_iteration,
+            "episode_complete": bool(chunk_complete),
+            "episode_frame_count": int(self.viser_pointcloud_frame_count),
+            "frames": self.viser_pointcloud_frames,
+        }
+        return payload
+
+    def _flush_viser_pointcloud_recording(self, chunk_complete: bool, reason: str):
+        if not self.viser_pointcloud_enabled or self.viser_pointcloud_frame_count <= 0:
+            return
+
+        latest_iteration = int(self.viser_pointcloud_latest_iteration or 0)
+        record_tag = f"chunk_{self.viser_pointcloud_chunk_index:04d}_iter_{latest_iteration}"
+        torch.save(
+            self._build_viser_pointcloud_payload(chunk_complete=chunk_complete),
+            format_iterated_record_path(self.viser_pointcloud_path, record_tag),
+        )
+        status = "complete" if chunk_complete else "partial"
+        print(
+            "Saved {} Viser .pt chunk {} for env {} with {} frames ({}).".format(
+                status,
+                self.viser_pointcloud_chunk_index,
+                self._viser_pointcloud_env_id,
+                self.viser_pointcloud_frame_count,
+                reason,
+            )
+        )
+
+        self.viser_pointcloud_frames = []
+        self.viser_pointcloud_frame_count = 0
+        self.viser_pointcloud_chunk_start_iteration = None
+        self.viser_pointcloud_latest_iteration = None
+
+    def _maybe_flush_viser_pointcloud_snapshot(self, iteration: int):
+        if not self.viser_pointcloud_enabled or self.viser_pointcloud_frame_count <= 0:
+            return
+        if (int(iteration) + 1) % self._viser_pointcloud_save_interval != 0:
+            return
+        self._flush_viser_pointcloud_recording(
+            chunk_complete=True,
+            reason=f"save_interval {self._viser_pointcloud_save_interval} reached at iteration {int(iteration)}",
+        )
+
     def _maybe_record_viser_pointcloud(self):
-        recorder = self.viser_pointcloud_recorder
-        if recorder is None or self._viser_env_asset_idx is None:
+        if not self.viser_pointcloud_enabled or self._viser_env_asset_idx is None:
             return
         iteration = int(self.common_step_counter)
         if iteration % self._viser_pointcloud_capture_interval != 0:
             return
 
-        env_id = recorder.get_env_id(self.num_envs)
+        env_id = self._viser_pointcloud_env_id
         robot_points_world = self._sample_viser_robot_pointcloud_world(env_id)
         door_points_world = self._sample_viser_door_pointcloud_world(env_id)
+        robot_points_world = prepare_pointcloud(
+            robot_points_world,
+            max_points=self._viser_pointcloud_max_points,
+        ).to(dtype=torch.float16)
+        door_points_world = prepare_pointcloud(
+            door_points_world,
+            max_points=self._viser_pointcloud_max_points,
+        ).to(dtype=torch.float16)
         door_asset_idx = int(self._viser_env_asset_idx[env_id].detach().cpu().item())
-        frame_metadata = {
+
+        if self.viser_pointcloud_chunk_start_iteration is None:
+            self.viser_pointcloud_chunk_index += 1
+            self.viser_pointcloud_chunk_start_iteration = iteration
+        self.viser_pointcloud_latest_iteration = iteration
+
+        frame_record = {
+            "iteration": iteration,
+            "sim_frame": int(self._rlgames_env_frames if self._rlgames_env_frames > 0 else iteration),
+            "env_id": int(env_id),
             "pointcloud_source": "articulation_sampler",
+            "robot_points_world": robot_points_world,
+            "door_points_world": door_points_world,
+            "pointclouds": {
+                "robot": robot_points_world,
+                "door": door_points_world,
+            },
             "rlgames_env_frames": int(self._rlgames_env_frames),
             "robot_joint_pos": self.robot.data.joint_pos[env_id].detach().cpu().to(dtype=torch.float32),
             "door_joint_pos": self.door.data.joint_pos[env_id].detach().cpu().to(dtype=torch.float32),
@@ -391,16 +503,9 @@ class DooropeningEnv(DirectRLEnv):
             "door_asset_idx": door_asset_idx,
             "door_asset_path": str(door_asset_paths[door_asset_idx]),
         }
-        recorder.append_frame(
-            iteration=iteration,
-            sim_frame=int(self._rlgames_env_frames if self._rlgames_env_frames > 0 else iteration),
-            env_id=env_id,
-            clouds={
-                "robot": robot_points_world,
-                "door": door_points_world,
-            },
-            frame_metadata=frame_metadata,
-        )
+        self.viser_pointcloud_frames.append(frame_record)
+        self._trim_viser_pointcloud_frames()
+        self._maybe_flush_viser_pointcloud_snapshot(iteration)
 
     def _initialize_runtime_event_terms(self):
         if not self.cfg.events:
@@ -1480,9 +1585,8 @@ class DooropeningEnv(DirectRLEnv):
         self._refresh_nominal_door_joint_gains(env_ids)
 
     def close(self):
-        recorder = getattr(self, "viser_pointcloud_recorder", None)
-        if recorder is not None:
-            recorder.close(reason="env close")
+        if getattr(self, "viser_pointcloud_enabled", False):
+            self._flush_viser_pointcloud_recording(chunk_complete=False, reason="env close")
         return super().close()
 
 @torch.jit.script
