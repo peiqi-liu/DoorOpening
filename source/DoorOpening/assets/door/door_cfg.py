@@ -13,6 +13,7 @@ Defines the door configuration for simulation with Isaac Sim.
 
 import os
 import glob
+import warnings
 import torch
 import isaaclab.sim as sim_utils
 from isaaclab.actuators.actuator_cfg import ImplicitActuatorCfg
@@ -170,24 +171,38 @@ asset_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/mobility.urdf
 board_offsets = []
 board_bboxes = []
 handle_offsets = []
+valid_asset_paths = []
+skipped_assets = []
 
 for asset_path in asset_paths:
-    keypoints = compute_exact_door_keypoints(asset_path)
+    try:
+        keypoints = compute_exact_door_keypoints(asset_path)
+    except Exception as exc:
+        skipped_assets.append((asset_path, exc))
+        warnings.warn(f"Skipping door asset {asset_path}: {exc}")
+        continue
+    valid_asset_paths.append(asset_path)
     board_offsets.append(keypoints["link_1"])
     board_bboxes.append(keypoints["link_1_bbox_base"])
     handle_offsets.append(keypoints["link_2"])
 
+if not valid_asset_paths:
+    raise RuntimeError(f"No valid door assets were loaded from {asset_base_folder}")
+
+asset_paths = valid_asset_paths
 board_offsets = torch.tensor(board_offsets)
 board_bboxes = torch.tensor(board_bboxes)
 handle_offsets = torch.tensor(handle_offsets)
 
 motion_traj_paths = [os.path.join(os.path.dirname(asset_path), "traj.pkl") for asset_path in asset_paths]
 
-door_asset_path = asset_paths[32]
+door_asset_path = asset_paths[min(32, len(asset_paths) - 1)]
 # door_asset_path = asset_paths[0]
 board_offset = board_offsets[0]
 handle_offset = handle_offsets[0]
 print("door_asset_path: ", door_asset_path)
+if skipped_assets:
+    print(f"Skipped {len(skipped_assets)} invalid door assets while building door configs.")
 
 DOOR_CONFIG = create_door_cfg(door_asset_path, training_mode=False)
 
