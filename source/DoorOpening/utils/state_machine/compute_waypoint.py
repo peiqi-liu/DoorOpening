@@ -1,4 +1,5 @@
 import argparse
+import json
 import math
 from DoorOpening.utils.state_machine.api import compute_base_joint, solve_ik, get_hinge_pos, open_hand
 import torch
@@ -18,10 +19,60 @@ from viser.extras import ViserUrdf
 from yourdfpy import URDF
 from DoorOpening.utils.state_machine.pin import PinocchioIKSolver
 from DoorOpening.utils.state_machine.offline_pull_door import state_machine_offline_pull_door
+from DoorOpening.utils.state_machine.offline_push_door import state_machine_offline_push_door
 import glob
 
 
 DEFAULT_TRAJ_DT = 1.0 / 40.0
+
+
+def _load_variant_metadata(door_urdf_path):
+    meta_path = os.path.join(os.path.dirname(door_urdf_path), "variant_meta.json")
+    if not os.path.exists(meta_path):
+        return None
+
+    with open(meta_path, encoding="utf-8") as meta_file:
+        return json.load(meta_file)
+
+
+def _metadata_handle_side_to_planner_side(handle_side):
+    if handle_side == "max":
+        return "right"
+    if handle_side == "min":
+        return "left"
+    return None
+
+
+def resolve_planner_options(door_urdf_path, handle_side, opening_direction):
+    metadata = _load_variant_metadata(door_urdf_path)
+
+    resolved_opening_direction = opening_direction
+    if resolved_opening_direction == "auto":
+        resolved_opening_direction = "pull"
+        if metadata is not None:
+            resolved_opening_direction = metadata.get("target_properties", {}).get(
+                "opening_direction",
+                resolved_opening_direction,
+            )
+
+    resolved_handle_side = handle_side
+    if resolved_handle_side == "auto":
+        resolved_handle_side = "right"
+        if metadata is not None:
+            metadata_handle_side = metadata.get("actual_properties", {}).get("handle_side")
+            resolved_handle_side = (
+                _metadata_handle_side_to_planner_side(metadata_handle_side)
+                or resolved_handle_side
+            )
+
+    if resolved_opening_direction not in {"pull", "push"}:
+        raise ValueError(
+            f"Unsupported opening_direction '{resolved_opening_direction}'. Expected 'pull' or 'push'."
+        )
+    if resolved_handle_side not in {"right", "left"}:
+        raise ValueError(f"Unsupported handle_side '{resolved_handle_side}'. Expected 'right' or 'left'.")
+
+    return resolved_handle_side, resolved_opening_direction
 
 
 def get_robot_constants():
@@ -602,7 +653,8 @@ def compute_link_twist(pos_traj: torch.Tensor,
 def play_and_save_traj(
     robot_urdf_path,
     door_urdf_path,
-    handle_side="right",
+    handle_side="auto",
+    opening_direction="auto",
     randomize_start_base=True,
     start_base_radius=1.0,
     start_base_angle_range_deg=30.0,
@@ -629,17 +681,38 @@ def play_and_save_traj(
             f"(radius={start_base_radius:.2f} m, angle={math.degrees(sampled_angle):.1f} deg)",
         )
     door_initial_q = torch.tensor([0.0, 0.0], device="cpu")
-    start_time = time.time()
-    robot_traj, door_traj, key_idx_in_key_indices = state_machine_offline_pull_door(
-        robot_urdf_path,
+    planner_handle_side, planner_opening_direction = resolve_planner_options(
         door_urdf_path,
-        robot_initial_pose,
-        door_initial_pose,
-        robot_initial_q,
-        door_initial_q,
-        handle_side=handle_side,
-        device="cpu",
+        handle_side,
+        opening_direction,
     )
+    print(
+        f"Using {planner_opening_direction} planner "
+        f"for {planner_handle_side}-side handle: {door_urdf_path}"
+    )
+    start_time = time.time()
+    if planner_opening_direction == "pull":
+        robot_traj, door_traj, key_idx_in_key_indices = state_machine_offline_pull_door(
+            robot_urdf_path,
+            door_urdf_path,
+            robot_initial_pose,
+            door_initial_pose,
+            robot_initial_q,
+            door_initial_q,
+            handle_side=planner_handle_side,
+            device="cpu",
+        )
+    else:
+        robot_traj, door_traj, key_idx_in_key_indices = state_machine_offline_push_door(
+            robot_urdf_path,
+            door_urdf_path,
+            robot_initial_pose,
+            door_initial_pose,
+            robot_initial_q,
+            door_initial_q,
+            handle_side=planner_handle_side,
+            device="cpu",
+        )
     print(f"Time taken: {time.time() - start_time} seconds")
     torch.set_printoptions(precision=4, sci_mode=False)
     # new_robot_traj = []
@@ -727,11 +800,15 @@ def play_and_save_traj(
     #     print(i, robot_body_pos_traj[i], robot_body_quat_traj[i])
 
     mask = torch.zeros(len(robot_traj), dtype=torch.int8)
-    # Contact with hinge should happen between keyframe 2 and 4
-    mask[key_indices[1]:key_indices[3]] = 1
+    if planner_opening_direction == "push" and len(key_indices) > 4:
+        mask[key_indices[2]:key_indices[4]] = 1
+    else:
+        # Contact with hinge should happen between keyframe 2 and 4
+        mask[key_indices[1]:key_indices[3]] = 1
 
     data = {
-        "handle_side": handle_side,
+        "handle_side": planner_handle_side,
+        "opening_direction": planner_opening_direction,
         "sim_dt": float(traj_dt),
         "door_traj": door_traj, 
         "robot_body_pos_traj": robot_body_pos_traj,
@@ -772,9 +849,15 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--handle-side",
-        default="right",
-        choices=["right", "left"],
-        help="Select the pull-door planner variant. 'right' keeps the legacy path; 'left' uses the mirrored planner.",
+        default="auto",
+        choices=["auto", "right", "left"],
+        help="Select handle-side planner tuning, or read it from variant_meta.json when available.",
+    )
+    parser.add_argument(
+        "--opening-direction",
+        default="auto",
+        choices=["auto", "pull", "push"],
+        help="Select the door planner, or read pull/push from variant_meta.json when available.",
     )
     parser.add_argument(
         "--playback-speed",
@@ -802,6 +885,7 @@ if __name__ == "__main__":
             robot_urdf_path,
             door_urdf_path,
             handle_side=args.handle_side,
+            opening_direction=args.opening_direction,
             playback_speed=args.playback_speed,
             traj_dt=args.traj_dt,
         )
