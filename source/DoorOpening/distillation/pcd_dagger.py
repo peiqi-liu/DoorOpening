@@ -33,6 +33,11 @@ from DoorOpening.utils.camera_utils import (
 from DoorOpening.utils.extract_pointcloud_from_articulation import FrankaLeapSampler
 from DoorOpening.utils.glorbot_collision_checker import GlorbotCollisionChecker
 from DoorOpening.utils.pose_utils import world_to_local
+from DoorOpening.utils.viser_pt import (
+    format_iterated_record_path,
+    prepare_pointcloud,
+    prepare_world_points_from_local,
+)
 
 
 def adjust_state_dict_keys(checkpoint_state_dict, model_state_dict):
@@ -1034,55 +1039,27 @@ class Dagger:
         drop_zero_rows=False,
     ):
         """Convert a base-frame point cloud for one env into world coordinates for raw replay output."""
-        if pointcloud_local is None:
-            return torch.zeros((0, 3), dtype=torch.float32)
-
-        local_points = self._prepare_viser_points(
+        return prepare_world_points_from_local(
             pointcloud_local,
-            env_id,
-            max_points,
+            base_pos_w,
+            base_quat_w,
+            env_id=int(env_id),
+            max_points=max_points,
             drop_zero_rows=drop_zero_rows,
         )
-        if local_points.numel() == 0:
-            return local_points
-
-        # Rotate from the robot base frame into world, then translate by the base origin.
-        quat = base_quat_w[env_id].detach().to(device=local_points.device, dtype=local_points.dtype).unsqueeze(0)
-        quat = quat.expand(local_points.shape[0], -1)
-        pos = base_pos_w[env_id].detach().to(device=local_points.device, dtype=local_points.dtype).unsqueeze(0)
-        world_points = quat_apply(quat, local_points) + pos
-        return world_points.to(dtype=torch.float32).cpu()
 
     def _prepare_viser_points(self, pointcloud, env_id, max_points, drop_zero_rows=False):
         """Extract one env's point cloud, sanitize it, and downsample it on CPU for replay export."""
-        if pointcloud is None:
-            return torch.zeros((0, 3), dtype=torch.float32)
-        if pointcloud.ndim == 2 and pointcloud.shape[-1] == 3:
-            points = pointcloud.detach()
-        elif pointcloud.ndim == 3 and pointcloud.shape[-1] == 3:
-            points = pointcloud[env_id].detach()
-        else:
-            raise ValueError(f"Expected pointcloud with shape (N, 3) or (B, N, 3), got {tuple(pointcloud.shape)}.")
-
-        points = points.to(dtype=torch.float32, device="cpu")
-        # Remove NaN/Inf rows before exporting debug captures.
-        finite_mask = torch.isfinite(points).all(dim=-1)
-        points = points[finite_mask]
-        if drop_zero_rows and points.numel() > 0:
-            # Policy inputs may be padded with zeros; drop those rows from replay output.
-            nonzero_mask = torch.any(points.abs() > 1e-6, dim=-1)
-            points = points[nonzero_mask]
-        if max_points is not None and max_points > 0 and points.shape[0] > max_points:
-            # Use evenly-spaced indexing across the full cloud to avoid prefix bias (e.g., dropping later robot links).
-            sample_idx = torch.linspace(0, points.shape[0] - 1, steps=max_points, dtype=torch.float32)
-            sample_idx = torch.round(sample_idx).to(dtype=torch.long)
-            points = points[sample_idx]
-        return points
+        return prepare_pointcloud(
+            pointcloud,
+            env_id=int(env_id),
+            max_points=max_points,
+            drop_zero_rows=drop_zero_rows,
+        )
 
     def _format_iterated_record_path(self, path_str, iteration):
         """Append a record-specific suffix to replay filenames so each saved capture gets its own file."""
-        path = Path(path_str)
-        return str(path.with_name(f"{path.stem}_{iteration}{path.suffix}"))
+        return format_iterated_record_path(path_str, iteration)
 
     def _maybe_update_viser_debug(
         self,
@@ -1101,7 +1078,6 @@ class Dagger:
             return
 
         env_id = self._get_viser_env_id()
-        show_policy_input = self.viser_show_policy_input and policy_input_pcd_base is not None
         if self._viser_raw_chunk_start_iteration is None:
             self._viser_raw_chunk_index += 1
             self._viser_raw_chunk_env_id = int(env_id)
@@ -1110,7 +1086,6 @@ class Dagger:
             self._viser_raw_chunk_env_id = None
         self._viser_raw_latest_iteration = int(iteration)
 
-        # Raw replay metadata stores world-frame points plus robot/door state for offline playback.
         ground_truth_points_world = None
         if self.viser_raw_include_ground_truth and self.viser_raw_max_points > 0:
             ground_truth_points_world = self._prepare_viser_points(
@@ -1130,11 +1105,7 @@ class Dagger:
             ).to(dtype=torch.float16)
 
         policy_input_points_world = None
-        if (
-            self.viser_raw_include_policy_input
-            and policy_input_pcd_base is not None
-            and self.viser_raw_max_points > 0
-        ):
+        if self.viser_raw_include_policy_input and policy_input_pcd_base is not None and self.viser_raw_max_points > 0:
             policy_input_points_world = self._prepare_viser_world_points_from_local(
                 policy_input_pcd_base,
                 robot_base_pos_w,
@@ -1143,6 +1114,7 @@ class Dagger:
                 self.viser_raw_max_points,
                 drop_zero_rows=True,
             ).to(dtype=torch.float16)
+
         frame_record = {
             "iteration": int(iteration),
             "sim_frame": int(self.frame),
@@ -1151,6 +1123,11 @@ class Dagger:
             "ground_truth_points_world": ground_truth_points_world,
             "robot_obs_points_world": robot_obs_points_world,
             "policy_input_points_world": policy_input_points_world,
+            "pointclouds": {
+                "ground_truth": ground_truth_points_world,
+                "robot_obs": robot_obs_points_world,
+                "policy_input": policy_input_points_world,
+            },
             "aux_prediction": None
             if aux_prediction is None
             else self._aux_to_2d(aux_prediction)[env_id].detach().cpu().to(dtype=torch.float32),
@@ -2045,6 +2022,8 @@ class Dagger:
             return
         episode_reward = self._mean_completed_metric(self.completed_rewards)
         episode_length = self._mean_completed_metric(self.completed_lengths)
+        env_step_dt = max(float(getattr(self.ov_env, "dt", 0.0)), 1e-6)
+        episode_length_seconds = episode_length * env_step_dt if episode_length is not None else None
         success_rate = self._mean_completed_metric(self.completed_successes)
         teacher_env_fraction = self._get_teacher_forcing_env_fraction()
         student_env_fraction = 1.0 - teacher_env_fraction
@@ -2070,6 +2049,8 @@ class Dagger:
                 print("Episode Reward:", episode_reward)
             if episode_length is not None:
                 print("Episode Length:", episode_length)
+            if episode_length_seconds is not None:
+                print("Episode Length (s):", episode_length_seconds)
             if success_rate is not None:
                 print("Success Rate:", success_rate)
             if iteration_time_ms is not None:
@@ -2091,6 +2072,8 @@ class Dagger:
             metrics["stats/episode_reward"] = episode_reward
         if episode_length is not None:
             metrics["stats/episode_length"] = episode_length
+        if episode_length_seconds is not None:
+            metrics["stats/episode_length_seconds"] = episode_length_seconds
         if success_rate is not None:
             metrics["stats/success_rate"] = success_rate
         if teacher_forcing_beta is not None:

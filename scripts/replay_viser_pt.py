@@ -12,6 +12,16 @@ import numpy as np
 import torch
 
 
+DEFAULT_CLOUD_COLORS = {
+    "ground_truth": (120, 120, 120),
+    "robot_obs": (79, 195, 247),
+    "policy_input": (0, 170, 120),
+    "robot": (79, 195, 247),
+    "door": (255, 193, 7),
+}
+PREFERRED_STREAM_ORDER = ("ground_truth", "robot_obs", "policy_input", "robot", "door")
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Replay a DoorOpening raw .pt Viser dump in a browser.",
@@ -21,16 +31,32 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="0.0.0.0", help="Host interface for the Viser server.")
     parser.add_argument("--port", type=int, default=8080, help="Port for the Viser server.")
     parser.add_argument(
+        "--clouds",
+        nargs="*",
+        default=None,
+        help="Optional point-cloud stream names to show. Defaults to every stream in the payload.",
+    )
+    parser.add_argument(
+        "--hide-clouds",
+        nargs="*",
+        default=[],
+        help="Point-cloud stream names to load initially hidden.",
+    )
+    parser.add_argument(
         "--fps",
         type=float,
         default=None,
         help="Playback speed in frames per second. Defaults to recorded metadata when available.",
     )
     parser.add_argument("--point-size", type=float, default=0.004, help="Rendered point size.")
+    parser.add_argument("--start-paused", action="store_true", help="Load the replay without auto-playing.")
+    parser.add_argument("--no-grid", action="store_true", help="Hide the ground grid.")
     return parser.parse_args()
 
 
 def _to_numpy_points(value: object) -> np.ndarray:
+    if isinstance(value, dict):
+        value = value.get("points")
     if value is None:
         return np.zeros((0, 3), dtype=np.float32)
     if isinstance(value, torch.Tensor):
@@ -85,13 +111,98 @@ def _aux_prediction_world_points(frame: dict) -> np.ndarray:
     return aux_world_points.astype(np.float32, copy=False)
 
 
-def _first_nonempty_cloud(frames: list[dict]) -> np.ndarray:
+def _cloud_key_to_name(key: str) -> str | None:
+    suffix = "_points_world"
+    if not key.endswith(suffix):
+        return None
+    return key[: -len(suffix)]
+
+
+def _coerce_color(value: object, default: tuple[int, int, int]) -> tuple[int, int, int]:
+    if value is None:
+        return default
+    try:
+        color = tuple(int(x) for x in value)
+    except TypeError:
+        return default
+    return color if len(color) == 3 else default
+
+
+def _stream_label(name: str) -> str:
+    labels = {
+        "ground_truth": "GT",
+        "robot_obs": "Robot Obs",
+        "policy_input": "Policy Input",
+        "robot": "Robot",
+        "door": "Door",
+    }
+    return labels.get(name, name.replace("_", " ").title())
+
+
+def _add_stream(streams: dict[str, dict], name: str, raw_spec: object | None = None) -> None:
+    if not name:
+        return
+    spec = dict(raw_spec) if isinstance(raw_spec, dict) else {}
+    default_color = DEFAULT_CLOUD_COLORS.get(name, (200, 200, 200))
+    streams[name] = {
+        "name": name,
+        "label": str(spec.get("label", _stream_label(name))),
+        "key": str(spec.get("key", f"{name}_points_world")),
+        "color": _coerce_color(spec.get("color", spec.get("colors")), default_color),
+        "point_size_scale": float(spec.get("point_size_scale", 1.0)),
+    }
+
+
+def _discover_streams(payload: dict, frames: list[dict]) -> list[dict]:
+    streams: dict[str, dict] = {}
+    payload_streams = payload.get("pointcloud_streams", [])
+    if isinstance(payload_streams, dict):
+        payload_streams = list(payload_streams.values())
+    if isinstance(payload_streams, list):
+        for raw_spec in payload_streams:
+            if isinstance(raw_spec, str):
+                _add_stream(streams, raw_spec)
+            elif isinstance(raw_spec, dict):
+                _add_stream(streams, str(raw_spec.get("name", "")), raw_spec)
+
     for frame in frames:
-        for key in ("ground_truth_points_world", "robot_obs_points_world", "policy_input_points_world"):
-            pts = _to_numpy_points(frame.get(key))
+        pointclouds = frame.get("pointclouds")
+        if isinstance(pointclouds, dict):
+            for name in pointclouds:
+                if name not in streams:
+                    _add_stream(streams, str(name))
+        for key in frame:
+            name = _cloud_key_to_name(str(key))
+            if name is not None and name not in streams:
+                _add_stream(streams, name, {"key": key})
+
+    ordered_names = [name for name in PREFERRED_STREAM_ORDER if name in streams]
+    ordered_names.extend(name for name in streams if name not in ordered_names)
+    return [streams[name] for name in ordered_names]
+
+
+def _frame_cloud_points(frame: dict, stream: dict) -> np.ndarray:
+    name = stream["name"]
+    pointclouds = frame.get("pointclouds")
+    if isinstance(pointclouds, dict) and name in pointclouds:
+        return _to_numpy_points(pointclouds[name])
+    for key in (stream.get("key"), f"{name}_points_world"):
+        if key and key in frame:
+            return _to_numpy_points(frame.get(key))
+    return np.zeros((0, 3), dtype=np.float32)
+
+
+def _first_nonempty_cloud(frames: list[dict], streams: list[dict]) -> np.ndarray:
+    for frame in frames:
+        for stream in streams:
+            pts = _frame_cloud_points(frame, stream)
             if pts.shape[0] > 0:
                 return pts
     return np.zeros((0, 3), dtype=np.float32)
+
+
+def _has_aux_prediction(frames: list[dict]) -> bool:
+    return any(_to_numpy_vector(frame.get("aux_prediction")) is not None for frame in frames)
 
 
 def _positive_float(value: object) -> float | None:
@@ -147,6 +258,15 @@ def main() -> None:
     if not isinstance(frames, list) or len(frames) == 0:
         raise SystemExit(f"Replay payload has no frames: {recording}")
 
+    streams = _discover_streams(payload, frames)
+    if args.clouds is not None:
+        requested_clouds = set(args.clouds)
+        streams = [stream for stream in streams if stream["name"] in requested_clouds]
+    if not streams:
+        raise SystemExit("Replay payload has no point-cloud streams matching the requested filters.")
+    hidden_clouds = set(args.hide_clouds)
+    has_aux_prediction = _has_aux_prediction(frames)
+
     payload_fps, payload_fps_source = _infer_payload_fps(payload)
     initial_fps = float(args.fps) if args.fps is not None else payload_fps
     fps_slider_max = max(60.0, initial_fps * 2.0)
@@ -154,9 +274,10 @@ def main() -> None:
     server = viser.ViserServer(host=args.host, port=args.port)
     server.gui.configure_theme(control_width="medium")
     server.scene.add_frame("/world", show_axes=True, axes_length=0.2, axes_radius=0.01)
-    server.scene.add_grid("/grid", width=6, height=6, position=(0.0, 0.0, 0.0), shadow_opacity=0.1)
+    if not args.no_grid:
+        server.scene.add_grid("/grid", width=6, height=6, position=(0.0, 0.0, 0.0), shadow_opacity=0.1)
 
-    first_cloud = _first_nonempty_cloud(frames)
+    first_cloud = _first_nonempty_cloud(frames, streams)
     if first_cloud.shape[0] > 0:
         center = first_cloud.mean(axis=0)
         server.initial_camera.look_at = tuple(float(x) for x in center)
@@ -164,56 +285,52 @@ def main() -> None:
             float(x) for x in (center + np.array([1.5, -1.5, 1.0], dtype=np.float32))
         )
 
-    gt_handle = server.scene.add_point_cloud(
-        "/ground_truth_points",
-        points=np.zeros((0, 3), dtype=np.float32),
-        colors=(120, 120, 120),
-        point_size=args.point_size,
-    )
-    obs_handle = server.scene.add_point_cloud(
-        "/robot_obs_points",
-        points=np.zeros((0, 3), dtype=np.float32),
-        colors=(79, 195, 247),
-        point_size=args.point_size,
-    )
-    policy_handle = server.scene.add_point_cloud(
-        "/policy_input_points",
-        points=np.zeros((0, 3), dtype=np.float32),
-        colors=(0, 170, 120),
-        point_size=args.point_size,
-    )
-    aux_handle = server.scene.add_point_cloud(
-        "/aux_prediction",
-        points=np.zeros((0, 3), dtype=np.float32),
-        colors=(255, 140, 0),
-        point_size=args.point_size * 3.0,
-    )
+    cloud_handles = {}
+    for stream in streams:
+        cloud_handles[stream["name"]] = server.scene.add_point_cloud(
+            f"/{stream['name']}_points",
+            points=np.zeros((0, 3), dtype=np.float32),
+            colors=stream["color"],
+            point_size=args.point_size * float(stream.get("point_size_scale", 1.0)),
+        )
+
+    aux_handle = None
+    if has_aux_prediction:
+        aux_handle = server.scene.add_point_cloud(
+            "/aux_prediction",
+            points=np.zeros((0, 3), dtype=np.float32),
+            colors=(255, 140, 0),
+            point_size=args.point_size * 3.0,
+        )
 
     with server.gui.add_folder("Playback"):
-        play = server.gui.add_checkbox("Play", initial_value=True)
+        play = server.gui.add_checkbox("Play", initial_value=not args.start_paused)
         loop = server.gui.add_checkbox("Loop", initial_value=True)
         fps = server.gui.add_slider("FPS", min=0.25, max=fps_slider_max, step=0.25, initial_value=initial_fps)
         frame_slider = server.gui.add_slider("Frame", min=0, max=len(frames) - 1, step=1, initial_value=0)
         prev_button = server.gui.add_button("Prev")
         next_button = server.gui.add_button("Next")
 
+    show_clouds = {}
     with server.gui.add_folder("Pointclouds"):
-        show_gt = server.gui.add_checkbox("Show GT", initial_value=True)
-        show_obs = server.gui.add_checkbox("Show Robot Obs", initial_value=True)
-        show_policy = server.gui.add_checkbox("Show Policy Input", initial_value=True)
-        show_aux = server.gui.add_checkbox("Show Aux Prediction", initial_value=True)
+        for stream in streams:
+            show_clouds[stream["name"]] = server.gui.add_checkbox(
+                f"Show {stream['label']}",
+                initial_value=stream["name"] not in hidden_clouds,
+            )
+        show_aux = None
+        if has_aux_prediction:
+            show_aux = server.gui.add_checkbox("Show Aux Prediction", initial_value=True)
 
     def _apply_frame(frame_idx: int) -> None:
         frame = frames[frame_idx]
-        gt_points = _to_numpy_points(frame.get("ground_truth_points_world"))
-        obs_points = _to_numpy_points(frame.get("robot_obs_points_world"))
-        policy_points = _to_numpy_points(frame.get("policy_input_points_world"))
-        aux_points = _aux_prediction_world_points(frame)
-
-        gt_handle.points = gt_points if show_gt.value else np.zeros((0, 3), dtype=np.float32)
-        obs_handle.points = obs_points if show_obs.value else np.zeros((0, 3), dtype=np.float32)
-        policy_handle.points = policy_points if show_policy.value else np.zeros((0, 3), dtype=np.float32)
-        aux_handle.points = aux_points if show_aux.value else np.zeros((0, 3), dtype=np.float32)
+        for stream in streams:
+            points = _frame_cloud_points(frame, stream)
+            handle = cloud_handles[stream["name"]]
+            handle.points = points if show_clouds[stream["name"]].value else np.zeros((0, 3), dtype=np.float32)
+        if aux_handle is not None and show_aux is not None:
+            aux_points = _aux_prediction_world_points(frame)
+            aux_handle.points = aux_points if show_aux.value else np.zeros((0, 3), dtype=np.float32)
 
     @frame_slider.on_update
     def _(_event):
@@ -227,24 +344,19 @@ def main() -> None:
     def _(_event):
         frame_slider.value = min(len(frames) - 1, int(frame_slider.value) + 1)
 
-    @show_gt.on_update
-    def _(_event):
-        _apply_frame(int(frame_slider.value))
+    for checkbox in show_clouds.values():
+        @checkbox.on_update
+        def _(_event):
+            _apply_frame(int(frame_slider.value))
 
-    @show_obs.on_update
-    def _(_event):
-        _apply_frame(int(frame_slider.value))
-
-    @show_policy.on_update
-    def _(_event):
-        _apply_frame(int(frame_slider.value))
-
-    @show_aux.on_update
-    def _(_event):
-        _apply_frame(int(frame_slider.value))
+    if show_aux is not None:
+        @show_aux.on_update
+        def _(_event):
+            _apply_frame(int(frame_slider.value))
 
     _apply_frame(0)
     print(f"Loaded {len(frames)} frames from {recording}")
+    print("Point-cloud streams: " + ", ".join(stream["name"] for stream in streams))
     if args.fps is None:
         print(f"Playback FPS: {initial_fps:.2f} (from {_format_fps_source_label(payload_fps_source)})")
     else:

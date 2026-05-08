@@ -235,6 +235,20 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         offset=CameraCfg.OffsetCfg(pos=(0.0, 0.0, 0.0), rot=POINTCLOUD_CAMERA_QUAT, convention="world"),
     )
 
+    # Raw `.pt` point-cloud replay dumps for teacher RL training on headless/HPC nodes.
+    # This uses geometry samplers, not cameras or renderer video: one robot cloud and one door cloud per saved frame.
+    viser_pointcloud = {
+        "enabled": False,
+        "path": "teacher_viser_replay.pt",
+        "env_id": 0,
+        "capture_interval": 1,
+        "save_interval": 5000,
+        "max_points": 6000,
+        "robot_num_points": 4096,
+        "door_num_points": 4096,
+        "max_frames": 2000,
+    }
+
     door_body_names = DOOR_BODY_NAMES
 
     door_base_frame_name = "base"
@@ -296,18 +310,18 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     finger_action_scale = 0.5
 
     # Deep Mimic Reward Parameters
-    robot_body_quat_w = 1.0
-    robot_key_body_pos_w = 2.0
-    robot_base_joint_pos_w = 3.0
-    robot_arm_joint_pos_w = 3.0
-    robot_finger_joint_pos_w = 1.0
-    robot_base_joint_vel_w = 1.0
-    robot_arm_joint_vel_w = 2.0
-    robot_finger_joint_vel_w = 0.5
+    robot_body_quat_w = 0.5
+    robot_key_body_pos_w = 1.0
+    robot_base_joint_pos_w = 1.0
+    robot_arm_joint_pos_w = 1.0
+    robot_finger_joint_pos_w = 0.5
+    robot_base_joint_vel_w = 0.0
+    robot_arm_joint_vel_w = 0.0
+    robot_finger_joint_vel_w = 0.0
     door_joint_pos_w = 4.0
     hinge_contact_reward_w = 1.0
-    robot_body_lin_vel_w = 1.0
-    robot_body_ang_vel_w = 0.5
+    robot_body_lin_vel_w = 0.0
+    robot_body_ang_vel_w = 0.0
     joint_limit_penalty_w = 40.0
     joint_limit_penalty_margin_ratio = 0.05
 

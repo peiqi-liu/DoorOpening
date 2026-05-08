@@ -18,7 +18,6 @@ MIN_HANDLE_BOTTOM_CLEARANCE_M = 0.15
 MIN_HANDLE_TOP_CLEARANCE_M = 0.15
 MIN_HANDLE_EDGE_CLEARANCE_M = 0.02
 
-
 def parse_args():
     repo_root = Path(__file__).resolve().parents[2]
     default_asset_root = repo_root / "source" / "DoorOpening" / "assets" / "door" / "PartNetv4"
@@ -495,7 +494,6 @@ def generate_variants(args):
             variant_name = build_variant_name(source_asset_name, variant_idx)
             variant_dir = output_dir / variant_name
             variant_dir.mkdir(parents=True, exist_ok=False)
-
             root = ET.parse(source_urdf_path).getroot()
             source_props = get_door_properties(source_dir, root, bounds_cache)
             target_props = sample_target_properties(rng, source_props)

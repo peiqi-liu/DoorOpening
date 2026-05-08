@@ -18,6 +18,35 @@ parser = argparse.ArgumentParser(description="Train an RL agent with RL-Games.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
 parser.add_argument("--video_length", type=int, default=600, help="Length of the recorded video (in steps).")
 parser.add_argument("--video_interval", type=int, default=10000, help="Interval between video recordings (in steps).")
+parser.add_argument(
+    "--viser_pt",
+    action="store_true",
+    default=False,
+    help="Save raw robot/door point-cloud .pt chunks for Viser replay during teacher training.",
+)
+parser.add_argument("--viser_pt_path", type=str, default=None, help="Output path for Viser .pt replay chunks.")
+parser.add_argument("--viser_pt_env_id", type=int, default=None, help="Environment index to record in Viser .pt dumps.")
+parser.add_argument(
+    "--viser_pt_interval",
+    type=int,
+    default=None,
+    help="Environment-step interval between recorded point-cloud frames.",
+)
+parser.add_argument(
+    "--viser_pt_save_interval",
+    type=int,
+    default=None,
+    help="Iteration interval between saved Viser .pt chunks.",
+)
+parser.add_argument("--viser_pt_max_frames", type=int, default=None, help="Maximum frames kept in each Viser .pt chunk.")
+parser.add_argument(
+    "--viser_pt_max_points",
+    type=int,
+    default=None,
+    help="Maximum exported points per cloud in each Viser .pt frame.",
+)
+parser.add_argument("--viser_pt_robot_points", type=int, default=None, help="Robot sampler point count before export.")
+parser.add_argument("--viser_pt_door_points", type=int, default=None, help="Door sampler point count before export.")
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
@@ -149,6 +178,53 @@ def _install_writer_step_counter(agent):
     writer._dooropening_wandb_step_counter_installed = True
 
 
+def _configure_viser_pt_recording(env_cfg, log_dir: str):
+    """Apply CLI overrides for headless point-cloud replay dumps."""
+
+    has_any_override = any(
+        value is not None
+        for value in (
+            args_cli.viser_pt_path,
+            args_cli.viser_pt_env_id,
+            args_cli.viser_pt_interval,
+            args_cli.viser_pt_save_interval,
+            args_cli.viser_pt_max_frames,
+            args_cli.viser_pt_max_points,
+            args_cli.viser_pt_robot_points,
+            args_cli.viser_pt_door_points,
+        )
+    )
+    if not args_cli.viser_pt and not has_any_override:
+        return
+    if not hasattr(env_cfg, "viser_pointcloud"):
+        logger.warning("--viser_pt was requested, but this task config has no `viser_pointcloud` field.")
+        return
+
+    record_cfg = dict(getattr(env_cfg, "viser_pointcloud", {}) or {})
+    if args_cli.viser_pt:
+        record_cfg["enabled"] = True
+    if args_cli.viser_pt_path is not None:
+        record_cfg["path"] = args_cli.viser_pt_path
+    if args_cli.viser_pt_env_id is not None:
+        record_cfg["env_id"] = int(args_cli.viser_pt_env_id)
+    if args_cli.viser_pt_interval is not None:
+        record_cfg["capture_interval"] = max(1, int(args_cli.viser_pt_interval))
+    if args_cli.viser_pt_save_interval is not None:
+        record_cfg["save_interval"] = max(1, int(args_cli.viser_pt_save_interval))
+    if args_cli.viser_pt_max_frames is not None:
+        record_cfg["max_frames"] = max(0, int(args_cli.viser_pt_max_frames))
+    if args_cli.viser_pt_max_points is not None:
+        record_cfg["max_points"] = int(args_cli.viser_pt_max_points)
+    if args_cli.viser_pt_robot_points is not None:
+        record_cfg["robot_num_points"] = int(args_cli.viser_pt_robot_points)
+    if args_cli.viser_pt_door_points is not None:
+        record_cfg["door_num_points"] = int(args_cli.viser_pt_door_points)
+
+    env_cfg.viser_pointcloud = record_cfg
+    print(f"[INFO] Viser .pt point-cloud recording config: {record_cfg}")
+    print(f"[INFO] Relative Viser .pt paths will be resolved under: {log_dir}")
+
+
 class DoorOpeningRunner(Runner):
     """Runner that installs local instrumentation before training starts."""
 
@@ -228,6 +304,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     agent_cfg["params"]["config"]["full_experiment_name"] = log_dir
     wandb_project = config_name if args_cli.wandb_project_name is None else args_cli.wandb_project_name
     experiment_name = log_dir if args_cli.wandb_name is None else args_cli.wandb_name
+    env_cfg.log_dir = os.path.join(log_root_path, log_dir)
+    _configure_viser_pt_recording(env_cfg, env_cfg.log_dir)
 
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_root_path, log_dir, "params", "env.yaml"), env_cfg)
@@ -248,9 +326,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         logger.warning(
             "IO descriptors are only supported for manager based RL environments. No IO descriptors will be exported."
         )
-
-    # set the log directory for the environment (works for all environment types)
-    env_cfg.log_dir = os.path.join(log_root_path, log_dir)
 
     # Let the env observe RL-Games frame/iteration counters without patching IsaacLab itself.
     _install_train_info_bridge()
