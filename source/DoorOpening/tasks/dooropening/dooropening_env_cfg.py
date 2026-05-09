@@ -310,18 +310,18 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     finger_action_scale = 0.5
 
     # Deep Mimic Reward Parameters
-    robot_body_quat_w = 0.5
-    robot_key_body_pos_w = 1.0
-    robot_base_joint_pos_w = 1.0
-    robot_arm_joint_pos_w = 1.0
-    robot_finger_joint_pos_w = 0.5
-    robot_base_joint_vel_w = 0.0
-    robot_arm_joint_vel_w = 0.0
-    robot_finger_joint_vel_w = 0.0
+    robot_body_quat_w = 1.0
+    robot_key_body_pos_w = 2.0
+    robot_base_joint_pos_w = 3.0
+    robot_arm_joint_pos_w = 3.0
+    robot_finger_joint_pos_w = 1.0
+    robot_base_joint_vel_w = 1.0
+    robot_arm_joint_vel_w = 2.0
+    robot_finger_joint_vel_w = 0.5
     door_joint_pos_w = 4.0
     hinge_contact_reward_w = 1.0
-    robot_body_lin_vel_w = 0.0
-    robot_body_ang_vel_w = 0.0
+    robot_body_lin_vel_w = 1.0
+    robot_body_ang_vel_w = 0.5
     joint_limit_penalty_w = 40.0
     joint_limit_penalty_margin_ratio = 0.05
 
