@@ -144,18 +144,20 @@ def preconvert_shared_urdf_assets(
     *,
     timeout_s: float = 1800.0,
     poll_interval_s: float = 1.0,
+    door_configs: object | None = None,
 ) -> None:
     """Convert shared DoorOpening URDF assets on rank 0 before other ranks construct the env."""
     from isaaclab.sim.converters import UrdfConverter
 
-    from DoorOpening.assets.door.door_cfg import ALL_DOOR_CONFIGS
     from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG
+    if door_configs is None:
+        from DoorOpening.assets.door.door_cfg import ALL_DOOR_CONFIGS as door_configs
 
     if not is_distributed_launch():
         return
 
     asset_cfgs = [GLORBOT_CONFIG.spawn]
-    asset_cfgs.extend(_iter_multi_asset_urdf_cfgs(getattr(ALL_DOOR_CONFIGS, "spawn", None)))
+    asset_cfgs.extend(_iter_multi_asset_urdf_cfgs(getattr(door_configs, "spawn", None)))
     unique_cfgs = _deduplicate_urdf_cfgs(asset_cfgs)
     if not unique_cfgs:
         return

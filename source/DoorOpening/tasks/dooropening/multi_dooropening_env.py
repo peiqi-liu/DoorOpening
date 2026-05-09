@@ -11,12 +11,12 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from DoorOpening.utils.quat_utils import quat_diff_angle, hinge_angle_diff
-from DoorOpening.motion.motion_lib import ReferenceMotionManager
-from DoorOpening.assets.door.door_cfg import edit_door_articulation
+from DoorOpening.motion.multi_motion_lib import ReferenceMotionManager
+from DoorOpening.assets.door.multi_door_cfg import edit_door_articulation
 from DoorOpening.tasks.dooropening.dooropening_adr import DoorOpeningADR
-from DoorOpening.tasks.dooropening.dooropening_env_cfg import DooropeningEnvCfg
-from DoorOpening.assets.door.door_cfg import asset_paths as door_asset_paths
-from DoorOpening.assets.door.door_cfg import motion_traj_paths, handle_offsets, board_offsets
+from DoorOpening.tasks.dooropening.multi_dooropening_env_cfg import DooropeningEnvCfg
+from DoorOpening.assets.door.multi_door_cfg import asset_paths as door_asset_paths
+from DoorOpening.assets.door.multi_door_cfg import motion_traj_paths, handle_offsets, board_offsets
 from DoorOpening.assets.glorbot.glorbot_cfg import glorbot_urdf_path
 from isaaclab.sensors import Camera, ContactSensor
 from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES, ROBOT_KEY_BODY_NAMES

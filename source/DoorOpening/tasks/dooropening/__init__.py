@@ -21,3 +21,14 @@ gym.register(
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
     },
 )
+
+
+gym.register(
+    id="DooropeningMulti",
+    entry_point=f"{__name__}.multi_dooropening_env:DooropeningEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.multi_dooropening_env_cfg:DooropeningEnvCfg",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
+    },
+)
