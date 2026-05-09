@@ -13,10 +13,7 @@ import pickle as pkl
 import os
 from scipy.interpolate import CubicSpline
 import random
-import viser
-from viser.extras import ViserUrdf
 
-from yourdfpy import URDF
 from DoorOpening.utils.state_machine.pin import PinocchioIKSolver
 from DoorOpening.utils.state_machine.offline_pull_door import state_machine_offline_pull_door
 from DoorOpening.utils.state_machine.offline_push_door import state_machine_offline_push_door
@@ -487,12 +484,15 @@ def play_trajectories_in_viser(
     door_world_quat: torch.Tensor,                   # (T, 4)
     hz: float = 60.0,
     playback_speed: float = 4.0,
+    port: int | None = None,
 ):
     """
     robot_traj: (T, Ndof) torch.Tensor or list of tensors
     door_traj:  (T, 2)    torch.Tensor or list of tensors
     sample_pc_fn(q_door_np) -> (N, 3) numpy array in world frame (optional)
     """
+    import viser
+    from viser.extras import ViserUrdf
 
     # Normalize input format
     if isinstance(robot_traj, list):
@@ -505,7 +505,10 @@ def play_trajectories_in_viser(
     # -------------------------
     # Start viser
     # -------------------------
-    server = viser.ViserServer()
+    server_kwargs = {}
+    if port is not None:
+        server_kwargs["port"] = port
+    server = viser.ViserServer(**server_kwargs)
 
     server.scene.add_frame(
         "/robot_root",
@@ -660,6 +663,8 @@ def play_and_save_traj(
     start_base_angle_range_deg=30.0,
     playback_speed=4.0,
     traj_dt=DEFAULT_TRAJ_DT,
+    port=None,
+    visualize=False,
 ):
     dir_path = os.path.dirname(door_urdf_path)
     robot_initial_pose = torch.tensor([[ROBOT_INITIAL_POS[0], ROBOT_INITIAL_POS[1], ROBOT_INITIAL_POS[2], ROBOT_INITIAL_ROT[0], ROBOT_INITIAL_ROT[1], ROBOT_INITIAL_ROT[2], ROBOT_INITIAL_ROT[3]]], device="cpu")
@@ -740,21 +745,25 @@ def play_and_save_traj(
     robot_world_quat = robot_initial_pose[:, 3:].squeeze(0).numpy()
     door_world_quat = door_initial_pose[:, 3:].squeeze(0).numpy()
 
-    robot_urdf = URDF.load(robot_urdf_path)
-    door_urdf  = URDF.load(door_urdf_path)
+    if visualize:
+        from yourdfpy import URDF
 
-    play_trajectories_in_viser(
-        robot_urdf=robot_urdf,
-        door_urdf=door_urdf,
-        robot_traj=robot_traj,
-        door_traj=door_traj,
-        robot_world_pos=robot_world_pos,
-        door_world_pos=door_world_pos,
-        robot_world_quat=robot_world_quat,
-        door_world_quat=door_world_quat,
-        hz=60,
-        playback_speed=playback_speed,
-    )
+        robot_urdf = URDF.load(robot_urdf_path)
+        door_urdf  = URDF.load(door_urdf_path)
+
+        play_trajectories_in_viser(
+            robot_urdf=robot_urdf,
+            door_urdf=door_urdf,
+            robot_traj=robot_traj,
+            door_traj=door_traj,
+            robot_world_pos=robot_world_pos,
+            door_world_pos=door_world_pos,
+            robot_world_quat=robot_world_quat,
+            door_world_quat=door_world_quat,
+            hz=60,
+            playback_speed=playback_speed,
+            port=port,
+        )
 
     robot_ik_solver = PinocchioIKSolver(
         urdf_path=robot_urdf_path, 
@@ -863,13 +872,24 @@ if __name__ == "__main__":
         "--playback-speed",
         type=float,
         default=8.0,
-        help="Initial viser playback speed multiplier.",
+        help="Initial viser playback speed multiplier when --visualize is set.",
     )
     parser.add_argument(
         "--traj-dt",
         type=float,
         default=DEFAULT_TRAJ_DT,
         help="Time step represented by adjacent trajectory samples.",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Optional Viser server port when --visualize is set.",
+    )
+    parser.add_argument(
+        "--visualize",
+        action="store_true",
+        help="Play each trajectory in Viser before saving. Disabled by default for batch processing.",
     )
     args = parser.parse_args()
 
@@ -888,6 +908,8 @@ if __name__ == "__main__":
             opening_direction=args.opening_direction,
             playback_speed=args.playback_speed,
             traj_dt=args.traj_dt,
+            port=args.port,
+            visualize=args.visualize,
         )
         print("Finished processing ", door_urdf_path, ", index: ", i)
     
