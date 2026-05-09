@@ -83,6 +83,18 @@ parser.add_argument("--seed", type=int, default=None, help="Seed used for the en
 parser.add_argument(
     "--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes."
 )
+parser.add_argument(
+    "--asset-preconvert-timeout-s",
+    type=float,
+    default=21600.0,
+    help="Timeout for rank-0 shared URDF preconversion in distributed multi-door runs.",
+)
+parser.add_argument(
+    "--asset-preconvert-poll-interval-s",
+    type=float,
+    default=5.0,
+    help="Polling interval while nonzero ranks wait for shared URDF preconversion.",
+)
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
 parser.add_argument("--teacher", type=str, default=None, help="Teacher checkpoint to use")
 parser.add_argument("--teacher-partnetv5", "--teacher_partnetv5", dest="teacher_partnetv5", type=str, default=None, help="Teacher checkpoint for PartNetv5.")
@@ -443,7 +455,12 @@ def main(env_cfg, agent_cfg: dict):
         print(f"Distillation adr_reset_progress_total: {env_cfg.adr_reset_progress_total}")
 
     # Serialize URDF-to-USD conversion across ranks before all workers build the same shared assets.
-    preconvert_shared_urdf_assets(door_configs=MULTI_DOOR_CONFIGS)
+    preconvert_shared_urdf_assets(
+        door_configs=MULTI_DOOR_CONFIGS,
+        timeout_s=float(args_cli.asset_preconvert_timeout_s),
+        poll_interval_s=float(args_cli.asset_preconvert_poll_interval_s),
+        verbose=True,
+    )
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)

@@ -145,6 +145,7 @@ def preconvert_shared_urdf_assets(
     timeout_s: float = 1800.0,
     poll_interval_s: float = 1.0,
     door_configs: object | None = None,
+    verbose: bool = False,
 ) -> None:
     """Convert shared DoorOpening URDF assets on rank 0 before other ranks construct the env."""
     from isaaclab.sim.converters import UrdfConverter
@@ -185,9 +186,18 @@ def preconvert_shared_urdf_assets(
             with contextlib.suppress(FileNotFoundError):
                 error_path.unlink()
             if not done_path.exists():
-                for cfg in unique_cfgs:
+                if verbose:
+                    print(f"[asset-prewarm] Rank 0 converting {len(unique_cfgs)} shared URDF assets.")
+                for idx, cfg in enumerate(unique_cfgs, start=1):
+                    if verbose and (idx == 1 or idx == len(unique_cfgs) or idx % 10 == 0):
+                        asset_label = Path(str(getattr(cfg, "asset_path", ""))).parent.name
+                        print(f"[asset-prewarm] Converting {idx}/{len(unique_cfgs)}: {asset_label}")
                     UrdfConverter(cfg)
                 done_path.write_text(str(time.time()), encoding="utf-8")
+                if verbose:
+                    print(f"[asset-prewarm] Rank 0 finished shared URDF conversion: {done_path}")
+            elif verbose:
+                print(f"[asset-prewarm] Shared URDF conversion already complete: {done_path}")
         except Exception as exc:
             error_path.write_text(repr(exc), encoding="utf-8")
             raise
@@ -195,13 +205,30 @@ def preconvert_shared_urdf_assets(
             _release_lock(lock_fd, lock_path)
     else:
         deadline = time.monotonic() + timeout_s
+        if verbose:
+            print(
+                "[asset-prewarm] Rank {} waiting up to {:.0f}s for rank 0 to convert {} shared URDF assets.".format(
+                    rank,
+                    float(timeout_s),
+                    len(unique_cfgs),
+                )
+            )
+        last_log_time = time.monotonic()
         while not done_path.exists():
             if error_path.exists():
                 message = error_path.read_text(encoding="utf-8").strip() or "unknown error"
                 raise RuntimeError(f"Rank 0 URDF preconversion failed: {message}")
             if time.monotonic() >= deadline:
-                raise TimeoutError("Timed out waiting for rank 0 to preconvert shared URDF assets.")
+                raise TimeoutError(
+                    "Timed out waiting for rank 0 to preconvert shared URDF assets "
+                    f"after {timeout_s:.0f}s. assets={len(unique_cfgs)} done_path={done_path} lock_path={lock_path}"
+                )
+            if verbose and time.monotonic() - last_log_time >= 300.0:
+                print(f"[asset-prewarm] Rank {rank} is still waiting for rank 0: {done_path}")
+                last_log_time = time.monotonic()
             time.sleep(poll_interval_s)
+        if verbose:
+            print(f"[asset-prewarm] Rank {rank} detected completed shared URDF conversion.")
 
 
 def _iter_multi_asset_urdf_cfgs(spawn_cfg: object) -> Iterable[object]:
