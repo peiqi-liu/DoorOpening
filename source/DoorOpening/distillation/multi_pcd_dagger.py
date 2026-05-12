@@ -1,4 +1,5 @@
 import os
+import math
 import pathlib
 import time
 from collections import OrderedDict, deque
@@ -63,6 +64,12 @@ def adjust_state_dict_keys(checkpoint_state_dict, model_state_dict):
 
         adjusted_state_dict[key] = value
     return adjusted_state_dict
+
+
+def clip_teacher_obs(obs: torch.Tensor, clip_obs: float) -> torch.Tensor:
+    if math.isfinite(clip_obs):
+        return torch.clamp(obs, -clip_obs, clip_obs)
+    return obs
 
 
 class Dagger:
@@ -246,6 +253,9 @@ class Dagger:
         self.teacher_network_params = self.load_yaml(cfg_path)["params"]
         self.teacher_network = self.load_networks(self.teacher_network_params)
         self.teacher_obs_type = self.teacher_cfg.get("obs_type", "policy")
+        self.teacher_clip_obs = float(
+            self.teacher_network_params.get("env", {}).get("clip_observations", math.inf)
+        )
         self.teacher_strict_load = self.teacher_cfg.get("strict_load", True)
         self.teacher_allow_key_adjust = self.teacher_cfg.get("allow_key_adjust", True)
 
@@ -297,8 +307,6 @@ class Dagger:
         teacher_ckpt = self.teacher_cfg.get("ckpt")
         if teacher_ckpt is None and not self.play_policy:
             raise ValueError("Teacher checkpoint is required for distillation.")
-        else:
-            print(f"Loaded teacher checkpoint: {teacher_ckpt}")
         if teacher_ckpt is not None:
             self.set_teacher_weights(
                 teacher_ckpt,
@@ -784,6 +792,20 @@ class Dagger:
         expected_asset_family_ids = door_asset_family_ids.to(device=self.device, dtype=torch.long)[self.env_asset_idx]
         if not torch.equal(expected_asset_family_ids, self.env_family_ids):
             raise RuntimeError("Door asset family ids and motion family ids are inconsistent.")
+        if self.rank == 0:
+            family_counts = {
+                family_name: int((self.env_family_ids == int(family_id)).sum().detach().cpu().item())
+                for family_id, family_name in enumerate(DOOR_FAMILY_NAMES)
+            }
+            print(f"[INFO] Door family env counts: {family_counts}")
+            sample = []
+            sample_count = min(12, int(self.num_envs))
+            for env_id in range(sample_count):
+                asset_idx = int(self.env_asset_idx[env_id].detach().cpu().item())
+                family_id = int(self.env_family_ids[env_id].detach().cpu().item())
+                asset_name = Path(door_asset_paths[asset_idx]).parent.name
+                sample.append(f"env{env_id}:{DOOR_FAMILY_NAMES[family_id]}/{asset_name}")
+            print("[INFO] Door family sample:", ", ".join(sample))
         self.env_board_bboxes = door_board_bboxes.to(device=self.device, dtype=torch.float32)[self.env_asset_idx]
         bbox_min = self.env_board_bboxes[:, 0]
         bbox_max = self.env_board_bboxes[:, 1]
@@ -1291,7 +1313,6 @@ class Dagger:
         model.load_state_dict(state_dict, strict=strict)
         if meta is not None and "running_mean_std" in meta:
             model.running_mean_std.load_state_dict(meta["running_mean_std"])
-        print(f"Loaded teacher checkpoint: {ckpt}")
 
     def load_student_weights(self, ckpt):
         weights = torch.load(ckpt, map_location="cpu")
@@ -1363,31 +1384,29 @@ class Dagger:
         if not self._has_teacher():
             raise RuntimeError("Teacher model is not initialized.")
         if getattr(self, "multi_teacher_enabled", False):
-            teacher_mus = torch.zeros((self.num_envs, self.num_actions), dtype=torch.float32, device=self.device)
-            teacher_actions = torch.zeros_like(teacher_mus)
+            teacher_actions = torch.zeros((self.num_envs, self.num_actions), dtype=torch.float32, device=self.device)
             for family_id, family_model in self.teacher_models_by_family_id.items():
                 env_ids = torch.nonzero(self.env_family_ids == int(family_id), as_tuple=False).squeeze(-1)
                 if env_ids.numel() == 0:
                     continue
                 batch_dict = {
                     "is_train": False,
-                    "obs": obs[self.teacher_obs_type][env_ids],
+                    "obs": clip_teacher_obs(obs[self.teacher_obs_type][env_ids], self.teacher_clip_obs),
                     "prev_actions": self.implemented_action_history[env_ids, 0, :],
                 }
                 with torch.no_grad():
                     res_dict = family_model(batch_dict)
                 family_mus = torch.clamp(res_dict["mus"], -1.0, 1.0)
-                teacher_mus[env_ids] = family_mus
                 teacher_actions[env_ids] = family_mus
-            adjusted_actions = self._override_actions_for_pregrasp(teacher_actions)
+            teacher_actions = self._override_actions_for_pregrasp(teacher_actions)
             return {
-                "mus": adjusted_actions,
-                "actions": adjusted_actions,
+                "mus": teacher_actions,
+                "actions": teacher_actions,
             }
 
         batch_dict = {
             "is_train": False,
-            "obs": obs[self.teacher_obs_type],
+            "obs": clip_teacher_obs(obs[self.teacher_obs_type], self.teacher_clip_obs),
             "prev_actions": self.implemented_action_history[:, 0, :],
         }
         with torch.no_grad():

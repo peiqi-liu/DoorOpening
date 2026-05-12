@@ -166,7 +166,7 @@ def create_door_cfg(
 
 root_path = os.path.dirname(os.path.dirname(__file__))
 asset_base_folder = os.path.join(root_path, "door")
-DOOR_FAMILY_NAMES = ("PartNetv5", "PartNetv6", "PartNetv7", "PartNetv8")
+DOOR_FAMILY_NAMES = ["PartNetv5", "PartNetv6", "PartNetv7", "PartNetv8"]
 door_family_base_folders = OrderedDict(
     (family_name, os.path.join(asset_base_folder, family_name))
     for family_name in DOOR_FAMILY_NAMES
@@ -174,34 +174,24 @@ door_family_base_folders = OrderedDict(
 
 
 def _collect_multi_family_assets():
-    family_variant_paths = OrderedDict()
+    family_asset_paths = OrderedDict()
     for family_name, family_folder in door_family_base_folders.items():
-        family_asset_paths = sorted(glob.glob(os.path.join(family_folder, "**/mobility.urdf"), recursive=True))
-        if len(family_asset_paths) == 0:
+        paths = sorted(glob.glob(os.path.join(family_folder, "**/mobility.urdf"), recursive=True))
+        if len(paths) == 0:
             raise FileNotFoundError(f"No mobility.urdf files found under {family_folder}")
+        family_asset_paths[family_name] = paths
 
-        variant_to_path = OrderedDict()
-        for path in family_asset_paths:
-            variant_name = os.path.basename(os.path.dirname(path))
-            if variant_name in variant_to_path:
-                raise ValueError(f"Duplicate door variant '{variant_name}' under {family_folder}")
-            variant_to_path[variant_name] = path
-        family_variant_paths[family_name] = variant_to_path
-
-    variant_sets = [set(paths.keys()) for paths in family_variant_paths.values()]
-    shared_variants = set.intersection(*variant_sets)
-    if any(variant_set != shared_variants for variant_set in variant_sets):
-        missing_report = {}
-        for family_name, variant_paths in family_variant_paths.items():
-            missing_report[family_name] = sorted(shared_variants.symmetric_difference(set(variant_paths.keys())))
-        raise ValueError(f"Door families must contain matching variant names. Differences: {missing_report}")
+    asset_counts = {family_name: len(paths) for family_name, paths in family_asset_paths.items()}
+    if len(set(asset_counts.values())) != 1:
+        raise ValueError(f"Door families must contain the same number of assets. Counts: {asset_counts}")
 
     asset_paths_out = []
     family_ids_out = []
     family_names_out = []
-    for variant_name in sorted(shared_variants):
+    num_variants = len(next(iter(family_asset_paths.values())))
+    for asset_idx in range(num_variants):
         for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
-            asset_paths_out.append(family_variant_paths[family_name][variant_name])
+            asset_paths_out.append(family_asset_paths[family_name][asset_idx])
             family_ids_out.append(family_id)
             family_names_out.append(family_name)
 
@@ -232,7 +222,6 @@ motion_family_ids = asset_family_ids.clone()
 motion_family_names = list(asset_family_names)
 
 door_asset_path = asset_paths[0]
-# door_asset_path = asset_paths[0]
 board_offset = board_offsets[0]
 handle_offset = handle_offsets[0]
 print("multi door families: ", ", ".join(DOOR_FAMILY_NAMES))

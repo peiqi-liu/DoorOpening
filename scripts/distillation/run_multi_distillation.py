@@ -12,7 +12,6 @@ from isaaclab.app import AppLauncher
 
 SCRIPT_ROOT = pathlib.Path(__file__).resolve().parents[2]
 DEFAULT_STUDENT_CFG = SCRIPT_ROOT / "source" / "DoorOpening" / "tasks" / "dooropening" / "agents" / "pcd_transformer_dagger_cfg.yaml"
-MULTI_TEACHER_FAMILY_NAMES = ("PartNetv5", "PartNetv6", "PartNetv7", "PartNetv8")
 
 
 def _resolve_student_cfg_path(path_value):
@@ -76,7 +75,7 @@ def _patch_play_mode_done_tensor(base_env):
 parser = argparse.ArgumentParser(description="Train an RL agent with RL-Games.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
 parser.add_argument("--video_length", type=int, default=1000, help="Length of the recorded video (in steps).")
-parser.add_argument("--video_interval", type=int, default=5000, help="Interval between video recordings (in steps).")
+parser.add_argument("--video_interval", type=int, default=500, help="Interval between video recordings (in steps).")
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default="DooropeningMulti", help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
@@ -217,6 +216,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 from DoorOpening.distillation.multi_pcd_dagger import Dagger
 from DoorOpening.assets.door.multi_door_cfg import ALL_DOOR_CONFIGS as MULTI_DOOR_CONFIGS
+from DoorOpening.assets.door.multi_door_cfg import DOOR_FAMILY_NAMES as MULTI_TEACHER_FAMILY_NAMES
 from DoorOpening.assets.cache_utils import preconvert_shared_urdf_assets
 
 import DoorOpening.tasks # noqa: F401
@@ -488,7 +488,7 @@ def main(env_cfg, agent_cfg: dict):
 
     teacher_config = {
         "cfg": teacher_cfg,
-        "obs_type": "critic",
+        "obs_type": "policy",
     }
     if multi_teacher_ckpts is not None:
         teacher_config["teachers"] = {

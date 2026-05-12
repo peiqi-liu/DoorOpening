@@ -539,8 +539,10 @@ class DooropeningEnv(DirectRLEnv):
         self.door = Articulation(self.cfg.door_cfg)
         # add ground plane
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
-        # clone and replicate
-        self.scene.clone_environments(copy_from_source=False)
+        # Do not clone env_0 over the other envs for heterogeneous multi-door
+        # scenes. The MultiAssetSpawner has already populated each env.
+        if self.cfg.scene.replicate_physics:
+            self.scene.clone_environments(copy_from_source=False)
         # we need to explicitly filter collisions for CPU simulation
         if self.device == "cpu":
             self.scene.filter_collisions(global_prim_paths=["/World/ground"])

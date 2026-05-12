@@ -1,4 +1,5 @@
 import os
+import math
 import pathlib
 import time
 from collections import OrderedDict, deque
@@ -61,6 +62,12 @@ def adjust_state_dict_keys(checkpoint_state_dict, model_state_dict):
 
         adjusted_state_dict[key] = value
     return adjusted_state_dict
+
+
+def clip_teacher_obs(obs: torch.Tensor, clip_obs: float) -> torch.Tensor:
+    if math.isfinite(clip_obs):
+        return torch.clamp(obs, -clip_obs, clip_obs)
+    return obs
 
 
 class Dagger:
@@ -234,8 +241,14 @@ class Dagger:
         self.teacher_network_params = self.load_yaml(cfg_path)["params"]
         self.teacher_network = self.load_networks(self.teacher_network_params)
         self.teacher_obs_type = self.teacher_cfg.get("obs_type", "policy")
+        self.teacher_clip_obs = float(
+            self.teacher_network_params.get("env", {}).get("clip_observations", math.inf)
+        )
         self.teacher_strict_load = self.teacher_cfg.get("strict_load", True)
         self.teacher_allow_key_adjust = self.teacher_cfg.get("allow_key_adjust", True)
+        if self.rank == 0:
+            print(f"[INFO] Teacher obs type: {self.teacher_obs_type}")
+            print(f"[INFO] Teacher obs clip: {self.teacher_clip_obs}")
 
         teacher_model_config = {
             "actions_num": self.num_actions,
@@ -1236,7 +1249,7 @@ class Dagger:
             raise RuntimeError("Teacher model is not initialized.")
         batch_dict = {
             "is_train": False,
-            "obs": obs[self.teacher_obs_type],
+            "obs": clip_teacher_obs(obs[self.teacher_obs_type], self.teacher_clip_obs),
             "prev_actions": self.implemented_action_history[:, 0, :],
         }
         with torch.no_grad():

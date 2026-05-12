@@ -539,8 +539,10 @@ class DooropeningEnv(DirectRLEnv):
         self.door = Articulation(self.cfg.door_cfg)
         # add ground plane
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
-        # clone and replicate
-        self.scene.clone_environments(copy_from_source=False)
+        # Do not clone env_0 over the other envs for heterogeneous door scenes.
+        # The MultiAssetSpawner has already populated each env.
+        if self.cfg.scene.replicate_physics:
+            self.scene.clone_environments(copy_from_source=False)
         # we need to explicitly filter collisions for CPU simulation
         if self.device == "cpu":
             self.scene.filter_collisions(global_prim_paths=["/World/ground"])
@@ -932,13 +934,10 @@ class DooropeningEnv(DirectRLEnv):
 
 
     def _apply_action(self):
-        # self.ref_motion_lib.step()
         # joint_pos = self.robot.data.default_joint_pos.clone()
         # ref_robot_joint_pos = self.ref_motion_lib.get_robot_joint_pos().to(joint_pos)
         # joint_pos[:, self._robot_dof_idx] = ref_robot_joint_pos[:, self.ref_robot_dof_idx]
         # self.robot.write_joint_position_to_sim(joint_pos)
-        # self.robot_dof_targets[:] = joint_pos[:, self._robot_dof_idx]
-        # self.applied_robot_dof_targets[:] = self.robot_dof_targets
         # door_pos = self.door.data.joint_pos.clone()
         # door_pos[:] = self.ref_motion_lib.get_door_joint_pos()
         # self.door.write_joint_position_to_sim(door_pos)
