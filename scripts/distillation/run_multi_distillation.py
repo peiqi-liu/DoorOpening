@@ -403,7 +403,7 @@ def main(env_cfg, agent_cfg: dict):
     multi_teacher_ckpts, teacher_ckpt = resolve_multi_teacher_checkpoints()
     student_ckpt = resolve_checkpoint(args_cli.student_ckpt)
 
-    if rank == 0:
+    if True:
         train_dir = "runs"
         default_project_name = "DoorOpening-Distillation"
         experiment_name = default_project_name + datetime.now().strftime("_%Y-%m-%d-%H-%M-%S")
@@ -450,10 +450,6 @@ def main(env_cfg, agent_cfg: dict):
     if wandb_enabled and rank == 0 and wandb_entity is None:
         raise ValueError("Weights and Biases entity must be specified for tracking.")
 
-    if rank == 0:
-        print(f"Distillation reset_progress_total: {env_cfg.reset_progress_total}")
-        print(f"Distillation adr_reset_progress_total: {env_cfg.adr_reset_progress_total}")
-
     # Serialize URDF-to-USD conversion across ranks before all workers build the same shared assets.
     preconvert_shared_urdf_assets(
         door_configs=MULTI_DOOR_CONFIGS,
@@ -475,7 +471,7 @@ def main(env_cfg, agent_cfg: dict):
             f"(reset_from_start={reset_from_start}, early_stopping={early_stopping})"
         )
 
-    if args_cli.video and rank == 0:
+    if args_cli.video:
         video_kwargs = {
             "video_folder": os.path.join(experiment_dir, "videos", "distillation"),
             "step_trigger": lambda step: step % args_cli.video_interval == 0,
