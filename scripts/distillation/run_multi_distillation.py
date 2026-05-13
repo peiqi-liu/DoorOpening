@@ -76,6 +76,13 @@ parser = argparse.ArgumentParser(description="Train an RL agent with RL-Games.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
 parser.add_argument("--video_length", type=int, default=1000, help="Length of the recorded video (in steps).")
 parser.add_argument("--video_interval", type=int, default=500, help="Interval between video recordings (in steps).")
+parser.add_argument(
+    "--video_ranks",
+    type=str,
+    choices=["all", "rank0"],
+    default="all",
+    help="Which distributed ranks record videos. Defaults to all ranks so every GPU gets its own videos.",
+)
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default="DooropeningMulti", help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
@@ -171,7 +178,6 @@ parser.add_argument(
     default=None,
     help="Iteration interval for periodic raw `.pt` replay snapshots. Defaults to dagger.viser.raw_interval.",
 )
-
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -403,25 +409,28 @@ def main(env_cfg, agent_cfg: dict):
     multi_teacher_ckpts, teacher_ckpt = resolve_multi_teacher_checkpoints()
     student_ckpt = resolve_checkpoint(args_cli.student_ckpt)
 
-    if True:
-        train_dir = "runs"
-        default_project_name = "DoorOpening-Distillation"
-        experiment_name = default_project_name + datetime.now().strftime("_%Y-%m-%d-%H-%M-%S")
-        experiment_dir = os.path.join(train_dir, experiment_name)
-        nn_dir = os.path.join(experiment_dir, "nn")
-        summaries_dir = os.path.join(experiment_dir, "summaries")
-        default_wandb_project = default_project_name
-        default_wandb_name = experiment_name
+    train_dir = "runs"
+    default_wandb_project = "DoorOpening-Distillation"
+    experiment_name = (
+        default_wandb_project + datetime.now().strftime("_%Y-%m-%d-%H-%M-%S")
+        if rank == 0
+        else None
+    )
+    if use_distributed:
+        experiment_name_obj = [experiment_name]
+        dist.broadcast_object_list(experiment_name_obj, src=0)
+        experiment_name = experiment_name_obj[0]
+    default_wandb_name = experiment_name
+    experiment_dir = os.path.join(train_dir, experiment_name)
+    nn_dir = os.path.join(experiment_dir, "nn")
+    summaries_dir = os.path.join(experiment_dir, "summaries")
 
-        os.makedirs(train_dir, exist_ok=True)
-        os.makedirs(experiment_dir, exist_ok=True)
-        os.makedirs(nn_dir, exist_ok=True)
-        os.makedirs(summaries_dir, exist_ok=True)
-    else:
-        summaries_dir = None
-        nn_dir = None
-        default_wandb_project = None
-        default_wandb_name = None
+    os.makedirs(train_dir, exist_ok=True)
+    os.makedirs(experiment_dir, exist_ok=True)
+    os.makedirs(nn_dir, exist_ok=True)
+    os.makedirs(summaries_dir, exist_ok=True)
+    if use_distributed:
+        dist.barrier()
 
     wandb_enabled = bool(wandb_cfg.get("enabled", False)) if args_cli.track is None else args_cli.track
     wandb_project = (
@@ -459,7 +468,11 @@ def main(env_cfg, agent_cfg: dict):
     )
 
     # create isaac environment
-    env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+    env = gym.make(
+        args_cli.task,
+        cfg=env_cfg,
+        render_mode="rgb_array" if args_cli.video and (args_cli.video_ranks == "all" or rank == 0) else None,
+    )
     ov_env = _configure_rollout_env_mode(env, args_cli.play_policy)
     if rank == 0:
         ref_motion_lib = getattr(ov_env, "ref_motion_lib", None)
@@ -471,16 +484,20 @@ def main(env_cfg, agent_cfg: dict):
             f"(reset_from_start={reset_from_start}, early_stopping={early_stopping})"
         )
 
-    if args_cli.video:
+    if args_cli.video and (args_cli.video_ranks == "all" or rank == 0):
+        rank_tag = f"rank{rank:03d}_local{local_rank:03d}"
         video_kwargs = {
-            "video_folder": os.path.join(experiment_dir, "videos", "distillation"),
+            "video_folder": os.path.join(experiment_dir, "videos", "distillation", rank_tag),
             "step_trigger": lambda step: step % args_cli.video_interval == 0,
             "video_length": args_cli.video_length,
+            "name_prefix": f"distillation_{rank_tag}",
             "disable_logger": True,
         }
-        print("[INFO] Recording videos during distillation.")
+        print(f"[INFO][rank {rank}] Recording videos during distillation.")
         print_dict(video_kwargs, nesting=4)
         env = gym.wrappers.RecordVideo(env, **video_kwargs)
+    elif args_cli.video and rank == 0:
+        print("[INFO] Video recording requested for rank0 only; nonzero ranks will not write videos.")
 
     teacher_config = {
         "cfg": teacher_cfg,

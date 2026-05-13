@@ -221,6 +221,94 @@ if missing_motion_paths:
 motion_family_ids = asset_family_ids.clone()
 motion_family_names = list(asset_family_names)
 
+
+def get_multi_door_rank(rank: int | None = None) -> int:
+    """Return the distributed rank used to offset the per-env door asset cycle."""
+
+    if rank is not None:
+        return int(rank)
+    return int(os.environ.get("RANK", "0"))
+
+
+def get_multi_door_asset_start_index(num_envs: int, rank: int | None = None) -> int:
+    """Return the first door asset index for this rank's local env 0."""
+
+    num_assets = len(asset_paths)
+    if num_assets == 0:
+        raise ValueError("No multi-door assets are available.")
+    return (get_multi_door_rank(rank) * int(num_envs)) % num_assets
+
+
+def get_multi_door_env_asset_indices(
+    num_envs: int,
+    rank: int | None = None,
+    device: torch.device | str | None = None,
+) -> torch.Tensor:
+    """Map local env ids to door asset ids with a rank-aware global env offset."""
+
+    num_assets = len(asset_paths)
+    start_index = get_multi_door_asset_start_index(num_envs, rank=rank)
+    return (torch.arange(int(num_envs), device=device, dtype=torch.long) + start_index) % num_assets
+
+
+def _make_ordered_asset_indices(asset_start_index: int = 0) -> list[int]:
+    num_assets = len(asset_paths)
+    if num_assets == 0:
+        raise ValueError("No multi-door assets are available.")
+    asset_start_index = int(asset_start_index) % num_assets
+    return [(asset_start_index + index) % num_assets for index in range(num_assets)]
+
+
+def _build_door_urdf_configs(
+    training_mode: bool = False,
+    activate_contact_sensors: bool = False,
+    asset_start_index: int = 0,
+):
+    door_urdf_configs = []
+    for asset_idx in _make_ordered_asset_indices(asset_start_index):
+        door_urdf_configs.append(
+            create_urdf_door_cfg(
+                asset_paths[asset_idx],
+                training_mode=training_mode,
+                activate_contact_sensors=activate_contact_sensors,
+            )
+        )
+    return door_urdf_configs
+
+
+def _infer_spawn_options(door_cfg: ArticulationCfg) -> tuple[bool, bool]:
+    spawn_cfg = getattr(door_cfg, "spawn", None)
+    assets_cfg = getattr(spawn_cfg, "assets_cfg", None)
+    if not assets_cfg:
+        return False, False
+
+    first_asset_cfg = assets_cfg[0]
+    training_mode = getattr(first_asset_cfg, "collider_type", None) == "convex_hull"
+    activate_contact_sensors = bool(getattr(first_asset_cfg, "activate_contact_sensors", False))
+    return training_mode, activate_contact_sensors
+
+
+def configure_multi_door_assets_for_rank(
+    door_cfg: ArticulationCfg,
+    num_envs: int,
+    rank: int | None = None,
+) -> int:
+    """Rotate a MultiAssetSpawner so local env ids continue the global asset cycle across ranks."""
+
+    spawn_cfg = getattr(door_cfg, "spawn", None)
+    if spawn_cfg is None or not hasattr(spawn_cfg, "assets_cfg"):
+        raise ValueError("Expected door_cfg.spawn to be a MultiAssetSpawnerCfg with assets_cfg.")
+
+    asset_start_index = get_multi_door_asset_start_index(num_envs, rank=rank)
+    training_mode, activate_contact_sensors = _infer_spawn_options(door_cfg)
+    spawn_cfg.assets_cfg = _build_door_urdf_configs(
+        training_mode=training_mode,
+        activate_contact_sensors=activate_contact_sensors,
+        asset_start_index=asset_start_index,
+    )
+    return asset_start_index
+
+
 door_asset_path = asset_paths[0]
 board_offset = board_offsets[0]
 handle_offset = handle_offsets[0]
@@ -236,18 +324,12 @@ for asset_path in asset_paths:
 
 def setup_doors(training_mode: bool = False):
     """Load all door cfg"""
-    door_urdf_configs = []
-    for asset_path in asset_paths:
-        door_urdf_configs.append(
-            create_urdf_door_cfg(
-                asset_path,
-                training_mode=training_mode,
-                activate_contact_sensors=False,
-            )
-        )
     return ArticulationCfg(
         spawn=sim_utils.MultiAssetSpawnerCfg(
-            assets_cfg=door_urdf_configs,
+            assets_cfg=_build_door_urdf_configs(
+                training_mode=training_mode,
+                activate_contact_sensors=False,
+            ),
             random_choice=False,
             activate_contact_sensors=False,
         ),

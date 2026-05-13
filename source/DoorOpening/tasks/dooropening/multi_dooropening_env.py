@@ -12,11 +12,18 @@ from isaaclab.envs import DirectRLEnv
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from DoorOpening.utils.quat_utils import quat_diff_angle, hinge_angle_diff
 from DoorOpening.motion.multi_motion_lib import ReferenceMotionManager
-from DoorOpening.assets.door.multi_door_cfg import edit_door_articulation
+from DoorOpening.assets.door.multi_door_cfg import (
+    asset_paths as door_asset_paths,
+    board_offsets,
+    configure_multi_door_assets_for_rank,
+    edit_door_articulation,
+    get_multi_door_asset_start_index,
+    get_multi_door_env_asset_indices,
+    handle_offsets,
+    motion_traj_paths,
+)
 from DoorOpening.tasks.dooropening.dooropening_adr import DoorOpeningADR
 from DoorOpening.tasks.dooropening.multi_dooropening_env_cfg import DooropeningEnvCfg
-from DoorOpening.assets.door.multi_door_cfg import asset_paths as door_asset_paths
-from DoorOpening.assets.door.multi_door_cfg import motion_traj_paths, handle_offsets, board_offsets
 from DoorOpening.assets.glorbot.glorbot_cfg import glorbot_urdf_path
 from isaaclab.sensors import Camera, ContactSensor
 from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES, ROBOT_KEY_BODY_NAMES
@@ -154,11 +161,20 @@ class DooropeningEnv(DirectRLEnv):
         self.twist_indices = self.cfg.twist_indices
 
         self.num_door_assets = len(handle_offsets)
-        self.handle_offsets = [handle_offsets[i % len(handle_offsets)] for i in range(self.num_envs)]
-        self.board_offsets = [board_offsets[i % len(board_offsets)] for i in range(self.num_envs)]
-        self.handle_offsets = torch.stack(self.handle_offsets).to(self.device)
-        self.board_offsets = torch.stack(self.board_offsets).to(self.device)
-        env_to_file_map = [i % len(motion_traj_paths) for i in range(self.num_envs)]
+        self.env_asset_start_index = get_multi_door_asset_start_index(self.num_envs)
+        self.env_asset_indices = get_multi_door_env_asset_indices(self.num_envs, device=self.device)
+        rank = int(os.environ.get("RANK", "0"))
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        if world_size > 1:
+            sample_indices = self.env_asset_indices[: min(8, self.num_envs)].detach().cpu().tolist()
+            sample_names = [Path(door_asset_paths[int(asset_idx)]).parent.name for asset_idx in sample_indices]
+            print(
+                f"[INFO][rank {rank}] Multi-door asset start index {self.env_asset_start_index}; "
+                f"first env assets: {sample_names}"
+            )
+        self.handle_offsets = handle_offsets.to(self.device)[self.env_asset_indices]
+        self.board_offsets = board_offsets.to(self.device)[self.env_asset_indices]
+        env_to_file_map = self.env_asset_indices.detach().cpu().tolist()
         self.ref_motion_lib = ReferenceMotionManager(
             num_envs=self.num_envs,
             device=self.device,
@@ -535,6 +551,7 @@ class DooropeningEnv(DirectRLEnv):
                 activate_contact_sensors(f"/World/envs/env_{env_id}/Door/{link_name}", True)
 
     def _setup_scene(self):
+        configure_multi_door_assets_for_rank(self.cfg.door_cfg, int(self.cfg.scene.num_envs))
         self.robot = Articulation(self.cfg.robot_cfg)
         self.door = Articulation(self.cfg.door_cfg)
         # add ground plane

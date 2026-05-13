@@ -787,17 +787,33 @@ class Dagger:
 
         env_motion_idx = self.ov_env.ref_motion_lib.env_to_file_map.to(device=self.device, dtype=torch.long)
         self.env_asset_idx = self.motion_to_asset_idx[env_motion_idx]
+        env_asset_indices = getattr(self.ov_env, "env_asset_indices", None)
+        if env_asset_indices is not None:
+            env_asset_indices = env_asset_indices.to(device=self.device, dtype=torch.long)
+            if not torch.equal(env_asset_indices, self.env_asset_idx):
+                raise RuntimeError("Door env asset indices and reference-motion asset indices are inconsistent.")
         self.motion_family_ids = motion_family_ids.to(device=self.device, dtype=torch.long)
         self.env_family_ids = self.motion_family_ids[env_motion_idx]
         expected_asset_family_ids = door_asset_family_ids.to(device=self.device, dtype=torch.long)[self.env_asset_idx]
         if not torch.equal(expected_asset_family_ids, self.env_family_ids):
             raise RuntimeError("Door asset family ids and motion family ids are inconsistent.")
+
+        local_family_counts_tensor = torch.stack(
+            [
+                (self.env_family_ids == int(family_id)).sum()
+                for family_id in range(len(DOOR_FAMILY_NAMES))
+            ]
+        ).to(device=self.device, dtype=torch.float64)
+        global_family_counts_tensor = local_family_counts_tensor.clone()
+        if self.use_ddp:
+            dist.all_reduce(global_family_counts_tensor, op=dist.ReduceOp.SUM)
+
         if self.rank == 0:
             family_counts = {
-                family_name: int((self.env_family_ids == int(family_id)).sum().detach().cpu().item())
+                family_name: int(global_family_counts_tensor[family_id].detach().cpu().item())
                 for family_id, family_name in enumerate(DOOR_FAMILY_NAMES)
             }
-            print(f"[INFO] Door family env counts: {family_counts}")
+            print(f"[INFO] Global door family env counts: {family_counts}")
             sample = []
             sample_count = min(12, int(self.num_envs))
             for env_id in range(sample_count):
@@ -805,7 +821,7 @@ class Dagger:
                 family_id = int(self.env_family_ids[env_id].detach().cpu().item())
                 asset_name = Path(door_asset_paths[asset_idx]).parent.name
                 sample.append(f"env{env_id}:{DOOR_FAMILY_NAMES[family_id]}/{asset_name}")
-            print("[INFO] Door family sample:", ", ".join(sample))
+            print("[INFO] Rank 0 door family sample:", ", ".join(sample))
         self.env_board_bboxes = door_board_bboxes.to(device=self.device, dtype=torch.float32)[self.env_asset_idx]
         bbox_min = self.env_board_bboxes[:, 0]
         bbox_max = self.env_board_bboxes[:, 1]
@@ -1385,10 +1401,12 @@ class Dagger:
             raise RuntimeError("Teacher model is not initialized.")
         if getattr(self, "multi_teacher_enabled", False):
             teacher_actions = torch.zeros((self.num_envs, self.num_actions), dtype=torch.float32, device=self.device)
+            assigned_teacher_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
             for family_id, family_model in self.teacher_models_by_family_id.items():
                 env_ids = torch.nonzero(self.env_family_ids == int(family_id), as_tuple=False).squeeze(-1)
                 if env_ids.numel() == 0:
                     continue
+                assigned_teacher_mask[env_ids] = True
                 batch_dict = {
                     "is_train": False,
                     "obs": clip_teacher_obs(obs[self.teacher_obs_type][env_ids], self.teacher_clip_obs),
@@ -1398,6 +1416,12 @@ class Dagger:
                     res_dict = family_model(batch_dict)
                 family_mus = torch.clamp(res_dict["mus"], -1.0, 1.0)
                 teacher_actions[env_ids] = family_mus
+            if not torch.all(assigned_teacher_mask):
+                missing_family_ids = sorted(
+                    set(self.env_family_ids[~assigned_teacher_mask].detach().cpu().tolist())
+                )
+                missing_family_names = [DOOR_FAMILY_NAMES[int(family_id)] for family_id in missing_family_ids]
+                raise RuntimeError(f"Missing teacher model for door families: {missing_family_names}.")
             teacher_actions = self._override_actions_for_pregrasp(teacher_actions)
             return {
                 "mus": teacher_actions,
@@ -2192,11 +2216,33 @@ class Dagger:
             family_name = DOOR_FAMILY_NAMES[int(family_id)]
             self.completed_successes_by_family[family_name].append(float(success_value))
 
-    def _get_family_success_rates(self):
-        return {
-            family_name: self._mean_completed_metric(values)
-            for family_name, values in self.completed_successes_by_family.items()
-        }
+    def _get_global_success_rates(self):
+        num_families = len(DOOR_FAMILY_NAMES)
+        stats = torch.zeros((1 + num_families, 2), dtype=torch.float64, device=self.device)
+        stats[0, 0] = float(sum(self.completed_successes))
+        stats[0, 1] = float(len(self.completed_successes))
+        for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
+            values = self.completed_successes_by_family[family_name]
+            stats[family_id + 1, 0] = float(sum(values))
+            stats[family_id + 1, 1] = float(len(values))
+
+        if self.use_ddp:
+            dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+
+        success_rate = None
+        if stats[0, 1] > 0:
+            success_rate = float((stats[0, 0] / stats[0, 1]).detach().cpu().item())
+
+        family_success_rates = {}
+        for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
+            count = stats[family_id + 1, 1]
+            if count > 0:
+                family_success_rates[family_name] = float(
+                    (stats[family_id + 1, 0] / count).detach().cpu().item()
+                )
+            else:
+                family_success_rates[family_name] = None
+        return success_rate, family_success_rates
 
     def _log(self, iteration, total_loss, action_loss, aux_loss, teacher_forcing_beta):
         if iteration % self.log_interval != 0:
@@ -2205,8 +2251,7 @@ class Dagger:
         episode_length = self._mean_completed_metric(self.completed_lengths)
         env_step_dt = max(float(getattr(self.ov_env, "dt", 0.0)), 1e-6)
         episode_length_seconds = episode_length * env_step_dt if episode_length is not None else None
-        success_rate = self._mean_completed_metric(self.completed_successes)
-        family_success_rates = self._get_family_success_rates()
+        success_rate, family_success_rates = self._get_global_success_rates()
         teacher_env_fraction = self._get_teacher_forcing_env_fraction()
         student_env_fraction = 1.0 - teacher_env_fraction
         iteration_time_ms = self._consume_timing_means()
@@ -2234,10 +2279,10 @@ class Dagger:
             if episode_length_seconds is not None:
                 print("Episode Length (s):", episode_length_seconds)
             if success_rate is not None:
-                print("Success Rate:", success_rate)
+                print("Global Success Rate:", success_rate)
             for family_name, family_success_rate in family_success_rates.items():
                 if family_success_rate is not None:
-                    print(f"Success Rate/{family_name}:", family_success_rate)
+                    print(f"Global Success Rate/{family_name}:", family_success_rate)
             if iteration_time_ms is not None:
                 print("Iteration Time (ms):", iteration_time_ms)
             # for key, value in sorted(self.latest_env_log_metrics.items()):
@@ -2274,7 +2319,10 @@ class Dagger:
         if iteration_time_ms is not None:
             metrics["timing/iteration_ms"] = iteration_time_ms
         if self.latest_env_log_metrics:
-            metrics.update(self.latest_env_log_metrics)
+            for key, value in self.latest_env_log_metrics.items():
+                if key == "stats/success_rate" or key.startswith("stats/success_rate/"):
+                    continue
+                metrics[key] = value
         self._wandb_log(metrics, step=iteration)
 
     def distill(self):

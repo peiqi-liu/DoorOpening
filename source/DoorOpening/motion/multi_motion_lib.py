@@ -26,7 +26,20 @@ class ReferenceMotionManager:
         if env_to_file_map is None:
             raise ValueError("env_to_file_map must be provided; ReferenceMotionManager now always loads the motion list.")
         self._load_motion_pkl_from_list()
-        self.env_to_file_map = torch.tensor(env_to_file_map, device=self.device)
+        self.env_to_file_map = torch.tensor(env_to_file_map, device=self.device, dtype=torch.long)
+        if self.env_to_file_map.numel() != int(self.num_envs):
+            raise ValueError(
+                "env_to_file_map must contain exactly one motion index per env: "
+                f"got {self.env_to_file_map.numel()} for {self.num_envs} envs."
+            )
+        if self.env_to_file_map.numel() > 0:
+            min_motion_idx = int(self.env_to_file_map.min().detach().cpu().item())
+            max_motion_idx = int(self.env_to_file_map.max().detach().cpu().item())
+            if min_motion_idx < 0 or max_motion_idx >= int(self.num_motions):
+                raise ValueError(
+                    "env_to_file_map contains an out-of-range motion index: "
+                    f"min={min_motion_idx}, max={max_motion_idx}, num_motions={self.num_motions}."
+                )
         self.frame_step = self.step_dt / self.frame_dt
         self._init_env_buffers()
         if self.twist_indices is not None:
