@@ -72,7 +72,9 @@ def should_force_asset_usd_conversion(
     """Force reconversion when the source asset tree is newer than the cached USD."""
     if should_force_usd_conversion(default=default):
         return True
-    return _is_source_asset_newer_than_cache(str(asset_path), str(usd_dir))
+    if _is_source_asset_newer_than_cache(str(asset_path), str(usd_dir)):
+        return True
+    return _is_cached_usd_missing_default_prim(asset_path, usd_dir)
 
 
 @lru_cache(maxsize=None)
@@ -192,7 +194,7 @@ def preconvert_shared_urdf_assets(
                     if verbose and (idx == 1 or idx == len(unique_cfgs) or idx % 10 == 0):
                         asset_label = Path(str(getattr(cfg, "asset_path", ""))).parent.name
                         print(f"[asset-prewarm] Converting {idx}/{len(unique_cfgs)}: {asset_label}")
-                    UrdfConverter(cfg)
+                    _convert_and_validate_urdf(UrdfConverter, cfg)
                 done_path.write_text(str(time.time()), encoding="utf-8")
                 if verbose:
                     print(f"[asset-prewarm] Rank 0 finished shared URDF conversion: {done_path}")
@@ -255,6 +257,78 @@ def _deduplicate_urdf_cfgs(cfgs: Iterable[object]) -> list[object]:
         unique_cfgs.append(cfg)
 
     return unique_cfgs
+
+
+def _convert_and_validate_urdf(converter_cls: type, cfg: object) -> None:
+    """Run Isaac Lab's converter and reject stale/corrupt USD cache outputs."""
+    converter_cls(cfg)
+    if not _is_cached_usd_missing_default_prim(
+        getattr(cfg, "asset_path", ""),
+        getattr(cfg, "usd_dir", ""),
+        getattr(cfg, "usd_file_name", None),
+    ):
+        return
+
+    # The converter may have skipped a stale cache because the config hash matched.
+    # Force one repair attempt before failing the distributed launch.
+    if not bool(getattr(cfg, "force_usd_conversion", False)):
+        setattr(cfg, "force_usd_conversion", True)
+        with contextlib.suppress(FileNotFoundError):
+            (Path(str(getattr(cfg, "usd_dir", ""))) / ".asset_hash").unlink()
+        converter_cls(cfg)
+
+    if _is_cached_usd_missing_default_prim(
+        getattr(cfg, "asset_path", ""),
+        getattr(cfg, "usd_dir", ""),
+        getattr(cfg, "usd_file_name", None),
+    ):
+        usd_path = _expected_usd_path(
+            getattr(cfg, "asset_path", ""),
+            getattr(cfg, "usd_dir", ""),
+            getattr(cfg, "usd_file_name", None),
+        )
+        with contextlib.suppress(FileNotFoundError):
+            (Path(str(getattr(cfg, "usd_dir", ""))) / ".asset_hash").unlink()
+        raise RuntimeError(
+            "URDF conversion produced an invalid USD cache with no default prim: "
+            f"asset_path={getattr(cfg, 'asset_path', None)} usd_path={usd_path}"
+        )
+
+
+def _is_cached_usd_missing_default_prim(
+    asset_path: str | Path,
+    usd_dir: str | Path,
+    usd_file_name: str | None = None,
+) -> bool:
+    """Return True when the expected cached USD is present but unusable as a referenced asset."""
+    usd_path = _expected_usd_path(asset_path, usd_dir, usd_file_name)
+    if not usd_path.is_file():
+        return False
+
+    try:
+        from pxr import Usd
+    except Exception:
+        return b"defaultPrim" not in usd_path.read_bytes()
+
+    try:
+        stage = Usd.Stage.Open(str(usd_path))
+    except Exception:
+        return True
+    if stage is None:
+        return True
+    default_prim = stage.GetDefaultPrim()
+    return not bool(default_prim and default_prim.IsValid())
+
+
+def _expected_usd_path(
+    asset_path: str | Path,
+    usd_dir: str | Path,
+    usd_file_name: str | None = None,
+) -> Path:
+    usd_file_name = usd_file_name or Path(str(asset_path)).stem
+    if not (usd_file_name.endswith(".usd") or usd_file_name.endswith(".usda")):
+        usd_file_name += ".usd"
+    return Path(str(usd_dir)).expanduser() / usd_file_name
 
 
 def _read_env_int(name: str, default: int) -> int:

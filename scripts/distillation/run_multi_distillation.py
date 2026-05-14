@@ -80,8 +80,8 @@ parser.add_argument(
     "--video_ranks",
     type=str,
     choices=["all", "rank0"],
-    default="all",
-    help="Which distributed ranks record videos. Defaults to all ranks so every GPU gets its own videos.",
+    default="rank0",
+    help="Which distributed ranks record videos. Use 'all' to record one rank-specific video folder per GPU.",
 )
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default="DooropeningMulti", help="Name of the task.")
@@ -236,6 +236,8 @@ def main(env_cfg, agent_cfg: dict):
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     use_distributed = args_cli.distributed or world_size > 1
 
+    if use_distributed and torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
     if use_distributed and not dist.is_initialized():
         backend = "nccl" if torch.cuda.is_available() else "gloo"
         dist.init_process_group(backend, rank=rank, world_size=world_size)
@@ -411,16 +413,10 @@ def main(env_cfg, agent_cfg: dict):
 
     train_dir = "runs"
     default_wandb_project = "DoorOpening-Distillation"
-    experiment_name = (
-        default_wandb_project + datetime.now().strftime("_%Y-%m-%d-%H-%M-%S")
-        if rank == 0
-        else None
-    )
-    if use_distributed:
-        experiment_name_obj = [experiment_name]
-        dist.broadcast_object_list(experiment_name_obj, src=0)
-        experiment_name = experiment_name_obj[0]
-    default_wandb_name = experiment_name
+    base_experiment_name = default_wandb_project + datetime.now().strftime("_%Y-%m-%d-%H-%M-%S")
+    rank_tag = f"rank{rank:03d}_local{local_rank:03d}"
+    experiment_name = f"{base_experiment_name}_{rank_tag}" if use_distributed else base_experiment_name
+    default_wandb_name = base_experiment_name
     experiment_dir = os.path.join(train_dir, experiment_name)
     nn_dir = os.path.join(experiment_dir, "nn")
     summaries_dir = os.path.join(experiment_dir, "summaries")
@@ -429,8 +425,7 @@ def main(env_cfg, agent_cfg: dict):
     os.makedirs(experiment_dir, exist_ok=True)
     os.makedirs(nn_dir, exist_ok=True)
     os.makedirs(summaries_dir, exist_ok=True)
-    if use_distributed:
-        dist.barrier()
+    print(f"[INFO][rank {rank}] Distillation output directory: {experiment_dir}")
 
     wandb_enabled = bool(wandb_cfg.get("enabled", False)) if args_cli.track is None else args_cli.track
     wandb_project = (
@@ -485,9 +480,8 @@ def main(env_cfg, agent_cfg: dict):
         )
 
     if args_cli.video and (args_cli.video_ranks == "all" or rank == 0):
-        rank_tag = f"rank{rank:03d}_local{local_rank:03d}"
         video_kwargs = {
-            "video_folder": os.path.join(experiment_dir, "videos", "distillation", rank_tag),
+            "video_folder": os.path.join(experiment_dir, "videos", "distillation"),
             "step_trigger": lambda step: step % args_cli.video_interval == 0,
             "video_length": args_cli.video_length,
             "name_prefix": f"distillation_{rank_tag}",
