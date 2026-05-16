@@ -12,6 +12,11 @@ door_pcd_num_points: 30000  # Dense scene-door sampling before local policy crop
 local_pcd_range: [1.2, 0.25, 0.25]
 x_direction_cutoff: -0.5
 
+temporal_obs:
+  enabled: true
+  history_offsets_s: [0.10, 0.20, 0.50]
+  interpolate: true
+
 pcd_encoders_cfg:
   local_pcd_t:
     type: "pointnet"
@@ -40,92 +45,77 @@ state_encoders_cfg:
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  prev_action_base_t1:
+  target_err_base:
     input_dim: 3
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  prev_action_arm_t1:
+  target_err_arm:
     input_dim: 7
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  prev_action_hand_t1:
+  target_err_hand:
     input_dim: 9
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  prev_action_base_t5:
+  delta_q_base_100ms:
     input_dim: 3
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  prev_action_arm_t5:
+  delta_q_arm_100ms:
     input_dim: 7
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  prev_action_hand_t5:
+  delta_q_hand_100ms:
     input_dim: 9
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  prev_q_base_t1:
+  delta_q_base_200ms:
     input_dim: 3
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  prev_q_arm_t1:
+  delta_q_arm_200ms:
     input_dim: 7
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  prev_q_hand_t1:
+  delta_q_hand_200ms:
     input_dim: 9
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  prev_q_base_t5:
+  delta_q_base_500ms:
     input_dim: 3
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  prev_q_arm_t5:
+  delta_q_arm_500ms:
     input_dim: 7
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  prev_q_hand_t5:
+  delta_q_hand_500ms:
     input_dim: 9
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  prev_q_base_t10:
+  delta_target_base_200ms:
     input_dim: 3
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  prev_q_arm_t10:
+  delta_target_arm_200ms:
     input_dim: 7
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  prev_q_hand_t10:
-    input_dim: 9
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  prev_q_base_t20:
-    input_dim: 3
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  prev_q_arm_t20:
-    input_dim: 7
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  prev_q_hand_t20:
+  delta_target_hand_200ms:
     input_dim: 9
     hidden_dims: [128, 256]
     dropout: 0.0

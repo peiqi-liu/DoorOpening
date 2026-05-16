@@ -4,6 +4,7 @@ import argparse
 import os
 import pathlib
 import sys
+import time
 import types
 from distutils.util import strtobool
 
@@ -35,6 +36,26 @@ def _load_student_dagger_defaults(student_cfg_path):
 
     dagger_cfg = student_cfg.get("dagger", {})
     return dict(dagger_cfg) if isinstance(dagger_cfg, dict) else {}
+
+
+def _stagger_isaac_sim_startup():
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size <= 1:
+        return
+
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    rank = os.environ.get("RANK", str(local_rank))
+    stagger_s = float(os.environ.get("ISAAC_STARTUP_STAGGER_S", "5"))
+    delay_s = max(0.0, stagger_s) * max(0, local_rank)
+    if delay_s <= 0.0:
+        return
+
+    print(
+        f"[INFO][rank {rank}] Staggering Isaac Sim startup by {delay_s:.1f}s "
+        f"({stagger_s:.1f}s * local_rank {local_rank}).",
+        flush=True,
+    )
+    time.sleep(delay_s)
 
 
 def _get_base_env(env):
@@ -191,6 +212,8 @@ if args_cli.pointcloud_source is not None:
 if args_cli.video or pointcloud_source == "depth":
     args_cli.enable_cameras = True
 
+
+_stagger_isaac_sim_startup()
 
 # clear out sys.argv for Hydra
 sys.argv = [sys.argv[0]] + hydra_args

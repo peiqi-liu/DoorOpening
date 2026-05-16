@@ -206,8 +206,17 @@ class Dagger:
                 raise ImportError("wandb logging is enabled, but the 'wandb' package is not installed.")
             self._init_wandb(summaries_dir)
 
-        self.implemented_action_history = None
-        self.student_proprio_history = None
+        self.temporal_obs_cfg = {}
+        self.temporal_derived_state_specs = OrderedDict()
+        self.temporal_history_offsets_s = []
+        self.temporal_history_interpolate = True
+        self.max_temporal_history_s = 0.0
+        self.temporal_dt_s = 0.0
+        self.temporal_history_len = 0
+        self.temporal_current_time_s = 0.0
+        self.temporal_time_history = None
+        self.temporal_q_history = None
+        self.temporal_target_history = None
         self.teacher_forcing_env_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.current_rewards = torch.zeros((self.num_envs, 1), dtype=torch.float32, device=self.device)
         self.current_lengths = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
@@ -326,6 +335,13 @@ class Dagger:
         self.local_pcd_range = list(student_cfg_data.pop("local_pcd_range", [1.0, 0.35, 0.35]))
         self.local_pcd_x_direction_cutoff = student_cfg_data.pop("x_direction_cutoff", -0.5)
         self.door_pcd_num_points = int(student_cfg_data.pop("door_pcd_num_points", 4096))
+        self.temporal_obs_cfg = dict(student_cfg_data.pop("temporal_obs", {}) or {})
+        self.temporal_obs_enabled = bool(self.temporal_obs_cfg.get("enabled", False))
+        self.temporal_history_interpolate = bool(self.temporal_obs_cfg.get("interpolate", True))
+        raw_temporal_offsets = self.temporal_obs_cfg.get("history_offsets_s", [])
+        self.temporal_history_offsets_s = [float(offset) for offset in raw_temporal_offsets]
+        if any(offset < 0.0 for offset in self.temporal_history_offsets_s):
+            raise ValueError("temporal_obs.history_offsets_s values must be non-negative.")
 
         student_model_kwargs = {
             key: value
@@ -373,46 +389,34 @@ class Dagger:
         if "q_hand" not in self.state_encoders_keys:
             raise ValueError("PCDTransformer student config must include q_hand in state_encoders_cfg.")
 
-        self.action_history_state_specs = OrderedDict()
-        self.max_implemented_action_history_lag = 1
+        self.temporal_derived_state_specs = OrderedDict()
         for key in self.state_encoders_keys:
-            spec = self._parse_action_history_state_key(key)
+            spec = self._parse_temporal_derived_state_key(key)
             if spec is None:
                 continue
             input_dim = int(self.student_model.state_encoders_cfg[key]["input_dim"])
             if input_dim != spec["dim"]:
                 raise ValueError(
-                    "{} must have input_dim={} to match the {} action slice.".format(
+                    "{} must have input_dim={} to match the {} temporal slice.".format(
                         key,
                         spec["dim"],
                         spec["component"],
                     )
                 )
-            self.action_history_state_specs[key] = spec
-            self.max_implemented_action_history_lag = max(self.max_implemented_action_history_lag, spec["lag"])
-        if student_ckpt is not None and self.action_history_state_specs and self.rank == 0:
+            self.temporal_derived_state_specs[key] = spec
+        if self.temporal_derived_state_specs and not self.temporal_obs_enabled:
+            raise ValueError("Temporal derived state keys require temporal_obs.enabled: true.")
+        spec_offsets = [
+            float(spec["offset_s"])
+            for spec in self.temporal_derived_state_specs.values()
+            if spec["offset_s"] is not None
+        ]
+        self.max_temporal_history_s = max([0.0, *self.temporal_history_offsets_s, *spec_offsets])
+        if student_ckpt is not None and self.temporal_derived_state_specs and self.rank == 0:
             print(
-                "Warning: student checkpoint was loaded while prev_action_* inputs are active. "
-                "If their meaning changed since the checkpoint was trained, reusing those encoder weights can spike loss."
+                "Warning: student checkpoint was loaded while temporal derived inputs are active. "
+                "New target_err/delta_* encoder weights may need fresh training."
             )
-
-        self.proprio_history_state_specs = OrderedDict()
-        self.max_student_proprio_history_lag = 1
-        for key in self.state_encoders_keys:
-            spec = self._parse_proprio_history_state_key(key)
-            if spec is None:
-                continue
-            input_dim = int(self.student_model.state_encoders_cfg[key]["input_dim"])
-            if input_dim != spec["dim"]:
-                raise ValueError(
-                    "{} must have input_dim={} to match the {} joint slice.".format(
-                        key,
-                        spec["dim"],
-                        spec["component"],
-                    )
-                )
-            self.proprio_history_state_specs[key] = spec
-            self.max_student_proprio_history_lag = max(self.max_student_proprio_history_lag, spec["lag"])
 
         self.aux_state_specs = OrderedDict()
         self.aux_input_dim = 0
@@ -496,82 +500,53 @@ class Dagger:
             ]
         )
 
-    def _parse_action_history_state_key(self, key):
-        if not key.startswith("prev_action"):
+    def _parse_temporal_offset_s(self, offset_token):
+        if not offset_token.endswith("ms") or not offset_token[:-2].isdigit():
+            raise KeyError(f"Unsupported temporal offset '{offset_token}'. Expected '<milliseconds>ms'.")
+        offset_ms = int(offset_token[:-2])
+        if offset_ms <= 0:
+            raise ValueError("Temporal derived state offsets must be positive.")
+        return offset_ms / 1000.0
+
+    def _parse_temporal_derived_state_key(self, key):
+        kind_prefixes = ("delta_target", "delta_q", "target_err")
+        kind = None
+        remainder = None
+        for candidate in kind_prefixes:
+            prefix = f"{candidate}_"
+            if key.startswith(prefix):
+                kind = candidate
+                remainder = key[len(prefix):]
+                break
+        if kind is None:
             return None
 
-        parts = key.split("_")
-        if parts[:2] != ["prev", "action"]:
+        parts = remainder.split("_")
+        if kind == "target_err":
+            if len(parts) != 1:
+                raise KeyError(f"Unsupported temporal state key {key}. Expected target_err_<component>.")
+            offset_s = None
+        else:
+            if len(parts) != 2:
+                raise KeyError(
+                    f"Unsupported temporal state key {key}. Expected {kind}_<component>_<milliseconds>ms."
+                )
+            offset_s = self._parse_temporal_offset_s(parts[1])
+
+        component = self.action_component_aliases.get(parts[0])
+        if component is None or component == "full":
             raise KeyError(
-                f"Unsupported action history key {key}. "
-                "Expected prev_action[_base|_arm|_hand][_tK]."
+                f"Unsupported temporal component in {key}. Expected one of: base, arm, hand."
             )
 
-        component = "full"
-        lag = 1
-        for part in parts[2:]:
-            if not part:
-                continue
-            if part.startswith("t") and part[1:].isdigit():
-                parsed_lag = int(part[1:])
-                if parsed_lag < 1:
-                    raise ValueError(f"Action history lag in {key} must be >= 1.")
-                lag = parsed_lag
-                continue
-            if part in self.action_component_aliases:
-                component = self.action_component_aliases[part]
-                continue
-            raise KeyError(
-                f"Unsupported action history key {key}. "
-                "Expected prev_action[_base|_arm|_hand][_tK]."
-            )
-
-        action_indices = self.action_component_history_indices[component]
-        action_dim = int(action_indices.numel())
+        indices = self.action_component_history_indices[component]
+        dim = int(indices.numel())
         return {
+            "kind": kind,
             "component": component,
-            "lag": lag,
-            "indices": action_indices,
-            "dim": action_dim,
-        }
-
-    def _parse_proprio_history_state_key(self, key):
-        if not key.startswith("prev_q"):
-            return None
-
-        parts = key.split("_")
-        if parts[:2] != ["prev", "q"]:
-            raise KeyError(
-                f"Unsupported proprio history key {key}. "
-                "Expected prev_q[_base|_arm|_hand][_tK]."
-            )
-
-        component = "full"
-        lag = 1
-        for part in parts[2:]:
-            if not part:
-                continue
-            if part.startswith("t") and part[1:].isdigit():
-                parsed_lag = int(part[1:])
-                if parsed_lag < 1:
-                    raise ValueError(f"Proprio history lag in {key} must be >= 1.")
-                lag = parsed_lag
-                continue
-            if part in self.action_component_aliases:
-                component = self.action_component_aliases[part]
-                continue
-            raise KeyError(
-                f"Unsupported proprio history key {key}. "
-                "Expected prev_q[_base|_arm|_hand][_tK]."
-            )
-
-        proprio_indices = self.proprio_component_history_indices[component]
-        proprio_dim = int(proprio_indices.numel())
-        return {
-            "component": component,
-            "lag": lag,
-            "indices": proprio_indices,
-            "dim": proprio_dim,
+            "offset_s": offset_s,
+            "indices": indices,
+            "dim": dim,
         }
 
     def _parse_aux_state_key(self, key):
@@ -583,66 +558,128 @@ class Dagger:
         }
 
     def _init_history_buffers(self):
-        self.implemented_action_history = torch.zeros(
-            (self.num_envs, self.max_implemented_action_history_lag, self.num_actions),
+        self.temporal_dt_s = max(float(getattr(self.ov_env, "dt", 1.0 / 15.0)), 1e-6)
+        self.temporal_history_len = max(
+            2,
+            int(math.ceil(max(0.0, self.max_temporal_history_s) / self.temporal_dt_s)) + 4,
+        )
+        self.temporal_current_time_s = float(self.resume_iteration) * self.temporal_dt_s
+        self.temporal_q_history_dim = int(self.ov_env.robot.data.joint_pos.shape[-1])
+        self.temporal_time_history = torch.full(
+            (self.num_envs, self.temporal_history_len),
+            self.temporal_current_time_s,
             dtype=torch.float32,
             device=self.device,
         )
-        self.student_proprio_history_dim = int(self.ov_env.robot.data.joint_pos.shape[-1])
-        self.student_proprio_history = torch.zeros(
-            (self.num_envs, self.max_student_proprio_history_lag, self.student_proprio_history_dim),
+        self.temporal_q_history = torch.zeros(
+            (self.num_envs, self.temporal_history_len, self.temporal_q_history_dim),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self.temporal_target_history = torch.zeros(
+            (self.num_envs, self.temporal_history_len, self.num_actions),
             dtype=torch.float32,
             device=self.device,
         )
 
-    def _get_history_tensor(self, history_buffer, lag, value_indices, reference_values=None):
-        if history_buffer is None:
-            raise RuntimeError("History buffer is not initialized.")
-        if lag < 1 or lag > history_buffer.shape[1]:
-            raise IndexError(
-                f"Requested history lag t-{lag} but buffer only stores {history_buffer.shape[1]} steps."
+    def _iteration_to_time_s(self, iteration):
+        return float(iteration) * float(self.temporal_dt_s)
+
+    def _get_current_time_s(self):
+        return float(self.temporal_current_time_s)
+
+    def _gather_temporal_values(self, value_history, indices):
+        expanded_values = value_history.unsqueeze(1).expand(-1, indices.shape[1], -1, -1)
+        gather_indices = indices.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, value_history.shape[-1])
+        return torch.gather(expanded_values, dim=2, index=gather_indices).squeeze(2)
+
+    def _sample_temporal_history_offsets(self, value_history, offsets_s):
+        """
+        Sample timestamped history for multiple offsets in one batched pass.
+        Histories are stored newest first. If a requested time is outside the
+        stored range, return the closest available value for that offset.
+        """
+        if not offsets_s:
+            return {}
+        if value_history is None or self.temporal_time_history is None:
+            raise RuntimeError("Temporal history buffers are not initialized.")
+        if value_history.ndim != 3 or self.temporal_time_history.ndim != 2:
+            raise RuntimeError(
+                "Expected value_history [N, H, D] and time_history [N, H], got "
+                f"{tuple(value_history.shape)} and {tuple(self.temporal_time_history.shape)}."
             )
-        values = history_buffer[:, lag - 1, value_indices]
-        if reference_values is not None:
-            if reference_values.ndim != 2:
-                raise RuntimeError(
-                    f"Expected reference_values to be rank-2, got shape {tuple(reference_values.shape)}."
-                )
-            values = values - reference_values[:, value_indices]
-        return values
 
-    def _push_history(self, history_buffer, values):
-        if history_buffer is None:
+        num_envs, history_len, _ = value_history.shape
+        offset_tensor = torch.as_tensor(offsets_s, dtype=torch.float32, device=value_history.device)
+        query = self._get_current_time_s() - offset_tensor
+        time_delta = torch.abs(self.temporal_time_history.unsqueeze(1) - query.view(1, -1, 1))
+        nearest_idx = torch.argmin(time_delta, dim=2)
+        nearest_value = self._gather_temporal_values(value_history, nearest_idx)
+        if history_len < 2 or not self.temporal_history_interpolate:
+            return {float(offset): nearest_value[:, idx, :] for idx, offset in enumerate(offsets_s)}
+
+        t_new = self.temporal_time_history[:, :-1]
+        t_old = self.temporal_time_history[:, 1:]
+        pair_mask = (t_new.unsqueeze(1) >= query.view(1, -1, 1)) & (
+            t_old.unsqueeze(1) <= query.view(1, -1, 1)
+        )
+        has_pair = torch.any(pair_mask, dim=2)
+        pair_idx = pair_mask.to(torch.long).argmax(dim=2)
+        new_idx = pair_idx
+        old_idx = pair_idx + 1
+
+        value_new = self._gather_temporal_values(value_history, new_idx)
+        value_old = self._gather_temporal_values(value_history, old_idx)
+        time_new = torch.gather(self.temporal_time_history, dim=1, index=new_idx)
+        time_old = torch.gather(self.temporal_time_history, dim=1, index=old_idx)
+        alpha = ((query.view(1, -1) - time_old) / (time_new - time_old + 1.0e-6)).clamp(0.0, 1.0)
+        alpha = alpha.unsqueeze(-1)
+        interpolated = (1.0 - alpha) * value_old + alpha * value_new
+        samples = torch.where(has_pair.unsqueeze(-1), interpolated, nearest_value)
+        return {float(offset): samples[:, idx, :] for idx, offset in enumerate(offsets_s)}
+
+    def _push_temporal_history(self, timestamp, q, target, env_ids=None):
+        if self.temporal_time_history is None:
             return
-        if history_buffer.shape[1] > 1:
-            history_buffer[:, 1:, :] = history_buffer[:, :-1, :].clone()
-        history_buffer[:, 0, :] = values
-
-    def _seed_student_histories(self, env_ids=None):
-        prev_action_seed = self._get_implemented_action_vector().detach()
-        proprio_seed = self._get_student_proprio_vector().detach()
+        if q.ndim != 2 or target.ndim != 2:
+            raise RuntimeError(f"Expected q and target to be rank-2, got {tuple(q.shape)} and {tuple(target.shape)}.")
 
         if env_ids is None:
-            if self.implemented_action_history is not None:
-                self.implemented_action_history[:] = prev_action_seed.unsqueeze(1).expand(
-                    -1, self.implemented_action_history.shape[1], -1
-                )
-            if self.student_proprio_history is not None:
-                self.student_proprio_history[:] = proprio_seed.unsqueeze(1).expand(
-                    -1, self.student_proprio_history.shape[1], -1
-                )
+            if self.temporal_history_len > 1:
+                self.temporal_time_history[:, 1:] = self.temporal_time_history[:, :-1].clone()
+                self.temporal_q_history[:, 1:, :] = self.temporal_q_history[:, :-1, :].clone()
+                self.temporal_target_history[:, 1:, :] = self.temporal_target_history[:, :-1, :].clone()
+            self.temporal_time_history[:, 0] = float(timestamp)
+            self.temporal_q_history[:, 0, :] = q
+            self.temporal_target_history[:, 0, :] = target
             return
 
         if env_ids.numel() == 0:
             return
-        if self.implemented_action_history is not None:
-            self.implemented_action_history[env_ids] = prev_action_seed[env_ids].unsqueeze(1).expand(
-                -1, self.implemented_action_history.shape[1], -1
-            )
-        if self.student_proprio_history is not None:
-            self.student_proprio_history[env_ids] = proprio_seed[env_ids].unsqueeze(1).expand(
-                -1, self.student_proprio_history.shape[1], -1
-            )
+        if self.temporal_history_len > 1:
+            self.temporal_time_history[env_ids, 1:] = self.temporal_time_history[env_ids, :-1].clone()
+            self.temporal_q_history[env_ids, 1:, :] = self.temporal_q_history[env_ids, :-1, :].clone()
+            self.temporal_target_history[env_ids, 1:, :] = self.temporal_target_history[env_ids, :-1, :].clone()
+        self.temporal_time_history[env_ids, 0] = float(timestamp)
+        self.temporal_q_history[env_ids, 0, :] = q[env_ids]
+        self.temporal_target_history[env_ids, 0, :] = target[env_ids]
+
+    def _seed_temporal_histories(self, env_ids=None):
+        q = self._get_student_proprio_vector().detach()
+        target = self._get_implemented_action_vector().detach()
+        timestamp = self._get_current_time_s()
+
+        if env_ids is None:
+            self.temporal_time_history[:] = timestamp
+            self.temporal_q_history[:] = q.unsqueeze(1).expand(-1, self.temporal_history_len, -1)
+            self.temporal_target_history[:] = target.unsqueeze(1).expand(-1, self.temporal_history_len, -1)
+            return
+
+        if env_ids.numel() == 0:
+            return
+        self.temporal_time_history[env_ids] = timestamp
+        self.temporal_q_history[env_ids] = q[env_ids].unsqueeze(1).expand(-1, self.temporal_history_len, -1)
+        self.temporal_target_history[env_ids] = target[env_ids].unsqueeze(1).expand(-1, self.temporal_history_len, -1)
 
     def _get_student_proprio_vector(self):
         get_student_joint_pos_obs = getattr(self.ov_env, "get_student_joint_pos_obs", None)
@@ -655,19 +692,62 @@ class Dagger:
         return q_pos
 
     def _get_implemented_action_vector(self):
-        # prev_action_* should reflect the actual joint-position targets sent to
+        # Temporal target features use the actual joint-position targets sent to
         # the PD controller, not the normalized delta policy actions.
-        pd_targets = getattr(self.ov_env, "applied_robot_dof_targets", None)
-        if pd_targets is None:
-            pd_targets = getattr(self.ov_env, "robot_dof_targets", None)
-        if pd_targets is None:
-            raise RuntimeError(
-                "Expected the environment to expose applied_robot_dof_targets or robot_dof_targets "
-                "for implemented action history features."
-            )
+        pd_targets = self.ov_env.applied_robot_dof_targets
         if pd_targets.ndim != 2:
             raise RuntimeError(f"Expected PD target tensor to be rank-2, got shape {tuple(pd_targets.shape)}.")
         return pd_targets
+
+    def _build_temporal_derived_state_values(self, q_pos, target_t):
+        if not self.temporal_derived_state_specs:
+            return {}
+
+        q_t = q_pos[:, self.ov_env._robot_dof_idx]
+        target_err = target_t - q_t
+        required_q_offsets = sorted(
+            {
+                float(spec["offset_s"])
+                for spec in self.temporal_derived_state_specs.values()
+                if spec["kind"] == "delta_q" and spec["offset_s"] is not None
+            }
+        )
+        required_target_offsets = sorted(
+            {
+                float(spec["offset_s"])
+                for spec in self.temporal_derived_state_specs.values()
+                if spec["kind"] == "delta_target" and spec["offset_s"] is not None
+            }
+        )
+
+        delta_q_by_offset = {}
+        q_history_by_offset = self._sample_temporal_history_offsets(self.temporal_q_history, required_q_offsets)
+        for offset_s, q_history in q_history_by_offset.items():
+            delta_q_by_offset[offset_s] = q_t - q_history[:, self.ov_env._robot_dof_idx]
+
+        delta_target_by_offset = {}
+        target_history_by_offset = self._sample_temporal_history_offsets(
+            self.temporal_target_history,
+            required_target_offsets,
+        )
+        for offset_s, target_history in target_history_by_offset.items():
+            delta_target_by_offset[offset_s] = target_t - target_history
+
+        values_by_key = {}
+        for key, spec in self.temporal_derived_state_specs.items():
+            kind = spec["kind"]
+            offset_s = spec["offset_s"]
+            if kind == "target_err":
+                full_value = target_err
+            elif kind == "delta_q":
+                full_value = delta_q_by_offset[offset_s]
+            elif kind == "delta_target":
+                full_value = delta_target_by_offset[offset_s]
+            else:
+                raise KeyError(f"Unsupported temporal derived state kind '{kind}' for key '{key}'.")
+
+            values_by_key[key] = full_value[:, spec["indices"]]
+        return values_by_key
 
     def _get_handle_position_base(self):
         getter = getattr(self.ov_env, "get_handle_position_in_base_frame", None)
@@ -1399,6 +1479,7 @@ class Dagger:
     def _get_teacher_actions(self, obs):
         if not self._has_teacher():
             raise RuntimeError("Teacher model is not initialized.")
+        latest_targets = self._get_implemented_action_vector()
         if getattr(self, "multi_teacher_enabled", False):
             teacher_actions = torch.zeros((self.num_envs, self.num_actions), dtype=torch.float32, device=self.device)
             assigned_teacher_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -1410,7 +1491,7 @@ class Dagger:
                 batch_dict = {
                     "is_train": False,
                     "obs": clip_teacher_obs(obs[self.teacher_obs_type][env_ids], self.teacher_clip_obs),
-                    "prev_actions": self.implemented_action_history[env_ids, 0, :],
+                    "prev_actions": latest_targets[env_ids],
                 }
                 with torch.no_grad():
                     res_dict = family_model(batch_dict)
@@ -1431,7 +1512,7 @@ class Dagger:
         batch_dict = {
             "is_train": False,
             "obs": clip_teacher_obs(obs[self.teacher_obs_type], self.teacher_clip_obs),
-            "prev_actions": self.implemented_action_history[:, 0, :],
+            "prev_actions": latest_targets,
         }
         with torch.no_grad():
             res_dict = self.teacher_model(batch_dict)
@@ -2033,9 +2114,8 @@ class Dagger:
         palm_pos_base = world_to_local(palm_pos_w, robot_base_pos_w, robot_base_quat_w).squeeze(1)
         door_pcd_base = self._sample_door_pointcloud_base()
         robot_pcd_base = self._sample_robot_pointcloud_base_sampler() if self.append_robot_gt_to_policy_cloud else None
-        current_implemented_action = (
-            self.implemented_action_history[:, 0, :] if self.implemented_action_history is not None else None
-        )
+        target_t = self._get_implemented_action_vector()
+        temporal_state_values = self._build_temporal_derived_state_values(q_pos, target_t)
         need_aux_target_vector = self.has_aux_input and (not self.play_policy and self.has_aux_prediction)
         aux_target_vector = (
             self._stack_aux_state_values(self._get_aux_state_values()) if need_aux_target_vector else None
@@ -2058,22 +2138,8 @@ class Dagger:
                 obs[key] = q_pos[:, self.ov_env._robot_arm_dof_idx]
             elif key == "q_hand":
                 obs[key] = q_pos[:, self.ov_env._robot_finger_dof_idx]
-            elif key in self.action_history_state_specs:
-                spec = self.action_history_state_specs[key]
-                obs[key] = self._get_history_tensor(
-                    self.implemented_action_history,
-                    lag=spec["lag"],
-                    value_indices=spec["indices"],
-                    reference_values=current_implemented_action,
-                )
-            elif key in self.proprio_history_state_specs:
-                spec = self.proprio_history_state_specs[key]
-                obs[key] = self._get_history_tensor(
-                    self.student_proprio_history,
-                    lag=spec["lag"],
-                    value_indices=spec["indices"],
-                    reference_values=q_pos,
-                )
+            elif key in self.temporal_derived_state_specs:
+                obs[key] = temporal_state_values[key]
             elif key in self.aux_state_specs:
                 if aux_input_vector is None:
                     raise RuntimeError(f"Aux state '{key}' is enabled but aux input vector is unavailable.")
@@ -2334,18 +2400,19 @@ class Dagger:
             teacher_model.eval()
 
         try:
+            start_iteration = int(self.resume_iteration)
+            end_iteration = start_iteration + int(self.num_iters)
             obs, reset_extras = self.env.reset()
             self._update_logged_env_metrics(reset_extras)
             self.latest_student_proprio_vector = None
             self.latest_aux_input_vector = None
             self.latest_aux_target_vector = None
             self._resample_wall_distractors()
-            self._seed_student_histories()
+            self.temporal_current_time_s = self._iteration_to_time_s(start_iteration)
+            self._seed_temporal_histories()
             self._seed_aux_buffer()
             self._resample_teacher_forcing_env_mask(self.resume_iteration)
 
-            start_iteration = int(self.resume_iteration)
-            end_iteration = start_iteration + int(self.num_iters)
             for iteration in range(start_iteration, end_iteration):
                 self._sync_timing_device()
                 iteration_start_time = time.perf_counter()
@@ -2353,10 +2420,6 @@ class Dagger:
                 student_obs = self._build_student_obs(iteration=iteration)
                 student_output = self._student_forward(student_obs)
                 student_actions = torch.clamp(student_output["action"][:, 0, :], -1.0, 1.0)
-                # Capture q_t before stepping so prev_q features align with the next state.
-                if self.latest_student_proprio_vector is None:
-                    raise RuntimeError("Expected the latest student proprio vector to be captured while building obs.")
-                current_q_pos = self.latest_student_proprio_vector.detach().clone()
                 aux_prediction_for_replay = None
                 if self.has_aux_prediction:
                     aux_prediction_for_replay = self._decode_aux_prediction(student_output["aux"].detach())
@@ -2411,10 +2474,15 @@ class Dagger:
                 )
                 obs, rew, out_of_reach, timed_out, step_extras = self.env.step(step_actions)
                 self._update_logged_env_metrics(step_extras)
-                current_pd_targets = self._get_implemented_action_vector().detach().clone()
+                self.temporal_current_time_s = self._iteration_to_time_s(iteration + 1)
+                q_after_step = self._get_student_proprio_vector().detach().clone()
+                target_after_step = self._get_implemented_action_vector().detach().clone()
 
-                self._push_history(self.implemented_action_history, current_pd_targets)
-                self._push_history(self.student_proprio_history, current_q_pos)
+                self._push_temporal_history(
+                    timestamp=self.temporal_current_time_s,
+                    q=q_after_step,
+                    target=target_after_step,
+                )
                 self.frame += self.num_envs
 
                 self.current_rewards += rew.unsqueeze(-1)
@@ -2425,7 +2493,7 @@ class Dagger:
                     self.current_rewards[done_mask] = 0.0
                     self.current_lengths[done_mask] = 0.0
                     self._resample_wall_distractors(done_mask)
-                    self._seed_student_histories(done_mask)
+                    self._seed_temporal_histories(done_mask)
                     self._seed_aux_buffer(done_mask)
                     self._resample_teacher_forcing_env_mask(iteration + 1, done_mask)
 
