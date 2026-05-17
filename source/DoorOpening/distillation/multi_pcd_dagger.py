@@ -156,6 +156,8 @@ class Dagger:
         self.lidar_occlusion_eps_rel = float(self.lidar_render_cfg.get("occlusion_eps_rel", 0.01))
         self.lidar_jitter_std_m = float(self.lidar_render_cfg.get("jitter_std_m", 0.001))
         self.lidar_use_compile = bool(self.lidar_render_cfg.get("use_compile", True))
+        self.use_sim_body_pose_door_pcd = bool(self.runtime_cfg.get("use_sim_body_pose_door_pcd", False))
+        self.timing_breakdown_interval = int(self.runtime_cfg.get("timing_breakdown_interval", 0))
         self.robot_pointcloud_filter_cfg = dict(self.runtime_cfg.get("robot_pointcloud_filter", {}))
         self.robot_pointcloud_filter_enabled = bool(self.robot_pointcloud_filter_cfg.get("enabled", True))
         self.robot_pointcloud_sdf_cutoff = float(self.robot_pointcloud_filter_cfg.get("sdf_cutoff", 0.02))
@@ -234,6 +236,7 @@ class Dagger:
         self.latest_aux_input_vector = None
         self.latest_aux_target_vector = None
         self._timing_stats = {"sum_ms": 0.0, "count": 0}
+        self._latest_timing_breakdown = None
         self.logged_env_metric_prefixes = ("dr/", "dr_limit/", "dr_sample/", "reset/")
         self.latest_env_log_metrics = {}
         self.zero_local_pcd_crop_center = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
@@ -523,9 +526,15 @@ class Dagger:
 
         parts = remainder.split("_")
         if kind == "target_err":
-            if len(parts) != 1:
-                raise KeyError(f"Unsupported temporal state key {key}. Expected target_err_<component>.")
-            offset_s = None
+            if len(parts) == 1:
+                offset_s = None
+            elif len(parts) == 2:
+                offset_s = self._parse_temporal_offset_s(parts[1])
+            else:
+                raise KeyError(
+                    f"Unsupported temporal state key {key}. "
+                    "Expected target_err_<component> or target_err_<component>_<milliseconds>ms."
+                )
         else:
             if len(parts) != 2:
                 raise KeyError(
@@ -709,14 +718,14 @@ class Dagger:
             {
                 float(spec["offset_s"])
                 for spec in self.temporal_derived_state_specs.values()
-                if spec["kind"] == "delta_q" and spec["offset_s"] is not None
+                if spec["kind"] in {"delta_q", "target_err"} and spec["offset_s"] is not None
             }
         )
         required_target_offsets = sorted(
             {
                 float(spec["offset_s"])
                 for spec in self.temporal_derived_state_specs.values()
-                if spec["kind"] == "delta_target" and spec["offset_s"] is not None
+                if spec["kind"] in {"delta_target", "target_err"} and spec["offset_s"] is not None
             }
         )
 
@@ -738,7 +747,13 @@ class Dagger:
             kind = spec["kind"]
             offset_s = spec["offset_s"]
             if kind == "target_err":
-                full_value = target_err
+                if offset_s is None:
+                    full_value = target_err
+                else:
+                    full_value = (
+                        target_history_by_offset[offset_s]
+                        - q_history_by_offset[offset_s][:, self.ov_env._robot_dof_idx]
+                    )
             elif kind == "delta_q":
                 full_value = delta_q_by_offset[offset_s]
             elif kind == "delta_target":
@@ -877,6 +892,10 @@ class Dagger:
         expected_asset_family_ids = door_asset_family_ids.to(device=self.device, dtype=torch.long)[self.env_asset_idx]
         if not torch.equal(expected_asset_family_ids, self.env_family_ids):
             raise RuntimeError("Door asset family ids and motion family ids are inconsistent.")
+        self.family_env_ids = {
+            int(family_id): torch.nonzero(self.env_family_ids == int(family_id), as_tuple=False).squeeze(-1)
+            for family_id in range(len(DOOR_FAMILY_NAMES))
+        }
 
         local_family_counts_tensor = torch.stack(
             [
@@ -914,6 +933,14 @@ class Dagger:
             idx: FrankaLeapSampler(door_asset_paths[idx], device=self.device, num_points=self.door_pcd_num_points)
             for idx in unique_asset_idx
         }
+        self.door_sampler_env_ids = {
+            idx: torch.nonzero(self.env_asset_idx == int(idx), as_tuple=False).squeeze(-1)
+            for idx in unique_asset_idx
+        }
+        self.door_link_pointclouds = {
+            idx: self._build_door_link_pointcloud_cache(sampler)
+            for idx, sampler in self.door_samplers.items()
+        }
         if self.robot_pcd_num_points is None:
             self.robot_pcd_num_points = self.door_pcd_num_points
         self.robot_pcd_num_points = int(self.robot_pcd_num_points)
@@ -941,6 +968,10 @@ class Dagger:
         self.robot_palm_body_idx = int(self.ov_env._robot_key_body_idx[self.ov_env._robot_palm_id_in_key_body_idx])
         self.robot_root_body_idx = int(self.ov_env._robot_base_link_idx[0])
         self.door_base_body_idx = int(self.ov_env._door_base_link_idx)
+        self.door_link_body_indices = {
+            link_name: int(self.ov_env._door_body_idx[self.ov_env.door_body_names.index(link_name)])
+            for link_name in ("link_1", "link_2")
+        }
         self.wall_distractors_enabled = bool(self.wall_distractor_cfg.get("enabled", True))
         self.wall_distractor_num_points = int(
             self.wall_distractor_cfg.get("num_points", max(256, self.door_pcd_num_points // 3))
@@ -1103,7 +1134,9 @@ class Dagger:
         """Select one stable env per door family for multi-door replay export."""
         self._viser_raw_streams = OrderedDict()
         for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
-            matching_envs = torch.nonzero(self.env_family_ids == int(family_id), as_tuple=False).squeeze(-1)
+            matching_envs = self.family_env_ids.get(int(family_id))
+            if matching_envs is None:
+                matching_envs = torch.nonzero(self.env_family_ids == int(family_id), as_tuple=False).squeeze(-1)
             if matching_envs.numel() == 0:
                 continue
             env_id = int(matching_envs[0].detach().cpu().item())
@@ -1332,6 +1365,7 @@ class Dagger:
                     robot_base_quat_w,
                     env_id,
                     self.viser_raw_max_points,
+                    drop_zero_rows=True,
                 ).to(dtype=torch.float16)
 
             policy_input_points_world = None
@@ -1525,6 +1559,25 @@ class Dagger:
     def _sync_timing_device(self):
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
+
+    def _should_record_timing_breakdown(self, iteration):
+        return self.timing_breakdown_interval > 0 and int(iteration) % self.timing_breakdown_interval == 0
+
+    def _mark_timing_breakdown(self, timings, stage_start_time, stage_name):
+        if timings is None:
+            return stage_start_time
+        self._sync_timing_device()
+        now = time.perf_counter()
+        timings[stage_name] = (now - stage_start_time) * 1000.0
+        return now
+
+    def _emit_timing_breakdown(self, iteration, timings):
+        if not timings:
+            return
+        self._latest_timing_breakdown = OrderedDict(timings)
+        if self.rank == 0:
+            summary = ", ".join(f"{name}={elapsed_ms:.2f}" for name, elapsed_ms in timings.items())
+            print(f"Timing Breakdown (ms) @ iteration {int(iteration)}: {summary}")
 
     def _record_timing(self, elapsed_s):
         self._timing_stats["sum_ms"] += elapsed_s * 1000.0
@@ -1857,6 +1910,78 @@ class Dagger:
         quat = door_base_quat_w.unsqueeze(1).expand(-1, wall_points_base.shape[1], -1)
         return quat_apply(quat, wall_points_base) + door_base_pos_w.unsqueeze(1)
 
+    def _build_door_link_pointcloud_cache(self, sampler):
+        zero_joint = torch.zeros(
+            (1, len(sampler.robot.actuated_joints)),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        link_fk = sampler.robot.link_fk_batch(zero_joint, use_names=True)
+        visual_fk = sampler.robot.visual_geometry_fk_batch(zero_joint)
+        link_points = {}
+        for link_name in ("link_1", "link_2"):
+            link = next((candidate for candidate in sampler.links if candidate.name == link_name), None)
+            if link is None:
+                link_points[link_name] = torch.zeros((0, 3), dtype=torch.float32, device=self.device)
+                continue
+
+            link_to_base = link_fk[link_name]
+            base_to_link = torch.linalg.inv(link_to_base)
+            first_visual_geometry = link.visuals[0].geometry
+            if first_visual_geometry not in visual_fk:
+                link_points[link_name] = torch.zeros((0, 3), dtype=torch.float32, device=self.device)
+                continue
+            points = sampler.points[link_name]
+            visual_to_base = visual_fk[first_visual_geometry]
+            visual_to_link = torch.matmul(base_to_link, visual_to_base)
+            hom_points = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
+            link_points[link_name] = (
+                torch.matmul(visual_to_link, hom_points.transpose(1, 2))[:, :3]
+                .transpose(1, 2)
+                .squeeze(0)
+                .contiguous()
+            )
+        return link_points
+
+    def _sample_cached_door_pointcloud_world(self):
+        door_pcd_world = torch.zeros(
+            (self.num_envs, self.door_pcd_num_points, 3),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        for asset_idx, link_points_by_name in self.door_link_pointclouds.items():
+            env_ids = self.door_sampler_env_ids.get(asset_idx)
+            if env_ids is None:
+                env_ids = torch.nonzero(self.env_asset_idx == asset_idx, as_tuple=False).squeeze(-1)
+            if env_ids.numel() == 0:
+                continue
+
+            pcd_parts = []
+            for link_name in ("link_1", "link_2"):
+                link_points = link_points_by_name.get(link_name)
+                if link_points is None or link_points.numel() == 0:
+                    continue
+                body_idx = self.door_link_body_indices[link_name]
+                link_pos_w = self.ov_env.door.data.body_pos_w[env_ids, body_idx]
+                link_quat_w = self.ov_env.door.data.body_quat_w[env_ids, body_idx]
+                expanded_points = link_points.unsqueeze(0).expand(env_ids.numel(), -1, -1)
+                expanded_quat = link_quat_w.unsqueeze(1).expand(-1, expanded_points.shape[1], -1)
+                pcd_parts.append(quat_apply(expanded_quat, expanded_points) + link_pos_w.unsqueeze(1))
+
+            if pcd_parts:
+                asset_pcd_world = torch.cat(pcd_parts, dim=1)
+                if asset_pcd_world.shape[1] != self.door_pcd_num_points:
+                    sample_idx = torch.linspace(
+                        0,
+                        asset_pcd_world.shape[1] - 1,
+                        steps=self.door_pcd_num_points,
+                        device=self.device,
+                        dtype=torch.float32,
+                    ).round().to(dtype=torch.long)
+                    asset_pcd_world = asset_pcd_world[:, sample_idx]
+                door_pcd_world[env_ids] = asset_pcd_world
+        return door_pcd_world
+
     def _sample_scene_pointcloud_world_sampler(self):
         door_base_pos_w = self.ov_env.door.data.body_pos_w[:, self.door_base_body_idx]
         door_base_quat_w = self.ov_env.door.data.body_quat_w[:, self.door_base_body_idx]
@@ -1868,7 +1993,9 @@ class Dagger:
             device=self.device,
         )
         for asset_idx, sampler in self.door_samplers.items():
-            env_ids = torch.nonzero(self.env_asset_idx == asset_idx, as_tuple=False).squeeze(-1)
+            env_ids = self.door_sampler_env_ids.get(asset_idx)
+            if env_ids is None:
+                env_ids = torch.nonzero(self.env_asset_idx == asset_idx, as_tuple=False).squeeze(-1)
             if env_ids.numel() == 0:
                 continue
             local_pcd = sampler.sample(door_joint_pos[env_ids])
@@ -1881,6 +2008,38 @@ class Dagger:
         if wall_pcd_world.shape[1] > 0:
             scene_parts.append(wall_pcd_world)
         return torch.cat(scene_parts, dim=1)
+
+    def _render_lidar_scene_pointcloud_base(self, scene_pcd_world, robot_base_pos_w, robot_base_quat_w):
+        rendered_pcd_world, _ = simulate_lidar_render_from_pose(
+            pcd=scene_pcd_world,
+            lidar_pose=self._get_lidar_pose(),
+            num_points=self.lidar_num_points,
+            num_azimuth=self.lidar_num_azimuth,
+            num_polar=self.lidar_num_polar,
+            near_m=self.lidar_near_m,
+            far_m=self.lidar_far_m,
+            suppress_bins=self.lidar_suppress_bins,
+            occlusion_eps_m=self.lidar_occlusion_eps_m,
+            occlusion_eps_rel=self.lidar_occlusion_eps_rel,
+            jitter_std_m=self.lidar_jitter_std_m,
+            use_compile=self.lidar_use_compile,
+        )
+        return world_to_local(rendered_pcd_world, robot_base_pos_w, robot_base_quat_w)
+
+    def _sample_door_pointcloud_base_from_sim_body_pose(self):
+        robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
+        robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
+        door_pcd_world = self._sample_cached_door_pointcloud_world()
+
+        robot_pcd_world = self._sample_robot_pointcloud_world_sampler()
+        scene_parts = [door_pcd_world, robot_pcd_world]
+        wall_pcd_world = self._sample_wall_pointcloud_world()
+        if wall_pcd_world.shape[1] > 0:
+            scene_parts.append(wall_pcd_world)
+        scene_pcd_world = torch.cat(scene_parts, dim=1)
+        if self.viser_raw_enabled:
+            self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(scene_pcd_world)
+        return self._render_lidar_scene_pointcloud_base(scene_pcd_world, robot_base_pos_w, robot_base_quat_w)
 
     def _sample_door_pointcloud_base_sampler(self):
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
@@ -1944,21 +2103,7 @@ class Dagger:
         if self.viser_raw_enabled:
             self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(gt_scene_pcd_world)
 
-        rendered_pcd_world, _ = simulate_lidar_render_from_pose(
-            pcd=gt_scene_pcd_world,
-            lidar_pose=self._get_lidar_pose(),
-            num_points=self.lidar_num_points,
-            num_azimuth=self.lidar_num_azimuth,
-            num_polar=self.lidar_num_polar,
-            near_m=self.lidar_near_m,
-            far_m=self.lidar_far_m,
-            suppress_bins=self.lidar_suppress_bins,
-            occlusion_eps_m=self.lidar_occlusion_eps_m,
-            occlusion_eps_rel=self.lidar_occlusion_eps_rel,
-            jitter_std_m=self.lidar_jitter_std_m,
-            use_compile=self.lidar_use_compile,
-        )
-        return world_to_local(rendered_pcd_world, robot_base_pos_w, robot_base_quat_w)
+        return self._render_lidar_scene_pointcloud_base(gt_scene_pcd_world, robot_base_pos_w, robot_base_quat_w)
 
     def _sample_door_pointcloud_base(self):
         self._viser_cached_ground_truth_pcd_world = None
@@ -1966,6 +2111,8 @@ class Dagger:
             door_pcd_base = self._sample_door_pointcloud_base_sampler()
         elif self.pointcloud_source == "depth":
             door_pcd_base = self._sample_door_pointcloud_base_depth()
+        elif self.use_sim_body_pose_door_pcd:
+            door_pcd_base = self._sample_door_pointcloud_base_from_sim_body_pose()
         else:
             door_pcd_base = self._sample_door_pointcloud_base_lidar()
         door_pcd_base = self._filter_robot_points_base(door_pcd_base)
@@ -2384,6 +2531,10 @@ class Dagger:
             metrics["stats/aux_pregrasp_dropout_fraction"] = self.latest_aux_pregrasp_dropout_fraction
         if iteration_time_ms is not None:
             metrics["timing/iteration_ms"] = iteration_time_ms
+        if self._latest_timing_breakdown:
+            for stage_name, elapsed_ms in self._latest_timing_breakdown.items():
+                metrics[f"timing_breakdown/{stage_name}_ms"] = float(elapsed_ms)
+            self._latest_timing_breakdown = None
         if self.latest_env_log_metrics:
             for key, value in self.latest_env_log_metrics.items():
                 if key == "stats/success_rate" or key.startswith("stats/success_rate/"):
@@ -2416,14 +2567,26 @@ class Dagger:
             for iteration in range(start_iteration, end_iteration):
                 self._sync_timing_device()
                 iteration_start_time = time.perf_counter()
+                timing_breakdown = OrderedDict() if self._should_record_timing_breakdown(iteration) else None
+                stage_start_time = iteration_start_time
 
                 student_obs = self._build_student_obs(iteration=iteration)
+                stage_start_time = self._mark_timing_breakdown(
+                    timing_breakdown,
+                    stage_start_time,
+                    "build_student_obs",
+                )
                 student_output = self._student_forward(student_obs)
                 student_actions = torch.clamp(student_output["action"][:, 0, :], -1.0, 1.0)
                 aux_prediction_for_replay = None
                 if self.has_aux_prediction:
                     aux_prediction_for_replay = self._decode_aux_prediction(student_output["aux"].detach())
                     self.aux_buffer[:] = aux_prediction_for_replay
+                stage_start_time = self._mark_timing_breakdown(
+                    timing_breakdown,
+                    stage_start_time,
+                    "student_forward",
+                )
 
                 if self.viser_raw_enabled and self._viser_pending_debug_frame is not None:
                     self._maybe_update_viser_debug(
@@ -2438,6 +2601,11 @@ class Dagger:
                         aux_prediction=aux_prediction_for_replay,
                     )
                     self._viser_pending_debug_frame = None
+                stage_start_time = self._mark_timing_breakdown(
+                    timing_breakdown,
+                    stage_start_time,
+                    "viser_raw",
+                )
 
                 teacher_actions = None
                 total_loss = None
@@ -2447,6 +2615,11 @@ class Dagger:
                 if not self.play_policy:
                     teacher_output = self._get_teacher_actions(obs)
                     teacher_actions = teacher_output["actions"]
+                    stage_start_time = self._mark_timing_breakdown(
+                        timing_breakdown,
+                        stage_start_time,
+                        "teacher_forward",
+                    )
                     aux_target = None
                     if self.has_aux_prediction:
                         if self.latest_aux_target_vector is None:
@@ -2466,6 +2639,11 @@ class Dagger:
                     self.student_update_steps += 1
                     self.last_local_update_batch_size = local_batch_size
                     self.last_global_update_batch_size = global_batch_size
+                    stage_start_time = self._mark_timing_breakdown(
+                        timing_breakdown,
+                        stage_start_time,
+                        "student_update",
+                    )
 
                 step_actions, teacher_forcing_beta = self._mix_actions(
                     student_actions.detach(),
@@ -2473,6 +2651,11 @@ class Dagger:
                     iteration,
                 )
                 obs, rew, out_of_reach, timed_out, step_extras = self.env.step(step_actions)
+                stage_start_time = self._mark_timing_breakdown(
+                    timing_breakdown,
+                    stage_start_time,
+                    "env_step",
+                )
                 self._update_logged_env_metrics(step_extras)
                 self.temporal_current_time_s = self._iteration_to_time_s(iteration + 1)
                 q_after_step = self._get_student_proprio_vector().detach().clone()
@@ -2496,6 +2679,12 @@ class Dagger:
                     self._seed_temporal_histories(done_mask)
                     self._seed_aux_buffer(done_mask)
                     self._resample_teacher_forcing_env_mask(iteration + 1, done_mask)
+                stage_start_time = self._mark_timing_breakdown(
+                    timing_breakdown,
+                    stage_start_time,
+                    "post_step",
+                )
+                self._emit_timing_breakdown(iteration, timing_breakdown)
 
                 if total_loss is not None:
                     self._sync_timing_device()
