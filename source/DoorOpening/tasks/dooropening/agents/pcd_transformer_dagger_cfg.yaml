@@ -7,6 +7,11 @@ normalize_action: True
 action_space: "absolute"
 action_dim: 19
 aux_weight: 0.1
+mode_prediction:
+  enabled: true
+  num_modes: 4
+  weight: 0.1
+  return_latent: true
 
 door_pcd_num_points: 30000  # Dense scene-door sampling before local policy crops are taken.
 local_pcd_range: [1.2, 0.25, 0.25]

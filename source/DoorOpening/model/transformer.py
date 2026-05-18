@@ -131,6 +131,7 @@ class PCDTransformer(BaseModel):
         aux_weight=0.0,
         aux_prediction_mode="absolute",
         aux_delta_scale=0.01,
+        mode_prediction=None,
     ):
         super().__init__(
             normalize_state=normalize_state,
@@ -148,6 +149,11 @@ class PCDTransformer(BaseModel):
         self.pcd_encoders_cfg = pcd_encoders_cfg
         self.state_encoders_cfg = state_encoders_cfg
         self.transformer_cfg = transformer_cfg
+        self.mode_prediction_cfg = mode_prediction or {}
+        self.mode_prediction_enabled = bool(self.mode_prediction_cfg.get("enabled", False))
+        self.num_modes = int(self.mode_prediction_cfg.get("num_modes", 4))
+        self.mode_weight = float(self.mode_prediction_cfg.get("weight", 0.0))
+        self.return_latent = bool(self.mode_prediction_cfg.get("return_latent", False))
 
         # update config for auxiliary object state prediction
         self.aux_prediction = (aux_weight > 0)
@@ -179,10 +185,12 @@ class PCDTransformer(BaseModel):
                 self.encoders[key] = StateEncoder(cfg["input_dim"], cfg["hidden_dims"], self.hidden_dim-self.type_dim, cfg["dropout"])
 
         # Query tokens
-        if self.aux_prediction:
-            self.query_tokens = nn.Parameter(nn.init.xavier_uniform_(torch.zeros(chunk_size+1, hidden_dim))) # assume aux first, then aciton tokens
-        else:
-            self.query_tokens = nn.Parameter(nn.init.xavier_uniform_(torch.zeros(chunk_size, hidden_dim)))
+        self.aux_query_idx = 0 if self.aux_prediction else None
+        self.action_query_start = 1 if self.aux_prediction else 0
+        self.action_query_end = self.action_query_start + chunk_size
+        self.mode_query_idx = self.action_query_end if self.mode_prediction_enabled else None
+        num_query_tokens = self.action_query_end + (1 if self.mode_prediction_enabled else 0)
+        self.query_tokens = nn.Parameter(nn.init.xavier_uniform_(torch.zeros(num_query_tokens, hidden_dim)))
 
         # Transformer
         if transformer_cfg["type"] == "encoder_decoder":
@@ -210,6 +218,8 @@ class PCDTransformer(BaseModel):
         self.action_head = nn.Linear(hidden_dim, action_dim)  # eef (6) + hand (16)
         if self.aux_prediction:
             self.aux_head = nn.Linear(hidden_dim, self.aux_output_dim)
+        if self.mode_prediction_enabled:
+            self.mode_head = nn.Linear(hidden_dim, self.num_modes)
 
     def load_checkpoint(self, checkpoint_path):
         checkpoint = torch.load(checkpoint_path)
@@ -255,23 +265,25 @@ class PCDTransformer(BaseModel):
         tgt_mask = torch.zeros((num_queries, num_queries), dtype=torch.bool, device=query_tokens.device)
         memory_mask = torch.zeros((num_queries, num_memory_tokens), dtype=torch.bool, device=query_tokens.device)
 
-        # Aux query is index 0; action queries are index [1:].
-        # For cross-attention, allow aux query to read only from the allowlist.
-        memory_mask[0, :] = True
-        found_allowed = False
-        for key in self.aux_memory_allowlist:
-            if key in token_ranges:
-                memory_mask[0, token_ranges[key]] = False
-                found_allowed = True
+        if self.aux_prediction:
+            # Aux query is index 0; action queries are index [action_query_start:action_query_end].
+            # For cross-attention, allow aux query to read only from the allowlist.
+            memory_mask[self.aux_query_idx, :] = True
+            for key in self.aux_memory_allowlist:
+                if key in token_ranges:
+                    memory_mask[self.aux_query_idx, token_ranges[key]] = False
 
-        if not found_allowed:
-            raise ValueError(
-                f"None of aux_memory_allowlist keys were found in encoder tokens: {self.aux_memory_allowlist}"
-            )
+            # For decoder self-attention, block aux query from reading non-aux queries.
+            if num_queries > 1:
+                tgt_mask[self.aux_query_idx, :] = True
+                tgt_mask[self.aux_query_idx, self.aux_query_idx] = False
 
-        # For decoder self-attention, block aux query from reading action queries.
-        if num_queries > 1:
-            tgt_mask[0, 1:] = True
+        if self.mode_prediction_enabled:
+            # Keep mode prediction as a readout branch: action queries cannot read the mode query,
+            # and the mode query reads encoder memory directly instead of action-query outputs.
+            tgt_mask[self.action_query_start:self.action_query_end, self.mode_query_idx] = True
+            tgt_mask[self.mode_query_idx, :] = True
+            tgt_mask[self.mode_query_idx, self.mode_query_idx] = False
 
         return tgt_mask, memory_mask
 
@@ -298,7 +310,7 @@ class PCDTransformer(BaseModel):
 
         memory = self.encoder(obs_tokens)  # (B, N, H)
         query_tokens = self.query_tokens.expand(B, -1, -1)  # (B, chunk_size/C+1, H)
-        if self.aux_prediction:
+        if self.aux_prediction or self.mode_prediction_enabled:
             tgt_mask, memory_mask = self._build_decoder_masks(query_tokens, token_ranges)
             output = self.decoder(
                 query_tokens,
@@ -310,12 +322,18 @@ class PCDTransformer(BaseModel):
             output = self.decoder(query_tokens, memory)  # (B, chunk_size/C+1, H)
 
         pred = {}
+        if self.return_latent:
+            z_context = memory.mean(dim=1)  # (B, H)
+            pred["latent"] = z_context
+        if self.mode_prediction_enabled:
+            output_mode = output[:, self.mode_query_idx, :]  # (B, H)
+            pred["mode_logits"] = self.mode_head(output_mode)
         if self.aux_prediction:
-            output_action = output[:, 1:, :]  # (B, chunk_size, H)
-            output_aux = output[:, 0:1, :]  # (B, 1, H)
+            output_action = output[:, self.action_query_start:self.action_query_end, :]  # (B, chunk_size, H)
+            output_aux = output[:, self.aux_query_idx:self.aux_query_idx+1, :]  # (B, 1, H)
             pred["aux"] = self._postprocess_aux_prediction(self.aux_head(output_aux))  # (B, 1, aux_output_dim)
         else:
-            output_action = output  # (B, chunk_size, H)
+            output_action = output[:, self.action_query_start:self.action_query_end, :]  # (B, chunk_size, H)
 
         pred["action"] = self.action_head(output_action)  # (B, chunk_size, 7)
 

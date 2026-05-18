@@ -11,7 +11,6 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from DoorOpening.utils.quat_utils import quat_diff_angle, hinge_angle_diff
-from DoorOpening.motion.multi_motion_lib import ReferenceMotionManager
 from DoorOpening.assets.door.multi_door_cfg import (
     asset_paths as door_asset_paths,
     board_offsets,
@@ -174,24 +173,32 @@ class DooropeningEnv(DirectRLEnv):
             )
         self.handle_offsets = handle_offsets.to(self.device)[self.env_asset_indices]
         self.board_offsets = board_offsets.to(self.device)[self.env_asset_indices]
+        self.use_motion_ref = bool(getattr(self.cfg, "use_motion_ref", True))
         env_to_file_map = self.env_asset_indices.detach().cpu().tolist()
-        self.ref_motion_lib = ReferenceMotionManager(
-            num_envs=self.num_envs,
-            device=self.device,
-            reset_from_start=False,
-            env_to_file_map=env_to_file_map,
-            twist_indices=self.twist_indices,
-            step_dt=self.dt,
-        )
+        if self.use_motion_ref:
+            from DoorOpening.motion.multi_motion_lib import ReferenceMotionManager
+
+            self.ref_motion_lib = ReferenceMotionManager(
+                num_envs=self.num_envs,
+                device=self.device,
+                reset_from_start=False,
+                env_to_file_map=env_to_file_map,
+                twist_indices=self.twist_indices,
+                step_dt=self.dt,
+            )
+            default_trial_steps = math.ceil(
+                max(float(self.ref_motion_lib.num_frames - 1), 0.0) / max(float(self.ref_motion_lib.frame_step), 1e-6)
+            ) + 1
+            self.success_frame_idx = float(self.ref_motion_lib.num_frames - 1)
+        else:
+            self.ref_motion_lib = None
+            default_trial_steps = max(1, math.ceil(float(self.cfg.episode_length_s) / max(float(self.dt), 1e-6)))
+            self.success_frame_idx = float("inf")
         self.prob_get_first_key_frame = None
-        default_trial_steps = math.ceil(
-            max(float(self.ref_motion_lib.num_frames - 1), 0.0) / max(float(self.ref_motion_lib.frame_step), 1e-6)
-        ) + 1
         self.max_trial_steps = default_trial_steps * torch.ones_like(self.episode_length_buf, device=self.device)
         self.games_to_track = 100
         self.completed_successes = deque(maxlen=self.games_to_track)
         self.episode_reached_last_frame = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self.success_frame_idx = float(self.ref_motion_lib.num_frames - 1)
 
         torch.set_printoptions(precision=4, sci_mode=False)
 
@@ -309,15 +316,18 @@ class DooropeningEnv(DirectRLEnv):
 
     def _init_viser_pointcloud_asset_samplers(self):
         asset_index_by_dir = {Path(asset_path).resolve().parent: idx for idx, asset_path in enumerate(door_asset_paths)}
-        motion_to_asset_idx = []
-        for motion_path in motion_traj_paths:
-            motion_dir = Path(motion_path).resolve().parent
-            if motion_dir not in asset_index_by_dir:
-                raise KeyError(f"Could not map motion file '{motion_path}' to a door asset path.")
-            motion_to_asset_idx.append(asset_index_by_dir[motion_dir])
-        motion_to_asset_idx = torch.tensor(motion_to_asset_idx, device=self.device, dtype=torch.long)
-        env_motion_idx = self.ref_motion_lib.env_to_file_map.to(device=self.device, dtype=torch.long)
-        self._viser_env_asset_idx = motion_to_asset_idx[env_motion_idx]
+        if self.ref_motion_lib is None:
+            self._viser_env_asset_idx = self.env_asset_indices.to(device=self.device, dtype=torch.long)
+        else:
+            motion_to_asset_idx = []
+            for motion_path in motion_traj_paths:
+                motion_dir = Path(motion_path).resolve().parent
+                if motion_dir not in asset_index_by_dir:
+                    raise KeyError(f"Could not map motion file '{motion_path}' to a door asset path.")
+                motion_to_asset_idx.append(asset_index_by_dir[motion_dir])
+            motion_to_asset_idx = torch.tensor(motion_to_asset_idx, device=self.device, dtype=torch.long)
+            env_motion_idx = self.ref_motion_lib.env_to_file_map.to(device=self.device, dtype=torch.long)
+            self._viser_env_asset_idx = motion_to_asset_idx[env_motion_idx]
 
         selected_asset_idx = int(self._viser_env_asset_idx[self._viser_pointcloud_env_id].detach().cpu().item())
         self._viser_door_samplers = {
@@ -616,6 +626,8 @@ class DooropeningEnv(DirectRLEnv):
         return float(sum(values) / len(values))
 
     def _update_last_frame_tracker(self):
+        if self.ref_motion_lib is None:
+            return
         current_frame_idx = torch.clamp(
             self.ref_motion_lib.frame_idx.to(device=self.device, dtype=torch.float32),
             max=self.success_frame_idx,
@@ -623,6 +635,8 @@ class DooropeningEnv(DirectRLEnv):
         self.episode_reached_last_frame |= current_frame_idx >= self.success_frame_idx
 
     def _get_reached_last_frame_mask(self) -> torch.Tensor:
+        if self.ref_motion_lib is None:
+            return torch.zeros_like(self.episode_length_buf, dtype=torch.bool)
         current_frame_idx = torch.clamp(
             self.ref_motion_lib.frame_idx.to(device=self.device, dtype=torch.float32),
             max=self.success_frame_idx,
@@ -926,6 +940,8 @@ class DooropeningEnv(DirectRLEnv):
         return delta_actions.clamp(-1.0, 1.0)
 
     def override_pregrasp_actions(self, actions: torch.Tensor) -> torch.Tensor:
+        if self.ref_motion_lib is None:
+            return actions
         pregrasp_mask = self.ref_motion_lib.get_before_first_keyframe_mask()
         if not torch.any(pregrasp_mask):
             return actions
@@ -947,7 +963,8 @@ class DooropeningEnv(DirectRLEnv):
         # Advance the reference once per RL/env step. IsaacLab will call _apply_action()
         # decimation times, so stepping here keeps replay duration tied to env dt instead
         # of being multiplied by decimation again.
-        self.ref_motion_lib.step()
+        if self.ref_motion_lib is not None:
+            self.ref_motion_lib.step()
 
 
     def _apply_action(self):
@@ -1303,6 +1320,56 @@ class DooropeningEnv(DirectRLEnv):
 
         return handle_center_pos_base
 
+    def _set_current_state_as_reference(self):
+        """Populate reference tensors without loading demonstration trajectories."""
+
+        ref_joint_pos = torch.zeros(
+            (self.num_envs, len(FULL_JOINT_NAMES)),
+            device=self.device,
+            dtype=self.robot.data.joint_pos.dtype,
+        )
+        ref_joint_vel = torch.zeros_like(ref_joint_pos)
+        ref_joint_pos[:, self.ref_robot_dof_idx] = self.robot.data.joint_pos[:, self._robot_dof_idx]
+        ref_joint_vel[:, self.ref_robot_dof_idx] = self.robot.data.joint_vel[:, self._robot_dof_idx]
+
+        self.ref_robot_key_body_pos = self.robot_key_body_pos
+        self.ref_robot_key_body_quat = self.robot_key_body_quat
+        self.ref_robot_reset_key_body_pos = self.robot_reset_key_body_pos
+        self.ref_robot_joint_pos = ref_joint_pos
+        self.ref_robot_base_joint_pos = ref_joint_pos[:, self.ref_base_joint_idx]
+        self.ref_robot_arm_joint_pos = ref_joint_pos[:, self.ref_arm_joint_idx]
+        self.ref_robot_finger_joint_pos = ref_joint_pos[:, self.ref_finger_joint_idx]
+        self.ref_joint_vel = ref_joint_vel
+        self.ref_robot_base_joint_vel = ref_joint_vel[:, self.ref_base_joint_idx]
+        self.ref_robot_arm_joint_vel = ref_joint_vel[:, self.ref_arm_joint_idx]
+        self.ref_robot_finger_joint_vel = ref_joint_vel[:, self.ref_finger_joint_idx]
+        self.ref_door_joint_pos = self.door_joint_pos.clone()
+        self.ref_hinge_contact_mask = torch.zeros(self.num_envs, device=self.device, dtype=self.door_joint_pos.dtype)
+        self.ref_robot_body_lin_vel = self.robot_body_lin_vel
+        self.ref_robot_body_ang_vel = self.robot_body_ang_vel
+
+        twist_len = len(self.twist_indices) if self.twist_indices is not None else 0
+        twist_shape = (self.num_envs, twist_len)
+        self.ref_robot_key_body_pos_twist = torch.zeros(
+            (*twist_shape, len(self.ref_key_body_idx), 3),
+            device=self.device,
+            dtype=self.robot_key_body_pos.dtype,
+        )
+        self.ref_robot_key_body_quat_twist = torch.zeros(
+            (*twist_shape, len(self.ref_key_body_idx), 6),
+            device=self.device,
+            dtype=self.robot_key_body_quat.dtype,
+        )
+        self.ref_robot_joint_pos_twist = ref_joint_pos.unsqueeze(1).expand(-1, twist_len, -1)
+        self.ref_robot_base_joint_pos_twist = self.ref_robot_joint_pos_twist[:, :, self.ref_base_joint_idx]
+        self.ref_robot_arm_joint_pos_twist = self.ref_robot_joint_pos_twist[:, :, self.ref_arm_joint_idx]
+        self.ref_door_joint_pos_twist = self.ref_door_joint_pos.unsqueeze(1).expand(-1, twist_len, -1)
+        self.ref_door_body_pos_twist = torch.zeros(
+            (*twist_shape, 3),
+            device=self.device,
+            dtype=self.door_link_pos.dtype,
+        )
+
     def _get_intermediate_values(self):
         self.robot_key_body_pos = self.robot.data.body_pos_w[:, self._robot_key_body_idx]\
              - self.scene.env_origins.repeat((1, 1)).reshape(self.num_envs, 1, 3)
@@ -1336,6 +1403,10 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_body_ang_vel = self.robot.data.body_link_ang_vel_w[:, self._robot_key_body_idx]
         # print("door keypoints: ", self.compute_door_keypoints())
         # print("door link pos: ", self.door_link_pos)
+
+        if self.ref_motion_lib is None:
+            self._set_current_state_as_reference()
+            return
 
         self.ref_robot_key_body_pos_twist = self.ref_motion_lib.get_robot_body_pos_twist()[:, :, self.ref_key_body_idx]
         # It is a misnomer, we are actually sending euler angles as it might be more friendly to MLP
@@ -1560,6 +1631,35 @@ class DooropeningEnv(DirectRLEnv):
             env_ids = self.robot._ALL_INDICES
 
         self._update_adr_ranges()
+        if not self.use_motion_ref:
+            self.prob_get_first_key_frame = None
+            default_trial_steps = max(1, math.ceil(float(self.cfg.episode_length_s) / max(float(self.dt), 1e-6)))
+            self.max_trial_steps[env_ids] = default_trial_steps
+            self._sample_reset_randomization(env_ids)
+
+            default_root_state = self.robot.data.default_root_state[env_ids]
+            default_root_state[:, :3] += self.scene.env_origins[env_ids]
+
+            self.joint_pos[env_ids] = self.robot.data.default_joint_pos[env_ids]
+            self.joint_vel[env_ids] = self.robot.data.default_joint_vel[env_ids]
+            self._apply_spawn_noise(env_ids)
+
+            self.robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
+            self.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
+            self.robot.write_joint_state_to_sim(self.joint_pos[env_ids], self.joint_vel[env_ids], None, env_ids)
+            self.robot.set_joint_position_target(self.joint_pos[env_ids], env_ids=env_ids)
+
+            door_joint_pos = self.door.data.default_joint_pos[env_ids].clone()
+            door_joint_vel = self.door.data.default_joint_vel[env_ids].clone()
+            self.door.write_joint_state_to_sim(door_joint_pos, door_joint_vel, None, env_ids)
+
+            self.robot_dof_targets[env_ids, :] = self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]]
+            self.applied_robot_dof_targets[env_ids, :] = self.robot_dof_targets[env_ids, :]
+            self.episode_reached_last_frame[env_ids] = False
+            super()._reset_idx(env_ids)
+            self._refresh_nominal_door_joint_gains(env_ids)
+            return
+
         reset_frame_idx, self.prob_get_first_key_frame = self.ref_motion_lib.reset(
             env_ids,
             step_count=self._get_curriculum_step_count(),

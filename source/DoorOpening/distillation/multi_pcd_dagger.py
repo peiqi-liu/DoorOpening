@@ -349,6 +349,9 @@ class Dagger:
             if not str(key).startswith("_")
         }
         self.student_model = PCDTransformer(**student_model_kwargs).to(self.device)
+        self.mode_prediction_enabled = bool(getattr(self.student_model, "mode_prediction_enabled", False))
+        self.mode_weight = float(getattr(self.student_model, "mode_weight", 0.0))
+        self.num_modes = int(getattr(self.student_model, "num_modes", 4))
         if self.student_model.action_head.out_features != self.num_actions:
             raise ValueError(
                 f"Student action_dim ({self.student_model.action_head.out_features}) "
@@ -857,23 +860,32 @@ class Dagger:
         asset_index_by_dir = {
             Path(asset_path).resolve().parent: idx for idx, asset_path in enumerate(door_asset_paths)
         }
-        motion_to_asset_idx = []
-        for motion_path in motion_traj_paths:
-            motion_dir = Path(motion_path).resolve().parent
-            if motion_dir not in asset_index_by_dir:
-                raise KeyError(f"Could not map motion file '{motion_path}' to a door asset path.")
-            motion_to_asset_idx.append(asset_index_by_dir[motion_dir])
-        self.motion_to_asset_idx = torch.tensor(motion_to_asset_idx, device=self.device, dtype=torch.long)
-
-        env_motion_idx = self.ov_env.ref_motion_lib.env_to_file_map.to(device=self.device, dtype=torch.long)
-        self.env_asset_idx = self.motion_to_asset_idx[env_motion_idx]
+        ref_motion_lib = getattr(self.ov_env, "ref_motion_lib", None)
         env_asset_indices = getattr(self.ov_env, "env_asset_indices", None)
-        if env_asset_indices is not None:
-            env_asset_indices = env_asset_indices.to(device=self.device, dtype=torch.long)
-            if not torch.equal(env_asset_indices, self.env_asset_idx):
-                raise RuntimeError("Door env asset indices and reference-motion asset indices are inconsistent.")
-        self.motion_family_ids = motion_family_ids.to(device=self.device, dtype=torch.long)
-        self.env_family_ids = self.motion_family_ids[env_motion_idx]
+        if ref_motion_lib is None:
+            if env_asset_indices is None:
+                raise RuntimeError("Play mode without reference motions requires env.env_asset_indices.")
+            self.motion_to_asset_idx = None
+            self.motion_family_ids = None
+            self.env_asset_idx = env_asset_indices.to(device=self.device, dtype=torch.long)
+            self.env_family_ids = door_asset_family_ids.to(device=self.device, dtype=torch.long)[self.env_asset_idx]
+        else:
+            motion_to_asset_idx = []
+            for motion_path in motion_traj_paths:
+                motion_dir = Path(motion_path).resolve().parent
+                if motion_dir not in asset_index_by_dir:
+                    raise KeyError(f"Could not map motion file '{motion_path}' to a door asset path.")
+                motion_to_asset_idx.append(asset_index_by_dir[motion_dir])
+            self.motion_to_asset_idx = torch.tensor(motion_to_asset_idx, device=self.device, dtype=torch.long)
+
+            env_motion_idx = ref_motion_lib.env_to_file_map.to(device=self.device, dtype=torch.long)
+            self.env_asset_idx = self.motion_to_asset_idx[env_motion_idx]
+            if env_asset_indices is not None:
+                env_asset_indices = env_asset_indices.to(device=self.device, dtype=torch.long)
+                if not torch.equal(env_asset_indices, self.env_asset_idx):
+                    raise RuntimeError("Door env asset indices and reference-motion asset indices are inconsistent.")
+            self.motion_family_ids = motion_family_ids.to(device=self.device, dtype=torch.long)
+            self.env_family_ids = self.motion_family_ids[env_motion_idx]
         expected_asset_family_ids = door_asset_family_ids.to(device=self.device, dtype=torch.long)[self.env_asset_idx]
         if not torch.equal(expected_asset_family_ids, self.env_family_ids):
             raise RuntimeError("Door asset family ids and motion family ids are inconsistent.")
@@ -2185,7 +2197,16 @@ class Dagger:
         total_loss = loss["total"]
         action_loss = loss.get("action", total_loss)
         aux_loss = loss.get("aux")
-        return total_loss, action_loss, aux_loss
+        mode_loss = None
+        if self.mode_prediction_enabled:
+            if "mode_logits" not in student_output:
+                raise RuntimeError("Mode prediction is enabled, but student output does not contain 'mode_logits'.")
+            mode_loss = torch.nn.functional.cross_entropy(
+                student_output["mode_logits"],
+                self.env_family_ids.long(),
+            )
+            total_loss = total_loss + self.mode_weight * mode_loss
+        return total_loss, action_loss, aux_loss, mode_loss
 
     def _get_teacher_forcing_beta(self, iteration):
         if self.play_policy or not self._has_teacher():
@@ -2310,7 +2331,16 @@ class Dagger:
                 family_success_rates[family_name] = None
         return success_rate, family_success_rates
 
-    def _log(self, iteration, total_loss, action_loss, aux_loss, teacher_forcing_beta):
+    def _log(
+        self,
+        iteration,
+        total_loss,
+        action_loss,
+        aux_loss,
+        mode_loss,
+        mode_acc,
+        teacher_forcing_beta,
+    ):
         if iteration % self.log_interval != 0:
             return
         episode_reward = self._mean_completed_metric(self.completed_rewards)
@@ -2329,6 +2359,10 @@ class Dagger:
             print("Action Loss:", float(action_loss.detach().cpu()))
             if aux_loss is not None:
                 print("Aux Loss:", float(aux_loss.detach().cpu()))
+            if mode_loss is not None:
+                print("Mode Loss:", float(mode_loss.detach().cpu()))
+            if mode_acc is not None:
+                print("Mode Acc:", float(mode_acc.detach().cpu()))
             print("Teacher Forcing Beta:", teacher_forcing_beta)
             print("Teacher Rollout Env Fraction:", teacher_env_fraction)
             print("Student Rollout Env Fraction:", student_env_fraction)
@@ -2364,6 +2398,10 @@ class Dagger:
         }
         if aux_loss is not None:
             metrics["loss/aux"] = float(aux_loss.detach().cpu())
+        if mode_loss is not None:
+            metrics["loss/mode"] = float(mode_loss.detach().cpu())
+        if mode_acc is not None:
+            metrics["stats/mode_acc"] = float(mode_acc.detach().cpu())
         if episode_reward is not None:
             metrics["stats/episode_reward"] = episode_reward
         if episode_length is not None:
@@ -2419,6 +2457,14 @@ class Dagger:
 
                 student_obs = self._build_student_obs(iteration=iteration)
                 student_output = self._student_forward(student_obs)
+                mode_pred = None
+                mode_target = None
+                if self.mode_prediction_enabled:
+                    mode_logits = student_output["mode_logits"].detach()
+                    mode_target = self.env_family_ids.long()
+                    mode_pred = mode_logits.argmax(dim=-1)
+                    if self.play_policy and iteration % 10 == 0:
+                        print("Iteration ", iteration, ": Mode Pred:", mode_logits.detach().cpu().tolist())
                 student_actions = torch.clamp(student_output["action"][:, 0, :], -1.0, 1.0)
                 aux_prediction_for_replay = None
                 if self.has_aux_prediction:
@@ -2443,6 +2489,8 @@ class Dagger:
                 total_loss = None
                 action_loss = None
                 aux_loss = None
+                mode_loss = None
+                mode_acc = None
 
                 if not self.play_policy:
                     teacher_output = self._get_teacher_actions(obs)
@@ -2452,11 +2500,13 @@ class Dagger:
                         if self.latest_aux_target_vector is None:
                             raise RuntimeError("Expected the latest auxiliary target vector while aux prediction is enabled.")
                         aux_target = self._get_aux_target(self.latest_aux_target_vector)
-                    total_loss, action_loss, aux_loss = self._compute_student_loss(
+                    total_loss, action_loss, aux_loss, mode_loss = self._compute_student_loss(
                         student_output,
                         teacher_output["mus"],
                         aux_target=aux_target,
                     )
+                    if self.mode_prediction_enabled:
+                        mode_acc = (mode_pred == mode_target).float().mean()
                     local_batch_size = int(student_actions.shape[0])
                     global_batch_size = self._get_global_batch_size(local_batch_size)
                     self.optimizer.zero_grad()
@@ -2500,7 +2550,15 @@ class Dagger:
                 if total_loss is not None:
                     self._sync_timing_device()
                     self._record_timing(time.perf_counter() - iteration_start_time)
-                    self._log(iteration, total_loss, action_loss, aux_loss, teacher_forcing_beta)
+                    self._log(
+                        iteration,
+                        total_loss,
+                        action_loss,
+                        aux_loss,
+                        mode_loss,
+                        mode_acc,
+                        teacher_forcing_beta,
+                    )
                 else:
                     self._sync_timing_device()
                     self._record_timing(time.perf_counter() - iteration_start_time)

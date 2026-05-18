@@ -215,9 +215,6 @@ handle_offsets = torch.tensor(handle_offsets)
 asset_family_ids = torch.tensor(asset_family_ids, dtype=torch.long)
 
 motion_traj_paths = [os.path.join(os.path.dirname(asset_path), "traj.pkl") for asset_path in asset_paths]
-missing_motion_paths = [path for path in motion_traj_paths if not os.path.exists(path)]
-if missing_motion_paths:
-    raise FileNotFoundError(f"Missing trajectory files for multi-door assets: {missing_motion_paths[:8]}")
 motion_family_ids = asset_family_ids.clone()
 motion_family_names = list(asset_family_names)
 
