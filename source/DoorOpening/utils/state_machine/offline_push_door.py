@@ -104,13 +104,13 @@ def state_machine_offline_push_door(
         hold_palm_rot_roll_per_theta = 0.9
         hold_palm_rot_yaw = math.pi + 0.10
         board_push_palm_rot_yaw = -math.pi / 2
-        board_push_contact_x_offset = -0.05
-        board_push_contact_y_offset = 0
-        board_push_contact_z_offset = 0.2
-        traverse_mid_base_x = -0.85
-        traverse_mid_base_y = 0.1
+        board_push_contact_x_offset = 0.0
+        board_push_contact_y_offset = -0.03
+        board_push_contact_z_offset = 0.1
+        traverse_mid_base_x = -1.0
+        traverse_mid_base_y = 0.15
         traverse_far_base_x = -1.25
-        traverse_far_base_y = 0.1
+        traverse_far_base_y = 0.15
         rotates_counterclockwise = True
     elif handle_side == "left":
         pregrasp_base_y_offset = 0.30
@@ -128,10 +128,10 @@ def state_machine_offline_push_door(
         hold_palm_rot_roll_per_theta = -0.9
         hold_palm_rot_yaw = math.pi - 0.10
         board_push_palm_rot_yaw = math.pi / 2
-        board_push_contact_x_offset = -0.05
-        board_push_contact_y_offset = 0
-        board_push_contact_z_offset = 0.2
-        traverse_mid_base_x = -0.85
+        board_push_contact_x_offset = 0.0
+        board_push_contact_y_offset = 0.03
+        board_push_contact_z_offset = 0.1
+        traverse_mid_base_x = -1.0
         traverse_mid_base_y = -0.1
         traverse_far_base_x = -1.25
         traverse_far_base_y = -0.1
