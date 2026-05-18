@@ -21,6 +21,9 @@ temporal_obs:
   enabled: true
   history_offsets_s: [0.10, 0.20, 0.50]
   interpolate: true
+  history_token_dropout_prob: 0.0
+  obs_delay_s: [0.0, 0.0]
+  command_delay_s: [0.0, 0.0]
 
 pcd_encoders_cfg:
   local_pcd_t:
@@ -30,11 +33,6 @@ pcd_encoders_cfg:
     use_pcd: true
 
 state_encoders_cfg:
-  q_base:
-    input_dim: 3
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
   q_arm:
     input_dim: 7
     hidden_dims: [128, 256]
@@ -50,8 +48,53 @@ state_encoders_cfg:
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  target_err_base:
+  base_vel:
     input_dim: 3
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  base_vel_100ms:
+    input_dim: 3
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  base_vel_200ms:
+    input_dim: 3
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  base_vel_500ms:
+    input_dim: 3
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  q_arm_100ms:
+    input_dim: 7
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  q_hand_100ms:
+    input_dim: 9
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  q_arm_200ms:
+    input_dim: 7
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  q_hand_200ms:
+    input_dim: 9
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  q_arm_500ms:
+    input_dim: 7
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  q_hand_500ms:
+    input_dim: 9
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
@@ -65,62 +108,32 @@ state_encoders_cfg:
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  delta_q_base_100ms:
-    input_dim: 3
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  delta_q_arm_100ms:
+  target_err_arm_100ms:
     input_dim: 7
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  delta_q_hand_100ms:
+  target_err_hand_100ms:
     input_dim: 9
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  delta_q_base_200ms:
-    input_dim: 3
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  delta_q_arm_200ms:
+  target_err_arm_200ms:
     input_dim: 7
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  delta_q_hand_200ms:
+  target_err_hand_200ms:
     input_dim: 9
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  delta_q_base_500ms:
-    input_dim: 3
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  delta_q_arm_500ms:
+  target_err_arm_500ms:
     input_dim: 7
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  delta_q_hand_500ms:
-    input_dim: 9
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  delta_target_base_200ms:
-    input_dim: 3
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  delta_target_arm_200ms:
-    input_dim: 7
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  delta_target_hand_200ms:
+  target_err_hand_500ms:
     input_dim: 9
     hidden_dims: [128, 256]
     dropout: 0.0
@@ -151,6 +164,8 @@ dagger:
   reset_progress_total: 50000
   adr_reset_progress_total: 10000
   pointcloud_source: "lidar"
+  use_sim_body_pose_door_pcd: true  # Fast source PCD path; still rendered through LiDAR visibility/binning.
+  timing_breakdown_interval: 0
   robot_num_points: 30000
   append_robot_gt_to_policy_cloud: true
   robot_gt_policy_points: 2000  # Policy robot input appended after the two door crops above.
@@ -166,14 +181,14 @@ dagger:
     use_compile: true
   lidar_render:
     num_points: 10000
-    num_azimuth: 1024
+    num_azimuth: 128
     num_polar: 256
     near_m: 0.1
     far_m: 30.0
-    suppress_bins: 3
+    suppress_bins: 2
     occlusion_eps_m: 0.02
     occlusion_eps_rel: 0.01
-    jitter_std_m: 0.0
+    jitter_std_m: 0.001
     use_compile: true
   wall_distractors:
     enabled: true

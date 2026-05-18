@@ -114,6 +114,11 @@ class Dagger:
         }
         self.action_component_history_indices = self._build_action_component_history_indices()
         self.proprio_component_history_indices = self._build_proprio_component_history_indices()
+        self.base_action_rot_local_idx = int(self.ov_env._robot_base_rot_local_idx[0].detach().cpu().item())
+        self.base_action_xy_local_idx = [
+            int(idx) for idx in self.ov_env._robot_base_xy_local_idx.detach().cpu().tolist()
+        ]
+        self.base_action_scale = max(float(self.ov_env.cfg.base_action_scale), 1e-6)
 
         self.student_cfg = self.config.get("student", {})
         self.teacher_cfg = self.config.get("teacher", {})
@@ -156,6 +161,8 @@ class Dagger:
         self.lidar_occlusion_eps_rel = float(self.lidar_render_cfg.get("occlusion_eps_rel", 0.01))
         self.lidar_jitter_std_m = float(self.lidar_render_cfg.get("jitter_std_m", 0.001))
         self.lidar_use_compile = bool(self.lidar_render_cfg.get("use_compile", True))
+        self.use_sim_body_pose_door_pcd = bool(self.runtime_cfg.get("use_sim_body_pose_door_pcd", False))
+        self.timing_breakdown_interval = int(self.runtime_cfg.get("timing_breakdown_interval", 0))
         self.robot_pointcloud_filter_cfg = dict(self.runtime_cfg.get("robot_pointcloud_filter", {}))
         self.robot_pointcloud_filter_enabled = bool(self.robot_pointcloud_filter_cfg.get("enabled", True))
         self.robot_pointcloud_sdf_cutoff = float(self.robot_pointcloud_filter_cfg.get("sdf_cutoff", 0.02))
@@ -217,6 +224,7 @@ class Dagger:
         self.temporal_time_history = None
         self.temporal_q_history = None
         self.temporal_target_history = None
+        self.temporal_base_vel_history = None
         self.teacher_forcing_env_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.current_rewards = torch.zeros((self.num_envs, 1), dtype=torch.float32, device=self.device)
         self.current_lengths = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
@@ -234,6 +242,7 @@ class Dagger:
         self.latest_aux_input_vector = None
         self.latest_aux_target_vector = None
         self._timing_stats = {"sum_ms": 0.0, "count": 0}
+        self._latest_timing_breakdown = None
         self.logged_env_metric_prefixes = ("dr/", "dr_limit/", "dr_sample/", "reset/")
         self.latest_env_log_metrics = {}
         self.zero_local_pcd_crop_center = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
@@ -418,7 +427,7 @@ class Dagger:
         if student_ckpt is not None and self.temporal_derived_state_specs and self.rank == 0:
             print(
                 "Warning: student checkpoint was loaded while temporal derived inputs are active. "
-                "New target_err/delta_* encoder weights may need fresh training."
+                "New temporal state encoder weights may need fresh training."
             )
 
         self.aux_state_specs = OrderedDict()
@@ -512,6 +521,36 @@ class Dagger:
         return offset_ms / 1000.0
 
     def _parse_temporal_derived_state_key(self, key):
+        if key.startswith("base_vel_"):
+            offset_s = self._parse_temporal_offset_s(key[len("base_vel_"):])
+            return {
+                "kind": "base_vel",
+                "component": "base_vel",
+                "offset_s": offset_s,
+                "indices": None,
+                "dim": 3,
+            }
+
+        if key.startswith("q_"):
+            parts = key[len("q_"):].split("_")
+            if len(parts) != 2:
+                return None
+            component = self.action_component_aliases.get(parts[0])
+            if component not in {"arm", "hand"}:
+                raise KeyError(
+                    f"Unsupported temporal q state key {key}. "
+                    "Raw base pose history is disabled; use base_vel_<milliseconds>ms instead."
+                )
+            offset_s = self._parse_temporal_offset_s(parts[1])
+            indices = self.proprio_component_history_indices[component]
+            return {
+                "kind": "q",
+                "component": component,
+                "offset_s": offset_s,
+                "indices": indices,
+                "dim": int(indices.numel()),
+            }
+
         kind_prefixes = ("delta_target", "delta_q", "target_err")
         kind = None
         remainder = None
@@ -526,9 +565,15 @@ class Dagger:
 
         parts = remainder.split("_")
         if kind == "target_err":
-            if len(parts) != 1:
-                raise KeyError(f"Unsupported temporal state key {key}. Expected target_err_<component>.")
-            offset_s = None
+            if len(parts) == 1:
+                offset_s = None
+            elif len(parts) == 2:
+                offset_s = self._parse_temporal_offset_s(parts[1])
+            else:
+                raise KeyError(
+                    f"Unsupported temporal state key {key}. "
+                    "Expected target_err_<component> or target_err_<component>_<milliseconds>ms."
+                )
         else:
             if len(parts) != 2:
                 raise KeyError(
@@ -537,10 +582,6 @@ class Dagger:
             offset_s = self._parse_temporal_offset_s(parts[1])
 
         component = self.action_component_aliases.get(parts[0])
-        if component is None or component == "full":
-            raise KeyError(
-                f"Unsupported temporal component in {key}. Expected one of: base, arm, hand."
-            )
 
         indices = self.action_component_history_indices[component]
         dim = int(indices.numel())
@@ -581,6 +622,11 @@ class Dagger:
         )
         self.temporal_target_history = torch.zeros(
             (self.num_envs, self.temporal_history_len, self.num_actions),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self.temporal_base_vel_history = torch.zeros(
+            (self.num_envs, self.temporal_history_len, 3),
             dtype=torch.float32,
             device=self.device,
         )
@@ -641,20 +687,25 @@ class Dagger:
         samples = torch.where(has_pair.unsqueeze(-1), interpolated, nearest_value)
         return {float(offset): samples[:, idx, :] for idx, offset in enumerate(offsets_s)}
 
-    def _push_temporal_history(self, timestamp, q, target, env_ids=None):
+    def _push_temporal_history(self, timestamp, q, target, base_vel, env_ids=None):
         if self.temporal_time_history is None:
             return
-        if q.ndim != 2 or target.ndim != 2:
-            raise RuntimeError(f"Expected q and target to be rank-2, got {tuple(q.shape)} and {tuple(target.shape)}.")
+        if q.ndim != 2 or target.ndim != 2 or base_vel.ndim != 2:
+            raise RuntimeError(
+                "Expected q, target, and base_vel to be rank-2, got "
+                f"{tuple(q.shape)}, {tuple(target.shape)}, and {tuple(base_vel.shape)}."
+            )
 
         if env_ids is None:
             if self.temporal_history_len > 1:
                 self.temporal_time_history[:, 1:] = self.temporal_time_history[:, :-1].clone()
                 self.temporal_q_history[:, 1:, :] = self.temporal_q_history[:, :-1, :].clone()
                 self.temporal_target_history[:, 1:, :] = self.temporal_target_history[:, :-1, :].clone()
+                self.temporal_base_vel_history[:, 1:, :] = self.temporal_base_vel_history[:, :-1, :].clone()
             self.temporal_time_history[:, 0] = float(timestamp)
             self.temporal_q_history[:, 0, :] = q
             self.temporal_target_history[:, 0, :] = target
+            self.temporal_base_vel_history[:, 0, :] = base_vel
             return
 
         if env_ids.numel() == 0:
@@ -663,19 +714,25 @@ class Dagger:
             self.temporal_time_history[env_ids, 1:] = self.temporal_time_history[env_ids, :-1].clone()
             self.temporal_q_history[env_ids, 1:, :] = self.temporal_q_history[env_ids, :-1, :].clone()
             self.temporal_target_history[env_ids, 1:, :] = self.temporal_target_history[env_ids, :-1, :].clone()
+            self.temporal_base_vel_history[env_ids, 1:, :] = self.temporal_base_vel_history[
+                env_ids, :-1, :
+            ].clone()
         self.temporal_time_history[env_ids, 0] = float(timestamp)
         self.temporal_q_history[env_ids, 0, :] = q[env_ids]
         self.temporal_target_history[env_ids, 0, :] = target[env_ids]
+        self.temporal_base_vel_history[env_ids, 0, :] = base_vel[env_ids]
 
     def _seed_temporal_histories(self, env_ids=None):
         q = self._get_student_proprio_vector().detach()
         target = self._get_implemented_action_vector().detach()
+        base_vel = self._get_student_base_velocity_vector().detach()
         timestamp = self._get_current_time_s()
 
         if env_ids is None:
             self.temporal_time_history[:] = timestamp
             self.temporal_q_history[:] = q.unsqueeze(1).expand(-1, self.temporal_history_len, -1)
             self.temporal_target_history[:] = target.unsqueeze(1).expand(-1, self.temporal_history_len, -1)
+            self.temporal_base_vel_history[:] = base_vel.unsqueeze(1).expand(-1, self.temporal_history_len, -1)
             return
 
         if env_ids.numel() == 0:
@@ -683,6 +740,9 @@ class Dagger:
         self.temporal_time_history[env_ids] = timestamp
         self.temporal_q_history[env_ids] = q[env_ids].unsqueeze(1).expand(-1, self.temporal_history_len, -1)
         self.temporal_target_history[env_ids] = target[env_ids].unsqueeze(1).expand(-1, self.temporal_history_len, -1)
+        self.temporal_base_vel_history[env_ids] = base_vel[env_ids].unsqueeze(1).expand(
+            -1, self.temporal_history_len, -1
+        )
 
     def _get_student_proprio_vector(self):
         get_student_joint_pos_obs = getattr(self.ov_env, "get_student_joint_pos_obs", None)
@@ -693,6 +753,78 @@ class Dagger:
         if q_pos.ndim != 2:
             raise RuntimeError(f"Expected joint_pos to be rank-2, got shape {tuple(q_pos.shape)}.")
         return q_pos
+
+    def _get_base_yaw(self):
+        return self.ov_env.robot.data.joint_pos[:, self.ov_env._robot_base_rot_dof_idx].squeeze(-1)
+
+    def _env_base_vector_to_robot_frame(self, base_vector):
+        if base_vector.ndim != 2 or base_vector.shape[-1] != 3:
+            raise RuntimeError(f"Expected base vector shape [N, 3], got {tuple(base_vector.shape)}.")
+
+        yaw = self._get_base_yaw().to(base_vector)
+        cos_yaw = torch.cos(yaw)
+        sin_yaw = torch.sin(yaw)
+        vx_world = base_vector[:, self.base_action_xy_local_idx[0]]
+        vy_world = base_vector[:, self.base_action_xy_local_idx[1]]
+        wz_robot = base_vector[:, self.base_action_rot_local_idx]
+        vx_robot = cos_yaw * vx_world + sin_yaw * vy_world
+        vy_robot = -sin_yaw * vx_world + cos_yaw * vy_world
+        return torch.stack((vx_robot, vy_robot, wz_robot), dim=-1)
+
+    def _robot_base_vector_to_env_frame(self, base_vector_robot):
+        if base_vector_robot.ndim != 2 or base_vector_robot.shape[-1] != 3:
+            raise RuntimeError(f"Expected robot-frame base vector shape [N, 3], got {tuple(base_vector_robot.shape)}.")
+
+        yaw = self._get_base_yaw().to(base_vector_robot)
+        cos_yaw = torch.cos(yaw)
+        sin_yaw = torch.sin(yaw)
+        vx_robot = base_vector_robot[:, 0]
+        vy_robot = base_vector_robot[:, 1]
+        wz_robot = base_vector_robot[:, 2]
+        vx_world = cos_yaw * vx_robot - sin_yaw * vy_robot
+        vy_world = sin_yaw * vx_robot + cos_yaw * vy_robot
+
+        base_vector_env = torch.zeros_like(base_vector_robot)
+        base_vector_env[:, self.base_action_xy_local_idx[0]] = vx_world
+        base_vector_env[:, self.base_action_xy_local_idx[1]] = vy_world
+        base_vector_env[:, self.base_action_rot_local_idx] = wz_robot
+        return base_vector_env
+
+    def _env_actions_to_student_actions(self, env_actions):
+        if env_actions.ndim != 2 or env_actions.shape[-1] != self.num_actions:
+            raise RuntimeError(f"Expected env action shape [N, {self.num_actions}], got {tuple(env_actions.shape)}.")
+
+        student_actions = env_actions.clone()
+        # Only the base action changes interface: env [wz, vx_w, vy_w] delta-action
+        # units become student [vx_robot, vy_robot, wz_robot] velocity units.
+        # Arm/hand stay in the env's normalized delta-action convention.
+        student_actions[:, :3] = self._env_base_vector_to_robot_frame(
+            env_actions[:, :3] * self.base_action_scale
+        )
+        return student_actions
+
+    def _student_actions_to_env_actions(self, student_actions):
+        if student_actions.ndim != 2 or student_actions.shape[-1] != self.num_actions:
+            raise RuntimeError(
+                f"Expected student action shape [N, {self.num_actions}], got {tuple(student_actions.shape)}."
+            )
+
+        env_actions = student_actions.clone()
+        # The env applies dt in _pre_physics_step when integrating delta actions.
+        # Keep arm/hand untouched here; only rotate/scale the base velocity command.
+        env_actions[:, :3] = self._robot_base_vector_to_env_frame(student_actions[:, :3]) / self.base_action_scale
+        return env_actions.clamp(-1.0, 1.0)
+
+    def _get_student_base_velocity_vector(self):
+        # joint_vel is already per-second in env/base-joint order [wz, vx_w, vy_w].
+        # Convert it to the deployment-facing robot-frame order [vx_robot, vy_robot, wz_robot].
+        base_joint_vel = self.ov_env.robot.data.joint_vel[:, self.ov_env._robot_base_dof_idx]
+        if base_joint_vel.ndim != 2 or base_joint_vel.shape[-1] != 3:
+            raise RuntimeError(f"Expected base joint velocity shape [N, 3], got {tuple(base_joint_vel.shape)}.")
+        base_vel = self._env_base_vector_to_robot_frame(base_joint_vel)
+        if base_vel.ndim != 2 or base_vel.shape[-1] != 3:
+            raise RuntimeError(f"Expected base velocity shape [N, 3], got {tuple(base_vel.shape)}.")
+        return base_vel
 
     def _get_implemented_action_vector(self):
         # Temporal target features use the actual joint-position targets sent to
@@ -712,14 +844,21 @@ class Dagger:
             {
                 float(spec["offset_s"])
                 for spec in self.temporal_derived_state_specs.values()
-                if spec["kind"] == "delta_q" and spec["offset_s"] is not None
+                if spec["kind"] in {"q", "delta_q", "target_err"} and spec["offset_s"] is not None
             }
         )
         required_target_offsets = sorted(
             {
                 float(spec["offset_s"])
                 for spec in self.temporal_derived_state_specs.values()
-                if spec["kind"] == "delta_target" and spec["offset_s"] is not None
+                if spec["kind"] in {"delta_target", "target_err"} and spec["offset_s"] is not None
+            }
+        )
+        required_base_vel_offsets = sorted(
+            {
+                float(spec["offset_s"])
+                for spec in self.temporal_derived_state_specs.values()
+                if spec["kind"] == "base_vel" and spec["offset_s"] is not None
             }
         )
 
@@ -736,12 +875,27 @@ class Dagger:
         for offset_s, target_history in target_history_by_offset.items():
             delta_target_by_offset[offset_s] = target_t - target_history
 
+        base_vel_history_by_offset = self._sample_temporal_history_offsets(
+            self.temporal_base_vel_history,
+            required_base_vel_offsets,
+        )
+
         values_by_key = {}
         for key, spec in self.temporal_derived_state_specs.items():
             kind = spec["kind"]
             offset_s = spec["offset_s"]
-            if kind == "target_err":
-                full_value = target_err
+            if kind == "q":
+                full_value = q_history_by_offset[offset_s]
+            elif kind == "base_vel":
+                full_value = base_vel_history_by_offset[offset_s]
+            elif kind == "target_err":
+                if offset_s is None:
+                    full_value = target_err
+                else:
+                    full_value = (
+                        target_history_by_offset[offset_s]
+                        - q_history_by_offset[offset_s][:, self.ov_env._robot_dof_idx]
+                    )
             elif kind == "delta_q":
                 full_value = delta_q_by_offset[offset_s]
             elif kind == "delta_target":
@@ -749,7 +903,10 @@ class Dagger:
             else:
                 raise KeyError(f"Unsupported temporal derived state kind '{kind}' for key '{key}'.")
 
-            values_by_key[key] = full_value[:, spec["indices"]]
+            if spec["indices"] is None:
+                values_by_key[key] = full_value
+            else:
+                values_by_key[key] = full_value[:, spec["indices"]]
         return values_by_key
 
     def _get_handle_position_base(self):
@@ -889,6 +1046,10 @@ class Dagger:
         expected_asset_family_ids = door_asset_family_ids.to(device=self.device, dtype=torch.long)[self.env_asset_idx]
         if not torch.equal(expected_asset_family_ids, self.env_family_ids):
             raise RuntimeError("Door asset family ids and motion family ids are inconsistent.")
+        self.family_env_ids = {
+            int(family_id): torch.nonzero(self.env_family_ids == int(family_id), as_tuple=False).squeeze(-1)
+            for family_id in range(len(DOOR_FAMILY_NAMES))
+        }
 
         local_family_counts_tensor = torch.stack(
             [
@@ -926,6 +1087,14 @@ class Dagger:
             idx: FrankaLeapSampler(door_asset_paths[idx], device=self.device, num_points=self.door_pcd_num_points)
             for idx in unique_asset_idx
         }
+        self.door_sampler_env_ids = {
+            idx: torch.nonzero(self.env_asset_idx == int(idx), as_tuple=False).squeeze(-1)
+            for idx in unique_asset_idx
+        }
+        self.door_link_pointclouds = {
+            idx: self._build_door_link_pointcloud_cache(sampler)
+            for idx, sampler in self.door_samplers.items()
+        }
         if self.robot_pcd_num_points is None:
             self.robot_pcd_num_points = self.door_pcd_num_points
         self.robot_pcd_num_points = int(self.robot_pcd_num_points)
@@ -953,6 +1122,10 @@ class Dagger:
         self.robot_palm_body_idx = int(self.ov_env._robot_key_body_idx[self.ov_env._robot_palm_id_in_key_body_idx])
         self.robot_root_body_idx = int(self.ov_env._robot_base_link_idx[0])
         self.door_base_body_idx = int(self.ov_env._door_base_link_idx)
+        self.door_link_body_indices = {
+            link_name: int(self.ov_env._door_body_idx[self.ov_env.door_body_names.index(link_name)])
+            for link_name in ("link_1", "link_2")
+        }
         self.wall_distractors_enabled = bool(self.wall_distractor_cfg.get("enabled", True))
         self.wall_distractor_num_points = int(
             self.wall_distractor_cfg.get("num_points", max(256, self.door_pcd_num_points // 3))
@@ -1115,7 +1288,9 @@ class Dagger:
         """Select one stable env per door family for multi-door replay export."""
         self._viser_raw_streams = OrderedDict()
         for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
-            matching_envs = torch.nonzero(self.env_family_ids == int(family_id), as_tuple=False).squeeze(-1)
+            matching_envs = self.family_env_ids.get(int(family_id))
+            if matching_envs is None:
+                matching_envs = torch.nonzero(self.env_family_ids == int(family_id), as_tuple=False).squeeze(-1)
             if matching_envs.numel() == 0:
                 continue
             env_id = int(matching_envs[0].detach().cpu().item())
@@ -1344,6 +1519,7 @@ class Dagger:
                     robot_base_quat_w,
                     env_id,
                     self.viser_raw_max_points,
+                    drop_zero_rows=True,
                 ).to(dtype=torch.float16)
 
             policy_input_points_world = None
@@ -1507,8 +1683,8 @@ class Dagger:
                 }
                 with torch.no_grad():
                     res_dict = family_model(batch_dict)
-                family_mus = torch.clamp(res_dict["mus"], -1.0, 1.0)
-                teacher_actions[env_ids] = family_mus
+                family_env_actions = torch.clamp(res_dict["mus"], -1.0, 1.0)
+                teacher_actions[env_ids] = family_env_actions
             if not torch.all(assigned_teacher_mask):
                 missing_family_ids = sorted(
                     set(self.env_family_ids[~assigned_teacher_mask].detach().cpu().tolist())
@@ -1516,8 +1692,9 @@ class Dagger:
                 missing_family_names = [DOOR_FAMILY_NAMES[int(family_id)] for family_id in missing_family_ids]
                 raise RuntimeError(f"Missing teacher model for door families: {missing_family_names}.")
             teacher_actions = self._override_actions_for_pregrasp(teacher_actions)
+            student_teacher_actions = self._env_actions_to_student_actions(teacher_actions)
             return {
-                "mus": teacher_actions,
+                "mus": student_teacher_actions,
                 "actions": teacher_actions,
             }
 
@@ -1529,14 +1706,34 @@ class Dagger:
         with torch.no_grad():
             res_dict = self.teacher_model(batch_dict)
         adjusted_actions = self._override_actions_for_pregrasp(torch.clamp(res_dict["mus"], -1.0, 1.0))
+        student_adjusted_actions = self._env_actions_to_student_actions(adjusted_actions)
         return {
-            "mus": adjusted_actions,
+            "mus": student_adjusted_actions,
             "actions": adjusted_actions,
         }
 
     def _sync_timing_device(self):
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
+
+    def _should_record_timing_breakdown(self, iteration):
+        return self.timing_breakdown_interval > 0 and int(iteration) % self.timing_breakdown_interval == 0
+
+    def _mark_timing_breakdown(self, timings, stage_start_time, stage_name):
+        if timings is None:
+            return stage_start_time
+        self._sync_timing_device()
+        now = time.perf_counter()
+        timings[stage_name] = (now - stage_start_time) * 1000.0
+        return now
+
+    def _emit_timing_breakdown(self, iteration, timings):
+        if not timings:
+            return
+        self._latest_timing_breakdown = OrderedDict(timings)
+        if self.rank == 0:
+            summary = ", ".join(f"{name}={elapsed_ms:.2f}" for name, elapsed_ms in timings.items())
+            print(f"Timing Breakdown (ms) @ iteration {int(iteration)}: {summary}")
 
     def _record_timing(self, elapsed_s):
         self._timing_stats["sum_ms"] += elapsed_s * 1000.0
@@ -1869,6 +2066,78 @@ class Dagger:
         quat = door_base_quat_w.unsqueeze(1).expand(-1, wall_points_base.shape[1], -1)
         return quat_apply(quat, wall_points_base) + door_base_pos_w.unsqueeze(1)
 
+    def _build_door_link_pointcloud_cache(self, sampler):
+        zero_joint = torch.zeros(
+            (1, len(sampler.robot.actuated_joints)),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        link_fk = sampler.robot.link_fk_batch(zero_joint, use_names=True)
+        visual_fk = sampler.robot.visual_geometry_fk_batch(zero_joint)
+        link_points = {}
+        for link_name in ("link_1", "link_2"):
+            link = next((candidate for candidate in sampler.links if candidate.name == link_name), None)
+            if link is None:
+                link_points[link_name] = torch.zeros((0, 3), dtype=torch.float32, device=self.device)
+                continue
+
+            link_to_base = link_fk[link_name]
+            base_to_link = torch.linalg.inv(link_to_base)
+            first_visual_geometry = link.visuals[0].geometry
+            if first_visual_geometry not in visual_fk:
+                link_points[link_name] = torch.zeros((0, 3), dtype=torch.float32, device=self.device)
+                continue
+            points = sampler.points[link_name]
+            visual_to_base = visual_fk[first_visual_geometry]
+            visual_to_link = torch.matmul(base_to_link, visual_to_base)
+            hom_points = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
+            link_points[link_name] = (
+                torch.matmul(visual_to_link, hom_points.transpose(1, 2))[:, :3]
+                .transpose(1, 2)
+                .squeeze(0)
+                .contiguous()
+            )
+        return link_points
+
+    def _sample_cached_door_pointcloud_world(self):
+        door_pcd_world = torch.zeros(
+            (self.num_envs, self.door_pcd_num_points, 3),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        for asset_idx, link_points_by_name in self.door_link_pointclouds.items():
+            env_ids = self.door_sampler_env_ids.get(asset_idx)
+            if env_ids is None:
+                env_ids = torch.nonzero(self.env_asset_idx == asset_idx, as_tuple=False).squeeze(-1)
+            if env_ids.numel() == 0:
+                continue
+
+            pcd_parts = []
+            for link_name in ("link_1", "link_2"):
+                link_points = link_points_by_name.get(link_name)
+                if link_points is None or link_points.numel() == 0:
+                    continue
+                body_idx = self.door_link_body_indices[link_name]
+                link_pos_w = self.ov_env.door.data.body_pos_w[env_ids, body_idx]
+                link_quat_w = self.ov_env.door.data.body_quat_w[env_ids, body_idx]
+                expanded_points = link_points.unsqueeze(0).expand(env_ids.numel(), -1, -1)
+                expanded_quat = link_quat_w.unsqueeze(1).expand(-1, expanded_points.shape[1], -1)
+                pcd_parts.append(quat_apply(expanded_quat, expanded_points) + link_pos_w.unsqueeze(1))
+
+            if pcd_parts:
+                asset_pcd_world = torch.cat(pcd_parts, dim=1)
+                if asset_pcd_world.shape[1] != self.door_pcd_num_points:
+                    sample_idx = torch.linspace(
+                        0,
+                        asset_pcd_world.shape[1] - 1,
+                        steps=self.door_pcd_num_points,
+                        device=self.device,
+                        dtype=torch.float32,
+                    ).round().to(dtype=torch.long)
+                    asset_pcd_world = asset_pcd_world[:, sample_idx]
+                door_pcd_world[env_ids] = asset_pcd_world
+        return door_pcd_world
+
     def _sample_scene_pointcloud_world_sampler(self):
         door_base_pos_w = self.ov_env.door.data.body_pos_w[:, self.door_base_body_idx]
         door_base_quat_w = self.ov_env.door.data.body_quat_w[:, self.door_base_body_idx]
@@ -1880,7 +2149,9 @@ class Dagger:
             device=self.device,
         )
         for asset_idx, sampler in self.door_samplers.items():
-            env_ids = torch.nonzero(self.env_asset_idx == asset_idx, as_tuple=False).squeeze(-1)
+            env_ids = self.door_sampler_env_ids.get(asset_idx)
+            if env_ids is None:
+                env_ids = torch.nonzero(self.env_asset_idx == asset_idx, as_tuple=False).squeeze(-1)
             if env_ids.numel() == 0:
                 continue
             local_pcd = sampler.sample(door_joint_pos[env_ids])
@@ -1893,6 +2164,38 @@ class Dagger:
         if wall_pcd_world.shape[1] > 0:
             scene_parts.append(wall_pcd_world)
         return torch.cat(scene_parts, dim=1)
+
+    def _render_lidar_scene_pointcloud_base(self, scene_pcd_world, robot_base_pos_w, robot_base_quat_w):
+        rendered_pcd_world, _ = simulate_lidar_render_from_pose(
+            pcd=scene_pcd_world,
+            lidar_pose=self._get_lidar_pose(),
+            num_points=self.lidar_num_points,
+            num_azimuth=self.lidar_num_azimuth,
+            num_polar=self.lidar_num_polar,
+            near_m=self.lidar_near_m,
+            far_m=self.lidar_far_m,
+            suppress_bins=self.lidar_suppress_bins,
+            occlusion_eps_m=self.lidar_occlusion_eps_m,
+            occlusion_eps_rel=self.lidar_occlusion_eps_rel,
+            jitter_std_m=self.lidar_jitter_std_m,
+            use_compile=self.lidar_use_compile,
+        )
+        return world_to_local(rendered_pcd_world, robot_base_pos_w, robot_base_quat_w)
+
+    def _sample_door_pointcloud_base_from_sim_body_pose(self):
+        robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
+        robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
+        door_pcd_world = self._sample_cached_door_pointcloud_world()
+
+        robot_pcd_world = self._sample_robot_pointcloud_world_sampler()
+        scene_parts = [door_pcd_world, robot_pcd_world]
+        wall_pcd_world = self._sample_wall_pointcloud_world()
+        if wall_pcd_world.shape[1] > 0:
+            scene_parts.append(wall_pcd_world)
+        scene_pcd_world = torch.cat(scene_parts, dim=1)
+        if self.viser_raw_enabled:
+            self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(scene_pcd_world)
+        return self._render_lidar_scene_pointcloud_base(scene_pcd_world, robot_base_pos_w, robot_base_quat_w)
 
     def _sample_door_pointcloud_base_sampler(self):
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
@@ -1956,21 +2259,7 @@ class Dagger:
         if self.viser_raw_enabled:
             self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(gt_scene_pcd_world)
 
-        rendered_pcd_world, _ = simulate_lidar_render_from_pose(
-            pcd=gt_scene_pcd_world,
-            lidar_pose=self._get_lidar_pose(),
-            num_points=self.lidar_num_points,
-            num_azimuth=self.lidar_num_azimuth,
-            num_polar=self.lidar_num_polar,
-            near_m=self.lidar_near_m,
-            far_m=self.lidar_far_m,
-            suppress_bins=self.lidar_suppress_bins,
-            occlusion_eps_m=self.lidar_occlusion_eps_m,
-            occlusion_eps_rel=self.lidar_occlusion_eps_rel,
-            jitter_std_m=self.lidar_jitter_std_m,
-            use_compile=self.lidar_use_compile,
-        )
-        return world_to_local(rendered_pcd_world, robot_base_pos_w, robot_base_quat_w)
+        return self._render_lidar_scene_pointcloud_base(gt_scene_pcd_world, robot_base_pos_w, robot_base_quat_w)
 
     def _sample_door_pointcloud_base(self):
         self._viser_cached_ground_truth_pcd_world = None
@@ -1978,6 +2267,8 @@ class Dagger:
             door_pcd_base = self._sample_door_pointcloud_base_sampler()
         elif self.pointcloud_source == "depth":
             door_pcd_base = self._sample_door_pointcloud_base_depth()
+        elif self.use_sim_body_pose_door_pcd:
+            door_pcd_base = self._sample_door_pointcloud_base_from_sim_body_pose()
         else:
             door_pcd_base = self._sample_door_pointcloud_base_lidar()
         door_pcd_base = self._filter_robot_points_base(door_pcd_base)
@@ -2116,6 +2407,7 @@ class Dagger:
 
     def _build_student_obs(self, iteration=None):
         q_pos = self._get_student_proprio_vector()
+        base_vel = self._get_student_base_velocity_vector()
         door_joint_pos = self.ov_env.door.data.joint_pos
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
@@ -2145,11 +2437,13 @@ class Dagger:
         obs = OrderedDict()
         for key in self.state_encoders_keys:
             if key == "q_base":
-                obs[key] = q_pos[:, self.ov_env._robot_base_dof_idx]
+                raise KeyError("Raw q_base is disabled for the student policy; use base_vel instead.")
             elif key == "q_arm":
                 obs[key] = q_pos[:, self.ov_env._robot_arm_dof_idx]
             elif key == "q_hand":
                 obs[key] = q_pos[:, self.ov_env._robot_finger_dof_idx]
+            elif key == "base_vel":
+                obs[key] = base_vel
             elif key in self.temporal_derived_state_specs:
                 obs[key] = temporal_state_values[key]
             elif key in self.aux_state_specs:
@@ -2422,6 +2716,10 @@ class Dagger:
             metrics["stats/aux_pregrasp_dropout_fraction"] = self.latest_aux_pregrasp_dropout_fraction
         if iteration_time_ms is not None:
             metrics["timing/iteration_ms"] = iteration_time_ms
+        if self._latest_timing_breakdown:
+            for stage_name, elapsed_ms in self._latest_timing_breakdown.items():
+                metrics[f"timing_breakdown/{stage_name}_ms"] = float(elapsed_ms)
+            self._latest_timing_breakdown = None
         if self.latest_env_log_metrics:
             for key, value in self.latest_env_log_metrics.items():
                 if key == "stats/success_rate" or key.startswith("stats/success_rate/"):
@@ -2454,8 +2752,15 @@ class Dagger:
             for iteration in range(start_iteration, end_iteration):
                 self._sync_timing_device()
                 iteration_start_time = time.perf_counter()
+                timing_breakdown = OrderedDict() if self._should_record_timing_breakdown(iteration) else None
+                stage_start_time = iteration_start_time
 
                 student_obs = self._build_student_obs(iteration=iteration)
+                stage_start_time = self._mark_timing_breakdown(
+                    timing_breakdown,
+                    stage_start_time,
+                    "build_student_obs",
+                )
                 student_output = self._student_forward(student_obs)
                 mode_pred = None
                 mode_target = None
@@ -2465,11 +2770,17 @@ class Dagger:
                     mode_pred = mode_logits.argmax(dim=-1)
                     if self.play_policy and iteration % 10 == 0:
                         print("Iteration ", iteration, ": Mode Pred:", mode_logits.detach().cpu().tolist())
-                student_actions = torch.clamp(student_output["action"][:, 0, :], -1.0, 1.0)
+                student_actions = student_output["action"][:, 0, :]
+                student_env_actions = self._student_actions_to_env_actions(student_actions)
                 aux_prediction_for_replay = None
                 if self.has_aux_prediction:
                     aux_prediction_for_replay = self._decode_aux_prediction(student_output["aux"].detach())
                     self.aux_buffer[:] = aux_prediction_for_replay
+                stage_start_time = self._mark_timing_breakdown(
+                    timing_breakdown,
+                    stage_start_time,
+                    "student_forward",
+                )
 
                 if self.viser_raw_enabled and self._viser_pending_debug_frame is not None:
                     self._maybe_update_viser_debug(
@@ -2484,6 +2795,11 @@ class Dagger:
                         aux_prediction=aux_prediction_for_replay,
                     )
                     self._viser_pending_debug_frame = None
+                stage_start_time = self._mark_timing_breakdown(
+                    timing_breakdown,
+                    stage_start_time,
+                    "viser_raw",
+                )
 
                 teacher_actions = None
                 total_loss = None
@@ -2495,6 +2811,11 @@ class Dagger:
                 if not self.play_policy:
                     teacher_output = self._get_teacher_actions(obs)
                     teacher_actions = teacher_output["actions"]
+                    stage_start_time = self._mark_timing_breakdown(
+                        timing_breakdown,
+                        stage_start_time,
+                        "teacher_forward",
+                    )
                     aux_target = None
                     if self.has_aux_prediction:
                         if self.latest_aux_target_vector is None:
@@ -2516,22 +2837,34 @@ class Dagger:
                     self.student_update_steps += 1
                     self.last_local_update_batch_size = local_batch_size
                     self.last_global_update_batch_size = global_batch_size
+                    stage_start_time = self._mark_timing_breakdown(
+                        timing_breakdown,
+                        stage_start_time,
+                        "student_update",
+                    )
 
                 step_actions, teacher_forcing_beta = self._mix_actions(
-                    student_actions.detach(),
+                    student_env_actions.detach(),
                     teacher_actions,
                     iteration,
                 )
                 obs, rew, out_of_reach, timed_out, step_extras = self.env.step(step_actions)
+                stage_start_time = self._mark_timing_breakdown(
+                    timing_breakdown,
+                    stage_start_time,
+                    "env_step",
+                )
                 self._update_logged_env_metrics(step_extras)
                 self.temporal_current_time_s = self._iteration_to_time_s(iteration + 1)
                 q_after_step = self._get_student_proprio_vector().detach().clone()
                 target_after_step = self._get_implemented_action_vector().detach().clone()
+                base_vel_after_step = self._get_student_base_velocity_vector().detach().clone()
 
                 self._push_temporal_history(
                     timestamp=self.temporal_current_time_s,
                     q=q_after_step,
                     target=target_after_step,
+                    base_vel=base_vel_after_step,
                 )
                 self.frame += self.num_envs
 
@@ -2546,6 +2879,12 @@ class Dagger:
                     self._seed_temporal_histories(done_mask)
                     self._seed_aux_buffer(done_mask)
                     self._resample_teacher_forcing_env_mask(iteration + 1, done_mask)
+                stage_start_time = self._mark_timing_breakdown(
+                    timing_breakdown,
+                    stage_start_time,
+                    "post_step",
+                )
+                self._emit_timing_breakdown(iteration, timing_breakdown)
 
                 if total_loss is not None:
                     self._sync_timing_device()

@@ -744,6 +744,8 @@ def render_lidar_bins_to_world_from_pose_fast(
 
     B, _, _ = pcd.shape
     device, dtype = pcd.device, pcd.dtype
+    finite_input = torch.isfinite(pcd).all(dim=-1)
+    pcd = torch.nan_to_num(pcd, nan=0.0, posinf=0.0, neginf=0.0)
 
     Hp = int(num_polar)
     Wp = int(num_azimuth)
@@ -760,7 +762,7 @@ def render_lidar_bins_to_world_from_pose_fast(
 
     r = torch.sqrt((x * x + y * y + z * z).clamp_min(1e-24))
 
-    inside = z > 0.0
+    inside = finite_input & (z > 0.0)
     if near_m is not None and near_m > 0.0:
         inside = inside & (r >= float(near_m))
     far_val = float("inf") if far_m is None else float(far_m)
@@ -869,6 +871,8 @@ def get_compiled_lidar_renderer_fixed_shapes(
 
         @torch.no_grad()
         def _compiled_fn(pcd: torch.Tensor, lidar_pose: torch.Tensor, jitter_std: torch.Tensor):
+            finite_input = torch.isfinite(pcd).all(dim=-1)
+            pcd = torch.nan_to_num(pcd, nan=0.0, posinf=0.0, neginf=0.0)
             B = pcd.shape[0]
 
             o = lidar_pose[:, 0:3]
@@ -884,7 +888,7 @@ def get_compiled_lidar_renderer_fixed_shapes(
 
             r = torch.sqrt((x * x + y * y + z * z).clamp_min(1e-24))
 
-            inside = z > 0.0
+            inside = finite_input & (z > 0.0)
             if near_m is not None and near_m > 0.0:
                 inside = inside & (r >= float(near_m))
             inside = inside & (r <= float(far_val))
@@ -1008,14 +1012,26 @@ def simulate_lidar_render_from_pose(
             jitter_std_m=float(jitter_std_m),
         )
 
+    select_count = min(int(num_points), int(K))
+    finite_mask = torch.isfinite(pts_w_flat).all(dim=-1)
+    valid_select_mask = valid_flat & finite_mask
+    batch_idx = torch.arange(B, device=device)[:, None].expand(B, select_count)
     if shuffle:
-        pts_w_flat = shuffle_pcd(pts_w_flat)
-
-    nan_mask = torch.isnan(pts_w_flat).any(dim=-1)
-    sort_idx = torch.argsort(nan_mask.int(), dim=-1)
-    batch_idx = torch.arange(B, device=device)[:, None].expand(B, K)
-    sorted_out = pts_w_flat[batch_idx, sort_idx]
-    lidar_pcd = sorted_out[:, :num_points]
+        scores = torch.rand((B, K), device=device, dtype=pts_w_flat.dtype)
+        scores = torch.where(valid_select_mask, scores + 1.0, scores - 1.0)
+        scores = torch.nan_to_num(scores, nan=-1.0, posinf=-1.0, neginf=-1.0)
+        select_idx = torch.topk(scores, k=select_count, dim=-1, sorted=True).indices
+    else:
+        select_idx = torch.argsort((~valid_select_mask).int(), dim=-1)[:, :select_count]
+    lidar_pcd = pts_w_flat[batch_idx, select_idx]
+    lidar_pcd = torch.where(
+        torch.isfinite(lidar_pcd).all(dim=-1, keepdim=True),
+        lidar_pcd,
+        torch.full_like(lidar_pcd, float("nan")),
+    )
+    if select_count < int(num_points):
+        pad = torch.full((B, int(num_points) - select_count, 3), float("nan"), dtype=lidar_pcd.dtype, device=device)
+        lidar_pcd = torch.cat([lidar_pcd, pad], dim=1)
 
     num_valid_per_batch = valid_flat.sum(dim=-1)
     logs: Dict[str, float] = {
