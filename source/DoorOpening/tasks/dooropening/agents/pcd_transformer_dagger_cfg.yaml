@@ -8,7 +8,7 @@ action_space: "absolute"
 action_dim: 19
 aux_weight: 0.1
 mode_prediction:
-  enabled: true
+  enabled: false
   num_modes: 4
   weight: 0.1
   return_latent: true
@@ -207,7 +207,7 @@ dagger:
     raw:
       enabled: false  # Save raw `.pt` replay chunks for offline debugging.
       path: "viser_replay.pt"
-      save_interval: 6000  # Write one raw `.pt` file every N iterations.
+      save_interval: 800  # Write one raw `.pt` file every N iterations.
       max_points: 6000  # Raw replay is for debugging, not training; smaller clouds replay much better on laptops.
       include_ground_truth: true  # GT is the heaviest cloud and usually duplicates what robot_obs already shows.
       max_frames: 3000  # Keep at most this many frames in each raw `.pt` file; set 0 to disable the cap.

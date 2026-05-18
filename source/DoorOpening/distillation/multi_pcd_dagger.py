@@ -1285,7 +1285,7 @@ class Dagger:
         return max(0, min(int(self.viser_env_id), self.num_envs - 1))
 
     def _init_viser_raw_streams(self):
-        """Select one stable env per door family for multi-door replay export."""
+        """Select one random env per door family for multi-door replay export."""
         self._viser_raw_streams = OrderedDict()
         for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
             matching_envs = self.family_env_ids.get(int(family_id))
@@ -1293,7 +1293,8 @@ class Dagger:
                 matching_envs = torch.nonzero(self.env_family_ids == int(family_id), as_tuple=False).squeeze(-1)
             if matching_envs.numel() == 0:
                 continue
-            env_id = int(matching_envs[0].detach().cpu().item())
+            env_offset = int(torch.randint(matching_envs.numel(), (1,), device=self.device).detach().cpu().item())
+            env_id = int(matching_envs[env_offset].detach().cpu().item())
             self._viser_raw_streams[family_name] = {
                 "family_id": int(family_id),
                 "family_name": family_name,
