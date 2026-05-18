@@ -7,6 +7,11 @@ normalize_action: True
 action_space: "absolute"
 action_dim: 19
 aux_weight: 0.1
+mode_prediction:
+  enabled: false
+  num_modes: 4
+  weight: 0.1
+  return_latent: true
 
 door_pcd_num_points: 30000  # Dense scene-door sampling before local policy crops are taken.
 local_pcd_range: [1.2, 0.25, 0.25]
@@ -16,6 +21,9 @@ temporal_obs:
   enabled: true
   history_offsets_s: [0.10, 0.20, 0.50]
   interpolate: true
+  history_token_dropout_prob: 0.0
+  obs_delay_s: [0.0, 0.0]
+  command_delay_s: [0.0, 0.0]
 
 pcd_encoders_cfg:
   local_pcd_t:
@@ -25,11 +33,6 @@ pcd_encoders_cfg:
     use_pcd: true
 
 state_encoders_cfg:
-  q_base:
-    input_dim: 3
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
   q_arm:
     input_dim: 7
     hidden_dims: [128, 256]
@@ -45,8 +48,53 @@ state_encoders_cfg:
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  target_err_base:
+  base_vel:
     input_dim: 3
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  base_vel_100ms:
+    input_dim: 3
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  base_vel_200ms:
+    input_dim: 3
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  base_vel_500ms:
+    input_dim: 3
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  q_arm_100ms:
+    input_dim: 7
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  q_hand_100ms:
+    input_dim: 9
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  q_arm_200ms:
+    input_dim: 7
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  q_hand_200ms:
+    input_dim: 9
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  q_arm_500ms:
+    input_dim: 7
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  q_hand_500ms:
+    input_dim: 9
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
@@ -60,11 +108,6 @@ state_encoders_cfg:
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  target_err_base_100ms:
-    input_dim: 3
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
   target_err_arm_100ms:
     input_dim: 7
     hidden_dims: [128, 256]
@@ -72,11 +115,6 @@ state_encoders_cfg:
     use_state: true
   target_err_hand_100ms:
     input_dim: 9
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  target_err_base_200ms:
-    input_dim: 3
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
@@ -90,107 +128,12 @@ state_encoders_cfg:
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  target_err_base_500ms:
-    input_dim: 3
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
   target_err_arm_500ms:
     input_dim: 7
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
   target_err_hand_500ms:
-    input_dim: 9
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  delta_q_base_100ms:
-    input_dim: 3
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  delta_q_arm_100ms:
-    input_dim: 7
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  delta_q_hand_100ms:
-    input_dim: 9
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  delta_q_base_200ms:
-    input_dim: 3
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  delta_q_arm_200ms:
-    input_dim: 7
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  delta_q_hand_200ms:
-    input_dim: 9
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  delta_q_base_500ms:
-    input_dim: 3
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  delta_q_arm_500ms:
-    input_dim: 7
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  delta_q_hand_500ms:
-    input_dim: 9
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  delta_target_base_100ms:
-    input_dim: 3
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  delta_target_arm_100ms:
-    input_dim: 7
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  delta_target_hand_100ms:
-    input_dim: 9
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  delta_target_base_200ms:
-    input_dim: 3
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  delta_target_arm_200ms:
-    input_dim: 7
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  delta_target_hand_200ms:
-    input_dim: 9
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  delta_target_base_500ms:
-    input_dim: 3
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  delta_target_arm_500ms:
-    input_dim: 7
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  delta_target_hand_500ms:
     input_dim: 9
     hidden_dims: [128, 256]
     dropout: 0.0
@@ -264,7 +207,7 @@ dagger:
     raw:
       enabled: false  # Save raw `.pt` replay chunks for offline debugging.
       path: "viser_replay.pt"
-      save_interval: 6000  # Write one raw `.pt` file every N iterations.
+      save_interval: 800  # Write one raw `.pt` file every N iterations.
       max_points: 6000  # Raw replay is for debugging, not training; smaller clouds replay much better on laptops.
       include_ground_truth: true  # GT is the heaviest cloud and usually duplicates what robot_obs already shows.
       max_frames: 3000  # Keep at most this many frames in each raw `.pt` file; set 0 to disable the cap.

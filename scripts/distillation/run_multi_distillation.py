@@ -387,6 +387,8 @@ def main(env_cfg, agent_cfg: dict):
     else:
         # Distillation default: ADR schedule progresses twice as fast as reset curriculum.
         env_cfg.adr_reset_progress_total = 0.5 * float(env_cfg.reset_progress_total)
+    if args_cli.play_policy:
+        env_cfg.use_motion_ref = False
 
     viser_cfg = dagger_runtime_cfg.get("viser", {})
     if not isinstance(viser_cfg, dict):

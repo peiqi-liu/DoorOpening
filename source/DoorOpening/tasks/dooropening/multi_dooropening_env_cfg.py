@@ -103,7 +103,7 @@ class EventCfg:
 class DooropeningEnvCfg(DirectRLEnvCfg):
     sim_dt = 1/60
     decimation = 4
-    episode_length_s = 10.
+    episode_length_s = 25.
     num_sim_steps_to_render=2
     # - spaces definition
     state_space = 0
@@ -346,6 +346,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # We are slowly increasing our tolerance on base position drift and slowly only resettting the env from the first key frame
     # This variable is used to indicate when we stop increasing the tolerance and reset the env from the first key frame for the greatest probability
     reset_progress_total = 7.5e5
+    use_motion_ref = True
     # ADR should ramp faster than the reference-motion reset curriculum so physics randomization is not lagging behind.
     adr_reset_progress_total = 2e5
 

@@ -114,6 +114,11 @@ class Dagger:
         }
         self.action_component_history_indices = self._build_action_component_history_indices()
         self.proprio_component_history_indices = self._build_proprio_component_history_indices()
+        self.base_action_rot_local_idx = int(self.ov_env._robot_base_rot_local_idx[0].detach().cpu().item())
+        self.base_action_xy_local_idx = [
+            int(idx) for idx in self.ov_env._robot_base_xy_local_idx.detach().cpu().tolist()
+        ]
+        self.base_action_scale = max(float(self.ov_env.cfg.base_action_scale), 1e-6)
 
         self.student_cfg = self.config.get("student", {})
         self.teacher_cfg = self.config.get("teacher", {})
@@ -219,6 +224,7 @@ class Dagger:
         self.temporal_time_history = None
         self.temporal_q_history = None
         self.temporal_target_history = None
+        self.temporal_base_vel_history = None
         self.teacher_forcing_env_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.current_rewards = torch.zeros((self.num_envs, 1), dtype=torch.float32, device=self.device)
         self.current_lengths = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
@@ -352,6 +358,9 @@ class Dagger:
             if not str(key).startswith("_")
         }
         self.student_model = PCDTransformer(**student_model_kwargs).to(self.device)
+        self.mode_prediction_enabled = bool(getattr(self.student_model, "mode_prediction_enabled", False))
+        self.mode_weight = float(getattr(self.student_model, "mode_weight", 0.0))
+        self.num_modes = int(getattr(self.student_model, "num_modes", 4))
         if self.student_model.action_head.out_features != self.num_actions:
             raise ValueError(
                 f"Student action_dim ({self.student_model.action_head.out_features}) "
@@ -418,7 +427,7 @@ class Dagger:
         if student_ckpt is not None and self.temporal_derived_state_specs and self.rank == 0:
             print(
                 "Warning: student checkpoint was loaded while temporal derived inputs are active. "
-                "New target_err/delta_* encoder weights may need fresh training."
+                "New temporal state encoder weights may need fresh training."
             )
 
         self.aux_state_specs = OrderedDict()
@@ -512,6 +521,36 @@ class Dagger:
         return offset_ms / 1000.0
 
     def _parse_temporal_derived_state_key(self, key):
+        if key.startswith("base_vel_"):
+            offset_s = self._parse_temporal_offset_s(key[len("base_vel_"):])
+            return {
+                "kind": "base_vel",
+                "component": "base_vel",
+                "offset_s": offset_s,
+                "indices": None,
+                "dim": 3,
+            }
+
+        if key.startswith("q_"):
+            parts = key[len("q_"):].split("_")
+            if len(parts) != 2:
+                return None
+            component = self.action_component_aliases.get(parts[0])
+            if component not in {"arm", "hand"}:
+                raise KeyError(
+                    f"Unsupported temporal q state key {key}. "
+                    "Raw base pose history is disabled; use base_vel_<milliseconds>ms instead."
+                )
+            offset_s = self._parse_temporal_offset_s(parts[1])
+            indices = self.proprio_component_history_indices[component]
+            return {
+                "kind": "q",
+                "component": component,
+                "offset_s": offset_s,
+                "indices": indices,
+                "dim": int(indices.numel()),
+            }
+
         kind_prefixes = ("delta_target", "delta_q", "target_err")
         kind = None
         remainder = None
@@ -543,10 +582,6 @@ class Dagger:
             offset_s = self._parse_temporal_offset_s(parts[1])
 
         component = self.action_component_aliases.get(parts[0])
-        if component is None or component == "full":
-            raise KeyError(
-                f"Unsupported temporal component in {key}. Expected one of: base, arm, hand."
-            )
 
         indices = self.action_component_history_indices[component]
         dim = int(indices.numel())
@@ -587,6 +622,11 @@ class Dagger:
         )
         self.temporal_target_history = torch.zeros(
             (self.num_envs, self.temporal_history_len, self.num_actions),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self.temporal_base_vel_history = torch.zeros(
+            (self.num_envs, self.temporal_history_len, 3),
             dtype=torch.float32,
             device=self.device,
         )
@@ -647,20 +687,25 @@ class Dagger:
         samples = torch.where(has_pair.unsqueeze(-1), interpolated, nearest_value)
         return {float(offset): samples[:, idx, :] for idx, offset in enumerate(offsets_s)}
 
-    def _push_temporal_history(self, timestamp, q, target, env_ids=None):
+    def _push_temporal_history(self, timestamp, q, target, base_vel, env_ids=None):
         if self.temporal_time_history is None:
             return
-        if q.ndim != 2 or target.ndim != 2:
-            raise RuntimeError(f"Expected q and target to be rank-2, got {tuple(q.shape)} and {tuple(target.shape)}.")
+        if q.ndim != 2 or target.ndim != 2 or base_vel.ndim != 2:
+            raise RuntimeError(
+                "Expected q, target, and base_vel to be rank-2, got "
+                f"{tuple(q.shape)}, {tuple(target.shape)}, and {tuple(base_vel.shape)}."
+            )
 
         if env_ids is None:
             if self.temporal_history_len > 1:
                 self.temporal_time_history[:, 1:] = self.temporal_time_history[:, :-1].clone()
                 self.temporal_q_history[:, 1:, :] = self.temporal_q_history[:, :-1, :].clone()
                 self.temporal_target_history[:, 1:, :] = self.temporal_target_history[:, :-1, :].clone()
+                self.temporal_base_vel_history[:, 1:, :] = self.temporal_base_vel_history[:, :-1, :].clone()
             self.temporal_time_history[:, 0] = float(timestamp)
             self.temporal_q_history[:, 0, :] = q
             self.temporal_target_history[:, 0, :] = target
+            self.temporal_base_vel_history[:, 0, :] = base_vel
             return
 
         if env_ids.numel() == 0:
@@ -669,19 +714,25 @@ class Dagger:
             self.temporal_time_history[env_ids, 1:] = self.temporal_time_history[env_ids, :-1].clone()
             self.temporal_q_history[env_ids, 1:, :] = self.temporal_q_history[env_ids, :-1, :].clone()
             self.temporal_target_history[env_ids, 1:, :] = self.temporal_target_history[env_ids, :-1, :].clone()
+            self.temporal_base_vel_history[env_ids, 1:, :] = self.temporal_base_vel_history[
+                env_ids, :-1, :
+            ].clone()
         self.temporal_time_history[env_ids, 0] = float(timestamp)
         self.temporal_q_history[env_ids, 0, :] = q[env_ids]
         self.temporal_target_history[env_ids, 0, :] = target[env_ids]
+        self.temporal_base_vel_history[env_ids, 0, :] = base_vel[env_ids]
 
     def _seed_temporal_histories(self, env_ids=None):
         q = self._get_student_proprio_vector().detach()
         target = self._get_implemented_action_vector().detach()
+        base_vel = self._get_student_base_velocity_vector().detach()
         timestamp = self._get_current_time_s()
 
         if env_ids is None:
             self.temporal_time_history[:] = timestamp
             self.temporal_q_history[:] = q.unsqueeze(1).expand(-1, self.temporal_history_len, -1)
             self.temporal_target_history[:] = target.unsqueeze(1).expand(-1, self.temporal_history_len, -1)
+            self.temporal_base_vel_history[:] = base_vel.unsqueeze(1).expand(-1, self.temporal_history_len, -1)
             return
 
         if env_ids.numel() == 0:
@@ -689,6 +740,9 @@ class Dagger:
         self.temporal_time_history[env_ids] = timestamp
         self.temporal_q_history[env_ids] = q[env_ids].unsqueeze(1).expand(-1, self.temporal_history_len, -1)
         self.temporal_target_history[env_ids] = target[env_ids].unsqueeze(1).expand(-1, self.temporal_history_len, -1)
+        self.temporal_base_vel_history[env_ids] = base_vel[env_ids].unsqueeze(1).expand(
+            -1, self.temporal_history_len, -1
+        )
 
     def _get_student_proprio_vector(self):
         get_student_joint_pos_obs = getattr(self.ov_env, "get_student_joint_pos_obs", None)
@@ -699,6 +753,78 @@ class Dagger:
         if q_pos.ndim != 2:
             raise RuntimeError(f"Expected joint_pos to be rank-2, got shape {tuple(q_pos.shape)}.")
         return q_pos
+
+    def _get_base_yaw(self):
+        return self.ov_env.robot.data.joint_pos[:, self.ov_env._robot_base_rot_dof_idx].squeeze(-1)
+
+    def _env_base_vector_to_robot_frame(self, base_vector):
+        if base_vector.ndim != 2 or base_vector.shape[-1] != 3:
+            raise RuntimeError(f"Expected base vector shape [N, 3], got {tuple(base_vector.shape)}.")
+
+        yaw = self._get_base_yaw().to(base_vector)
+        cos_yaw = torch.cos(yaw)
+        sin_yaw = torch.sin(yaw)
+        vx_world = base_vector[:, self.base_action_xy_local_idx[0]]
+        vy_world = base_vector[:, self.base_action_xy_local_idx[1]]
+        wz_robot = base_vector[:, self.base_action_rot_local_idx]
+        vx_robot = cos_yaw * vx_world + sin_yaw * vy_world
+        vy_robot = -sin_yaw * vx_world + cos_yaw * vy_world
+        return torch.stack((vx_robot, vy_robot, wz_robot), dim=-1)
+
+    def _robot_base_vector_to_env_frame(self, base_vector_robot):
+        if base_vector_robot.ndim != 2 or base_vector_robot.shape[-1] != 3:
+            raise RuntimeError(f"Expected robot-frame base vector shape [N, 3], got {tuple(base_vector_robot.shape)}.")
+
+        yaw = self._get_base_yaw().to(base_vector_robot)
+        cos_yaw = torch.cos(yaw)
+        sin_yaw = torch.sin(yaw)
+        vx_robot = base_vector_robot[:, 0]
+        vy_robot = base_vector_robot[:, 1]
+        wz_robot = base_vector_robot[:, 2]
+        vx_world = cos_yaw * vx_robot - sin_yaw * vy_robot
+        vy_world = sin_yaw * vx_robot + cos_yaw * vy_robot
+
+        base_vector_env = torch.zeros_like(base_vector_robot)
+        base_vector_env[:, self.base_action_xy_local_idx[0]] = vx_world
+        base_vector_env[:, self.base_action_xy_local_idx[1]] = vy_world
+        base_vector_env[:, self.base_action_rot_local_idx] = wz_robot
+        return base_vector_env
+
+    def _env_actions_to_student_actions(self, env_actions):
+        if env_actions.ndim != 2 or env_actions.shape[-1] != self.num_actions:
+            raise RuntimeError(f"Expected env action shape [N, {self.num_actions}], got {tuple(env_actions.shape)}.")
+
+        student_actions = env_actions.clone()
+        # Only the base action changes interface: env [wz, vx_w, vy_w] delta-action
+        # units become student [vx_robot, vy_robot, wz_robot] velocity units.
+        # Arm/hand stay in the env's normalized delta-action convention.
+        student_actions[:, :3] = self._env_base_vector_to_robot_frame(
+            env_actions[:, :3] * self.base_action_scale
+        )
+        return student_actions
+
+    def _student_actions_to_env_actions(self, student_actions):
+        if student_actions.ndim != 2 or student_actions.shape[-1] != self.num_actions:
+            raise RuntimeError(
+                f"Expected student action shape [N, {self.num_actions}], got {tuple(student_actions.shape)}."
+            )
+
+        env_actions = student_actions.clone()
+        # The env applies dt in _pre_physics_step when integrating delta actions.
+        # Keep arm/hand untouched here; only rotate/scale the base velocity command.
+        env_actions[:, :3] = self._robot_base_vector_to_env_frame(student_actions[:, :3]) / self.base_action_scale
+        return env_actions.clamp(-1.0, 1.0)
+
+    def _get_student_base_velocity_vector(self):
+        # joint_vel is already per-second in env/base-joint order [wz, vx_w, vy_w].
+        # Convert it to the deployment-facing robot-frame order [vx_robot, vy_robot, wz_robot].
+        base_joint_vel = self.ov_env.robot.data.joint_vel[:, self.ov_env._robot_base_dof_idx]
+        if base_joint_vel.ndim != 2 or base_joint_vel.shape[-1] != 3:
+            raise RuntimeError(f"Expected base joint velocity shape [N, 3], got {tuple(base_joint_vel.shape)}.")
+        base_vel = self._env_base_vector_to_robot_frame(base_joint_vel)
+        if base_vel.ndim != 2 or base_vel.shape[-1] != 3:
+            raise RuntimeError(f"Expected base velocity shape [N, 3], got {tuple(base_vel.shape)}.")
+        return base_vel
 
     def _get_implemented_action_vector(self):
         # Temporal target features use the actual joint-position targets sent to
@@ -718,7 +844,7 @@ class Dagger:
             {
                 float(spec["offset_s"])
                 for spec in self.temporal_derived_state_specs.values()
-                if spec["kind"] in {"delta_q", "target_err"} and spec["offset_s"] is not None
+                if spec["kind"] in {"q", "delta_q", "target_err"} and spec["offset_s"] is not None
             }
         )
         required_target_offsets = sorted(
@@ -726,6 +852,13 @@ class Dagger:
                 float(spec["offset_s"])
                 for spec in self.temporal_derived_state_specs.values()
                 if spec["kind"] in {"delta_target", "target_err"} and spec["offset_s"] is not None
+            }
+        )
+        required_base_vel_offsets = sorted(
+            {
+                float(spec["offset_s"])
+                for spec in self.temporal_derived_state_specs.values()
+                if spec["kind"] == "base_vel" and spec["offset_s"] is not None
             }
         )
 
@@ -742,11 +875,20 @@ class Dagger:
         for offset_s, target_history in target_history_by_offset.items():
             delta_target_by_offset[offset_s] = target_t - target_history
 
+        base_vel_history_by_offset = self._sample_temporal_history_offsets(
+            self.temporal_base_vel_history,
+            required_base_vel_offsets,
+        )
+
         values_by_key = {}
         for key, spec in self.temporal_derived_state_specs.items():
             kind = spec["kind"]
             offset_s = spec["offset_s"]
-            if kind == "target_err":
+            if kind == "q":
+                full_value = q_history_by_offset[offset_s]
+            elif kind == "base_vel":
+                full_value = base_vel_history_by_offset[offset_s]
+            elif kind == "target_err":
                 if offset_s is None:
                     full_value = target_err
                 else:
@@ -761,7 +903,10 @@ class Dagger:
             else:
                 raise KeyError(f"Unsupported temporal derived state kind '{kind}' for key '{key}'.")
 
-            values_by_key[key] = full_value[:, spec["indices"]]
+            if spec["indices"] is None:
+                values_by_key[key] = full_value
+            else:
+                values_by_key[key] = full_value[:, spec["indices"]]
         return values_by_key
 
     def _get_handle_position_base(self):
@@ -872,23 +1017,32 @@ class Dagger:
         asset_index_by_dir = {
             Path(asset_path).resolve().parent: idx for idx, asset_path in enumerate(door_asset_paths)
         }
-        motion_to_asset_idx = []
-        for motion_path in motion_traj_paths:
-            motion_dir = Path(motion_path).resolve().parent
-            if motion_dir not in asset_index_by_dir:
-                raise KeyError(f"Could not map motion file '{motion_path}' to a door asset path.")
-            motion_to_asset_idx.append(asset_index_by_dir[motion_dir])
-        self.motion_to_asset_idx = torch.tensor(motion_to_asset_idx, device=self.device, dtype=torch.long)
-
-        env_motion_idx = self.ov_env.ref_motion_lib.env_to_file_map.to(device=self.device, dtype=torch.long)
-        self.env_asset_idx = self.motion_to_asset_idx[env_motion_idx]
+        ref_motion_lib = getattr(self.ov_env, "ref_motion_lib", None)
         env_asset_indices = getattr(self.ov_env, "env_asset_indices", None)
-        if env_asset_indices is not None:
-            env_asset_indices = env_asset_indices.to(device=self.device, dtype=torch.long)
-            if not torch.equal(env_asset_indices, self.env_asset_idx):
-                raise RuntimeError("Door env asset indices and reference-motion asset indices are inconsistent.")
-        self.motion_family_ids = motion_family_ids.to(device=self.device, dtype=torch.long)
-        self.env_family_ids = self.motion_family_ids[env_motion_idx]
+        if ref_motion_lib is None:
+            if env_asset_indices is None:
+                raise RuntimeError("Play mode without reference motions requires env.env_asset_indices.")
+            self.motion_to_asset_idx = None
+            self.motion_family_ids = None
+            self.env_asset_idx = env_asset_indices.to(device=self.device, dtype=torch.long)
+            self.env_family_ids = door_asset_family_ids.to(device=self.device, dtype=torch.long)[self.env_asset_idx]
+        else:
+            motion_to_asset_idx = []
+            for motion_path in motion_traj_paths:
+                motion_dir = Path(motion_path).resolve().parent
+                if motion_dir not in asset_index_by_dir:
+                    raise KeyError(f"Could not map motion file '{motion_path}' to a door asset path.")
+                motion_to_asset_idx.append(asset_index_by_dir[motion_dir])
+            self.motion_to_asset_idx = torch.tensor(motion_to_asset_idx, device=self.device, dtype=torch.long)
+
+            env_motion_idx = ref_motion_lib.env_to_file_map.to(device=self.device, dtype=torch.long)
+            self.env_asset_idx = self.motion_to_asset_idx[env_motion_idx]
+            if env_asset_indices is not None:
+                env_asset_indices = env_asset_indices.to(device=self.device, dtype=torch.long)
+                if not torch.equal(env_asset_indices, self.env_asset_idx):
+                    raise RuntimeError("Door env asset indices and reference-motion asset indices are inconsistent.")
+            self.motion_family_ids = motion_family_ids.to(device=self.device, dtype=torch.long)
+            self.env_family_ids = self.motion_family_ids[env_motion_idx]
         expected_asset_family_ids = door_asset_family_ids.to(device=self.device, dtype=torch.long)[self.env_asset_idx]
         if not torch.equal(expected_asset_family_ids, self.env_family_ids):
             raise RuntimeError("Door asset family ids and motion family ids are inconsistent.")
@@ -1131,7 +1285,7 @@ class Dagger:
         return max(0, min(int(self.viser_env_id), self.num_envs - 1))
 
     def _init_viser_raw_streams(self):
-        """Select one stable env per door family for multi-door replay export."""
+        """Select one random env per door family for multi-door replay export."""
         self._viser_raw_streams = OrderedDict()
         for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
             matching_envs = self.family_env_ids.get(int(family_id))
@@ -1139,7 +1293,8 @@ class Dagger:
                 matching_envs = torch.nonzero(self.env_family_ids == int(family_id), as_tuple=False).squeeze(-1)
             if matching_envs.numel() == 0:
                 continue
-            env_id = int(matching_envs[0].detach().cpu().item())
+            env_offset = int(torch.randint(matching_envs.numel(), (1,), device=self.device).detach().cpu().item())
+            env_id = int(matching_envs[env_offset].detach().cpu().item())
             self._viser_raw_streams[family_name] = {
                 "family_id": int(family_id),
                 "family_name": family_name,
@@ -1529,8 +1684,8 @@ class Dagger:
                 }
                 with torch.no_grad():
                     res_dict = family_model(batch_dict)
-                family_mus = torch.clamp(res_dict["mus"], -1.0, 1.0)
-                teacher_actions[env_ids] = family_mus
+                family_env_actions = torch.clamp(res_dict["mus"], -1.0, 1.0)
+                teacher_actions[env_ids] = family_env_actions
             if not torch.all(assigned_teacher_mask):
                 missing_family_ids = sorted(
                     set(self.env_family_ids[~assigned_teacher_mask].detach().cpu().tolist())
@@ -1538,8 +1693,9 @@ class Dagger:
                 missing_family_names = [DOOR_FAMILY_NAMES[int(family_id)] for family_id in missing_family_ids]
                 raise RuntimeError(f"Missing teacher model for door families: {missing_family_names}.")
             teacher_actions = self._override_actions_for_pregrasp(teacher_actions)
+            student_teacher_actions = self._env_actions_to_student_actions(teacher_actions)
             return {
-                "mus": teacher_actions,
+                "mus": student_teacher_actions,
                 "actions": teacher_actions,
             }
 
@@ -1551,8 +1707,9 @@ class Dagger:
         with torch.no_grad():
             res_dict = self.teacher_model(batch_dict)
         adjusted_actions = self._override_actions_for_pregrasp(torch.clamp(res_dict["mus"], -1.0, 1.0))
+        student_adjusted_actions = self._env_actions_to_student_actions(adjusted_actions)
         return {
-            "mus": adjusted_actions,
+            "mus": student_adjusted_actions,
             "actions": adjusted_actions,
         }
 
@@ -2251,6 +2408,7 @@ class Dagger:
 
     def _build_student_obs(self, iteration=None):
         q_pos = self._get_student_proprio_vector()
+        base_vel = self._get_student_base_velocity_vector()
         door_joint_pos = self.ov_env.door.data.joint_pos
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
@@ -2280,11 +2438,13 @@ class Dagger:
         obs = OrderedDict()
         for key in self.state_encoders_keys:
             if key == "q_base":
-                obs[key] = q_pos[:, self.ov_env._robot_base_dof_idx]
+                raise KeyError("Raw q_base is disabled for the student policy; use base_vel instead.")
             elif key == "q_arm":
                 obs[key] = q_pos[:, self.ov_env._robot_arm_dof_idx]
             elif key == "q_hand":
                 obs[key] = q_pos[:, self.ov_env._robot_finger_dof_idx]
+            elif key == "base_vel":
+                obs[key] = base_vel
             elif key in self.temporal_derived_state_specs:
                 obs[key] = temporal_state_values[key]
             elif key in self.aux_state_specs:
@@ -2332,7 +2492,16 @@ class Dagger:
         total_loss = loss["total"]
         action_loss = loss.get("action", total_loss)
         aux_loss = loss.get("aux")
-        return total_loss, action_loss, aux_loss
+        mode_loss = None
+        if self.mode_prediction_enabled:
+            if "mode_logits" not in student_output:
+                raise RuntimeError("Mode prediction is enabled, but student output does not contain 'mode_logits'.")
+            mode_loss = torch.nn.functional.cross_entropy(
+                student_output["mode_logits"],
+                self.env_family_ids.long(),
+            )
+            total_loss = total_loss + self.mode_weight * mode_loss
+        return total_loss, action_loss, aux_loss, mode_loss
 
     def _get_teacher_forcing_beta(self, iteration):
         if self.play_policy or not self._has_teacher():
@@ -2457,7 +2626,16 @@ class Dagger:
                 family_success_rates[family_name] = None
         return success_rate, family_success_rates
 
-    def _log(self, iteration, total_loss, action_loss, aux_loss, teacher_forcing_beta):
+    def _log(
+        self,
+        iteration,
+        total_loss,
+        action_loss,
+        aux_loss,
+        mode_loss,
+        mode_acc,
+        teacher_forcing_beta,
+    ):
         if iteration % self.log_interval != 0:
             return
         episode_reward = self._mean_completed_metric(self.completed_rewards)
@@ -2476,6 +2654,10 @@ class Dagger:
             print("Action Loss:", float(action_loss.detach().cpu()))
             if aux_loss is not None:
                 print("Aux Loss:", float(aux_loss.detach().cpu()))
+            if mode_loss is not None:
+                print("Mode Loss:", float(mode_loss.detach().cpu()))
+            if mode_acc is not None:
+                print("Mode Acc:", float(mode_acc.detach().cpu()))
             print("Teacher Forcing Beta:", teacher_forcing_beta)
             print("Teacher Rollout Env Fraction:", teacher_env_fraction)
             print("Student Rollout Env Fraction:", student_env_fraction)
@@ -2511,6 +2693,10 @@ class Dagger:
         }
         if aux_loss is not None:
             metrics["loss/aux"] = float(aux_loss.detach().cpu())
+        if mode_loss is not None:
+            metrics["loss/mode"] = float(mode_loss.detach().cpu())
+        if mode_acc is not None:
+            metrics["stats/mode_acc"] = float(mode_acc.detach().cpu())
         if episode_reward is not None:
             metrics["stats/episode_reward"] = episode_reward
         if episode_length is not None:
@@ -2577,7 +2763,16 @@ class Dagger:
                     "build_student_obs",
                 )
                 student_output = self._student_forward(student_obs)
-                student_actions = torch.clamp(student_output["action"][:, 0, :], -1.0, 1.0)
+                mode_pred = None
+                mode_target = None
+                if self.mode_prediction_enabled:
+                    mode_logits = student_output["mode_logits"].detach()
+                    mode_target = self.env_family_ids.long()
+                    mode_pred = mode_logits.argmax(dim=-1)
+                    if self.play_policy and iteration % 10 == 0:
+                        print("Iteration ", iteration, ": Mode Pred:", mode_logits.detach().cpu().tolist())
+                student_actions = student_output["action"][:, 0, :]
+                student_env_actions = self._student_actions_to_env_actions(student_actions)
                 aux_prediction_for_replay = None
                 if self.has_aux_prediction:
                     aux_prediction_for_replay = self._decode_aux_prediction(student_output["aux"].detach())
@@ -2611,6 +2806,8 @@ class Dagger:
                 total_loss = None
                 action_loss = None
                 aux_loss = None
+                mode_loss = None
+                mode_acc = None
 
                 if not self.play_policy:
                     teacher_output = self._get_teacher_actions(obs)
@@ -2625,11 +2822,13 @@ class Dagger:
                         if self.latest_aux_target_vector is None:
                             raise RuntimeError("Expected the latest auxiliary target vector while aux prediction is enabled.")
                         aux_target = self._get_aux_target(self.latest_aux_target_vector)
-                    total_loss, action_loss, aux_loss = self._compute_student_loss(
+                    total_loss, action_loss, aux_loss, mode_loss = self._compute_student_loss(
                         student_output,
                         teacher_output["mus"],
                         aux_target=aux_target,
                     )
+                    if self.mode_prediction_enabled:
+                        mode_acc = (mode_pred == mode_target).float().mean()
                     local_batch_size = int(student_actions.shape[0])
                     global_batch_size = self._get_global_batch_size(local_batch_size)
                     self.optimizer.zero_grad()
@@ -2646,7 +2845,7 @@ class Dagger:
                     )
 
                 step_actions, teacher_forcing_beta = self._mix_actions(
-                    student_actions.detach(),
+                    student_env_actions.detach(),
                     teacher_actions,
                     iteration,
                 )
@@ -2660,11 +2859,13 @@ class Dagger:
                 self.temporal_current_time_s = self._iteration_to_time_s(iteration + 1)
                 q_after_step = self._get_student_proprio_vector().detach().clone()
                 target_after_step = self._get_implemented_action_vector().detach().clone()
+                base_vel_after_step = self._get_student_base_velocity_vector().detach().clone()
 
                 self._push_temporal_history(
                     timestamp=self.temporal_current_time_s,
                     q=q_after_step,
                     target=target_after_step,
+                    base_vel=base_vel_after_step,
                 )
                 self.frame += self.num_envs
 
@@ -2689,7 +2890,15 @@ class Dagger:
                 if total_loss is not None:
                     self._sync_timing_device()
                     self._record_timing(time.perf_counter() - iteration_start_time)
-                    self._log(iteration, total_loss, action_loss, aux_loss, teacher_forcing_beta)
+                    self._log(
+                        iteration,
+                        total_loss,
+                        action_loss,
+                        aux_loss,
+                        mode_loss,
+                        mode_acc,
+                        teacher_forcing_beta,
+                    )
                 else:
                     self._sync_timing_device()
                     self._record_timing(time.perf_counter() - iteration_start_time)
