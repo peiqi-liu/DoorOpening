@@ -308,6 +308,8 @@ def main(env_cfg, agent_cfg: dict):
             return None, None
 
         cli_values = {
+            "PartNetv5_plus": args_cli.teacher_partnetv5,
+            "PartNetv5_pro": args_cli.teacher_partnetv5,
             "PartNetv5": args_cli.teacher_partnetv5,
             "PartNetv6": args_cli.teacher_partnetv6,
             "PartNetv7": args_cli.teacher_partnetv7,

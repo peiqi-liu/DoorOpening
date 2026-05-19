@@ -140,6 +140,7 @@ class Dagger:
         self.teacher_forcing_min_beta = float(self.runtime_cfg.get("teacher_forcing_min_beta", 0.0))
         self.log_interval = int(self.runtime_cfg.get("log_interval", 100))
         self.save_interval = int(self.runtime_cfg.get("save_interval", 5_000))
+        self.visual_policy_batch_size = int(self.runtime_cfg.get("visual_policy_batch_size", 0))
         self.pointcloud_source = str(self.runtime_cfg.get("pointcloud_source", "sampler")).lower()
         self.robot_pcd_num_points = self.runtime_cfg.get("robot_num_points")
         self.sampler_render_cfg = self.runtime_cfg.get("sampler_render", {})
@@ -190,12 +191,6 @@ class Dagger:
         )
         if self.pointcloud_source not in {"sampler", "depth", "lidar"}:
             raise ValueError(f"Unsupported pointcloud_source '{self.pointcloud_source}'.")
-        if self.teacher_forcing_warmup_iters < 0:
-            raise ValueError("teacher_forcing_warmup_iters must be non-negative.")
-        if self.teacher_forcing_transition_iters < 0:
-            raise ValueError("teacher_forcing_transition_iters must be non-negative.")
-        if not 0.0 <= self.teacher_forcing_min_beta <= 1.0:
-            raise ValueError("teacher_forcing_min_beta must be in [0, 1].")
 
         self.games_to_track = 100
         self.frame = 0
@@ -226,6 +221,10 @@ class Dagger:
         self.temporal_target_history = None
         self.temporal_base_vel_history = None
         self.teacher_forcing_env_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._visual_policy_active_env_ids = None
+        self._visual_policy_active_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.latest_visual_policy_env_count = self.num_envs
+        self.latest_teacher_rollout_env_fraction = 0.0
         self.current_rewards = torch.zeros((self.num_envs, 1), dtype=torch.float32, device=self.device)
         self.current_lengths = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         self.completed_rewards = deque(maxlen=self.games_to_track)
@@ -757,11 +756,13 @@ class Dagger:
     def _get_base_yaw(self):
         return self.ov_env.robot.data.joint_pos[:, self.ov_env._robot_base_rot_dof_idx].squeeze(-1)
 
-    def _env_base_vector_to_robot_frame(self, base_vector):
+    def _env_base_vector_to_robot_frame(self, base_vector, env_ids=None):
         if base_vector.ndim != 2 or base_vector.shape[-1] != 3:
             raise RuntimeError(f"Expected base vector shape [N, 3], got {tuple(base_vector.shape)}.")
 
         yaw = self._get_base_yaw().to(base_vector)
+        if env_ids is not None:
+            yaw = yaw[self._normalize_env_ids(env_ids)]
         cos_yaw = torch.cos(yaw)
         sin_yaw = torch.sin(yaw)
         vx_world = base_vector[:, self.base_action_xy_local_idx[0]]
@@ -771,13 +772,20 @@ class Dagger:
         vy_robot = -sin_yaw * vx_world + cos_yaw * vy_world
         return torch.stack((vx_robot, vy_robot, wz_robot), dim=-1)
 
-    def _robot_base_vector_to_env_frame(self, base_vector_robot):
+    def _robot_base_vector_to_env_frame(self, base_vector_robot, env_ids=None):
         if base_vector_robot.ndim != 2 or base_vector_robot.shape[-1] != 3:
             raise RuntimeError(f"Expected robot-frame base vector shape [N, 3], got {tuple(base_vector_robot.shape)}.")
 
         yaw = self._get_base_yaw().to(base_vector_robot)
+        if env_ids is not None:
+            yaw = yaw[self._normalize_env_ids(env_ids)]
         cos_yaw = torch.cos(yaw)
         sin_yaw = torch.sin(yaw)
+        if yaw.shape[0] != base_vector_robot.shape[0]:
+            raise RuntimeError(
+                "Base yaw batch size must match robot-frame base vector batch size: "
+                f"got {yaw.shape[0]} and {base_vector_robot.shape[0]}."
+            )
         vx_robot = base_vector_robot[:, 0]
         vy_robot = base_vector_robot[:, 1]
         wz_robot = base_vector_robot[:, 2]
@@ -790,7 +798,7 @@ class Dagger:
         base_vector_env[:, self.base_action_rot_local_idx] = wz_robot
         return base_vector_env
 
-    def _env_actions_to_student_actions(self, env_actions):
+    def _env_actions_to_student_actions(self, env_actions, env_ids=None):
         if env_actions.ndim != 2 or env_actions.shape[-1] != self.num_actions:
             raise RuntimeError(f"Expected env action shape [N, {self.num_actions}], got {tuple(env_actions.shape)}.")
 
@@ -799,11 +807,12 @@ class Dagger:
         # units become student [vx_robot, vy_robot, wz_robot] velocity units.
         # Arm/hand stay in the env's normalized delta-action convention.
         student_actions[:, :3] = self._env_base_vector_to_robot_frame(
-            env_actions[:, :3] * self.base_action_scale
+            env_actions[:, :3] * self.base_action_scale,
+            env_ids=env_ids,
         )
         return student_actions
 
-    def _student_actions_to_env_actions(self, student_actions):
+    def _student_actions_to_env_actions(self, student_actions, env_ids=None):
         if student_actions.ndim != 2 or student_actions.shape[-1] != self.num_actions:
             raise RuntimeError(
                 f"Expected student action shape [N, {self.num_actions}], got {tuple(student_actions.shape)}."
@@ -812,7 +821,10 @@ class Dagger:
         env_actions = student_actions.clone()
         # The env applies dt in _pre_physics_step when integrating delta actions.
         # Keep arm/hand untouched here; only rotate/scale the base velocity command.
-        env_actions[:, :3] = self._robot_base_vector_to_env_frame(student_actions[:, :3]) / self.base_action_scale
+        env_actions[:, :3] = (
+            self._robot_base_vector_to_env_frame(student_actions[:, :3], env_ids=env_ids)
+            / self.base_action_scale
+        )
         return env_actions.clamp(-1.0, 1.0)
 
     def _get_student_base_velocity_vector(self):
@@ -949,7 +961,7 @@ class Dagger:
     def _get_aux_target(self, current_abs_aux):
         return current_abs_aux
 
-    def _maybe_drop_aux_feedback(self, aux_input_vector):
+    def _maybe_drop_aux_feedback(self, aux_input_vector, env_ids=None):
         self.latest_aux_pregrasp_env_fraction = 0.0
         self.latest_aux_pregrasp_dropout_fraction = 0.0
         if aux_input_vector is None or not self.aux_feedback_to_policy or self.aux_pregrasp_dropout_prob <= 0.0:
@@ -964,6 +976,8 @@ class Dagger:
             return aux_input_vector
 
         pregrasp_mask = get_pregrasp_mask().to(device=self.device, dtype=torch.bool)
+        if env_ids is not None:
+            pregrasp_mask = pregrasp_mask[self._normalize_env_ids(env_ids)]
         self.latest_aux_pregrasp_env_fraction = float(pregrasp_mask.float().mean().item())
         if not torch.any(pregrasp_mask):
             return aux_input_vector
@@ -1322,16 +1336,22 @@ class Dagger:
     def _viser_stream_env_ids(self):
         return [int(stream["env_id"]) for stream in self._viser_raw_streams.values()]
 
-    def _select_viser_ground_truth_points(self, pointcloud_world):
+    def _select_viser_ground_truth_points(self, pointcloud_world, env_ids=None):
         if not self.viser_raw_enabled or pointcloud_world is None:
             return None
+        env_ids = self._normalize_env_ids(env_ids)
+        env_rows = {
+            int(env_id): row_idx
+            for row_idx, env_id in enumerate(env_ids.detach().cpu().tolist())
+        }
         return {
             int(env_id): prepare_pointcloud(
                 pointcloud_world,
-                env_id=int(env_id),
+                env_id=env_rows[int(env_id)],
                 max_points=self.viser_raw_max_points,
             )
             for env_id in self._viser_stream_env_ids()
+            if int(env_id) in env_rows
         }
 
     def _build_viser_raw_payload(self, latest_iteration, chunk_complete, stream):
@@ -1486,13 +1506,27 @@ class Dagger:
         robot_obs_pcd_base,
         policy_input_pcd_base,
         aux_prediction=None,
+        selected_env_ids=None,
+        student_rollout_mask=None,
     ):
         """Append one replay frame for each selected multi-door family env."""
         if not self.viser_raw_enabled:
             return
+        selected_env_ids = self._normalize_env_ids(selected_env_ids)
+        selected_env_rows = {
+            int(env_id): row_idx
+            for row_idx, env_id in enumerate(selected_env_ids.detach().cpu().tolist())
+        }
+        if student_rollout_mask is None:
+            student_rollout_mask = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+        else:
+            student_rollout_mask = student_rollout_mask.to(device=self.device, dtype=torch.bool)
 
         for stream in self._viser_raw_streams.values():
             env_id = int(stream["env_id"])
+            if env_id not in selected_env_rows or not bool(student_rollout_mask[env_id].detach().cpu().item()):
+                continue
+            row_idx = selected_env_rows[env_id]
             if stream["chunk_start_iteration"] is None:
                 stream["chunk_index"] += 1
                 stream["chunk_start_iteration"] = int(iteration)
@@ -1518,7 +1552,7 @@ class Dagger:
                     robot_obs_pcd_base,
                     robot_base_pos_w,
                     robot_base_quat_w,
-                    env_id,
+                    row_idx,
                     self.viser_raw_max_points,
                     drop_zero_rows=True,
                 ).to(dtype=torch.float16)
@@ -1529,7 +1563,7 @@ class Dagger:
                     policy_input_pcd_base,
                     robot_base_pos_w,
                     robot_base_quat_w,
-                    env_id,
+                    row_idx,
                     self.viser_raw_max_points,
                     drop_zero_rows=True,
                 ).to(dtype=torch.float16)
@@ -1552,7 +1586,7 @@ class Dagger:
                 },
                 "aux_prediction": None
                 if aux_prediction is None
-                else self._aux_to_2d(aux_prediction)[env_id].detach().cpu().to(dtype=torch.float32),
+                else self._aux_to_2d(aux_prediction)[row_idx].detach().cpu().to(dtype=torch.float32),
                 "robot_joint_pos": q_pos[env_id].detach().cpu().to(dtype=torch.float32),
                 "door_joint_pos": door_joint_pos[env_id].detach().cpu().to(dtype=torch.float32),
                 "robot_base_pos_w": self.ov_env.robot.data.body_pos_w[env_id, self.robot_base_body_idx].detach().cpu().to(dtype=torch.float32),
@@ -1773,15 +1807,17 @@ class Dagger:
             "far_m": float(far_m),
         }
 
-    def _get_sampler_camera_pose(self):
-        camera_link_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_camera_body_idx]
-        camera_link_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_camera_body_idx]
+    def _get_sampler_camera_pose(self, env_ids=None):
+        env_ids = self._normalize_env_ids(env_ids)
+        camera_link_pos_w = self.ov_env.robot.data.body_pos_w[env_ids, self.robot_camera_body_idx]
+        camera_link_quat_w = self.ov_env.robot.data.body_quat_w[env_ids, self.robot_camera_body_idx]
         # The sampler render currently uses the camera-link pose directly.
         return torch.cat([camera_link_pos_w, camera_link_quat_w[:, [1, 2, 3, 0]]], dim=-1)
 
-    def _get_lidar_pose(self):
-        lidar_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_lidar_body_idx]
-        lidar_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_lidar_body_idx]
+    def _get_lidar_pose(self, env_ids=None):
+        env_ids = self._normalize_env_ids(env_ids)
+        lidar_pos_w = self.ov_env.robot.data.body_pos_w[env_ids, self.robot_lidar_body_idx]
+        lidar_quat_w = self.ov_env.robot.data.body_quat_w[env_ids, self.robot_lidar_body_idx]
         return torch.cat([lidar_pos_w, lidar_quat_w[:, [1, 2, 3, 0]]], dim=-1)
 
     def _sample_wall_pointcloud_local(self, env_ids=None, num_points=None):
@@ -2002,25 +2038,28 @@ class Dagger:
             return
         self._wall_distractor_local_points[env_ids] = self._sample_wall_pointcloud_local(env_ids=env_ids)
 
-    def _sample_robot_pointcloud_world_sampler(self):
-        robot_joint_pos = self.ov_env.robot.data.joint_pos[:, self.robot_sampler_joint_ids]
+    def _sample_robot_pointcloud_world_sampler(self, env_ids=None):
+        env_ids = self._normalize_env_ids(env_ids)
+        robot_joint_pos = self.ov_env.robot.data.joint_pos[env_ids[:, None], self.robot_sampler_joint_ids[None, :]]
         robot_joint_pos = robot_joint_pos[:, self.robot_sampler_joint_reorder]
         robot_local_pcd = self.robot_sampler.sample(robot_joint_pos)
         # The URDF sampler already applies the mobile-base joints (base_x/base_y/base_rotation),
         # so these points live in the URDF root frame, not the tidybot chassis frame.
-        robot_root_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_root_body_idx]
-        robot_root_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_root_body_idx]
+        robot_root_pos_w = self.ov_env.robot.data.body_pos_w[env_ids, self.robot_root_body_idx]
+        robot_root_quat_w = self.ov_env.robot.data.body_quat_w[env_ids, self.robot_root_body_idx]
         quat = robot_root_quat_w.unsqueeze(1).expand(-1, robot_local_pcd.shape[1], -1)
         return quat_apply(quat, robot_local_pcd) + robot_root_pos_w.unsqueeze(1)
 
-    def _sample_robot_pointcloud_base_sampler(self):
-        robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
-        robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
-        robot_pcd_world = self._sample_robot_pointcloud_world_sampler()
+    def _sample_robot_pointcloud_base_sampler(self, env_ids=None):
+        env_ids = self._normalize_env_ids(env_ids)
+        robot_base_pos_w = self.ov_env.robot.data.body_pos_w[env_ids, self.robot_base_body_idx]
+        robot_base_quat_w = self.ov_env.robot.data.body_quat_w[env_ids, self.robot_base_body_idx]
+        robot_pcd_world = self._sample_robot_pointcloud_world_sampler(env_ids=env_ids)
         return world_to_local(robot_pcd_world, robot_base_pos_w, robot_base_quat_w)
 
-    def _get_robot_filter_joint_pos_base_frame(self):
-        robot_joint_pos = self.ov_env.robot.data.joint_pos[:, self.robot_sampler_joint_ids]
+    def _get_robot_filter_joint_pos_base_frame(self, env_ids=None):
+        env_ids = self._normalize_env_ids(env_ids)
+        robot_joint_pos = self.ov_env.robot.data.joint_pos[env_ids[:, None], self.robot_sampler_joint_ids[None, :]]
         robot_joint_pos = robot_joint_pos[:, self.robot_sampler_joint_reorder].clone()
         # The observation cloud is already in tidybot2_base_link, so zero the floating-base
         # joints before evaluating the same Glorbot sphere model in that local frame.
@@ -2028,7 +2067,7 @@ class Dagger:
             robot_joint_pos[:, self.robot_collision_checker_base_joint_indices] = 0.0
         return robot_joint_pos
 
-    def _filter_robot_points_base(self, pointcloud_base):
+    def _filter_robot_points_base(self, pointcloud_base, env_ids=None):
         if (
             not self.robot_pointcloud_filter_enabled
             or self.robot_collision_checker is None
@@ -2039,31 +2078,32 @@ class Dagger:
 
         return self.robot_collision_checker.filter_pointcloud_outside_spheres(
             pointclouds=pointcloud_base,
-            joint_angles=self._get_robot_filter_joint_pos_base_frame(),
+            joint_angles=self._get_robot_filter_joint_pos_base_frame(env_ids=env_ids),
             sdf_cutoff=self.robot_pointcloud_sdf_cutoff,
             max_points_per_process=self.robot_pointcloud_filter_max_points_per_process,
         )
 
-    def _sample_wall_pointcloud_world(self, num_points=None):
+    def _sample_wall_pointcloud_world(self, env_ids=None, num_points=None):
+        env_ids = self._normalize_env_ids(env_ids)
         if not self.wall_distractors_enabled:
-            return torch.zeros((self.num_envs, 0, 3), dtype=torch.float32, device=self.device)
+            return torch.zeros((env_ids.numel(), 0, 3), dtype=torch.float32, device=self.device)
 
         if num_points is None:
             num_points = self.wall_distractor_num_points
         num_points = int(num_points)
         if num_points <= 0:
-            return torch.zeros((self.num_envs, 0, 3), dtype=torch.float32, device=self.device)
+            return torch.zeros((env_ids.numel(), 0, 3), dtype=torch.float32, device=self.device)
 
-        door_base_pos_w = self.ov_env.door.data.body_pos_w[:, self.door_base_body_idx]
-        door_base_quat_w = self.ov_env.door.data.body_quat_w[:, self.door_base_body_idx]
+        door_base_pos_w = self.ov_env.door.data.body_pos_w[env_ids, self.door_base_body_idx]
+        door_base_quat_w = self.ov_env.door.data.body_quat_w[env_ids, self.door_base_body_idx]
         if (
             self.wall_distractor_resample_each_step
             or self._wall_distractor_local_points is None
             or num_points != self.wall_distractor_num_points
         ):
-            wall_points_base = self._sample_wall_pointcloud_local(num_points=num_points)
+            wall_points_base = self._sample_wall_pointcloud_local(env_ids=env_ids, num_points=num_points)
         else:
-            wall_points_base = self._wall_distractor_local_points
+            wall_points_base = self._wall_distractor_local_points[env_ids]
         quat = door_base_quat_w.unsqueeze(1).expand(-1, wall_points_base.shape[1], -1)
         return quat_apply(quat, wall_points_base) + door_base_pos_w.unsqueeze(1)
 
@@ -2100,18 +2140,19 @@ class Dagger:
             )
         return link_points
 
-    def _sample_cached_door_pointcloud_world(self):
+    def _sample_cached_door_pointcloud_world(self, env_ids=None):
+        env_ids = self._normalize_env_ids(env_ids)
         door_pcd_world = torch.zeros(
-            (self.num_envs, self.door_pcd_num_points, 3),
+            (env_ids.numel(), self.door_pcd_num_points, 3),
             dtype=torch.float32,
             device=self.device,
         )
         for asset_idx, link_points_by_name in self.door_link_pointclouds.items():
-            env_ids = self.door_sampler_env_ids.get(asset_idx)
-            if env_ids is None:
-                env_ids = torch.nonzero(self.env_asset_idx == asset_idx, as_tuple=False).squeeze(-1)
-            if env_ids.numel() == 0:
+            asset_mask = self.env_asset_idx[env_ids] == int(asset_idx)
+            selected_env_ids = env_ids[asset_mask]
+            if selected_env_ids.numel() == 0:
                 continue
+            selected_rows = torch.nonzero(asset_mask, as_tuple=False).squeeze(-1)
 
             pcd_parts = []
             for link_name in ("link_1", "link_2"):
@@ -2119,9 +2160,9 @@ class Dagger:
                 if link_points is None or link_points.numel() == 0:
                     continue
                 body_idx = self.door_link_body_indices[link_name]
-                link_pos_w = self.ov_env.door.data.body_pos_w[env_ids, body_idx]
-                link_quat_w = self.ov_env.door.data.body_quat_w[env_ids, body_idx]
-                expanded_points = link_points.unsqueeze(0).expand(env_ids.numel(), -1, -1)
+                link_pos_w = self.ov_env.door.data.body_pos_w[selected_env_ids, body_idx]
+                link_quat_w = self.ov_env.door.data.body_quat_w[selected_env_ids, body_idx]
+                expanded_points = link_points.unsqueeze(0).expand(selected_env_ids.numel(), -1, -1)
                 expanded_quat = link_quat_w.unsqueeze(1).expand(-1, expanded_points.shape[1], -1)
                 pcd_parts.append(quat_apply(expanded_quat, expanded_points) + link_pos_w.unsqueeze(1))
 
@@ -2136,40 +2177,41 @@ class Dagger:
                         dtype=torch.float32,
                     ).round().to(dtype=torch.long)
                     asset_pcd_world = asset_pcd_world[:, sample_idx]
-                door_pcd_world[env_ids] = asset_pcd_world
+                door_pcd_world[selected_rows] = asset_pcd_world
         return door_pcd_world
 
-    def _sample_scene_pointcloud_world_sampler(self):
-        door_base_pos_w = self.ov_env.door.data.body_pos_w[:, self.door_base_body_idx]
-        door_base_quat_w = self.ov_env.door.data.body_quat_w[:, self.door_base_body_idx]
+    def _sample_scene_pointcloud_world_sampler(self, env_ids=None):
+        env_ids = self._normalize_env_ids(env_ids)
+        door_base_pos_w = self.ov_env.door.data.body_pos_w[env_ids, self.door_base_body_idx]
+        door_base_quat_w = self.ov_env.door.data.body_quat_w[env_ids, self.door_base_body_idx]
         door_joint_pos = self.ov_env.door.data.joint_pos
 
         door_pcd_world = torch.zeros(
-            (self.num_envs, self.door_pcd_num_points, 3),
+            (env_ids.numel(), self.door_pcd_num_points, 3),
             dtype=torch.float32,
             device=self.device,
         )
         for asset_idx, sampler in self.door_samplers.items():
-            env_ids = self.door_sampler_env_ids.get(asset_idx)
-            if env_ids is None:
-                env_ids = torch.nonzero(self.env_asset_idx == asset_idx, as_tuple=False).squeeze(-1)
-            if env_ids.numel() == 0:
+            asset_mask = self.env_asset_idx[env_ids] == int(asset_idx)
+            selected_env_ids = env_ids[asset_mask]
+            if selected_env_ids.numel() == 0:
                 continue
-            local_pcd = sampler.sample(door_joint_pos[env_ids])
-            quat = door_base_quat_w[env_ids].unsqueeze(1).expand(-1, local_pcd.shape[1], -1)
-            world_pcd = quat_apply(quat, local_pcd) + door_base_pos_w[env_ids].unsqueeze(1)
-            door_pcd_world[env_ids] = world_pcd
-        robot_pcd_world = self._sample_robot_pointcloud_world_sampler()
+            selected_rows = torch.nonzero(asset_mask, as_tuple=False).squeeze(-1)
+            local_pcd = sampler.sample(door_joint_pos[selected_env_ids])
+            quat = door_base_quat_w[selected_rows].unsqueeze(1).expand(-1, local_pcd.shape[1], -1)
+            world_pcd = quat_apply(quat, local_pcd) + door_base_pos_w[selected_rows].unsqueeze(1)
+            door_pcd_world[selected_rows] = world_pcd
+        robot_pcd_world = self._sample_robot_pointcloud_world_sampler(env_ids=env_ids)
         scene_parts = [door_pcd_world, robot_pcd_world]
-        wall_pcd_world = self._sample_wall_pointcloud_world()
+        wall_pcd_world = self._sample_wall_pointcloud_world(env_ids=env_ids)
         if wall_pcd_world.shape[1] > 0:
             scene_parts.append(wall_pcd_world)
         return torch.cat(scene_parts, dim=1)
 
-    def _render_lidar_scene_pointcloud_base(self, scene_pcd_world, robot_base_pos_w, robot_base_quat_w):
+    def _render_lidar_scene_pointcloud_base(self, scene_pcd_world, robot_base_pos_w, robot_base_quat_w, env_ids=None):
         rendered_pcd_world, _ = simulate_lidar_render_from_pose(
             pcd=scene_pcd_world,
-            lidar_pose=self._get_lidar_pose(),
+            lidar_pose=self._get_lidar_pose(env_ids=env_ids),
             num_points=self.lidar_num_points,
             num_azimuth=self.lidar_num_azimuth,
             num_polar=self.lidar_num_polar,
@@ -2183,32 +2225,45 @@ class Dagger:
         )
         return world_to_local(rendered_pcd_world, robot_base_pos_w, robot_base_quat_w)
 
-    def _sample_door_pointcloud_base_from_sim_body_pose(self):
-        robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
-        robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
-        door_pcd_world = self._sample_cached_door_pointcloud_world()
+    def _sample_door_pointcloud_base_from_sim_body_pose(self, env_ids=None):
+        env_ids = self._normalize_env_ids(env_ids)
+        robot_base_pos_w = self.ov_env.robot.data.body_pos_w[env_ids, self.robot_base_body_idx]
+        robot_base_quat_w = self.ov_env.robot.data.body_quat_w[env_ids, self.robot_base_body_idx]
+        door_pcd_world = self._sample_cached_door_pointcloud_world(env_ids=env_ids)
 
-        robot_pcd_world = self._sample_robot_pointcloud_world_sampler()
+        robot_pcd_world = self._sample_robot_pointcloud_world_sampler(env_ids=env_ids)
         scene_parts = [door_pcd_world, robot_pcd_world]
-        wall_pcd_world = self._sample_wall_pointcloud_world()
+        wall_pcd_world = self._sample_wall_pointcloud_world(env_ids=env_ids)
         if wall_pcd_world.shape[1] > 0:
             scene_parts.append(wall_pcd_world)
         scene_pcd_world = torch.cat(scene_parts, dim=1)
         if self.viser_raw_enabled:
-            self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(scene_pcd_world)
-        return self._render_lidar_scene_pointcloud_base(scene_pcd_world, robot_base_pos_w, robot_base_quat_w)
+            self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(
+                scene_pcd_world,
+                env_ids=env_ids,
+            )
+        return self._render_lidar_scene_pointcloud_base(
+            scene_pcd_world,
+            robot_base_pos_w,
+            robot_base_quat_w,
+            env_ids=env_ids,
+        )
 
-    def _sample_door_pointcloud_base_sampler(self):
-        robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
-        robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
-        gt_scene_pcd_world = self._sample_scene_pointcloud_world_sampler()
+    def _sample_door_pointcloud_base_sampler(self, env_ids=None):
+        env_ids = self._normalize_env_ids(env_ids)
+        robot_base_pos_w = self.ov_env.robot.data.body_pos_w[env_ids, self.robot_base_body_idx]
+        robot_base_quat_w = self.ov_env.robot.data.body_quat_w[env_ids, self.robot_base_body_idx]
+        gt_scene_pcd_world = self._sample_scene_pointcloud_world_sampler(env_ids=env_ids)
         if self.viser_raw_enabled:
             # Keep only the selected family envs on CPU so Viser debug does not retain an
             # extra full batched scene pointcloud on GPU during training/debug runs.
-            self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(gt_scene_pcd_world)
+            self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(
+                gt_scene_pcd_world,
+                env_ids=env_ids,
+            )
         rendered_pcd_world, _ = simulate_depth_cam_render_from_pose(
             pcd=gt_scene_pcd_world,
-            camera_pose=self._get_sampler_camera_pose(),
+            camera_pose=self._get_sampler_camera_pose(env_ids=env_ids),
             num_points=self.door_pcd_num_points,
             inflate_px=self.sampler_render_inflate_px,
             jitter_std_m=self.sampler_render_jitter_std_m,
@@ -2220,32 +2275,37 @@ class Dagger:
         scene_pointcloud_base = world_to_local(rendered_pcd_world, robot_base_pos_w, robot_base_quat_w)
         return scene_pointcloud_base
 
-    def _sample_door_pointcloud_base_depth(self):
-        robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
-        robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
+    def _sample_door_pointcloud_base_depth(self, env_ids=None):
+        env_ids = self._normalize_env_ids(env_ids)
+        robot_base_pos_w = self.ov_env.robot.data.body_pos_w[env_ids, self.robot_base_body_idx]
+        robot_base_quat_w = self.ov_env.robot.data.body_quat_w[env_ids, self.robot_base_body_idx]
         depth = self.pointcloud_camera.data.output["distance_to_image_plane"]
         if depth.ndim == 4 and depth.shape[-1] == 1:
             depth_image = depth.squeeze(-1)
         else:
             depth_image = depth
+        depth_image = depth_image[env_ids]
 
         door_pcd_camera = depth_to_pointcloud(
             depth=depth_image,
-            intrinsics=self.pointcloud_camera.data.intrinsic_matrices,
+            intrinsics=self.pointcloud_camera.data.intrinsic_matrices[env_ids],
             num_local_points=None,
         )
 
         door_pcd_world = transform_points(
             door_pcd_camera,
-            pos=self.pointcloud_camera.data.pos_w,
-            quat=self.pointcloud_camera.data.quat_w_ros,
+            pos=self.pointcloud_camera.data.pos_w[env_ids],
+            quat=self.pointcloud_camera.data.quat_w_ros[env_ids],
         )
         scene_pcd_world = door_pcd_world
-        wall_pcd_world = self._sample_wall_pointcloud_world()
+        wall_pcd_world = self._sample_wall_pointcloud_world(env_ids=env_ids)
         if wall_pcd_world.shape[1] > 0:
             scene_pcd_world = torch.cat([scene_pcd_world, wall_pcd_world], dim=1)
         if self.viser_raw_enabled:
-            self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(scene_pcd_world)
+            self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(
+                scene_pcd_world,
+                env_ids=env_ids,
+            )
         door_pcd_base = world_to_local(scene_pcd_world, robot_base_pos_w, robot_base_quat_w)
         # Filter floor points while preserving the batched layout expected by the cropper.
         floor_mask = door_pcd_base[..., 2] > 0.1
@@ -2253,38 +2313,49 @@ class Dagger:
         door_pcd_base[~floor_mask] = float("nan")
         return door_pcd_base
 
-    def _sample_door_pointcloud_base_lidar(self):
-        robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
-        robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
-        gt_scene_pcd_world = self._sample_scene_pointcloud_world_sampler()
+    def _sample_door_pointcloud_base_lidar(self, env_ids=None):
+        env_ids = self._normalize_env_ids(env_ids)
+        robot_base_pos_w = self.ov_env.robot.data.body_pos_w[env_ids, self.robot_base_body_idx]
+        robot_base_quat_w = self.ov_env.robot.data.body_quat_w[env_ids, self.robot_base_body_idx]
+        gt_scene_pcd_world = self._sample_scene_pointcloud_world_sampler(env_ids=env_ids)
         if self.viser_raw_enabled:
-            self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(gt_scene_pcd_world)
+            self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(
+                gt_scene_pcd_world,
+                env_ids=env_ids,
+            )
 
-        return self._render_lidar_scene_pointcloud_base(gt_scene_pcd_world, robot_base_pos_w, robot_base_quat_w)
+        return self._render_lidar_scene_pointcloud_base(
+            gt_scene_pcd_world,
+            robot_base_pos_w,
+            robot_base_quat_w,
+            env_ids=env_ids,
+        )
 
-    def _sample_door_pointcloud_base(self):
+    def _sample_door_pointcloud_base(self, env_ids=None):
+        env_ids = self._normalize_env_ids(env_ids)
         self._viser_cached_ground_truth_pcd_world = None
         if self.pointcloud_source == "sampler":
-            door_pcd_base = self._sample_door_pointcloud_base_sampler()
+            door_pcd_base = self._sample_door_pointcloud_base_sampler(env_ids=env_ids)
         elif self.pointcloud_source == "depth":
-            door_pcd_base = self._sample_door_pointcloud_base_depth()
+            door_pcd_base = self._sample_door_pointcloud_base_depth(env_ids=env_ids)
         elif self.use_sim_body_pose_door_pcd:
-            door_pcd_base = self._sample_door_pointcloud_base_from_sim_body_pose()
+            door_pcd_base = self._sample_door_pointcloud_base_from_sim_body_pose(env_ids=env_ids)
         else:
-            door_pcd_base = self._sample_door_pointcloud_base_lidar()
-        door_pcd_base = self._filter_robot_points_base(door_pcd_base)
+            door_pcd_base = self._sample_door_pointcloud_base_lidar(env_ids=env_ids)
+        door_pcd_base = self._filter_robot_points_base(door_pcd_base, env_ids=env_ids)
         return door_pcd_base
 
     def _build_local_pcd(self, door_pcd_base, palm_pos_base, robot_pcd_base=None):
         pcd_parts = []
 
         if self.local_pcd_points[0] > 0:
+            zero_crop_center = torch.zeros((door_pcd_base.shape[0], 3), dtype=torch.float32, device=self.device)
             base_crop, _ = crop_local_pcd(
                 door_pcd_base,
                 local_range=self.local_pcd_range[0],
                 num_local_points=self.local_pcd_points[0],
                 is_cylindrical=True,
-                crop_center=self.zero_local_pcd_crop_center,
+                crop_center=zero_crop_center,
                 x_direction_cutoff=self.local_pcd_x_direction_cutoff,
                 log_name="base",
             )
@@ -2406,34 +2477,165 @@ class Dagger:
             dist.all_reduce(batch_size, op=dist.ReduceOp.SUM)
         return int(batch_size.item())
 
-    def _build_student_obs(self, iteration=None):
-        q_pos = self._get_student_proprio_vector()
-        base_vel = self._get_student_base_velocity_vector()
-        door_joint_pos = self.ov_env.door.data.joint_pos
-        robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
-        robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
-        palm_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_palm_body_idx].unsqueeze(1)
+    def _all_env_ids(self):
+        return torch.arange(self.num_envs, device=self.device, dtype=torch.long)
 
-        self.latest_student_proprio_vector = q_pos.detach().clone()
+    def _normalize_env_ids(self, env_ids=None):
+        if env_ids is None:
+            return self._all_env_ids()
+        return torch.as_tensor(env_ids, device=self.device, dtype=torch.long).flatten()
+
+    def _visual_policy_uses_full_batch(self):
+        return self.visual_policy_batch_size <= 0 or self.visual_policy_batch_size >= self.num_envs
+
+    def _reset_visual_policy_scheduler(self):
+        self._visual_policy_active_env_ids = None
+        self._visual_policy_active_mask.zero_()
+        self.latest_visual_policy_env_count = (
+            self.num_envs if self._visual_policy_uses_full_batch() else int(self.visual_policy_batch_size)
+        )
+
+    def _take_next_visual_policy_env_ids(self, count, exclude_env_ids=None):
+        count = int(count)
+        if count <= 0:
+            return torch.empty(0, device=self.device, dtype=torch.long)
+
+        exclude_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        if exclude_env_ids is not None:
+            exclude_env_ids = self._normalize_env_ids(exclude_env_ids)
+            if exclude_env_ids.numel() > 0:
+                exclude_mask[exclude_env_ids] = True
+
+        candidate_env_ids = torch.nonzero(
+            (~self._visual_policy_active_mask) & (~exclude_mask),
+            as_tuple=False,
+        ).squeeze(-1)
+        if candidate_env_ids.numel() < count:
+            candidate_env_ids = torch.nonzero(~self._visual_policy_active_mask, as_tuple=False).squeeze(-1)
+        if candidate_env_ids.numel() < count:
+            raise RuntimeError(f"Unable to select {count} visual-policy envs from {self.num_envs} envs.")
+
+        perm = torch.randperm(candidate_env_ids.numel(), device=self.device)
+        picked = candidate_env_ids[perm[:count]]
+        self._visual_policy_active_mask[picked] = True
+        return picked
+
+    def _select_visual_policy_env_ids(self):
+        if self._visual_policy_uses_full_batch():
+            selected_env_ids = self._all_env_ids()
+        else:
+            if self._visual_policy_active_env_ids is None:
+                self._visual_policy_active_env_ids = self._take_next_visual_policy_env_ids(
+                    min(int(self.visual_policy_batch_size), int(self.num_envs))
+                )
+            selected_env_ids = self._visual_policy_active_env_ids
+
+        self.latest_visual_policy_env_count = int(selected_env_ids.numel())
+        return selected_env_ids
+
+    def _filter_active_visual_done_env_ids(self, done_env_ids, selected_env_ids):
+        done_env_ids = self._normalize_env_ids(done_env_ids)
+        if done_env_ids.numel() == 0:
+            return done_env_ids
+        selected_env_ids = self._normalize_env_ids(selected_env_ids)
+        active_metric_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        active_metric_mask[selected_env_ids] = True
+        return done_env_ids[active_metric_mask[done_env_ids]]
+
+    def _advance_visual_policy_env_ids_after_reset(self, reset_env_ids):
+        if self._visual_policy_uses_full_batch() or self._visual_policy_active_env_ids is None:
+            return torch.empty(0, device=self.device, dtype=torch.long)
+
+        reset_env_ids = self._normalize_env_ids(reset_env_ids)
+        if reset_env_ids.numel() == 0:
+            return torch.empty(0, device=self.device, dtype=torch.long)
+
+        reset_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        reset_mask[reset_env_ids] = True
+        reset_slots = reset_mask[self._visual_policy_active_env_ids]
+        if not torch.any(reset_slots):
+            return torch.empty(0, device=self.device, dtype=torch.long)
+
+        retired_env_ids = self._visual_policy_active_env_ids[reset_slots]
+        self._visual_policy_active_mask[retired_env_ids] = False
+        replacement_env_ids = self._take_next_visual_policy_env_ids(
+            int(retired_env_ids.numel()),
+            exclude_env_ids=retired_env_ids,
+        )
+        active_env_ids = self._visual_policy_active_env_ids.clone()
+        active_env_ids[reset_slots] = replacement_env_ids
+        self._visual_policy_active_env_ids = active_env_ids
+        return replacement_env_ids
+
+    def _reset_visual_policy_replacement_envs(self, env_ids, iteration, already_reset_env_ids=None):
+        env_ids = self._normalize_env_ids(env_ids)
+        if env_ids.numel() == 0:
+            return torch.empty(0, device=self.device, dtype=torch.long)
+
+        if already_reset_env_ids is None:
+            hard_reset_env_ids = env_ids
+        else:
+            already_reset_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+            already_reset_env_ids = self._normalize_env_ids(already_reset_env_ids)
+            if already_reset_env_ids.numel() > 0:
+                already_reset_mask[already_reset_env_ids] = True
+            hard_reset_env_ids = env_ids[~already_reset_mask[env_ids]]
+
+        if hard_reset_env_ids.numel() > 0:
+            reset_idx = getattr(self.ov_env, "_reset_idx", None)
+            if not callable(reset_idx):
+                raise RuntimeError("The unwrapped env does not expose _reset_idx for visual-policy replacement resets.")
+            reset_idx(hard_reset_env_ids)
+        self._resample_wall_distractors(env_ids)
+        self._seed_temporal_histories(env_ids)
+        self._seed_aux_buffer(env_ids)
+        self._resample_teacher_forcing_env_mask(iteration, env_ids)
+        self.current_rewards[env_ids] = 0.0
+        self.current_lengths[env_ids] = 0.0
+        return hard_reset_env_ids
+
+    def _build_student_obs(self, iteration=None, env_ids=None):
+        env_ids = self._normalize_env_ids(env_ids)
+        env_count = int(env_ids.numel())
+
+        q_pos_all = self._get_student_proprio_vector()
+        base_vel_all = self._get_student_base_velocity_vector()
+        door_joint_pos_all = self.ov_env.door.data.joint_pos
+        robot_base_pos_w_all = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
+        robot_base_quat_w_all = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
+        palm_pos_w_all = self.ov_env.robot.data.body_pos_w[:, self.robot_palm_body_idx].unsqueeze(1)
+
+        self.latest_student_proprio_vector = q_pos_all.detach().clone()
+
+        q_pos = q_pos_all[env_ids]
+        base_vel = base_vel_all[env_ids]
+        door_joint_pos = door_joint_pos_all[env_ids]
+        robot_base_pos_w = robot_base_pos_w_all[env_ids]
+        robot_base_quat_w = robot_base_quat_w_all[env_ids]
+        palm_pos_w = palm_pos_w_all[env_ids]
 
         palm_pos_base = world_to_local(palm_pos_w, robot_base_pos_w, robot_base_quat_w).squeeze(1)
-        door_pcd_base = self._sample_door_pointcloud_base()
-        robot_pcd_base = self._sample_robot_pointcloud_base_sampler() if self.append_robot_gt_to_policy_cloud else None
-        target_t = self._get_implemented_action_vector()
-        temporal_state_values = self._build_temporal_derived_state_values(q_pos, target_t)
+        door_pcd_base = self._sample_door_pointcloud_base(env_ids=env_ids)
+        robot_pcd_base = (
+            self._sample_robot_pointcloud_base_sampler(env_ids=env_ids)
+            if self.append_robot_gt_to_policy_cloud
+            else None
+        )
+        target_t_all = self._get_implemented_action_vector()
+        temporal_state_values_all = self._build_temporal_derived_state_values(q_pos_all, target_t_all)
         need_aux_target_vector = self.has_aux_input and (not self.play_policy and self.has_aux_prediction)
         aux_target_vector = (
-            self._stack_aux_state_values(self._get_aux_state_values()) if need_aux_target_vector else None
+            self._stack_aux_state_values(self._get_aux_state_values())[env_ids] if need_aux_target_vector else None
         )
         if self.has_aux_input and self.aux_feedback_to_policy:
             if self.aux_buffer is None:
                 raise RuntimeError("Aux feedback requested but aux_buffer is not initialized.")
-            aux_input_vector = self.aux_buffer.clone()
+            aux_input_vector = self.aux_buffer[env_ids].clone()
         elif self.has_aux_input:
-            aux_input_vector = torch.zeros((self.num_envs, self.aux_input_dim), dtype=torch.float32, device=self.device)
+            aux_input_vector = torch.zeros((env_count, self.aux_input_dim), dtype=torch.float32, device=self.device)
         else:
             aux_input_vector = None
-        aux_input_vector = self._maybe_drop_aux_feedback(aux_input_vector)
+        aux_input_vector = self._maybe_drop_aux_feedback(aux_input_vector, env_ids=env_ids)
 
         obs = OrderedDict()
         for key in self.state_encoders_keys:
@@ -2446,7 +2648,7 @@ class Dagger:
             elif key == "base_vel":
                 obs[key] = base_vel
             elif key in self.temporal_derived_state_specs:
-                obs[key] = temporal_state_values[key]
+                obs[key] = temporal_state_values_all[key][env_ids]
             elif key in self.aux_state_specs:
                 if aux_input_vector is None:
                     raise RuntimeError(f"Aux state '{key}' is enabled but aux input vector is unavailable.")
@@ -2467,13 +2669,14 @@ class Dagger:
         if self.viser_raw_enabled:
             self._viser_pending_debug_frame = {
                 "iteration": iteration,
-                "q_pos": q_pos,
-                "door_joint_pos": door_joint_pos,
+                "q_pos": q_pos_all,
+                "door_joint_pos": door_joint_pos_all,
                 "robot_base_pos_w": robot_base_pos_w,
                 "robot_base_quat_w": robot_base_quat_w,
                 "ground_truth_pcd_world": self._viser_cached_ground_truth_pcd_world,
                 "robot_obs_pcd_base": door_pcd_base,
                 "policy_input_pcd_base": obs.get("local_pcd_t"),
+                "selected_env_ids": env_ids.detach().clone(),
             }
             self._viser_cached_ground_truth_pcd_world = None
 
@@ -2484,7 +2687,7 @@ class Dagger:
     def _student_forward(self, student_obs):
         return self.student_model_ddp(student_obs)
 
-    def _compute_student_loss(self, student_output, teacher_actions, aux_target=None):
+    def _compute_student_loss(self, student_output, teacher_actions, aux_target=None, mode_target=None):
         target = teacher_actions
         if aux_target is not None:
             target = torch.cat([teacher_actions, aux_target], dim=-1)
@@ -2496,9 +2699,11 @@ class Dagger:
         if self.mode_prediction_enabled:
             if "mode_logits" not in student_output:
                 raise RuntimeError("Mode prediction is enabled, but student output does not contain 'mode_logits'.")
+            if mode_target is None:
+                mode_target = self.env_family_ids.long()
             mode_loss = torch.nn.functional.cross_entropy(
                 student_output["mode_logits"],
-                self.env_family_ids.long(),
+                mode_target.long(),
             )
             total_loss = total_loss + self.mode_weight * mode_loss
         return total_loss, action_loss, aux_loss, mode_loss
@@ -2558,23 +2763,33 @@ class Dagger:
         self.teacher_forcing_env_mask[env_ids] = self._sample_teacher_forcing_mask(int(env_ids.numel()), beta)
         return beta
 
-    def _get_teacher_forcing_env_fraction(self):
-        if self.play_policy or not self._has_teacher():
-            return 0.0
-        return float(self.teacher_forcing_env_mask.float().mean().item())
-
-    def _mix_actions(self, student_actions, teacher_actions, iteration):
-        if self.play_policy or teacher_actions is None:
-            return student_actions, 0.0
+    def _compose_selected_step_actions(self, selected_env_ids, selected_student_env_actions, teacher_actions, iteration):
         beta = self._get_teacher_forcing_beta(iteration)
-        teacher_mask = self.teacher_forcing_env_mask
-        if not torch.any(teacher_mask):
-            return student_actions, beta
-        if torch.all(teacher_mask):
-            return teacher_actions, beta
-        step_actions = student_actions.clone()
-        step_actions[teacher_mask] = teacher_actions[teacher_mask]
-        return step_actions, beta
+        step_actions = torch.zeros((self.num_envs, self.num_actions), dtype=torch.float32, device=self.device)
+
+        selected_env_ids = self._normalize_env_ids(selected_env_ids)
+        student_rollout_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        if selected_env_ids.numel() > 0:
+            student_rollout_mask[selected_env_ids] = True
+
+        teacher_rollout_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        if teacher_actions is not None:
+            teacher_rollout_mask = student_rollout_mask & self.teacher_forcing_env_mask
+            student_rollout_mask &= ~self.teacher_forcing_env_mask
+
+        if torch.any(student_rollout_mask):
+            selected_student_mask = student_rollout_mask[selected_env_ids]
+            step_actions[selected_env_ids[selected_student_mask]] = selected_student_env_actions[selected_student_mask]
+        if teacher_actions is not None and torch.any(teacher_rollout_mask):
+            step_actions[teacher_rollout_mask] = teacher_actions[teacher_rollout_mask]
+
+        if selected_env_ids.numel() > 0:
+            self.latest_teacher_rollout_env_fraction = float(
+                teacher_rollout_mask[selected_env_ids].float().mean().item()
+            )
+        else:
+            self.latest_teacher_rollout_env_fraction = 0.0
+        return step_actions, beta, student_rollout_mask
 
     def _mean_completed_metric(self, values):
         if not values:
@@ -2643,8 +2858,6 @@ class Dagger:
         env_step_dt = max(float(getattr(self.ov_env, "dt", 0.0)), 1e-6)
         episode_length_seconds = episode_length * env_step_dt if episode_length is not None else None
         success_rate, family_success_rates = self._get_global_success_rates()
-        teacher_env_fraction = self._get_teacher_forcing_env_fraction()
-        student_env_fraction = 1.0 - teacher_env_fraction
         iteration_time_ms = self._consume_timing_means()
 
         if self.rank == 0:
@@ -2659,8 +2872,8 @@ class Dagger:
             if mode_acc is not None:
                 print("Mode Acc:", float(mode_acc.detach().cpu()))
             print("Teacher Forcing Beta:", teacher_forcing_beta)
-            print("Teacher Rollout Env Fraction:", teacher_env_fraction)
-            print("Student Rollout Env Fraction:", student_env_fraction)
+            print("Teacher Rollout Env Fraction:", self.latest_teacher_rollout_env_fraction)
+            print("Visual Policy Local Batch Size:", self.latest_visual_policy_env_count)
             print("Student Update Steps:", self.student_update_steps)
             print("Last Local Update Batch Size:", self.last_local_update_batch_size)
             print("Last Global Update Batch Size:", self.last_global_update_batch_size)
@@ -2690,6 +2903,7 @@ class Dagger:
             "dist/update_steps": self.student_update_steps,
             "dist/last_local_update_batch_size": self.last_local_update_batch_size,
             "dist/last_global_update_batch_size": self.last_global_update_batch_size,
+            "dist/visual_policy_local_batch_size": self.latest_visual_policy_env_count,
         }
         if aux_loss is not None:
             metrics["loss/aux"] = float(aux_loss.detach().cpu())
@@ -2710,8 +2924,7 @@ class Dagger:
                 metrics[f"stats/success_rate/{family_name}"] = family_success_rate
         if teacher_forcing_beta is not None:
             metrics["stats/teacher_forcing_beta"] = teacher_forcing_beta
-        metrics["stats/teacher_rollout_env_fraction"] = teacher_env_fraction
-        metrics["stats/student_rollout_env_fraction"] = student_env_fraction
+        metrics["stats/teacher_rollout_env_fraction"] = self.latest_teacher_rollout_env_fraction
         if self.aux_pregrasp_dropout_prob > 0.0:
             metrics["stats/aux_pregrasp_env_fraction"] = self.latest_aux_pregrasp_env_fraction
             metrics["stats/aux_pregrasp_dropout_fraction"] = self.latest_aux_pregrasp_dropout_fraction
@@ -2749,6 +2962,7 @@ class Dagger:
             self._seed_temporal_histories()
             self._seed_aux_buffer()
             self._resample_teacher_forcing_env_mask(self.resume_iteration)
+            self._reset_visual_policy_scheduler()
 
             for iteration in range(start_iteration, end_iteration):
                 self._sync_timing_device()
@@ -2756,7 +2970,8 @@ class Dagger:
                 timing_breakdown = OrderedDict() if self._should_record_timing_breakdown(iteration) else None
                 stage_start_time = iteration_start_time
 
-                student_obs = self._build_student_obs(iteration=iteration)
+                selected_env_ids = self._select_visual_policy_env_ids()
+                student_obs = self._build_student_obs(iteration=iteration, env_ids=selected_env_ids)
                 stage_start_time = self._mark_timing_breakdown(
                     timing_breakdown,
                     stage_start_time,
@@ -2767,35 +2982,22 @@ class Dagger:
                 mode_target = None
                 if self.mode_prediction_enabled:
                     mode_logits = student_output["mode_logits"].detach()
-                    mode_target = self.env_family_ids.long()
+                    mode_target = self.env_family_ids[selected_env_ids].long()
                     mode_pred = mode_logits.argmax(dim=-1)
                     if self.play_policy and iteration % 10 == 0:
                         print("Iteration ", iteration, ": Mode Pred:", mode_logits.detach().cpu().tolist())
                 student_actions = student_output["action"][:, 0, :]
-                student_env_actions = self._student_actions_to_env_actions(student_actions)
+                student_env_actions = self._student_actions_to_env_actions(student_actions, env_ids=selected_env_ids)
                 aux_prediction_for_replay = None
                 if self.has_aux_prediction:
                     aux_prediction_for_replay = self._decode_aux_prediction(student_output["aux"].detach())
-                    self.aux_buffer[:] = aux_prediction_for_replay
+                    self.aux_buffer[selected_env_ids] = aux_prediction_for_replay
                 stage_start_time = self._mark_timing_breakdown(
                     timing_breakdown,
                     stage_start_time,
                     "student_forward",
                 )
 
-                if self.viser_raw_enabled and self._viser_pending_debug_frame is not None:
-                    self._maybe_update_viser_debug(
-                        iteration=self._viser_pending_debug_frame["iteration"],
-                        q_pos=self._viser_pending_debug_frame["q_pos"],
-                        door_joint_pos=self._viser_pending_debug_frame["door_joint_pos"],
-                        robot_base_pos_w=self._viser_pending_debug_frame["robot_base_pos_w"],
-                        robot_base_quat_w=self._viser_pending_debug_frame["robot_base_quat_w"],
-                        ground_truth_pcd_world=self._viser_pending_debug_frame["ground_truth_pcd_world"],
-                        robot_obs_pcd_base=self._viser_pending_debug_frame["robot_obs_pcd_base"],
-                        policy_input_pcd_base=self._viser_pending_debug_frame["policy_input_pcd_base"],
-                        aux_prediction=aux_prediction_for_replay,
-                    )
-                    self._viser_pending_debug_frame = None
                 stage_start_time = self._mark_timing_breakdown(
                     timing_breakdown,
                     stage_start_time,
@@ -2824,8 +3026,9 @@ class Dagger:
                         aux_target = self._get_aux_target(self.latest_aux_target_vector)
                     total_loss, action_loss, aux_loss, mode_loss = self._compute_student_loss(
                         student_output,
-                        teacher_output["mus"],
+                        teacher_output["mus"][selected_env_ids],
                         aux_target=aux_target,
+                        mode_target=mode_target,
                     )
                     if self.mode_prediction_enabled:
                         mode_acc = (mode_pred == mode_target).float().mean()
@@ -2844,11 +3047,27 @@ class Dagger:
                         "student_update",
                     )
 
-                step_actions, teacher_forcing_beta = self._mix_actions(
+                step_actions, teacher_forcing_beta, student_rollout_mask = self._compose_selected_step_actions(
+                    selected_env_ids,
                     student_env_actions.detach(),
                     teacher_actions,
                     iteration,
                 )
+                if self.viser_raw_enabled and self._viser_pending_debug_frame is not None:
+                    self._maybe_update_viser_debug(
+                        iteration=self._viser_pending_debug_frame["iteration"],
+                        q_pos=self._viser_pending_debug_frame["q_pos"],
+                        door_joint_pos=self._viser_pending_debug_frame["door_joint_pos"],
+                        robot_base_pos_w=self._viser_pending_debug_frame["robot_base_pos_w"],
+                        robot_base_quat_w=self._viser_pending_debug_frame["robot_base_quat_w"],
+                        ground_truth_pcd_world=self._viser_pending_debug_frame["ground_truth_pcd_world"],
+                        robot_obs_pcd_base=self._viser_pending_debug_frame["robot_obs_pcd_base"],
+                        policy_input_pcd_base=self._viser_pending_debug_frame["policy_input_pcd_base"],
+                        aux_prediction=aux_prediction_for_replay,
+                        selected_env_ids=self._viser_pending_debug_frame["selected_env_ids"],
+                        student_rollout_mask=student_rollout_mask,
+                    )
+                    self._viser_pending_debug_frame = None
                 obs, rew, out_of_reach, timed_out, step_extras = self.env.step(step_actions)
                 stage_start_time = self._mark_timing_breakdown(
                     timing_breakdown,
@@ -2873,13 +3092,23 @@ class Dagger:
                 self.current_lengths += 1
                 done_mask = torch.nonzero(out_of_reach | timed_out, as_tuple=False).squeeze(-1)
                 if done_mask.numel() > 0:
-                    self._update_completed_episode_metrics(done_mask, timed_out)
+                    metric_done_mask = self._filter_active_visual_done_env_ids(done_mask, selected_env_ids)
+                    self._update_completed_episode_metrics(metric_done_mask, timed_out)
                     self.current_rewards[done_mask] = 0.0
                     self.current_lengths[done_mask] = 0.0
                     self._resample_wall_distractors(done_mask)
                     self._seed_temporal_histories(done_mask)
                     self._seed_aux_buffer(done_mask)
                     self._resample_teacher_forcing_env_mask(iteration + 1, done_mask)
+                    replacement_env_ids = self._advance_visual_policy_env_ids_after_reset(done_mask)
+                    if replacement_env_ids.numel() > 0:
+                        hard_reset_env_ids = self._reset_visual_policy_replacement_envs(
+                            replacement_env_ids,
+                            iteration + 1,
+                            already_reset_env_ids=done_mask,
+                        )
+                        if hard_reset_env_ids.numel() > 0:
+                            obs = self.ov_env._get_observations()
                 stage_start_time = self._mark_timing_breakdown(
                     timing_breakdown,
                     stage_start_time,
