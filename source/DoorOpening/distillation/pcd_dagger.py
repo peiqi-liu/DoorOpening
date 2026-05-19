@@ -757,6 +757,10 @@ class Dagger:
             idx: FrankaLeapSampler(door_asset_paths[idx], device=self.device, num_points=self.door_pcd_num_points)
             for idx in unique_asset_idx
         }
+        door_geometry_aug_cfg = self.runtime_cfg.get("door_geometry_aug", {})
+        for sampler in self.door_samplers.values():
+            sampler.configure_door_geometry_aug(door_geometry_aug_cfg, device=self.device)
+            sampler.set_door_geometry_aug_runtime_enabled(not self.play_policy)
         if self.robot_pcd_num_points is None:
             self.robot_pcd_num_points = self.door_pcd_num_points
         self.robot_pcd_num_points = int(self.robot_pcd_num_points)

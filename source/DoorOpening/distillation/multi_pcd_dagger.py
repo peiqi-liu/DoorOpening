@@ -1087,6 +1087,10 @@ class Dagger:
             idx: FrankaLeapSampler(door_asset_paths[idx], device=self.device, num_points=self.door_pcd_num_points)
             for idx in unique_asset_idx
         }
+        door_geometry_aug_cfg = self.runtime_cfg.get("door_geometry_aug", {})
+        for sampler in self.door_samplers.values():
+            sampler.configure_door_geometry_aug(door_geometry_aug_cfg, device=self.device)
+            sampler.set_door_geometry_aug_runtime_enabled(not self.play_policy)
         self.door_sampler_env_ids = {
             idx: torch.nonzero(self.env_asset_idx == int(idx), as_tuple=False).squeeze(-1)
             for idx in unique_asset_idx

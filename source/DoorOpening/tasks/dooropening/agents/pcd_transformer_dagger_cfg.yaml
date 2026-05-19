@@ -159,6 +159,17 @@ dagger:
   aux_feedback_to_policy: true  # When false, aux input stays zero instead of feeding back predictions.
   aux_pregrasp_dropout_prob: 0.001  # Conservative start: 0.1% per pregrasp step while predicted aux feedback is carried over.
   # aux_pregrasp_dropout_prob: 0
+  door_geometry_aug:
+    enabled: false
+    env_prob: 1.0
+    global_shift_std_m: [0.010, 0.010, 0.005]
+    global_shift_clip_m: [0.025, 0.025, 0.010]
+    handle_child_shift_std_m: [0.000, 0.012, 0.012]
+    handle_child_shift_clip_m: [0.000, 0.030, 0.030]
+    handle_scale_range: [0.97, 1.03]
+    panel_width_scale_range: [0.98, 1.02]
+    panel_width_axis: 1
+    panel_width_anchor: "origin"
   log_interval: 100
   save_interval: 5000
   reset_progress_total: 50000
@@ -207,7 +218,7 @@ dagger:
     raw:
       enabled: false  # Save raw `.pt` replay chunks for offline debugging.
       path: "viser_replay.pt"
-      save_interval: 800  # Write one raw `.pt` file every N iterations.
+      save_interval: 6000  # Write one raw `.pt` file every N iterations.
       max_points: 6000  # Raw replay is for debugging, not training; smaller clouds replay much better on laptops.
       include_ground_truth: true  # GT is the heaviest cloud and usually duplicates what robot_obs already shows.
       max_frames: 3000  # Keep at most this many frames in each raw `.pt` file; set 0 to disable the cap.

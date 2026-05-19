@@ -1005,6 +1005,18 @@ class FrankaLeapSampler:
         self.device = device
         self.urdf_path = urdf_path
         self.robot = TorchURDF.load(urdf_path, lazy_load_meshes=True, device=device)
+        self.door_geometry_aug_enabled = False
+        self.door_geometry_aug_runtime_enabled = True
+        self.door_geometry_aug_env_prob = 1.0
+        self.door_geometry_aug_global_shift_std_m = torch.zeros(3, device=device, dtype=torch.float32)
+        self.door_geometry_aug_global_shift_clip_m = torch.zeros(3, device=device, dtype=torch.float32)
+        self.door_geometry_aug_handle_child_shift_std_m = torch.zeros(3, device=device, dtype=torch.float32)
+        self.door_geometry_aug_handle_child_shift_clip_m = torch.zeros(3, device=device, dtype=torch.float32)
+        self.door_geometry_aug_handle_scale_range = (1.0, 1.0)
+        self.door_geometry_aug_panel_width_scale_range = (1.0, 1.0)
+        self.door_geometry_aug_panel_width_axis = 1
+        self.door_geometry_aug_panel_width_anchor = "origin"
+        self.latest_door_geometry_aug_stats = {}
         # Load meshes for all links with visuals
         self.links = [l for l in self.robot.links if len(l.visuals) and (l.visuals[0].geometry.mesh is not None)]
         self.hand_links = [l for l in self.links if ("panda" not in l.name) and l.visuals[0].geometry.mesh is not None]
@@ -1035,6 +1047,135 @@ class FrankaLeapSampler:
             for i, l in enumerate(self.links)
         }
 
+    def configure_door_geometry_aug(self, cfg: dict | None, device=None):
+        cfg = {} if cfg is None else dict(cfg)
+        device = self.device if device is None else device
+        self.door_geometry_aug_enabled = bool(cfg.get("enabled", False))
+        self.door_geometry_aug_runtime_enabled = True
+        self.door_geometry_aug_env_prob = float(cfg.get("env_prob", 1.0))
+        if not 0.0 <= self.door_geometry_aug_env_prob <= 1.0:
+            raise ValueError("door_geometry_aug.env_prob must be in [0, 1].")
+
+        global_std = self._cfg_vec3(cfg.get("global_shift_std_m"), [0.0, 0.0, 0.0])
+        global_clip = self._cfg_vec3(cfg.get("global_shift_clip_m"), [0.0, 0.0, 0.0])
+        handle_std = self._cfg_vec3(cfg.get("handle_child_shift_std_m"), [0.0, 0.0, 0.0])
+        handle_clip = self._cfg_vec3(cfg.get("handle_child_shift_clip_m"), [0.0, 0.0, 0.0])
+        if any(v < 0.0 for v in (*global_std, *handle_std)):
+            raise ValueError("door_geometry_aug std values must be nonnegative.")
+        if any(v < 0.0 for v in (*global_clip, *handle_clip)):
+            raise ValueError("door_geometry_aug clip values must be nonnegative.")
+        self.door_geometry_aug_global_shift_std_m = torch.tensor(global_std, device=device, dtype=torch.float32)
+        self.door_geometry_aug_global_shift_clip_m = torch.tensor(global_clip, device=device, dtype=torch.float32)
+        self.door_geometry_aug_handle_child_shift_std_m = torch.tensor(handle_std, device=device, dtype=torch.float32)
+        self.door_geometry_aug_handle_child_shift_clip_m = torch.tensor(handle_clip, device=device, dtype=torch.float32)
+
+        self.door_geometry_aug_handle_scale_range = self._cfg_positive_range(
+            cfg.get("handle_scale_range", [1.0, 1.0]), "handle_scale_range"
+        )
+        self.door_geometry_aug_panel_width_scale_range = self._cfg_positive_range(
+            cfg.get("panel_width_scale_range", [1.0, 1.0]), "panel_width_scale_range"
+        )
+        self.door_geometry_aug_panel_width_axis = int(cfg.get("panel_width_axis", 1))
+        if self.door_geometry_aug_panel_width_axis not in (0, 1, 2):
+            raise ValueError("door_geometry_aug.panel_width_axis must be one of {0, 1, 2}.")
+        self.door_geometry_aug_panel_width_anchor = str(cfg.get("panel_width_anchor", "origin")).lower()
+        if self.door_geometry_aug_panel_width_anchor not in ("origin", "center"):
+            raise ValueError('door_geometry_aug.panel_width_anchor must be "origin" or "center".')
+
+        if self.door_geometry_aug_enabled:
+            if "link_1" not in self.points:
+                print("[WARN] door_geometry_aug enabled but link_1 is missing; skipping panel width augmentation.")
+            if "link_2" not in self.points:
+                print("[WARN] door_geometry_aug enabled but link_2 is missing; skipping handle augmentation.")
+            print(
+                "[INFO] door_geometry_aug enabled: "
+                f"env_prob={self.door_geometry_aug_env_prob}, "
+                f"global_shift_std_m={global_std}, "
+                f"handle_child_shift_std_m={handle_std}, "
+                f"handle_scale_range={self.door_geometry_aug_handle_scale_range}, "
+                f"panel_width_scale_range={self.door_geometry_aug_panel_width_scale_range}"
+            )
+        return self
+
+    def set_door_geometry_aug_runtime_enabled(self, flag: bool):
+        self.door_geometry_aug_runtime_enabled = bool(flag)
+
+    def _cfg_vec3(self, value, default):
+        value = default if value is None else value
+        if len(value) != 3:
+            raise ValueError("door_geometry_aug vector values must have length 3.")
+        return tuple(float(v) for v in value)
+
+    def _cfg_positive_range(self, value, name):
+        if len(value) != 2:
+            raise ValueError(f"door_geometry_aug.{name} must have length 2.")
+        low, high = float(value[0]), float(value[1])
+        if low <= 0.0 or high <= 0.0:
+            raise ValueError(f"door_geometry_aug.{name} values must be positive.")
+        if low > high:
+            raise ValueError(f"door_geometry_aug.{name} lower bound must be <= upper bound.")
+        return low, high
+
+    def _sample_clipped_normal(self, shape, std_vec, clip_vec, device, dtype):
+        std_vec = std_vec.to(device=device, dtype=dtype)
+        clip_vec = clip_vec.to(device=device, dtype=dtype)
+        sample = torch.randn(shape, device=device, dtype=dtype) * std_vec
+        return torch.clamp(sample, min=-clip_vec, max=clip_vec)
+
+    def _sample_uniform(self, shape, low, high, device, dtype):
+        return torch.empty(shape, device=device, dtype=dtype).uniform_(low, high)
+
+    def _sample_geometry_aug_params(self, batch_size, device, dtype):
+        global_shift = self._sample_clipped_normal(
+            (batch_size, 3),
+            self.door_geometry_aug_global_shift_std_m,
+            self.door_geometry_aug_global_shift_clip_m,
+            device,
+            dtype,
+        )
+        handle_shift = self._sample_clipped_normal(
+            (batch_size, 3),
+            self.door_geometry_aug_handle_child_shift_std_m,
+            self.door_geometry_aug_handle_child_shift_clip_m,
+            device,
+            dtype,
+        )
+        handle_scale = self._sample_uniform(
+            (batch_size,),
+            *self.door_geometry_aug_handle_scale_range,
+            device=device,
+            dtype=dtype,
+        )
+        panel_width_scale = self._sample_uniform(
+            (batch_size,),
+            *self.door_geometry_aug_panel_width_scale_range,
+            device=device,
+            dtype=dtype,
+        )
+        if self.door_geometry_aug_env_prob < 1.0:
+            env_mask = torch.rand((batch_size,), device=device, dtype=dtype) < self.door_geometry_aug_env_prob
+            mask_vec = env_mask.to(dtype).unsqueeze(-1)
+            global_shift = global_shift * mask_vec
+            handle_shift = handle_shift * mask_vec
+            handle_scale = torch.where(env_mask, handle_scale, torch.ones_like(handle_scale))
+            panel_width_scale = torch.where(env_mask, panel_width_scale, torch.ones_like(panel_width_scale))
+        else:
+            env_mask = torch.ones((batch_size,), device=device, dtype=torch.bool)
+
+        self.latest_door_geometry_aug_stats = {
+            "door_geom_aug/env_fraction": float(env_mask.to(dtype).mean().detach().cpu()),
+            "door_geom_aug/global_shift_norm_mean_m": float(global_shift.norm(dim=-1).mean().detach().cpu()),
+            "door_geom_aug/handle_shift_norm_mean_m": float(handle_shift.norm(dim=-1).mean().detach().cpu()),
+            "door_geom_aug/handle_scale_mean": float(handle_scale.mean().detach().cpu()),
+            "door_geom_aug/panel_width_scale_mean": float(panel_width_scale.mean().detach().cpu()),
+        }
+        return {
+            "global_shift": global_shift,
+            "handle_shift": handle_shift,
+            "handle_scale": handle_scale,
+            "panel_width_scale": panel_width_scale,
+        }
+
     def sample(self, joint_angles, joint_mapping_list=None, num_points=None, hand_only=False):
         """
         joint_angles: (B, 23) joint config
@@ -1050,14 +1191,40 @@ class FrankaLeapSampler:
 
         fk = self.robot.visual_geometry_fk_batch(joint_angles)  # dict[geom] -> (B,4,4)
         pcs = []
+        batch_size = joint_angles.shape[0]
+        aug_params = None
+        if self.door_geometry_aug_enabled and self.door_geometry_aug_runtime_enabled and not hand_only:
+            aug_params = self._sample_geometry_aug_params(batch_size, joint_angles.device, joint_angles.dtype)
 
         link_set = self.hand_links if hand_only else self.links
         for l in link_set:
             T = fk[l.visuals[0].geometry]  # (B,4,4)
-            pc = self.points[l.name].repeat(joint_angles.shape[0], 1, 1)  # (B,Ni,3)
+            pc = self.points[l.name].repeat(batch_size, 1, 1)  # (B,Ni,3)
+            if aug_params is not None and l.name == "link_1":
+                scale = aug_params["panel_width_scale"]
+                axis = self.door_geometry_aug_panel_width_axis
+                coord = pc[..., axis]
+                if self.door_geometry_aug_panel_width_anchor == "center":
+                    anchor = coord.mean(dim=1, keepdim=True)
+                else:
+                    anchor = 0.0
+                pc = pc.clone()
+                pc[..., axis] = anchor + scale[:, None] * (coord - anchor)
+            elif aug_params is not None and l.name == "link_2":
+                scale = aug_params["handle_scale"]
+                center = pc.mean(dim=1, keepdim=True)
+                pc = center + scale[:, None, None] * (pc - center)
+                pc = pc + aug_params["handle_shift"][:, None, :]
             pcs.append(transform_pointcloud(pc, T))
 
         pc = torch.cat(pcs, dim=1)  # (B, totalN, 3)
+        if aug_params is not None:
+            global_shift = aug_params["global_shift"][:, None, :]
+            if torch.isfinite(pc).all():
+                pc = pc + global_shift
+            else:
+                valid = torch.isfinite(pc).all(dim=-1, keepdim=True)
+                pc = torch.where(valid, pc + global_shift, pc)
         if num_points is None:
             return pc
         idx = np.random.choice(pc.shape[1], num_points, replace=False)
