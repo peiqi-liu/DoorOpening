@@ -165,7 +165,6 @@ dagger:
     start_phase_range: [2.0, 3.5]
     duration_steps_range: [3, 6]
     max_bursts_per_episode: 1
-    teacher_forced_envs_only: true
     preserve_handle_side: true
     replace_components: ["base", "arm"]
     loss_target: "correct_teacher"

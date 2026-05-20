@@ -1219,7 +1219,6 @@ class Dagger:
             "start_phase_range": [2.4, 3.1],
             "duration_steps_range": [5, 8],
             "max_bursts_per_episode": 1,
-            "teacher_forced_envs_only": True,
             "preserve_handle_side": True,
             "replace_components": ["base", "arm"],
             "loss_target": "correct_teacher",
@@ -1251,7 +1250,6 @@ class Dagger:
         self.wrong_pp_duration_min = int(duration_min)
         self.wrong_pp_duration_max = int(duration_max)
         self.wrong_pp_max_bursts_per_episode = int(cfg.get("max_bursts_per_episode", 1))
-        self.wrong_pp_teacher_forced_envs_only = bool(cfg.get("teacher_forced_envs_only", True))
         self.wrong_pp_preserve_handle_side = bool(cfg.get("preserve_handle_side", True))
         self.wrong_pp_loss_target = str(cfg.get("loss_target", "correct_teacher"))
         self.wrong_pp_use_wrong_trajectory = bool(cfg.get("use_wrong_trajectory", True))
@@ -2970,8 +2968,6 @@ class Dagger:
         get_pregrasp_mask = getattr(ref_motion_lib, "get_before_first_keyframe_mask", None)
         if callable(get_pregrasp_mask):
             eligible &= ~get_pregrasp_mask().to(device=self.device, dtype=torch.bool)
-        if self.wrong_pp_teacher_forced_envs_only:
-            eligible &= self.teacher_forcing_env_mask
 
         new_env_ids = torch.nonzero(eligible, as_tuple=False).squeeze(-1)
         if new_env_ids.numel() == 0:
