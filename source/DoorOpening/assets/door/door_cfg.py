@@ -165,7 +165,7 @@ def create_door_cfg(
 
 root_path = os.path.dirname(os.path.dirname(__file__))
 # asset_base_folder = os.path.join(root_path, "door/PartNetv4")
-asset_base_folder = os.path.join(root_path, "door/PartNetv9")
+asset_base_folder = os.path.join(root_path, "door/PartNetv8_plus")
 asset_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/mobility.urdf"), recursive=True))
 board_offsets = []
 board_bboxes = []
@@ -181,7 +181,8 @@ board_offsets = torch.tensor(board_offsets)
 board_bboxes = torch.tensor(board_bboxes)
 handle_offsets = torch.tensor(handle_offsets)
 
-motion_traj_paths = [os.path.join(os.path.dirname(asset_path), "traj.pkl") for asset_path in asset_paths]
+motion_traj_file = os.environ.get("DOOROPENING_MOTION_TRAJ_FILE", "traj.pkl")
+motion_traj_paths = [os.path.join(os.path.dirname(asset_path), motion_traj_file) for asset_path in asset_paths]
 
 # door_asset_path = asset_paths[32]
 door_asset_path = asset_paths[0]

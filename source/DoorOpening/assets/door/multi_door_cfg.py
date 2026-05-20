@@ -214,7 +214,8 @@ board_bboxes = torch.tensor(board_bboxes)
 handle_offsets = torch.tensor(handle_offsets)
 asset_family_ids = torch.tensor(asset_family_ids, dtype=torch.long)
 
-motion_traj_paths = [os.path.join(os.path.dirname(asset_path), "traj.pkl") for asset_path in asset_paths]
+motion_traj_file = os.environ.get("DOOROPENING_MOTION_TRAJ_FILE", "traj.pkl")
+motion_traj_paths = [os.path.join(os.path.dirname(asset_path), motion_traj_file) for asset_path in asset_paths]
 motion_family_ids = asset_family_ids.clone()
 motion_family_names = list(asset_family_names)
 

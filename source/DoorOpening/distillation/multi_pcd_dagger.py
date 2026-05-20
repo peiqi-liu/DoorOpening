@@ -2,6 +2,7 @@ import os
 import math
 import pathlib
 import time
+import csv
 from collections import OrderedDict, deque
 from pathlib import Path
 
@@ -141,6 +142,35 @@ class Dagger:
         self.log_interval = int(self.runtime_cfg.get("log_interval", 100))
         self.save_interval = int(self.runtime_cfg.get("save_interval", 5_000))
         self.visual_policy_batch_size = int(self.runtime_cfg.get("visual_policy_batch_size", 0))
+        self.visual_policy_env_rotation_cfg = dict(self.runtime_cfg.get("visual_policy_env_rotation", {}))
+        self.visual_policy_env_selection_strategy = str(
+            self.visual_policy_env_rotation_cfg.get("strategy", "random")
+        ).lower()
+        if self.visual_policy_env_selection_strategy not in {"random", "round_robin", "least_used"}:
+            raise ValueError(
+                "dagger.visual_policy_env_rotation.strategy must be one of "
+                "['random', 'round_robin', 'least_used'], got "
+                f"'{self.visual_policy_env_selection_strategy}'."
+            )
+        self.visual_policy_coverage_log_enabled = bool(
+            self.visual_policy_env_rotation_cfg.get("log_coverage", True)
+        )
+        self.visual_policy_coverage_log_interval = int(
+            self.visual_policy_env_rotation_cfg.get("log_interval", 1000)
+        )
+        self.visual_policy_coverage_csv_interval = int(
+            self.visual_policy_env_rotation_cfg.get("csv_interval", 10000)
+        )
+        self.visual_policy_coverage_csv_dir = self.visual_policy_env_rotation_cfg.get("csv_dir")
+        self.visual_policy_coverage_print_topk = int(
+            self.visual_policy_env_rotation_cfg.get("print_topk", 8)
+        )
+        if self.visual_policy_coverage_log_interval <= 0:
+            raise ValueError("dagger.visual_policy_env_rotation.log_interval must be positive.")
+        if self.visual_policy_coverage_csv_interval <= 0:
+            raise ValueError("dagger.visual_policy_env_rotation.csv_interval must be positive.")
+        if self.visual_policy_coverage_print_topk < 0:
+            raise ValueError("dagger.visual_policy_env_rotation.print_topk must be >= 0.")
         self.pointcloud_source = str(self.runtime_cfg.get("pointcloud_source", "sampler")).lower()
         self.robot_pcd_num_points = self.runtime_cfg.get("robot_num_points")
         self.sampler_render_cfg = self.runtime_cfg.get("sampler_render", {})
@@ -199,6 +229,7 @@ class Dagger:
         self._resumed_from_student_ckpt = False
 
         self.nn_dir = nn_dir
+        self.summaries_dir = summaries_dir
         self.debug_pointcloud_dir = os.path.join(self.nn_dir if self.nn_dir is not None else os.getcwd(), "debug_pointclouds")
         self.wandb_cfg = self.runtime_cfg.get("wandb", self.config.get("wandb", {}))
         self.use_wandb = self.rank == 0 and bool(self.wandb_cfg.get("enabled", False))
@@ -223,6 +254,20 @@ class Dagger:
         self.teacher_forcing_env_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._visual_policy_active_env_ids = None
         self._visual_policy_active_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._visual_policy_round_robin_cursor = 0
+        self._warned_visual_policy_candidate_shortage = False
+        self._active_env_rotation_step = 0
+        self.visual_env_activation_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.visual_env_active_step_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.visual_env_completed_active_episode_count = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self.visual_env_success_active_episode_count = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self.visual_env_last_activated_step = torch.full(
+            (self.num_envs,), -1, dtype=torch.long, device=self.device
+        )
         self.latest_visual_policy_env_count = self.num_envs
         self.latest_teacher_rollout_env_fraction = 0.0
         self.current_rewards = torch.zeros((self.num_envs, 1), dtype=torch.float32, device=self.device)
@@ -250,6 +295,7 @@ class Dagger:
         self._init_student()
         self._init_history_buffers()
         self._init_pointcloud_assets()
+        self._log_initial_visual_env_assignment()
         self._init_viser_debug_tools()
 
     def _init_teacher(self):
@@ -2477,6 +2523,9 @@ class Dagger:
             dist.all_reduce(batch_size, op=dist.ReduceOp.SUM)
         return int(batch_size.item())
 
+    def _get_global_step(self):
+        return int(self._active_env_rotation_step)
+
     def _all_env_ids(self):
         return torch.arange(self.num_envs, device=self.device, dtype=torch.long)
 
@@ -2488,12 +2537,91 @@ class Dagger:
     def _visual_policy_uses_full_batch(self):
         return self.visual_policy_batch_size <= 0 or self.visual_policy_batch_size >= self.num_envs
 
+    def _register_visual_policy_activation(self, env_ids, step=None):
+        env_ids = self._normalize_env_ids(env_ids)
+        if env_ids.numel() == 0:
+            return
+        if step is None:
+            step = self._get_global_step()
+        self.visual_env_activation_count[env_ids] += 1
+        self.visual_env_last_activated_step[env_ids] = int(step)
+
+    def _count_visual_policy_active_step(self, active_env_ids):
+        active_env_ids = self._normalize_env_ids(active_env_ids)
+        if active_env_ids.numel() == 0:
+            return
+        self.visual_env_active_step_count[active_env_ids] += 1
+
+    def _warn_visual_policy_candidate_shortage(self, requested, available):
+        if self._warned_visual_policy_candidate_shortage:
+            return
+        self._warned_visual_policy_candidate_shortage = True
+        if self.rank == 0:
+            print(
+                "[WARN] Visual-policy env replacement requested "
+                f"{int(requested)} envs, but only {int(available)} inactive candidates were available. "
+                "The active visual env set may shrink."
+            )
+
+    def _select_random_visual_policy_env_ids(self, count, candidate_env_ids, exclude_mask):
+        # Preserve the original random behavior, including the fallback that ignores
+        # exclude_env_ids when the active set is nearly the whole local batch.
+        if candidate_env_ids.numel() < count:
+            candidate_env_ids = torch.nonzero(~self._visual_policy_active_mask, as_tuple=False).squeeze(-1)
+        if candidate_env_ids.numel() < count:
+            raise RuntimeError(f"Unable to select {count} visual-policy envs from {self.num_envs} envs.")
+        perm = torch.randperm(candidate_env_ids.numel(), device=self.device)
+        return candidate_env_ids[perm[:count]]
+
+    def _select_round_robin_visual_policy_env_ids(self, count, exclude_mask):
+        picked = []
+        cursor = int(self._visual_policy_round_robin_cursor) % max(1, self.num_envs)
+        checked = 0
+        while len(picked) < count and checked < self.num_envs:
+            env_id = (cursor + checked) % self.num_envs
+            if (
+                not bool(self._visual_policy_active_mask[env_id].detach().cpu().item())
+                and not bool(exclude_mask[env_id].detach().cpu().item())
+            ):
+                picked.append(env_id)
+            checked += 1
+
+        self._visual_policy_round_robin_cursor = (cursor + checked) % max(1, self.num_envs)
+        if len(picked) < count:
+            self._warn_visual_policy_candidate_shortage(count, len(picked))
+        if not picked:
+            return torch.empty(0, device=self.device, dtype=torch.long)
+        return torch.tensor(picked, device=self.device, dtype=torch.long)
+
+    def _select_least_used_visual_policy_env_ids(self, count, candidate_env_ids):
+        if candidate_env_ids.numel() == 0:
+            self._warn_visual_policy_candidate_shortage(count, 0)
+            return candidate_env_ids
+
+        active_steps = self.visual_env_active_step_count[candidate_env_ids].detach().cpu().tolist()
+        activations = self.visual_env_activation_count[candidate_env_ids].detach().cpu().tolist()
+        candidate_list = candidate_env_ids.detach().cpu().tolist()
+        ordered = sorted(
+            zip(candidate_list, active_steps, activations),
+            key=lambda item: (int(item[1]), int(item[2]), int(item[0])),
+        )
+        if len(ordered) < count:
+            self._warn_visual_policy_candidate_shortage(count, len(ordered))
+        picked = [env_id for env_id, _, _ in ordered[:count]]
+        return torch.tensor(picked, device=self.device, dtype=torch.long)
+
     def _reset_visual_policy_scheduler(self):
         self._visual_policy_active_env_ids = None
         self._visual_policy_active_mask.zero_()
+        self._visual_policy_round_robin_cursor = 0
         self.latest_visual_policy_env_count = (
             self.num_envs if self._visual_policy_uses_full_batch() else int(self.visual_policy_batch_size)
         )
+        if self._visual_policy_uses_full_batch():
+            all_env_ids = self._all_env_ids()
+            self._visual_policy_active_mask[:] = True
+            self._visual_policy_active_env_ids = all_env_ids
+            self._register_visual_policy_activation(all_env_ids)
 
     def _take_next_visual_policy_env_ids(self, count, exclude_env_ids=None):
         count = int(count)
@@ -2510,14 +2638,18 @@ class Dagger:
             (~self._visual_policy_active_mask) & (~exclude_mask),
             as_tuple=False,
         ).squeeze(-1)
-        if candidate_env_ids.numel() < count:
-            candidate_env_ids = torch.nonzero(~self._visual_policy_active_mask, as_tuple=False).squeeze(-1)
-        if candidate_env_ids.numel() < count:
-            raise RuntimeError(f"Unable to select {count} visual-policy envs from {self.num_envs} envs.")
+        if self.visual_policy_env_selection_strategy == "random":
+            picked = self._select_random_visual_policy_env_ids(count, candidate_env_ids, exclude_mask)
+        elif self.visual_policy_env_selection_strategy == "round_robin":
+            picked = self._select_round_robin_visual_policy_env_ids(count, exclude_mask)
+        elif self.visual_policy_env_selection_strategy == "least_used":
+            picked = self._select_least_used_visual_policy_env_ids(count, candidate_env_ids)
+        else:
+            raise RuntimeError(f"Unknown visual-policy env selection strategy: {self.visual_policy_env_selection_strategy}")
 
-        perm = torch.randperm(candidate_env_ids.numel(), device=self.device)
-        picked = candidate_env_ids[perm[:count]]
-        self._visual_policy_active_mask[picked] = True
+        if picked.numel() > 0:
+            self._visual_policy_active_mask[picked] = True
+            self._register_visual_policy_activation(picked)
         return picked
 
     def _select_visual_policy_env_ids(self):
@@ -2562,8 +2694,14 @@ class Dagger:
             int(retired_env_ids.numel()),
             exclude_env_ids=retired_env_ids,
         )
-        active_env_ids = self._visual_policy_active_env_ids.clone()
-        active_env_ids[reset_slots] = replacement_env_ids
+        if replacement_env_ids.numel() == retired_env_ids.numel():
+            active_env_ids = self._visual_policy_active_env_ids.clone()
+            active_env_ids[reset_slots] = replacement_env_ids
+        else:
+            active_env_ids = torch.cat(
+                [self._visual_policy_active_env_ids[~reset_slots], replacement_env_ids],
+                dim=0,
+            )
         self._visual_policy_active_env_ids = active_env_ids
         return replacement_env_ids
 
@@ -2805,6 +2943,10 @@ class Dagger:
         episode_success_tensor = timed_out[done_mask].to(dtype=torch.float32)
         episode_successes = episode_success_tensor.detach().cpu().tolist()
         episode_family_ids = self.env_family_ids[done_mask].detach().cpu().tolist()
+        self.visual_env_completed_active_episode_count[done_mask] += 1
+        successful_done_env_ids = done_mask[episode_success_tensor.to(dtype=torch.bool)]
+        if successful_done_env_ids.numel() > 0:
+            self.visual_env_success_active_episode_count[successful_done_env_ids] += 1
 
         self.completed_rewards.extend(float(value) for value in episode_rewards)
         self.completed_lengths.extend(float(value) for value in episode_lengths)
@@ -2840,6 +2982,229 @@ class Dagger:
             else:
                 family_success_rates[family_name] = None
         return success_rate, family_success_rates
+
+    def _get_visual_env_coverage_stats(self):
+        active_mask = self._visual_policy_active_mask
+        active_env_count = int(active_mask.sum().detach().cpu().item())
+        activation_counts = self.visual_env_activation_count.to(dtype=torch.float32)
+        active_step_counts = self.visual_env_active_step_count.to(dtype=torch.float32)
+        stats = {
+            "active/env_count": float(active_env_count),
+            "active/env_fraction": float(active_env_count / max(1, self.num_envs)),
+            "active/activation_min": float(activation_counts.min().detach().cpu().item()),
+            "active/activation_mean": float(activation_counts.mean().detach().cpu().item()),
+            "active/activation_max": float(activation_counts.max().detach().cpu().item()),
+            "active/active_steps_min": float(active_step_counts.min().detach().cpu().item()),
+            "active/active_steps_mean": float(active_step_counts.mean().detach().cpu().item()),
+            "active/active_steps_max": float(active_step_counts.max().detach().cpu().item()),
+        }
+        quantiles = torch.quantile(
+            active_step_counts,
+            torch.tensor([0.1, 0.5, 0.9], device=self.device, dtype=torch.float32),
+        )
+        stats["active/active_steps_p10"] = float(quantiles[0].detach().cpu().item())
+        stats["active/active_steps_p50"] = float(quantiles[1].detach().cpu().item())
+        stats["active/active_steps_p90"] = float(quantiles[2].detach().cpu().item())
+
+        env_asset_idx = getattr(self, "env_asset_idx", None)
+        if env_asset_idx is not None:
+            env_asset_idx = env_asset_idx.to(device=self.device, dtype=torch.long)
+            unique_assets, inverse = torch.unique(env_asset_idx, sorted=True, return_inverse=True)
+            per_asset_steps = torch.zeros(unique_assets.numel(), dtype=torch.float32, device=self.device)
+            per_asset_steps.scatter_add_(0, inverse, active_step_counts)
+            seen_assets = per_asset_steps > 0
+            stats["active/unique_assets_seen"] = float(seen_assets.sum().detach().cpu().item())
+            stats["active/unique_assets_total"] = float(unique_assets.numel())
+            if per_asset_steps.numel() > 0:
+                stats["active/min_active_steps_per_asset"] = float(per_asset_steps.min().detach().cpu().item())
+                stats["active/mean_active_steps_per_asset"] = float(per_asset_steps.mean().detach().cpu().item())
+                stats["active/max_active_steps_per_asset"] = float(per_asset_steps.max().detach().cpu().item())
+
+        env_family_ids = getattr(self, "env_family_ids", None)
+        if env_family_ids is not None:
+            env_family_ids = env_family_ids.to(device=self.device, dtype=torch.long)
+            for family_id in range(len(DOOR_FAMILY_NAMES)):
+                family_mask = env_family_ids == int(family_id)
+                family_count = int(family_mask.sum().detach().cpu().item())
+                stats[f"active/family_{family_id}_env_count"] = float(family_count)
+                if family_count > 0:
+                    stats[f"active/family_{family_id}_active_steps_mean"] = float(
+                        active_step_counts[family_mask].mean().detach().cpu().item()
+                    )
+        return stats
+
+    def _get_visual_env_coverage_csv_dir(self):
+        configured_dir = self.visual_policy_coverage_csv_dir
+        if configured_dir is not None:
+            return Path(str(configured_dir)).expanduser()
+        if self.summaries_dir is not None:
+            return Path(self.summaries_dir).expanduser() / "active_env_coverage"
+        if self.nn_dir is not None:
+            return Path(self.nn_dir).expanduser().parent / "active_env_coverage"
+        return Path.cwd() / "active_env_coverage"
+
+    def _dump_visual_env_coverage_csv(self, iteration):
+        csv_dir = self._get_visual_env_coverage_csv_dir()
+        csv_dir.mkdir(parents=True, exist_ok=True)
+        csv_path = csv_dir / f"active_env_coverage_rank{self.rank}_step{int(iteration)}.csv"
+        env_asset_idx = getattr(self, "env_asset_idx", None)
+        env_family_ids = getattr(self, "env_family_ids", None)
+        if env_asset_idx is None:
+            env_asset_idx_cpu = [-1] * self.num_envs
+        else:
+            env_asset_idx_cpu = env_asset_idx.detach().cpu().tolist()
+        if env_family_ids is None:
+            env_family_ids_cpu = [-1] * self.num_envs
+        else:
+            env_family_ids_cpu = env_family_ids.detach().cpu().tolist()
+
+        active_mask_cpu = self._visual_policy_active_mask.detach().cpu().tolist()
+        activation_count_cpu = self.visual_env_activation_count.detach().cpu().tolist()
+        active_step_count_cpu = self.visual_env_active_step_count.detach().cpu().tolist()
+        completed_count_cpu = self.visual_env_completed_active_episode_count.detach().cpu().tolist()
+        success_count_cpu = self.visual_env_success_active_episode_count.detach().cpu().tolist()
+        last_activated_cpu = self.visual_env_last_activated_step.detach().cpu().tolist()
+
+        with open(csv_path, "w", newline="", encoding="utf-8") as csv_file:
+            writer = csv.writer(csv_file)
+            writer.writerow(
+                [
+                    "rank",
+                    "local_env_id",
+                    "global_env_id",
+                    "asset_idx",
+                    "family_id",
+                    "is_active",
+                    "activation_count",
+                    "active_step_count",
+                    "completed_active_episode_count",
+                    "success_active_episode_count",
+                    "last_activated_step",
+                ]
+            )
+            for local_env_id in range(self.num_envs):
+                writer.writerow(
+                    [
+                        self.rank,
+                        local_env_id,
+                        self.rank * self.num_envs + local_env_id,
+                        int(env_asset_idx_cpu[local_env_id]),
+                        int(env_family_ids_cpu[local_env_id]),
+                        int(bool(active_mask_cpu[local_env_id])),
+                        int(activation_count_cpu[local_env_id]),
+                        int(active_step_count_cpu[local_env_id]),
+                        int(completed_count_cpu[local_env_id]),
+                        int(success_count_cpu[local_env_id]),
+                        int(last_activated_cpu[local_env_id]),
+                    ]
+                )
+        if self.rank == 0:
+            print(f"[INFO] Wrote visual-policy env coverage CSV: {csv_path}")
+
+    def _format_visual_env_rows(self, env_ids):
+        env_asset_idx = getattr(self, "env_asset_idx", None)
+        env_family_ids = getattr(self, "env_family_ids", None)
+        rows = []
+        for env_id in env_ids:
+            env_id = int(env_id)
+            asset_idx = -1 if env_asset_idx is None else int(env_asset_idx[env_id].detach().cpu().item())
+            family_id = -1 if env_family_ids is None else int(env_family_ids[env_id].detach().cpu().item())
+            rows.append(
+                "env{}(global={}, asset={}, family={}, steps={}, activations={})".format(
+                    env_id,
+                    self.rank * self.num_envs + env_id,
+                    asset_idx,
+                    family_id,
+                    int(self.visual_env_active_step_count[env_id].detach().cpu().item()),
+                    int(self.visual_env_activation_count[env_id].detach().cpu().item()),
+                )
+            )
+        return rows
+
+    def _print_visual_env_coverage(self, iteration, stats):
+        if self.rank != 0:
+            return
+        print("=" * 10)
+        print("VISUAL POLICY COVERAGE ITERATION:", iteration)
+        print("Visual Env Rotation Strategy:", self.visual_policy_env_selection_strategy)
+        print("Visual Active Env Count:", int(stats.get("active/env_count", 0.0)))
+        print(
+            "Visual Active Steps min/mean/max: "
+            f"{stats['active/active_steps_min']:.1f} / "
+            f"{stats['active/active_steps_mean']:.1f} / "
+            f"{stats['active/active_steps_max']:.1f}"
+        )
+        print(
+            "Visual Activations min/mean/max: "
+            f"{stats['active/activation_min']:.1f} / "
+            f"{stats['active/activation_mean']:.1f} / "
+            f"{stats['active/activation_max']:.1f}"
+        )
+        if "active/unique_assets_total" in stats:
+            print(
+                "Visual Unique Assets Seen/Total: "
+                f"{int(stats['active/unique_assets_seen'])} / {int(stats['active/unique_assets_total'])}"
+            )
+        family_summaries = []
+        for family_id in range(len(DOOR_FAMILY_NAMES)):
+            count_key = f"active/family_{family_id}_env_count"
+            mean_key = f"active/family_{family_id}_active_steps_mean"
+            if count_key in stats:
+                family_summaries.append(
+                    f"family_{family_id}: count={int(stats[count_key])}, mean_steps={stats.get(mean_key, 0.0):.1f}"
+                )
+        if family_summaries:
+            print("Visual Family Means:", "; ".join(family_summaries))
+
+        topk = min(int(self.visual_policy_coverage_print_topk), self.num_envs)
+        if topk <= 0:
+            return
+        counts_cpu = self.visual_env_active_step_count.detach().cpu()
+        bottom_envs = torch.argsort(counts_cpu, descending=False)[:topk].tolist()
+        top_envs = torch.argsort(counts_cpu, descending=True)[:topk].tolist()
+        print("Visual Bottom Env Coverage:", ", ".join(self._format_visual_env_rows(bottom_envs)))
+        print("Visual Top Env Coverage:", ", ".join(self._format_visual_env_rows(top_envs)))
+
+    def _maybe_log_visual_env_coverage(self, iteration, emit_summary=True):
+        if not self.visual_policy_coverage_log_enabled:
+            return
+        if emit_summary and int(iteration) % self.visual_policy_coverage_log_interval == 0:
+            stats = self._get_visual_env_coverage_stats()
+            self._print_visual_env_coverage(iteration, stats)
+            self._wandb_log(stats, step=iteration)
+        if int(iteration) % self.visual_policy_coverage_csv_interval == 0:
+            self._dump_visual_env_coverage_csv(iteration)
+
+    def _log_initial_visual_env_assignment(self):
+        if self.rank != 0:
+            return
+        env_asset_idx = getattr(self, "env_asset_idx", None)
+        env_family_ids = getattr(self, "env_family_ids", None)
+        unique_asset_count = -1 if env_asset_idx is None else int(torch.unique(env_asset_idx).numel())
+        family_counts = {}
+        if env_family_ids is not None:
+            for family_id in range(len(DOOR_FAMILY_NAMES)):
+                family_counts[f"family_{family_id}"] = int((env_family_ids == family_id).sum().detach().cpu().item())
+        print("=" * 10)
+        print("VISUAL POLICY INITIAL ENV ASSIGNMENT")
+        print("Num Envs:", self.num_envs)
+        print("Visual Policy Batch Size:", self.visual_policy_batch_size)
+        print("Visual Env Rotation Strategy:", self.visual_policy_env_selection_strategy)
+        print("Unique Asset Count:", unique_asset_count)
+        print("Family Counts:", family_counts)
+        sample_count = min(12, self.num_envs)
+        print("First Visual Env Rows:")
+        for local_env_id in range(sample_count):
+            asset_idx = -1 if env_asset_idx is None else int(env_asset_idx[local_env_id].detach().cpu().item())
+            family_id = -1 if env_family_ids is None else int(env_family_ids[local_env_id].detach().cpu().item())
+            print(
+                "  local_env_id={}, global_env_id={}, asset_idx={}, family_id={}".format(
+                    local_env_id,
+                    self.rank * self.num_envs + local_env_id,
+                    asset_idx,
+                    family_id,
+                )
+            )
 
     def _log(
         self,
@@ -2939,6 +3304,13 @@ class Dagger:
                 if key == "stats/success_rate" or key.startswith("stats/success_rate/"):
                     continue
                 metrics[key] = value
+        if (
+            self.visual_policy_coverage_log_enabled
+            and int(iteration) % self.visual_policy_coverage_log_interval == 0
+        ):
+            coverage_stats = self._get_visual_env_coverage_stats()
+            metrics.update(coverage_stats)
+            self._print_visual_env_coverage(iteration, coverage_stats)
         self._wandb_log(metrics, step=iteration)
 
     def distill(self):
@@ -2962,6 +3334,7 @@ class Dagger:
             self._seed_temporal_histories()
             self._seed_aux_buffer()
             self._resample_teacher_forcing_env_mask(self.resume_iteration)
+            self._active_env_rotation_step = start_iteration
             self._reset_visual_policy_scheduler()
 
             for iteration in range(start_iteration, end_iteration):
@@ -2970,7 +3343,10 @@ class Dagger:
                 timing_breakdown = OrderedDict() if self._should_record_timing_breakdown(iteration) else None
                 stage_start_time = iteration_start_time
 
+                self._active_env_rotation_step = int(iteration)
                 selected_env_ids = self._select_visual_policy_env_ids()
+                self._count_visual_policy_active_step(selected_env_ids)
+                self._maybe_log_visual_env_coverage(iteration, emit_summary=self.play_policy)
                 student_obs = self._build_student_obs(iteration=iteration, env_ids=selected_env_ids)
                 stage_start_time = self._mark_timing_breakdown(
                     timing_breakdown,
