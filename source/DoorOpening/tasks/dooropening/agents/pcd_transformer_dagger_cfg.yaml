@@ -159,6 +159,23 @@ dagger:
   aux_feedback_to_policy: true  # When false, aux input stays zero instead of feeding back predictions.
   aux_pregrasp_dropout_prob: 0.001  # Conservative start: 0.1% per pregrasp step while predicted aux feedback is carried over.
   # aux_pregrasp_dropout_prob: 0
+  wrong_push_pull_rollout:
+    enabled: true
+    prob_per_episode: 0.40
+    start_phase_range: [2.0, 3.5]
+    duration_steps_range: [3, 6]
+    max_bursts_per_episode: 1
+    teacher_forced_envs_only: true
+    preserve_handle_side: true
+    replace_components: ["base", "arm"]
+    loss_target: "correct_teacher"
+    use_wrong_trajectory: true
+    wrong_traj_filename: "traj_wrong.pkl"
+    family_map:
+      PartNetv5_plus: PartNetv8_plus
+      PartNetv8_plus: PartNetv5_plus
+      PartNetv6_plus: PartNetv7_plus
+      PartNetv7_plus: PartNetv6_plus
   door_geometry_aug:
     enabled: false
     env_prob: 1.0

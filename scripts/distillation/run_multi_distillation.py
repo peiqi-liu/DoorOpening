@@ -311,8 +311,11 @@ def main(env_cfg, agent_cfg: dict):
             "PartNetv5": args_cli.teacher_partnetv5,
             "PartNetv5_plus": args_cli.teacher_partnetv5,
             "PartNetv6": args_cli.teacher_partnetv6,
+            "PartNetv6_plus": args_cli.teacher_partnetv6,
             "PartNetv7": args_cli.teacher_partnetv7,
+            "PartNetv7_plus": args_cli.teacher_partnetv7,
             "PartNetv8": args_cli.teacher_partnetv8,
+            "PartNetv8_plus": args_cli.teacher_partnetv8,
         }
         any_family_cli = any(value is not None for value in cli_values.values())
         discovered_values = {}
@@ -326,7 +329,7 @@ def main(env_cfg, agent_cfg: dict):
                 family_name,
                 "door_opening.pth",
             )
-            configured_value = cli_values[family_name]
+            configured_value = cli_values.get(family_name)
             if configured_value is not None:
                 discovered_values[family_name] = resolve_checkpoint(configured_value)
             elif os.path.exists(default_family_ckpt):

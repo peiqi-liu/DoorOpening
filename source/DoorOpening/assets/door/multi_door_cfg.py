@@ -168,7 +168,7 @@ root_path = os.path.dirname(os.path.dirname(__file__))
 asset_base_folder = os.path.join(root_path, "door")
 # DOOR_FAMILY_NAMES = ["PartNetv5", "PartNetv6", "PartNetv7", "PartNetv8"]
 # DOOR_FAMILY_NAMES = ["PartNetv5_plus"]
-DOOR_FAMILY_NAMES = ["PartNetv5"]
+DOOR_FAMILY_NAMES = ["PartNetv5_plus", "PartNetv6_plus", "PartNetv7_plus", "PartNetv8_plus"]
 door_family_base_folders = OrderedDict(
     (family_name, os.path.join(asset_base_folder, family_name))
     for family_name in DOOR_FAMILY_NAMES
@@ -217,6 +217,7 @@ handle_offsets = torch.tensor(handle_offsets)
 asset_family_ids = torch.tensor(asset_family_ids, dtype=torch.long)
 
 motion_traj_paths = [os.path.join(os.path.dirname(asset_path), "traj.pkl") for asset_path in asset_paths]
+motion_wrong_traj_paths = [os.path.join(os.path.dirname(asset_path), "traj_wrong.pkl") for asset_path in asset_paths]
 motion_family_ids = asset_family_ids.clone()
 motion_family_names = list(asset_family_names)
 
