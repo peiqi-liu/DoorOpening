@@ -1604,8 +1604,8 @@ class Dagger:
         state_dict, _ = self._extract_model_state(weights)
         state_dict = strip_prefix_from_state_dict(state_dict)
         self.student_model.load_state_dict(state_dict, strict=False)
-        if isinstance(weights, dict):
-            if "optimizer_state_dict" in weights and not self.play_policy:
+        if isinstance(weights, dict) and not self.play_policy:
+            if "optimizer_state_dict" in weights:
                 try:
                     self.optimizer.load_state_dict(weights["optimizer_state_dict"])
                 except Exception as exc:
@@ -1624,7 +1624,7 @@ class Dagger:
                 if saved_num_envs <= 0:
                     saved_num_envs = int(self.num_envs)
                 resume_iteration = self.frame // max(1, saved_num_envs)
-            if resume_iteration is None and not self.play_policy and "student_update_steps" in weights:
+            if resume_iteration is None and "student_update_steps" in weights:
                 resume_iteration = int(weights["student_update_steps"])
             self.resume_iteration = int(resume_iteration)
             self._resumed_from_student_ckpt = True
@@ -1648,6 +1648,8 @@ class Dagger:
                 f"iteration={self.resume_iteration}, curriculum_step_count={int(curriculum_step_count)}, frame={self.frame}, "
                 f"student_update_steps={self.student_update_steps}"
             )
+        elif self.rank == 0 and self.play_policy:
+            print("Loaded student weights for policy evaluation; optimizer and curriculum state were ignored.")
 
     def _override_actions_for_pregrasp(self, actions: torch.Tensor) -> torch.Tensor:
         override_fn = getattr(self.ov_env, "override_pregrasp_actions", None)

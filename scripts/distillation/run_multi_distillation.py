@@ -5,7 +5,6 @@ import os
 import pathlib
 import sys
 import time
-import types
 from distutils.util import strtobool
 
 import yaml
@@ -62,34 +61,15 @@ def _get_base_env(env):
     return getattr(env, "unwrapped", getattr(env, "env", env))
 
 
-def _configure_rollout_env_mode(env, play_policy):
+def _configure_rollout_env_mode(env):
     """Match the RL Games train/play env semantics used by the reference scripts."""
     base_env = _get_base_env(env)
     ref_motion_lib = getattr(base_env, "ref_motion_lib", None)
     if ref_motion_lib is not None:
-        ref_motion_lib.reset_from_start = bool(play_policy)
+        ref_motion_lib.reset_from_start = False
     if hasattr(base_env, "early_stopping"):
-        base_env.early_stopping = not bool(play_policy)
-    if play_policy:
-        _patch_play_mode_done_tensor(base_env)
+        base_env.early_stopping = True
     return base_env
-
-
-def _patch_play_mode_done_tensor(base_env):
-    """Normalize custom env done outputs so play mode still satisfies tensor-based reward code."""
-    if not hasattr(base_env, "_get_dones") or getattr(base_env, "_play_mode_done_tensor_patch", False):
-        return
-
-    original_get_dones = base_env._get_dones
-
-    def _get_dones_with_tensor_killed(self):
-        is_killed, timed_out = original_get_dones()
-        if isinstance(is_killed, bool):
-            is_killed = torch.zeros_like(timed_out, dtype=torch.bool)
-        return is_killed, timed_out
-
-    base_env._get_dones = types.MethodType(_get_dones_with_tensor_killed, base_env)
-    base_env._play_mode_done_tensor_patch = True
 
 
 # add argparse arguments
@@ -128,10 +108,9 @@ parser.add_argument("--teacher-partnetv5", "--teacher_partnetv5", dest="teacher_
 parser.add_argument("--teacher-partnetv6", "--teacher_partnetv6", dest="teacher_partnetv6", type=str, default=None, help="Teacher checkpoint for PartNetv6.")
 parser.add_argument("--teacher-partnetv7", "--teacher_partnetv7", dest="teacher_partnetv7", type=str, default=None, help="Teacher checkpoint for PartNetv7.")
 parser.add_argument("--teacher-partnetv8", "--teacher_partnetv8", dest="teacher_partnetv8", type=str, default=None, help="Teacher checkpoint for PartNetv8.")
-parser.add_argument("--play_policy", action="store_true", default=False, help="Play a distilled policy.")
 # parser.add_argument("--data_aug", action="store_true", default=False, help="Whether to use data augmentation for student")
 parser.add_argument("--student_cfg", type=str, default=None, help="Student config YAML to use.")
-parser.add_argument("--student_ckpt", type=str, default=None, help="Student checkpoint to resume or evaluate.")
+parser.add_argument("--student_ckpt", type=str, default=None, help="Student checkpoint to resume from.")
 parser.add_argument("--teacher_cfg", type=str, default=None, help="Teacher RL-Games config YAML to use.")
 parser.add_argument("--wandb-project-name", type=str, default=None, help="the wandb's project name")
 parser.add_argument("--wandb-entity", type=str, default=None, help="the entity (team) of wandb's project")
@@ -304,9 +283,6 @@ def main(env_cfg, agent_cfg: dict):
         return os.path.join(parent_path, "pretrained_ckpts", path_value)
 
     def resolve_multi_teacher_checkpoints():
-        if args_cli.play_policy:
-            return None, None
-
         cli_values = {
             "PartNetv5": args_cli.teacher_partnetv5,
             "PartNetv6": args_cli.teacher_partnetv6,
@@ -387,9 +363,6 @@ def main(env_cfg, agent_cfg: dict):
     else:
         # Distillation default: ADR schedule progresses twice as fast as reset curriculum.
         env_cfg.adr_reset_progress_total = 0.5 * float(env_cfg.reset_progress_total)
-    if args_cli.play_policy:
-        env_cfg.use_motion_ref = False
-
     viser_cfg = dagger_runtime_cfg.get("viser", {})
     if not isinstance(viser_cfg, dict):
         viser_cfg = {}
@@ -493,14 +466,13 @@ def main(env_cfg, agent_cfg: dict):
         cfg=env_cfg,
         render_mode="rgb_array" if args_cli.video and (args_cli.video_ranks == "all" or rank == 0) else None,
     )
-    ov_env = _configure_rollout_env_mode(env, args_cli.play_policy)
+    ov_env = _configure_rollout_env_mode(env)
     if rank == 0:
         ref_motion_lib = getattr(ov_env, "ref_motion_lib", None)
         reset_from_start = getattr(ref_motion_lib, "reset_from_start", None)
         early_stopping = getattr(ov_env, "early_stopping", None)
         print(
-            "[INFO] Distillation rollout mode: "
-            f"{'play' if args_cli.play_policy else 'train'} "
+            "[INFO] Distillation rollout mode: train "
             f"(reset_from_start={reset_from_start}, early_stopping={early_stopping})"
         )
 
@@ -537,7 +509,6 @@ def main(env_cfg, agent_cfg: dict):
             # "data_aug": args_cli.data_aug,
         },
         "teacher": teacher_config,
-        "play_policy": args_cli.play_policy,
         "dagger": dagger_runtime_cfg,
         "wandb": wandb_cfg,
     }
