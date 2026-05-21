@@ -225,6 +225,30 @@ def _configure_viser_pt_recording(env_cfg, log_dir: str):
     print(f"[INFO] Relative Viser .pt paths will be resolved under: {log_dir}")
 
 
+def _inherit_central_value_config(agent_cfg: dict):
+    """Fill central critic training defaults from the main RL-Games config."""
+
+    config = agent_cfg["params"]["config"]
+    central_cfg = config.get("central_value_config")
+    if not isinstance(central_cfg, dict):
+        return
+
+    inherited_keys = (
+        "minibatch_size",
+        "mini_epochs",
+        "learning_rate",
+        "lr_schedule",
+        "schedule_type",
+        "kl_threshold",
+        "clip_value",
+        "normalize_input",
+        "truncate_grads",
+    )
+    for key in inherited_keys:
+        if key in config:
+            central_cfg.setdefault(key, config[key])
+
+
 class DoorOpeningRunner(Runner):
     """Runner that installs local instrumentation before training starts."""
 
@@ -306,6 +330,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     experiment_name = log_dir if args_cli.wandb_name is None else args_cli.wandb_name
     env_cfg.log_dir = os.path.join(log_root_path, log_dir)
     _configure_viser_pt_recording(env_cfg, env_cfg.log_dir)
+    _inherit_central_value_config(agent_cfg)
 
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_root_path, log_dir, "params", "env.yaml"), env_cfg)

@@ -106,8 +106,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     episode_length_s = 10.
     num_sim_steps_to_render=2
     # - spaces definition
-    state_space = 0
-    num_states = 0
     # Actor gets noisy deployment-style observations while the critic keeps the full clean state.
     asymmetric_obs = True
 
@@ -297,13 +295,19 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     #     len(door_body_names) * 3 +\
     #     len(door_joint_names) * 2 +\
     #     twist_observation_space
+
+    # observation_space = \
+    #     actuated_joints_num * 3 +\
+    #     len(robot_key_bodies) * 3 +\
+    #     (len(robot_key_bodies) - 1) * (3 + 6) + 6 +\
+    #     len(door_body_names) * 3 +\
+    #     len(door_joint_names) * 2
     
     observation_space = \
         actuated_joints_num * 3 +\
-        len(robot_key_bodies) * 3 +\
         (len(robot_key_bodies) - 1) * (3 + 6) + 6 +\
         len(door_body_names) * 3 +\
-        len(door_joint_names) * 2
+        len(door_joint_names) * (2 - 1)
     state_space = observation_space
     num_observations = observation_space
     num_states = state_space
