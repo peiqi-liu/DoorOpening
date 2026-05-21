@@ -888,39 +888,7 @@ class DooropeningEnv(DirectRLEnv):
         )
         return scaled_actions
 
-    def _compute_pregrasp_delta_actions(self) -> torch.Tensor:
-        next_ref_joint_pos = self.ref_motion_lib.get_next_robot_joint_pos().to(self.robot_dof_targets)
-        next_ref_targets = next_ref_joint_pos[..., self.ref_robot_dof_idx]
-        target_delta = next_ref_targets - self.robot_dof_targets
-
-        dt = max(float(self.dt), 1e-6)
-        base_scale = max(float(self.cfg.base_action_scale), 1e-6)
-        arm_scale = max(float(self.cfg.arm_action_scale), 1e-6)
-        finger_scale = max(float(self.cfg.finger_action_scale), 1e-6)
-
-        delta_actions = torch.zeros_like(self.robot_dof_targets)
-        delta_actions[:, :self.num_base_joints] = target_delta[:, :self.num_base_joints] / (dt * base_scale)
-        delta_actions[:, self.num_base_joints:self.num_base_joints + self.num_arm_joints] = (
-            target_delta[:, self.num_base_joints:self.num_base_joints + self.num_arm_joints] / (dt * arm_scale)
-        )
-        delta_actions[:, self.num_base_joints + self.num_arm_joints:] = (
-            target_delta[:, self.num_base_joints + self.num_arm_joints:] / (dt * finger_scale)
-        )
-        return delta_actions.clamp(-1.0, 1.0)
-
-    def override_pregrasp_actions(self, actions: torch.Tensor) -> torch.Tensor:
-        pregrasp_mask = self.ref_motion_lib.get_before_first_keyframe_mask()
-        if not torch.any(pregrasp_mask):
-            return actions
-        adjusted_actions = actions.clone()
-        delta_actions = self._compute_pregrasp_delta_actions()
-        adjusted_actions[pregrasp_mask] = delta_actions[pregrasp_mask]
-        return adjusted_actions
-
     def _pre_physics_step(self, actions: torch.Tensor):
-        # Pregrasp reference tracking is part of the environment transition, so teacher
-        # RL, DAgger rollouts, and play mode all share the same executed action path.
-        # actions = self.override_pregrasp_actions(actions)
         # delta actions
         self.scaled_actions = self._scale_actions(actions)
         targets = self.robot_dof_targets + self.dt * self.scaled_actions

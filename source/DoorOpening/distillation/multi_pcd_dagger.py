@@ -162,7 +162,6 @@ class Dagger:
         self.lidar_jitter_std_m = float(self.lidar_render_cfg.get("jitter_std_m", 0.001))
         self.lidar_use_compile = bool(self.lidar_render_cfg.get("use_compile", True))
         self.use_sim_body_pose_door_pcd = bool(self.runtime_cfg.get("use_sim_body_pose_door_pcd", False))
-        self.timing_breakdown_interval = int(self.runtime_cfg.get("timing_breakdown_interval", 0))
         self.robot_pointcloud_filter_cfg = dict(self.runtime_cfg.get("robot_pointcloud_filter", {}))
         self.robot_pointcloud_filter_enabled = bool(self.robot_pointcloud_filter_cfg.get("enabled", True))
         self.robot_pointcloud_sdf_cutoff = float(self.robot_pointcloud_filter_cfg.get("sdf_cutoff", 0.02))
@@ -175,7 +174,6 @@ class Dagger:
         self.viser_cfg = dict(self.runtime_cfg.get("viser", {}))
         self.viser_raw_cfg = dict(self.viser_cfg.get("raw", {}))
         self.viser_env_id = int(self.viser_cfg.get("env_id", 0))
-        self.viser_show_policy_input = bool(self.viser_cfg.get("show_policy_input", True))
         self.viser_raw_enabled = self.rank == 0 and bool(self.viser_raw_cfg.get("enabled", False))
         self.viser_raw_save_interval = max(
             1,
@@ -183,11 +181,6 @@ class Dagger:
         )
         self.viser_raw_max_points = int(self.viser_raw_cfg.get("max_points", 12_000))
         self.viser_raw_max_frames = max(0, int(self.viser_raw_cfg.get("max_frames", 0)))
-        self.viser_raw_include_ground_truth = bool(self.viser_raw_cfg.get("include_ground_truth", True))
-        self.viser_raw_include_robot_obs = bool(self.viser_raw_cfg.get("include_robot_obs", True))
-        self.viser_raw_include_policy_input = bool(
-            self.viser_raw_cfg.get("include_policy_input", self.viser_show_policy_input)
-        )
         if self.pointcloud_source not in {"sampler", "depth", "lidar"}:
             raise ValueError(f"Unsupported pointcloud_source '{self.pointcloud_source}'.")
         if self.teacher_forcing_warmup_iters < 0:
@@ -242,7 +235,6 @@ class Dagger:
         self.latest_aux_input_vector = None
         self.latest_aux_target_vector = None
         self._timing_stats = {"sum_ms": 0.0, "count": 0}
-        self._latest_timing_breakdown = None
         self.logged_env_metric_prefixes = ("dr/", "dr_limit/", "dr_sample/", "reset/")
         self.latest_env_log_metrics = {}
         self.zero_local_pcd_crop_center = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
@@ -460,8 +452,6 @@ class Dagger:
         self.aux_buffer = None
         if self.has_aux_input:
             self.aux_buffer = torch.zeros((self.num_envs, self.aux_input_dim), dtype=torch.float32, device=self.device)
-        if not 0.0 <= self.aux_pregrasp_dropout_prob <= 1.0:
-            raise ValueError("aux_pregrasp_dropout_prob must be in [0, 1].")
         self.latest_aux_pregrasp_env_fraction = 0.0
         self.latest_aux_pregrasp_dropout_fraction = 0.0
         if student_ckpt is not None and self.has_aux_input and self.rank == 0:
@@ -969,16 +959,12 @@ class Dagger:
         if not torch.any(pregrasp_mask):
             return aux_input_vector
 
-        drop_mask = pregrasp_mask & (
-            torch.rand(aux_input_vector.shape[0], device=self.device) < self.aux_pregrasp_dropout_prob
-        )
+        drop_mask = pregrasp_mask & torch.rand(self.num_envs, device=self.device).lt(self.aux_pregrasp_dropout_prob)
         self.latest_aux_pregrasp_dropout_fraction = float(drop_mask.float().mean().item())
         if not torch.any(drop_mask):
             return aux_input_vector
 
         dropped_aux_input = aux_input_vector.clone()
-        # Zeroing the carried-over aux vector forces the student to recover the
-        # handle estimate from the rest of the observation during pregrasp.
         dropped_aux_input[drop_mask] = 0.0
         return dropped_aux_input
 
@@ -991,28 +977,6 @@ class Dagger:
         if env_ids.numel() == 0:
             return
         self.aux_buffer[env_ids] = 0.0
-
-    def _get_cfg_range(self, cfg, key, default):
-        values = cfg.get(key, default)
-        if len(values) != 2:
-            raise ValueError(f"Expected '{key}' to have exactly two values, got {values}.")
-        low = float(values[0])
-        high = float(values[1])
-        if low > high:
-            raise ValueError(f"Expected '{key}' to be ordered as [low, high], got {values}.")
-        return low, high
-
-    def _get_optional_cfg_range(self, cfg, key):
-        values = cfg.get(key)
-        if values is None:
-            return None
-        if len(values) != 2:
-            raise ValueError(f"Expected '{key}' to have exactly two values, got {values}.")
-        low = float(values[0])
-        high = float(values[1])
-        if low > high:
-            raise ValueError(f"Expected '{key}' to be ordered as [low, high], got {values}.")
-        return low, high
 
     def _init_pointcloud_assets(self):
         asset_index_by_dir = {
@@ -1137,36 +1101,28 @@ class Dagger:
         self.wall_distractor_num_points = int(
             self.wall_distractor_cfg.get("num_points", max(256, self.door_pcd_num_points // 3))
         )
-        self.wall_distractor_side_margin_scale_min, self.wall_distractor_side_margin_scale_max = self._get_cfg_range(
-            self.wall_distractor_cfg,
-            "side_margin_scale",
-            [0.35, 0.75],
+        self.wall_distractor_side_margin_scale_min, self.wall_distractor_side_margin_scale_max = map(
+            float, self.wall_distractor_cfg.get("side_margin_scale", [0.35, 0.75])
         )
-        side_margin_abs_range = self._get_optional_cfg_range(self.wall_distractor_cfg, "side_margin_m")
+        side_margin_abs_range = self.wall_distractor_cfg.get("side_margin_m")
         if side_margin_abs_range is None:
             self.wall_distractor_side_margin_abs_min_m = None
             self.wall_distractor_side_margin_abs_max_m = None
         else:
-            self.wall_distractor_side_margin_abs_min_m, self.wall_distractor_side_margin_abs_max_m = side_margin_abs_range
-        self.wall_distractor_bottom_margin_scale_min, self.wall_distractor_bottom_margin_scale_max = self._get_cfg_range(
-            self.wall_distractor_cfg,
-            "bottom_margin_scale",
-            [0.02, 0.08],
+            self.wall_distractor_side_margin_abs_min_m, self.wall_distractor_side_margin_abs_max_m = map(
+                float, side_margin_abs_range
+            )
+        self.wall_distractor_bottom_margin_scale_min, self.wall_distractor_bottom_margin_scale_max = map(
+            float, self.wall_distractor_cfg.get("bottom_margin_scale", [0.02, 0.08])
         )
-        self.wall_distractor_gap_min_m, self.wall_distractor_gap_max_m = self._get_cfg_range(
-            self.wall_distractor_cfg,
-            "edge_gap_m",
-            [0.015, 0.04],
+        self.wall_distractor_gap_min_m, self.wall_distractor_gap_max_m = map(
+            float, self.wall_distractor_cfg.get("edge_gap_m", [0.015, 0.04])
         )
-        self.wall_distractor_depth_min_m, self.wall_distractor_depth_max_m = self._get_cfg_range(
-            self.wall_distractor_cfg,
-            "depth_m",
-            [0.10, 0.26],
+        self.wall_distractor_depth_min_m, self.wall_distractor_depth_max_m = map(
+            float, self.wall_distractor_cfg.get("depth_m", [0.10, 0.26])
         )
-        self.wall_distractor_center_offset_min_m, self.wall_distractor_center_offset_max_m = self._get_cfg_range(
-            self.wall_distractor_cfg,
-            "center_offset_m",
-            [-0.20, 0.20],
+        self.wall_distractor_center_offset_min_m, self.wall_distractor_center_offset_max_m = map(
+            float, self.wall_distractor_cfg.get("center_offset_m", [-0.20, 0.20])
         )
         self.wall_distractor_side_margin_min_m = float(self.wall_distractor_cfg.get("side_margin_min_m", 0.10))
         self.wall_distractor_face_jitter_m = float(self.wall_distractor_cfg.get("face_jitter_m", 0.004))
@@ -1237,16 +1193,8 @@ class Dagger:
         self.wrong_pp_cfg = cfg
         self.wrong_pp_enabled = bool(cfg.get("enabled", False))
         self.wrong_pp_prob_per_episode = float(cfg.get("prob_per_episode", 0.10))
-        self.wrong_pp_phase_min, self.wrong_pp_phase_max = self._get_cfg_range(
-            cfg,
-            "start_phase_range",
-            [2.4, 3.1],
-        )
-        duration_min, duration_max = self._get_cfg_range(
-            cfg,
-            "duration_steps_range",
-            [5, 8],
-        )
+        self.wrong_pp_phase_min, self.wrong_pp_phase_max = map(float, cfg.get("start_phase_range", [2.4, 3.1]))
+        duration_min, duration_max = cfg.get("duration_steps_range", [5, 8])
         self.wrong_pp_duration_min = int(duration_min)
         self.wrong_pp_duration_max = int(duration_max)
         self.wrong_pp_max_bursts_per_episode = int(cfg.get("max_bursts_per_episode", 1))
@@ -1516,63 +1464,15 @@ class Dagger:
         sim_dt = getattr(sim_cfg, "dt", None)
         self.viser_sim_dt = float(sim_dt) if sim_dt is not None else 1.0 / 30.0
         self.viser_env_step_dt = max(float(getattr(self.ov_env, "dt", self.viser_sim_dt)), 1e-6)
-        self.viser_env_step_fps = 1.0 / self.viser_env_step_dt
-        self.viser_render_interval = max(int(getattr(sim_cfg, "render_interval", 1)), 1)
-        self.viser_render_dt = self.viser_sim_dt * self.viser_render_interval
-        pointcloud_sensor_dt = self.viser_env_step_dt
-        if self.pointcloud_source == "depth":
-            pointcloud_sensor_dt = getattr(
-                self.ov_env.cfg,
-                "pointcloud_camera_update_period",
-                pointcloud_sensor_dt,
-            )
-        self.viser_pointcloud_sensor_dt = max(float(pointcloud_sensor_dt), 1e-6)
-        self.viser_pointcloud_sensor_fps = 1.0 / self.viser_pointcloud_sensor_dt
         if not self.viser_raw_enabled:
             return
+        if self.viser_raw_max_points <= 0:
+            raise ValueError("viser.raw.max_points must be positive when raw Viser capture is enabled.")
 
         raw_dir = os.path.dirname(self.viser_raw_path)
         if raw_dir:
             os.makedirs(raw_dir, exist_ok=True)
         self._init_viser_raw_streams()
-
-        if self.rank == 0:
-            stream_desc = ", ".join(
-                f"{name}:env{stream['env_id']}" for name, stream in self._viser_raw_streams.items()
-            )
-            print(f"Viser raw replay capture enabled for multi-door streams ({stream_desc}).")
-            print(
-                "Raw replay data will be written as "
-                f"{self._format_iterated_record_path(self.viser_raw_path, '<family>_<chunk_tag>')}"
-            )
-            print(
-                "Raw replay chunks will be written every "
-                f"{self.viser_raw_save_interval} iterations."
-            )
-            if self.viser_raw_max_frames > 0:
-                print(f"Each raw replay chunk will keep at most {self.viser_raw_max_frames} frames.")
-            print(
-                "Raw replay point budget: max_points={} (gt={}, obs={}, policy={}).".format(
-                    self.viser_raw_max_points,
-                    "off"
-                    if not self.viser_raw_include_ground_truth or self.viser_raw_max_points <= 0
-                    else "on",
-                    "off"
-                    if not self.viser_raw_include_robot_obs or self.viser_raw_max_points <= 0
-                    else "on",
-                    "off"
-                    if not self.viser_raw_include_policy_input or self.viser_raw_max_points <= 0
-                    else "on",
-                )
-            )
-            print(
-                "Replay timing: env_step_dt={:.6f}s ({:.2f} FPS), pointcloud_sensor_dt={:.6f}s ({:.2f} FPS).".format(
-                    self.viser_env_step_dt,
-                    self.viser_env_step_fps,
-                    self.viser_pointcloud_sensor_dt,
-                    self.viser_pointcloud_sensor_fps,
-                )
-            )
 
     def _get_viser_env_id(self):
         """Clamp the configured replay env index so debug capture never indexes outside the batch."""
@@ -1598,7 +1498,6 @@ class Dagger:
                 "frames": [],
                 "frame_count": 0,
                 "chunk_index": 0,
-                "chunk_start_iteration": None,
                 "latest_iteration": None,
             }
 
@@ -1611,7 +1510,6 @@ class Dagger:
                 "frames": [],
                 "frame_count": 0,
                 "chunk_index": 0,
-                "chunk_start_iteration": None,
                 "latest_iteration": None,
             }
 
@@ -1630,50 +1528,10 @@ class Dagger:
             for env_id in self._viser_stream_env_ids()
         }
 
-    def _build_viser_raw_payload(self, latest_iteration, chunk_complete, stream):
+    def _build_viser_raw_payload(self, stream):
         return {
             "format": "dooropening_viser_replay_v1",
-            "pointcloud_frame": "world",
-            "pointcloud_source": self.pointcloud_source,
-            "pointcloud_render_mode": str(getattr(self.ov_env.cfg, "pointcloud_render_mode", "none")).lower(),
-            "sim_dt": float(self.viser_sim_dt),
-            "decimation": int(getattr(self.ov_env.cfg, "decimation", 1)),
-            "render_interval": int(self.viser_render_interval),
-            "render_dt": float(self.viser_render_dt),
-            "env_step_dt": float(self.viser_env_step_dt),
-            "env_step_fps": float(self.viser_env_step_fps),
             "frame_dt": float(self.viser_env_step_dt),
-            "frame_fps": float(self.viser_env_step_fps),
-            "pointcloud_sensor_dt": float(self.viser_pointcloud_sensor_dt),
-            "pointcloud_sensor_fps": float(self.viser_pointcloud_sensor_fps),
-            "raw_cloud_config": {
-                "include_ground_truth": bool(self.viser_raw_include_ground_truth),
-                "include_robot_obs": bool(self.viser_raw_include_robot_obs),
-                "include_policy_input": bool(self.viser_raw_include_policy_input),
-                "max_points": int(self.viser_raw_max_points),
-            },
-            "glorbot_urdf_path": str(glorbot_urdf_path),
-            "robot_joint_names": list(getattr(self.ov_env.robot, "joint_names", [])),
-            "door_joint_names": list(getattr(self.ov_env.door, "joint_names", [])),
-            "capture_mode": "iteration_chunk",
-            "door_family_id": stream["family_id"],
-            "door_family_name": stream["family_name"],
-            "chunk_index": int(stream["chunk_index"]),
-            "chunk_env_id": int(stream["env_id"]),
-            "chunk_start_iteration": None
-            if stream["chunk_start_iteration"] is None
-            else int(stream["chunk_start_iteration"]),
-            "chunk_end_iteration": int(latest_iteration),
-            "chunk_complete": bool(chunk_complete),
-            "chunk_frame_count": int(stream["frame_count"]),
-            "episode_index": int(stream["chunk_index"]),
-            "episode_env_id": int(stream["env_id"]),
-            "episode_start_iteration": None
-            if stream["chunk_start_iteration"] is None
-            else int(stream["chunk_start_iteration"]),
-            "episode_end_iteration": int(latest_iteration),
-            "episode_complete": bool(chunk_complete),
-            "episode_frame_count": int(stream["frame_count"]),
             "frames": stream["frames"],
         }
 
@@ -1681,10 +1539,6 @@ class Dagger:
         if self.viser_raw_max_frames > 0 and len(stream["frames"]) > self.viser_raw_max_frames:
             stream["frames"] = stream["frames"][-self.viser_raw_max_frames :]
         stream["frame_count"] = len(stream["frames"])
-        if stream["frame_count"] > 0:
-            stream["chunk_start_iteration"] = int(stream["frames"][0]["iteration"])
-        else:
-            stream["chunk_start_iteration"] = None
 
     def _maybe_flush_viser_raw_snapshot(self, iteration):
         if not self.viser_raw_enabled or self.rank != 0:
@@ -1714,11 +1568,7 @@ class Dagger:
 
         latest_iteration = int(stream["latest_iteration"])
         record_tag = f"{stream['family_name']}_chunk_{stream['chunk_index']:04d}_iter_{latest_iteration}"
-        payload = self._build_viser_raw_payload(
-            latest_iteration=latest_iteration,
-            chunk_complete=chunk_complete,
-            stream=stream,
-        )
+        payload = self._build_viser_raw_payload(stream)
         torch.save(payload, self._format_iterated_record_path(self.viser_raw_path, record_tag))
 
         if self.rank == 0:
@@ -1736,7 +1586,6 @@ class Dagger:
 
         stream["frames"] = []
         stream["frame_count"] = 0
-        stream["chunk_start_iteration"] = None
         stream["latest_iteration"] = None
 
     def _prepare_viser_world_points_from_local(
@@ -1774,8 +1623,6 @@ class Dagger:
     def _maybe_update_viser_debug(
         self,
         iteration,
-        q_pos,
-        door_joint_pos,
         robot_base_pos_w,
         robot_base_quat_w,
         ground_truth_pcd_world,
@@ -1789,9 +1636,8 @@ class Dagger:
 
         for stream in self._viser_raw_streams.values():
             env_id = int(stream["env_id"])
-            if stream["chunk_start_iteration"] is None:
+            if stream["frame_count"] == 0:
                 stream["chunk_index"] += 1
-                stream["chunk_start_iteration"] = int(iteration)
             stream["latest_iteration"] = int(iteration)
 
             selected_ground_truth = None
@@ -1800,27 +1646,23 @@ class Dagger:
             else:
                 selected_ground_truth = ground_truth_pcd_world
 
-            ground_truth_points_world = None
-            if self.viser_raw_include_ground_truth and self.viser_raw_max_points > 0:
-                ground_truth_points_world = self._prepare_viser_points(
-                    selected_ground_truth,
-                    env_id,
-                    self.viser_raw_max_points,
-                ).to(dtype=torch.float16)
+            ground_truth_points_world = self._prepare_viser_points(
+                selected_ground_truth,
+                env_id,
+                self.viser_raw_max_points,
+            ).to(dtype=torch.float16)
 
-            robot_obs_points_world = None
-            if self.viser_raw_include_robot_obs and self.viser_raw_max_points > 0:
-                robot_obs_points_world = self._prepare_viser_world_points_from_local(
-                    robot_obs_pcd_base,
-                    robot_base_pos_w,
-                    robot_base_quat_w,
-                    env_id,
-                    self.viser_raw_max_points,
-                    drop_zero_rows=True,
-                ).to(dtype=torch.float16)
+            robot_obs_points_world = self._prepare_viser_world_points_from_local(
+                robot_obs_pcd_base,
+                robot_base_pos_w,
+                robot_base_quat_w,
+                env_id,
+                self.viser_raw_max_points,
+                drop_zero_rows=True,
+            ).to(dtype=torch.float16)
 
             policy_input_points_world = None
-            if self.viser_raw_include_policy_input and policy_input_pcd_base is not None and self.viser_raw_max_points > 0:
+            if policy_input_pcd_base is not None:
                 policy_input_points_world = self._prepare_viser_world_points_from_local(
                     policy_input_pcd_base,
                     robot_base_pos_w,
@@ -1830,34 +1672,22 @@ class Dagger:
                     drop_zero_rows=True,
                 ).to(dtype=torch.float16)
 
-            asset_idx = int(self.env_asset_idx[env_id].detach().cpu().item())
+            aux_prediction_base = (
+                None
+                if aux_prediction is None
+                else self._aux_to_2d(aux_prediction)[env_id].detach().cpu().to(dtype=torch.float32)
+            )
             frame_record = {
-                "iteration": int(iteration),
-                "sim_frame": int(self.frame),
-                "env_id": int(env_id),
-                "door_family_id": stream["family_id"],
-                "door_family_name": stream["family_name"],
-                "pointcloud_source": self.pointcloud_source,
-                "ground_truth_points_world": ground_truth_points_world,
-                "robot_obs_points_world": robot_obs_points_world,
-                "policy_input_points_world": policy_input_points_world,
                 "pointclouds": {
                     "ground_truth": ground_truth_points_world,
                     "robot_obs": robot_obs_points_world,
                     "policy_input": policy_input_points_world,
                 },
-                "aux_prediction": None
-                if aux_prediction is None
-                else self._aux_to_2d(aux_prediction)[env_id].detach().cpu().to(dtype=torch.float32),
-                "robot_joint_pos": q_pos[env_id].detach().cpu().to(dtype=torch.float32),
-                "door_joint_pos": door_joint_pos[env_id].detach().cpu().to(dtype=torch.float32),
-                "robot_base_pos_w": self.ov_env.robot.data.body_pos_w[env_id, self.robot_base_body_idx].detach().cpu().to(dtype=torch.float32),
-                "robot_base_quat_w": self.ov_env.robot.data.body_quat_w[env_id, self.robot_base_body_idx].detach().cpu().to(dtype=torch.float32),
-                "door_base_pos_w": self.ov_env.door.data.body_pos_w[env_id, self.door_base_body_idx].detach().cpu().to(dtype=torch.float32),
-                "door_base_quat_w": self.ov_env.door.data.body_quat_w[env_id, self.door_base_body_idx].detach().cpu().to(dtype=torch.float32),
-                "door_asset_idx": asset_idx,
-                "door_asset_path": str(door_asset_paths[asset_idx]),
             }
+            if aux_prediction_base is not None:
+                frame_record["aux_prediction"] = aux_prediction_base
+                frame_record["robot_base_pos_w"] = robot_base_pos_w[env_id].detach().cpu().to(dtype=torch.float32)
+                frame_record["robot_base_quat_w"] = robot_base_quat_w[env_id].detach().cpu().to(dtype=torch.float32)
             stream["frames"].append(frame_record)
             self._trim_viser_raw_frames(stream)
         self._maybe_flush_viser_raw_snapshot(iteration)
@@ -1945,12 +1775,6 @@ class Dagger:
                 f"student_update_steps={self.student_update_steps}"
             )
 
-    def _override_actions_for_pregrasp(self, actions: torch.Tensor) -> torch.Tensor:
-        override_fn = getattr(self.ov_env, "override_pregrasp_actions", None)
-        if override_fn is None:
-            return actions
-        return override_fn(actions)
-
     def _has_teacher(self):
         return self.teacher_model is not None or len(getattr(self, "teacher_models", {})) > 0
 
@@ -1988,7 +1812,6 @@ class Dagger:
                 )
                 missing_family_names = [DOOR_FAMILY_NAMES[int(family_id)] for family_id in missing_family_ids]
                 raise RuntimeError(f"Missing teacher model for door families: {missing_family_names}.")
-            teacher_actions = self._override_actions_for_pregrasp(teacher_actions)
             student_teacher_actions = self._env_actions_to_student_actions(teacher_actions)
             return {
                 "mus": student_teacher_actions,
@@ -2002,11 +1825,11 @@ class Dagger:
         }
         with torch.no_grad():
             res_dict = self.teacher_model(batch_dict)
-        adjusted_actions = self._override_actions_for_pregrasp(torch.clamp(res_dict["mus"], -1.0, 1.0))
-        student_adjusted_actions = self._env_actions_to_student_actions(adjusted_actions)
+        teacher_actions = torch.clamp(res_dict["mus"], -1.0, 1.0)
+        student_teacher_actions = self._env_actions_to_student_actions(teacher_actions)
         return {
-            "mus": student_adjusted_actions,
-            "actions": adjusted_actions,
+            "mus": student_teacher_actions,
+            "actions": teacher_actions,
         }
 
     def _get_teacher_actions_for_family_override(
@@ -2076,25 +1899,6 @@ class Dagger:
     def _sync_timing_device(self):
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
-
-    def _should_record_timing_breakdown(self, iteration):
-        return self.timing_breakdown_interval > 0 and int(iteration) % self.timing_breakdown_interval == 0
-
-    def _mark_timing_breakdown(self, timings, stage_start_time, stage_name):
-        if timings is None:
-            return stage_start_time
-        self._sync_timing_device()
-        now = time.perf_counter()
-        timings[stage_name] = (now - stage_start_time) * 1000.0
-        return now
-
-    def _emit_timing_breakdown(self, iteration, timings):
-        if not timings:
-            return
-        self._latest_timing_breakdown = OrderedDict(timings)
-        if self.rank == 0:
-            summary = ", ".join(f"{name}={elapsed_ms:.2f}" for name, elapsed_ms in timings.items())
-            print(f"Timing Breakdown (ms) @ iteration {int(iteration)}: {summary}")
 
     def _record_timing(self, elapsed_s):
         self._timing_stats["sum_ms"] += elapsed_s * 1000.0
@@ -2769,7 +2573,6 @@ class Dagger:
     def _build_student_obs(self, iteration=None):
         q_pos = self._get_student_proprio_vector()
         base_vel = self._get_student_base_velocity_vector()
-        door_joint_pos = self.ov_env.door.data.joint_pos
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
         palm_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_palm_body_idx].unsqueeze(1)
@@ -2827,8 +2630,6 @@ class Dagger:
         if self.viser_raw_enabled:
             self._viser_pending_debug_frame = {
                 "iteration": iteration,
-                "q_pos": q_pos,
-                "door_joint_pos": door_joint_pos,
                 "robot_base_pos_w": robot_base_pos_w,
                 "robot_base_quat_w": robot_base_quat_w,
                 "ground_truth_pcd_world": self._viser_cached_ground_truth_pcd_world,
@@ -2965,9 +2766,6 @@ class Dagger:
             & (self.wrong_pp_target_family_ids >= 0)
             & (self.wrong_pp_target_motion_ids >= 0)
         )
-        get_pregrasp_mask = getattr(ref_motion_lib, "get_before_first_keyframe_mask", None)
-        if callable(get_pregrasp_mask):
-            eligible &= ~get_pregrasp_mask().to(device=self.device, dtype=torch.bool)
 
         new_env_ids = torch.nonzero(eligible, as_tuple=False).squeeze(-1)
         if new_env_ids.numel() == 0:
@@ -3315,10 +3113,6 @@ class Dagger:
             metrics["stats/aux_pregrasp_dropout_fraction"] = self.latest_aux_pregrasp_dropout_fraction
         if iteration_time_ms is not None:
             metrics["timing/iteration_ms"] = iteration_time_ms
-        if self._latest_timing_breakdown:
-            for stage_name, elapsed_ms in self._latest_timing_breakdown.items():
-                metrics[f"timing_breakdown/{stage_name}_ms"] = float(elapsed_ms)
-            self._latest_timing_breakdown = None
         if self.latest_env_log_metrics:
             for key, value in self.latest_env_log_metrics.items():
                 if key == "stats/success_rate" or key.startswith("stats/success_rate/"):
@@ -3353,15 +3147,8 @@ class Dagger:
             for iteration in range(start_iteration, end_iteration):
                 self._sync_timing_device()
                 iteration_start_time = time.perf_counter()
-                timing_breakdown = OrderedDict() if self._should_record_timing_breakdown(iteration) else None
-                stage_start_time = iteration_start_time
 
                 student_obs = self._build_student_obs(iteration=iteration)
-                stage_start_time = self._mark_timing_breakdown(
-                    timing_breakdown,
-                    stage_start_time,
-                    "build_student_obs",
-                )
                 student_output = self._student_forward(student_obs)
                 mode_pred = None
                 mode_target = None
@@ -3377,17 +3164,10 @@ class Dagger:
                 if self.has_aux_prediction:
                     aux_prediction_for_replay = self._decode_aux_prediction(student_output["aux"].detach())
                     self.aux_buffer[:] = aux_prediction_for_replay
-                stage_start_time = self._mark_timing_breakdown(
-                    timing_breakdown,
-                    stage_start_time,
-                    "student_forward",
-                )
 
                 if self.viser_raw_enabled and self._viser_pending_debug_frame is not None:
                     self._maybe_update_viser_debug(
                         iteration=self._viser_pending_debug_frame["iteration"],
-                        q_pos=self._viser_pending_debug_frame["q_pos"],
-                        door_joint_pos=self._viser_pending_debug_frame["door_joint_pos"],
                         robot_base_pos_w=self._viser_pending_debug_frame["robot_base_pos_w"],
                         robot_base_quat_w=self._viser_pending_debug_frame["robot_base_quat_w"],
                         ground_truth_pcd_world=self._viser_pending_debug_frame["ground_truth_pcd_world"],
@@ -3396,11 +3176,6 @@ class Dagger:
                         aux_prediction=aux_prediction_for_replay,
                     )
                     self._viser_pending_debug_frame = None
-                stage_start_time = self._mark_timing_breakdown(
-                    timing_breakdown,
-                    stage_start_time,
-                    "viser_raw",
-                )
 
                 teacher_actions = None
                 total_loss = None
@@ -3412,11 +3187,6 @@ class Dagger:
                 if not self.play_policy:
                     teacher_output = self._get_teacher_actions(obs)
                     teacher_actions = teacher_output["actions"]
-                    stage_start_time = self._mark_timing_breakdown(
-                        timing_breakdown,
-                        stage_start_time,
-                        "teacher_forward",
-                    )
                     aux_target = None
                     if self.has_aux_prediction:
                         if self.latest_aux_target_vector is None:
@@ -3438,11 +3208,6 @@ class Dagger:
                     self.student_update_steps += 1
                     self.last_local_update_batch_size = local_batch_size
                     self.last_global_update_batch_size = global_batch_size
-                    stage_start_time = self._mark_timing_breakdown(
-                        timing_breakdown,
-                        stage_start_time,
-                        "student_update",
-                    )
 
                 step_actions, teacher_forcing_beta = self._mix_actions(
                     student_env_actions.detach(),
@@ -3456,11 +3221,6 @@ class Dagger:
                     iteration,
                 )
                 obs, rew, out_of_reach, timed_out, step_extras = self.env.step(step_actions)
-                stage_start_time = self._mark_timing_breakdown(
-                    timing_breakdown,
-                    stage_start_time,
-                    "env_step",
-                )
                 self._update_logged_env_metrics(step_extras)
                 self.temporal_current_time_s = self._iteration_to_time_s(iteration + 1)
                 q_after_step = self._get_student_proprio_vector().detach().clone()
@@ -3487,12 +3247,6 @@ class Dagger:
                     self._seed_aux_buffer(done_mask)
                     self._resample_teacher_forcing_env_mask(iteration + 1, done_mask)
                     self._reset_wrong_pp_state(done_mask)
-                stage_start_time = self._mark_timing_breakdown(
-                    timing_breakdown,
-                    stage_start_time,
-                    "post_step",
-                )
-                self._emit_timing_breakdown(iteration, timing_breakdown)
 
                 if total_loss is not None:
                     self._sync_timing_device()

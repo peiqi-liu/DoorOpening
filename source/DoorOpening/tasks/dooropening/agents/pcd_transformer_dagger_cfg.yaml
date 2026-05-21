@@ -192,7 +192,6 @@ dagger:
   adr_reset_progress_total: 10000
   pointcloud_source: "lidar"
   use_sim_body_pose_door_pcd: true  # Fast source PCD path; still rendered through LiDAR visibility/binning.
-  timing_breakdown_interval: 0
   robot_num_points: 30000
   append_robot_gt_to_policy_cloud: true
   robot_gt_policy_points: 2000  # Policy robot input appended after the two door crops above.
@@ -230,13 +229,11 @@ dagger:
     face_jitter_m: 0.004
   viser:
     env_id: 0
-    show_policy_input: true
     raw:
       enabled: false  # Save raw `.pt` replay chunks for offline debugging.
       path: "viser_replay.pt"
       save_interval: 6000  # Write one raw `.pt` file every N iterations.
       max_points: 6000  # Raw replay is for debugging, not training; smaller clouds replay much better on laptops.
-      include_ground_truth: true  # GT is the heaviest cloud and usually duplicates what robot_obs already shows.
       max_frames: 3000  # Keep at most this many frames in each raw `.pt` file; set 0 to disable the cap.
   wandb:
     enabled: false

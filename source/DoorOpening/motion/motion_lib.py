@@ -31,11 +31,6 @@ class ReferenceMotionManager:
         self._init_env_buffers()
         if self.twist_indices is not None:
             self._precompute_twist()
-            self._twist_offset_to_index = {int(offset): idx for idx, offset in enumerate(self.twist_indices)}
-            self._twist_plus_one_index = self._twist_offset_to_index.get(1)
-        else:
-            self._twist_offset_to_index = {}
-            self._twist_plus_one_index = None
 
     def _extract_first_keyframe(self, key_indices, num_frames: int) -> int:
         if isinstance(key_indices, torch.Tensor):
@@ -334,18 +329,6 @@ class ReferenceMotionManager:
         if env_ids is None:
             return mask
         return mask[env_ids]
-
-    def get_next_robot_joint_pos(self, env_ids: Optional[Sequence[int]] = None):
-        if self._twist_plus_one_index is not None and abs(float(self.frame_step) - 1.0) < 1e-6:
-            next_joint_pos = self.ref_robot_joint_pos_twist[:, self._twist_plus_one_index, :]
-            if env_ids is None:
-                return next_joint_pos
-            return next_joint_pos[env_ids]
-
-        next_joint_pos = self._sample_env_traj(self.robot_joint_pos_traj, self.frame_idx + self.frame_step)
-        if env_ids is None:
-            return next_joint_pos
-        return next_joint_pos[env_ids]
 
     def _lerp(self, a, b, w):
         while w.dim() < a.dim():

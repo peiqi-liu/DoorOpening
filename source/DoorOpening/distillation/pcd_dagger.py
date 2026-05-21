@@ -166,7 +166,6 @@ class Dagger:
         self.viser_cfg = dict(self.runtime_cfg.get("viser", {}))
         self.viser_raw_cfg = dict(self.viser_cfg.get("raw", {}))
         self.viser_env_id = int(self.viser_cfg.get("env_id", 0))
-        self.viser_show_policy_input = bool(self.viser_cfg.get("show_policy_input", True))
         self.viser_raw_enabled = self.rank == 0 and bool(self.viser_raw_cfg.get("enabled", False))
         self.viser_raw_save_interval = max(
             1,
@@ -174,11 +173,6 @@ class Dagger:
         )
         self.viser_raw_max_points = int(self.viser_raw_cfg.get("max_points", 12_000))
         self.viser_raw_max_frames = max(0, int(self.viser_raw_cfg.get("max_frames", 0)))
-        self.viser_raw_include_ground_truth = bool(self.viser_raw_cfg.get("include_ground_truth", True))
-        self.viser_raw_include_robot_obs = bool(self.viser_raw_cfg.get("include_robot_obs", True))
-        self.viser_raw_include_policy_input = bool(
-            self.viser_raw_cfg.get("include_policy_input", self.viser_show_policy_input)
-        )
         if self.pointcloud_source not in {"sampler", "depth", "lidar"}:
             raise ValueError(f"Unsupported pointcloud_source '{self.pointcloud_source}'.")
         if self.teacher_forcing_warmup_iters < 0:
@@ -686,16 +680,12 @@ class Dagger:
         if not torch.any(pregrasp_mask):
             return aux_input_vector
 
-        drop_mask = pregrasp_mask & (
-            torch.rand(aux_input_vector.shape[0], device=self.device) < self.aux_pregrasp_dropout_prob
-        )
+        drop_mask = pregrasp_mask & torch.rand(self.num_envs, device=self.device).lt(self.aux_pregrasp_dropout_prob)
         self.latest_aux_pregrasp_dropout_fraction = float(drop_mask.float().mean().item())
         if not torch.any(drop_mask):
             return aux_input_vector
 
         dropped_aux_input = aux_input_vector.clone()
-        # Zeroing the carried-over aux vector forces the student to recover the
-        # handle estimate from the rest of the observation during pregrasp.
         dropped_aux_input[drop_mask] = 0.0
         return dropped_aux_input
 
@@ -708,28 +698,6 @@ class Dagger:
         if env_ids.numel() == 0:
             return
         self.aux_buffer[env_ids] = 0.0
-
-    def _get_cfg_range(self, cfg, key, default):
-        values = cfg.get(key, default)
-        if len(values) != 2:
-            raise ValueError(f"Expected '{key}' to have exactly two values, got {values}.")
-        low = float(values[0])
-        high = float(values[1])
-        if low > high:
-            raise ValueError(f"Expected '{key}' to be ordered as [low, high], got {values}.")
-        return low, high
-
-    def _get_optional_cfg_range(self, cfg, key):
-        values = cfg.get(key)
-        if values is None:
-            return None
-        if len(values) != 2:
-            raise ValueError(f"Expected '{key}' to have exactly two values, got {values}.")
-        low = float(values[0])
-        high = float(values[1])
-        if low > high:
-            raise ValueError(f"Expected '{key}' to be ordered as [low, high], got {values}.")
-        return low, high
 
     def _init_pointcloud_assets(self):
         asset_index_by_dir = {
@@ -792,36 +760,28 @@ class Dagger:
         self.wall_distractor_num_points = int(
             self.wall_distractor_cfg.get("num_points", max(256, self.door_pcd_num_points // 3))
         )
-        self.wall_distractor_side_margin_scale_min, self.wall_distractor_side_margin_scale_max = self._get_cfg_range(
-            self.wall_distractor_cfg,
-            "side_margin_scale",
-            [0.35, 0.75],
+        self.wall_distractor_side_margin_scale_min, self.wall_distractor_side_margin_scale_max = map(
+            float, self.wall_distractor_cfg.get("side_margin_scale", [0.35, 0.75])
         )
-        side_margin_abs_range = self._get_optional_cfg_range(self.wall_distractor_cfg, "side_margin_m")
+        side_margin_abs_range = self.wall_distractor_cfg.get("side_margin_m")
         if side_margin_abs_range is None:
             self.wall_distractor_side_margin_abs_min_m = None
             self.wall_distractor_side_margin_abs_max_m = None
         else:
-            self.wall_distractor_side_margin_abs_min_m, self.wall_distractor_side_margin_abs_max_m = side_margin_abs_range
-        self.wall_distractor_bottom_margin_scale_min, self.wall_distractor_bottom_margin_scale_max = self._get_cfg_range(
-            self.wall_distractor_cfg,
-            "bottom_margin_scale",
-            [0.02, 0.08],
+            self.wall_distractor_side_margin_abs_min_m, self.wall_distractor_side_margin_abs_max_m = map(
+                float, side_margin_abs_range
+            )
+        self.wall_distractor_bottom_margin_scale_min, self.wall_distractor_bottom_margin_scale_max = map(
+            float, self.wall_distractor_cfg.get("bottom_margin_scale", [0.02, 0.08])
         )
-        self.wall_distractor_gap_min_m, self.wall_distractor_gap_max_m = self._get_cfg_range(
-            self.wall_distractor_cfg,
-            "edge_gap_m",
-            [0.015, 0.04],
+        self.wall_distractor_gap_min_m, self.wall_distractor_gap_max_m = map(
+            float, self.wall_distractor_cfg.get("edge_gap_m", [0.015, 0.04])
         )
-        self.wall_distractor_depth_min_m, self.wall_distractor_depth_max_m = self._get_cfg_range(
-            self.wall_distractor_cfg,
-            "depth_m",
-            [0.10, 0.26],
+        self.wall_distractor_depth_min_m, self.wall_distractor_depth_max_m = map(
+            float, self.wall_distractor_cfg.get("depth_m", [0.10, 0.26])
         )
-        self.wall_distractor_center_offset_min_m, self.wall_distractor_center_offset_max_m = self._get_cfg_range(
-            self.wall_distractor_cfg,
-            "center_offset_m",
-            [-0.20, 0.20],
+        self.wall_distractor_center_offset_min_m, self.wall_distractor_center_offset_max_m = map(
+            float, self.wall_distractor_cfg.get("center_offset_m", [-0.20, 0.20])
         )
         self.wall_distractor_side_margin_min_m = float(self.wall_distractor_cfg.get("side_margin_min_m", 0.10))
         self.wall_distractor_face_jitter_m = float(self.wall_distractor_cfg.get("face_jitter_m", 0.004))
@@ -887,59 +847,12 @@ class Dagger:
         sim_dt = getattr(sim_cfg, "dt", None)
         self.viser_sim_dt = float(sim_dt) if sim_dt is not None else 1.0 / 30.0
         self.viser_env_step_dt = max(float(getattr(self.ov_env, "dt", self.viser_sim_dt)), 1e-6)
-        self.viser_env_step_fps = 1.0 / self.viser_env_step_dt
-        self.viser_render_interval = max(int(getattr(sim_cfg, "render_interval", 1)), 1)
-        self.viser_render_dt = self.viser_sim_dt * self.viser_render_interval
-        pointcloud_sensor_dt = self.viser_env_step_dt
-        if self.pointcloud_source == "depth":
-            pointcloud_sensor_dt = getattr(
-                self.ov_env.cfg,
-                "pointcloud_camera_update_period",
-                pointcloud_sensor_dt,
-            )
-        self.viser_pointcloud_sensor_dt = max(float(pointcloud_sensor_dt), 1e-6)
-        self.viser_pointcloud_sensor_fps = 1.0 / self.viser_pointcloud_sensor_dt
         if not self.viser_raw_enabled:
             return
 
         raw_dir = os.path.dirname(self.viser_raw_path)
         if raw_dir:
             os.makedirs(raw_dir, exist_ok=True)
-
-        if self.rank == 0:
-            print(f"Viser raw replay capture enabled for env {self.viser_env_id}.")
-            print(
-                "Raw replay data will be written as "
-                f"{self._format_iterated_record_path(self.viser_raw_path, '<chunk_tag>')}"
-            )
-            print(
-                "Raw replay chunks will be written every "
-                f"{self.viser_raw_save_interval} iterations."
-            )
-            if self.viser_raw_max_frames > 0:
-                print(f"Each raw replay chunk will keep at most {self.viser_raw_max_frames} frames.")
-            print(
-                "Raw replay point budget: max_points={} (gt={}, obs={}, policy={}).".format(
-                    self.viser_raw_max_points,
-                    "off"
-                    if not self.viser_raw_include_ground_truth or self.viser_raw_max_points <= 0
-                    else "on",
-                    "off"
-                    if not self.viser_raw_include_robot_obs or self.viser_raw_max_points <= 0
-                    else "on",
-                    "off"
-                    if not self.viser_raw_include_policy_input or self.viser_raw_max_points <= 0
-                    else "on",
-                )
-            )
-            print(
-                "Replay timing: env_step_dt={:.6f}s ({:.2f} FPS), pointcloud_sensor_dt={:.6f}s ({:.2f} FPS).".format(
-                    self.viser_env_step_dt,
-                    self.viser_env_step_fps,
-                    self.viser_pointcloud_sensor_dt,
-                    self.viser_pointcloud_sensor_fps,
-                )
-            )
 
     def _get_viser_env_id(self):
         """Clamp the configured replay env index so debug capture never indexes outside the batch."""
@@ -955,18 +868,12 @@ class Dagger:
             "pointcloud_render_mode": str(getattr(self.ov_env.cfg, "pointcloud_render_mode", "none")).lower(),
             "sim_dt": float(self.viser_sim_dt),
             "decimation": int(getattr(self.ov_env.cfg, "decimation", 1)),
-            "render_interval": int(self.viser_render_interval),
-            "render_dt": float(self.viser_render_dt),
             "env_step_dt": float(self.viser_env_step_dt),
-            "env_step_fps": float(self.viser_env_step_fps),
             "frame_dt": float(self.viser_env_step_dt),
-            "frame_fps": float(self.viser_env_step_fps),
-            "pointcloud_sensor_dt": float(self.viser_pointcloud_sensor_dt),
-            "pointcloud_sensor_fps": float(self.viser_pointcloud_sensor_fps),
             "raw_cloud_config": {
-                "include_ground_truth": bool(self.viser_raw_include_ground_truth),
-                "include_robot_obs": bool(self.viser_raw_include_robot_obs),
-                "include_policy_input": bool(self.viser_raw_include_policy_input),
+                "include_ground_truth": True,
+                "include_robot_obs": True,
+                "include_policy_input": True,
                 "max_points": int(self.viser_raw_max_points),
             },
             "glorbot_urdf_path": str(glorbot_urdf_path),
@@ -1104,7 +1011,7 @@ class Dagger:
         self._viser_raw_latest_iteration = int(iteration)
 
         ground_truth_points_world = None
-        if self.viser_raw_include_ground_truth and self.viser_raw_max_points > 0:
+        if self.viser_raw_max_points > 0:
             ground_truth_points_world = self._prepare_viser_points(
                 ground_truth_pcd_world,
                 env_id,
@@ -1112,7 +1019,7 @@ class Dagger:
             ).to(dtype=torch.float16)
 
         robot_obs_points_world = None
-        if self.viser_raw_include_robot_obs and self.viser_raw_max_points > 0:
+        if self.viser_raw_max_points > 0:
             robot_obs_points_world = self._prepare_viser_world_points_from_local(
                 robot_obs_pcd_base,
                 robot_base_pos_w,
@@ -1122,7 +1029,7 @@ class Dagger:
             ).to(dtype=torch.float16)
 
         policy_input_points_world = None
-        if self.viser_raw_include_policy_input and policy_input_pcd_base is not None and self.viser_raw_max_points > 0:
+        if policy_input_pcd_base is not None and self.viser_raw_max_points > 0:
             policy_input_points_world = self._prepare_viser_world_points_from_local(
                 policy_input_pcd_base,
                 robot_base_pos_w,
@@ -1242,12 +1149,6 @@ class Dagger:
                 f"student_update_steps={self.student_update_steps}"
             )
 
-    def _override_actions_for_pregrasp(self, actions: torch.Tensor) -> torch.Tensor:
-        override_fn = getattr(self.ov_env, "override_pregrasp_actions", None)
-        if override_fn is None:
-            return actions
-        return override_fn(actions)
-
     def _get_teacher_actions(self, obs):
         if self.teacher_model is None:
             raise RuntimeError("Teacher model is not initialized.")
@@ -1258,7 +1159,7 @@ class Dagger:
         }
         with torch.no_grad():
             res_dict = self.teacher_model(batch_dict)
-        adjusted_actions = self._override_actions_for_pregrasp(torch.clamp(res_dict["mus"], -1.0, 1.0))
+        adjusted_actions = torch.clamp(res_dict["mus"], -1.0, 1.0)
         return {
             "mus": adjusted_actions,
             "actions": adjusted_actions,
