@@ -8,9 +8,9 @@ action_space: "absolute"
 action_dim: 19
 aux_weight: 0.1
 mode_prediction:
-  enabled: false
+  enabled: true
   num_modes: 4
-  weight: 0.1
+  weight: 0.01
   return_latent: true
 
 door_pcd_num_points: 30000  # Dense scene-door sampling before local policy crops are taken.
@@ -181,7 +181,7 @@ dagger:
   aux_feedback_to_policy: true  # When false, aux input stays zero instead of feeding back predictions.
   aux_pregrasp_dropout_prob: 0.001  # Conservative start: 0.1% per pregrasp step while predicted aux feedback is carried over.
   wrong_push_pull_rollout:
-    enabled: true
+    enabled: false
     prob_per_episode: 0.50
     start_phase_range: [1.8, 3.3]
     duration_steps_range: [5, 10]
