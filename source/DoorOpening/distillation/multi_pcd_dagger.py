@@ -208,8 +208,9 @@ class Dagger:
 
         self.temporal_obs_cfg = {}
         self.temporal_derived_state_specs = OrderedDict()
-        self.temporal_history_offsets_s = []
-        self.temporal_history_interpolate = True
+        self.temporal_history_s = 0.0
+        self.temporal_obs_delay_range_s = (0.0, 0.0)
+        self.temporal_command_delay_range_s = (0.0, 0.0)
         self.max_temporal_history_s = 0.0
         self.temporal_dt_s = 0.0
         self.temporal_history_len = 0
@@ -338,12 +339,9 @@ class Dagger:
         self.local_pcd_x_direction_cutoff = student_cfg_data.pop("x_direction_cutoff", -0.5)
         self.door_pcd_num_points = int(student_cfg_data.pop("door_pcd_num_points", 4096))
         self.temporal_obs_cfg = dict(student_cfg_data.pop("temporal_obs", {}) or {})
-        self.temporal_obs_enabled = bool(self.temporal_obs_cfg.get("enabled", False))
-        self.temporal_history_interpolate = bool(self.temporal_obs_cfg.get("interpolate", True))
-        raw_temporal_offsets = self.temporal_obs_cfg.get("history_offsets_s", [])
-        self.temporal_history_offsets_s = [float(offset) for offset in raw_temporal_offsets]
-        if any(offset < 0.0 for offset in self.temporal_history_offsets_s):
-            raise ValueError("temporal_obs.history_offsets_s values must be non-negative.")
+        self.temporal_history_s = float(self.temporal_obs_cfg.get("history_s", 0.0))
+        self.temporal_obs_delay_range_s = self.temporal_obs_cfg.get("obs_delay_s", [0.0, 0.0])
+        self.temporal_command_delay_range_s = self.temporal_obs_cfg.get("command_delay_s", [0.0, 0.0])
 
         student_model_kwargs = {
             key: value
@@ -409,14 +407,12 @@ class Dagger:
                     )
                 )
             self.temporal_derived_state_specs[key] = spec
-        if self.temporal_derived_state_specs and not self.temporal_obs_enabled:
-            raise ValueError("Temporal derived state keys require temporal_obs.enabled: true.")
         spec_offsets = [
             float(spec["offset_s"])
             for spec in self.temporal_derived_state_specs.values()
             if spec["offset_s"] is not None
         ]
-        self.max_temporal_history_s = max([0.0, *self.temporal_history_offsets_s, *spec_offsets])
+        self.max_temporal_history_s = max([0.0, self.temporal_history_s, *spec_offsets])
         if student_ckpt is not None and self.temporal_derived_state_specs and self.rank == 0:
             print(
                 "Warning: student checkpoint was loaded while temporal derived inputs are active. "
@@ -655,7 +651,7 @@ class Dagger:
         time_delta = torch.abs(self.temporal_time_history.unsqueeze(1) - query.view(1, -1, 1))
         nearest_idx = torch.argmin(time_delta, dim=2)
         nearest_value = self._gather_temporal_values(value_history, nearest_idx)
-        if history_len < 2 or not self.temporal_history_interpolate:
+        if history_len < 2:
             return {float(offset): nearest_value[:, idx, :] for idx, offset in enumerate(offsets_s)}
 
         t_new = self.temporal_time_history[:, :-1]
