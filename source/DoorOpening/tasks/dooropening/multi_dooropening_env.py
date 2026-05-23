@@ -12,7 +12,9 @@ from isaaclab.envs import DirectRLEnv
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from DoorOpening.utils.quat_utils import quat_diff_angle, hinge_angle_diff
 from DoorOpening.assets.door.multi_door_cfg import (
+    DOOR_FAMILY_NAMES,
     asset_paths as door_asset_paths,
+    asset_family_ids,
     board_offsets,
     configure_multi_door_assets_for_rank,
     edit_door_articulation,
@@ -162,6 +164,7 @@ class DooropeningEnv(DirectRLEnv):
         self.num_door_assets = len(handle_offsets)
         self.env_asset_start_index = get_multi_door_asset_start_index(self.num_envs)
         self.env_asset_indices = get_multi_door_env_asset_indices(self.num_envs, device=self.device)
+        self.env_family_ids = asset_family_ids.to(device=self.device, dtype=torch.long)[self.env_asset_indices]
         rank = int(os.environ.get("RANK", "0"))
         world_size = int(os.environ.get("WORLD_SIZE", "1"))
         if world_size > 1:
@@ -198,6 +201,9 @@ class DooropeningEnv(DirectRLEnv):
         self.max_trial_steps = default_trial_steps * torch.ones_like(self.episode_length_buf, device=self.device)
         self.games_to_track = 100
         self.completed_successes = deque(maxlen=self.games_to_track)
+        self.completed_successes_by_family = {
+            family_name: deque(maxlen=self.games_to_track) for family_name in DOOR_FAMILY_NAMES
+        }
         self.episode_reached_last_frame = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         torch.set_printoptions(precision=4, sci_mode=False)
@@ -648,15 +654,30 @@ class DooropeningEnv(DirectRLEnv):
 
         done_mask = torch.nonzero(self.reset_buf, as_tuple=False).squeeze(-1)
         if done_mask.numel() > 0:
-            episode_successes = (
+            episode_successes_tensor = (
                 self.episode_reached_last_frame[done_mask] | self.reset_time_outs[done_mask]
-            ).to(dtype=torch.float32).detach().cpu().tolist()
+            ).to(dtype=torch.float32)
+            episode_successes = episode_successes_tensor.detach().cpu().tolist()
             self.completed_successes.extend(float(value) for value in episode_successes)
+            done_family_ids = self.env_family_ids[done_mask].detach().cpu().tolist()
+            for family_id, value in zip(done_family_ids, episode_successes):
+                family_name = DOOR_FAMILY_NAMES[int(family_id)]
+                self.completed_successes_by_family[family_name].append(float(value))
 
         self.extras["stats/active_success_rate"] = self.episode_reached_last_frame.float().mean().item()
         success_rate = self._mean_completed_metric(self.completed_successes)
         if success_rate is not None:
             self.extras["stats/success_rate"] = success_rate
+
+        for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
+            family_mask = self.env_family_ids == int(family_id)
+            if family_mask.any():
+                self.extras[f"stats/family_active_success_rate/{family_name}"] = (
+                    self.episode_reached_last_frame[family_mask].float().mean().item()
+                )
+            family_success_rate = self._mean_completed_metric(self.completed_successes_by_family[family_name])
+            if family_success_rate is not None:
+                self.extras[f"stats/family_success_rate/{family_name}"] = family_success_rate
 
     def _log_dr_metrics(self):
         step_count = self._get_curriculum_step_count()
@@ -1078,8 +1099,6 @@ class DooropeningEnv(DirectRLEnv):
                 policy_joint_pos.unsqueeze(dim=1),
                 policy_joint_vel.unsqueeze(dim=1),
                 self.robot_dof_targets.unsqueeze(dim = 1),
-                policy_base_joint_ref_err,
-                policy_arm_joint_ref_err,
                 key_pos_err,
                 robot_key_body_pos.reshape(self.num_envs, 1, -1),
                 robot_key_body_euler.reshape(self.num_envs, 1, -1),
@@ -1088,7 +1107,6 @@ class DooropeningEnv(DirectRLEnv):
                 door_to_base_link_pos,
                 self.door_joint_pos[:, self._door_joint_idx].unsqueeze(dim = 1),
                 self.ref_door_joint_pos[:, self._door_joint_idx].to(self.door_joint_pos).unsqueeze(dim = 1),
-                twist_obs,
             ),
             dim=-1,
         )
@@ -1098,20 +1116,14 @@ class DooropeningEnv(DirectRLEnv):
                 clean_joint_pos.unsqueeze(dim=1),
                 clean_joint_vel.unsqueeze(dim=1),
                 self.robot_dof_targets.unsqueeze(dim=1),
-                clean_base_joint_ref_err,
-                clean_arm_joint_ref_err,
                 key_pos_err,
                 robot_key_body_pos.reshape(self.num_envs, 1, -1),
                 robot_key_body_euler.reshape(self.num_envs, 1, -1),
                 base_lin_vel_local.reshape(self.num_envs, 1, -1),
                 base_ang_vel_local.reshape(self.num_envs, 1, -1),
                 door_to_base_link_pos,
-                # door_to_palm_link_pos,
-                # self.door_link_pos.reshape(self.num_envs, 1, -1),
                 self.door_joint_pos[:, self._door_joint_idx].unsqueeze(dim = 1),
-                # self.door_joint_vel[:, self._door_joint_idx].unsqueeze(dim = 1),
                 self.ref_door_joint_pos[:, self._door_joint_idx].to(self.door_joint_pos).unsqueeze(dim = 1),
-                twist_obs,
             ),
             dim=-1,
         )
