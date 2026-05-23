@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import math
 from DoorOpening.utils.state_machine.api import compute_base_joint, solve_ik, get_hinge_pos, open_hand
@@ -72,6 +73,30 @@ def resolve_planner_options(door_urdf_path, handle_side, opening_direction):
     return resolved_handle_side, resolved_opening_direction
 
 
+def resolve_start_base_pair_key(door_urdf_path):
+    metadata = _load_variant_metadata(door_urdf_path)
+    if metadata is None:
+        return os.path.basename(os.path.dirname(door_urdf_path))
+
+    key_payload = {
+        "source_asset": metadata.get("source_asset"),
+        "variant_name": metadata.get("variant_name"),
+        "actual_properties": metadata.get("actual_properties"),
+    }
+    return json.dumps(key_payload, sort_keys=True, separators=(",", ":"))
+
+
+def _stable_unit_interval(key):
+    digest = hashlib.blake2b(key.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, byteorder="big", signed=False) / float(1 << 64)
+
+
+def paired_start_angle(pair_key, seed, angle_range_deg):
+    angle_limit = math.radians(angle_range_deg)
+    unit = _stable_unit_interval(f"dooropening-start-base-v1:{int(seed)}:{pair_key}")
+    return -angle_limit + 2.0 * angle_limit * unit
+
+
 def get_robot_constants():
     all_joint_names = FULL_JOINT_NAMES + list(CAMERA_JOINT_DEFAULT_VALUES.keys())
     default_joint_pos_dict = {}
@@ -104,12 +129,18 @@ def sample_robot_initial_base_joints_on_door_ring(
     *,
     radius: float = 1.2,
     angle_range_deg: float = 25.0,
+    rng=None,
+    approach_angle: float | None = None,
 ):
     """Sample base xy joints for a start pose on a ring around the door while
     keeping the base rotation joint unchanged."""
 
     angle_limit = math.radians(angle_range_deg)
-    approach_angle = random.uniform(-angle_limit, angle_limit)
+    if approach_angle is None:
+        rng = random if rng is None else rng
+        approach_angle = rng.uniform(-angle_limit, angle_limit)
+    else:
+        approach_angle = max(-angle_limit, min(angle_limit, float(approach_angle)))
 
     sampled_x = door_initial_pose[:, 0] + radius * math.cos(approach_angle)
     sampled_y = door_initial_pose[:, 1] + radius * math.sin(approach_angle)
@@ -659,8 +690,10 @@ def play_and_save_traj(
     handle_side="auto",
     opening_direction="auto",
     randomize_start_base=True,
+    start_base_sampling="paired",
     start_base_radius=1.0,
     start_base_angle_range_deg=30.0,
+    start_base_pair_seed=0,
     playback_speed=4.0,
     traj_dt=DEFAULT_TRAJ_DT,
     port=None,
@@ -670,16 +703,34 @@ def play_and_save_traj(
     robot_initial_pose = torch.tensor([[ROBOT_INITIAL_POS[0], ROBOT_INITIAL_POS[1], ROBOT_INITIAL_POS[2], ROBOT_INITIAL_ROT[0], ROBOT_INITIAL_ROT[1], ROBOT_INITIAL_ROT[2], ROBOT_INITIAL_ROT[3]]], device="cpu")
     door_initial_pose = torch.tensor([[DOOR_INITIAL_POS[0], DOOR_INITIAL_POS[1], DOOR_INITIAL_POS[2], DOOR_INITIAL_ROT[0], DOOR_INITIAL_ROT[1], DOOR_INITIAL_ROT[2], DOOR_INITIAL_ROT[3]]], device="cpu")
     robot_constants, robot_initial_q = get_robot_constants()
+    if start_base_sampling == "none":
+        randomize_start_base = False
+    elif start_base_sampling not in {"paired", "random"}:
+        raise ValueError(
+            f"Unsupported start_base_sampling '{start_base_sampling}'. Expected paired, random, or none."
+        )
+
     if randomize_start_base:
+        approach_angle = None
+        if start_base_sampling == "paired":
+            pair_key = resolve_start_base_pair_key(door_urdf_path)
+            approach_angle = paired_start_angle(
+                pair_key,
+                start_base_pair_seed,
+                start_base_angle_range_deg,
+            )
+
         sampled_base_joint, sampled_world_pose, sampled_angle = sample_robot_initial_base_joints_on_door_ring(
             robot_initial_pose,
             door_initial_pose,
             radius=start_base_radius,
             angle_range_deg=start_base_angle_range_deg,
+            approach_angle=approach_angle,
         )
         robot_initial_q[:3] = sampled_base_joint
+        sampling_label = "Paired" if start_base_sampling == "paired" else "Randomized"
         print(
-            "Randomized start base joints:",
+            f"{sampling_label} start base joints:",
             robot_initial_q[:3],
             "world pose:",
             sampled_world_pose,
@@ -881,6 +932,34 @@ if __name__ == "__main__":
         help="Time step represented by adjacent trajectory samples.",
     )
     parser.add_argument(
+        "--start-base-sampling",
+        default="paired",
+        choices=["paired", "random", "none"],
+        help=(
+            "How to choose the initial mobile-base waypoint. 'paired' hashes a "
+            "pull/push-shared asset identity; 'random' preserves the old fresh "
+            "RNG behavior; 'none' uses the default robot base."
+        ),
+    )
+    parser.add_argument(
+        "--start-base-radius",
+        type=float,
+        default=1.0,
+        help="Radius in meters for the initial mobile-base waypoint around the door.",
+    )
+    parser.add_argument(
+        "--start-base-angle-range-deg",
+        type=float,
+        default=30.0,
+        help="Symmetric angle range in degrees for initial mobile-base waypoint sampling.",
+    )
+    parser.add_argument(
+        "--start-base-pair-seed",
+        type=int,
+        default=0,
+        help="Seed mixed into the deterministic paired start-base hash.",
+    )
+    parser.add_argument(
         "--port",
         type=int,
         default=None,
@@ -906,6 +985,10 @@ if __name__ == "__main__":
             door_urdf_path,
             handle_side=args.handle_side,
             opening_direction=args.opening_direction,
+            start_base_sampling=args.start_base_sampling,
+            start_base_radius=args.start_base_radius,
+            start_base_angle_range_deg=args.start_base_angle_range_deg,
+            start_base_pair_seed=args.start_base_pair_seed,
             playback_speed=args.playback_speed,
             traj_dt=args.traj_dt,
             port=args.port,
