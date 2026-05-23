@@ -563,8 +563,7 @@ class DooropeningEnv(DirectRLEnv):
             activate_contact_sensors = sim_schemas.activate_contact_sensors
 
         for env_id in range(self.num_envs):
-            for link_name in ("link_1", "link_2"):
-                activate_contact_sensors(f"/World/envs/env_{env_id}/Door/{link_name}", True)
+            activate_contact_sensors(f"/World/envs/env_{env_id}/Door", 1.0)
 
     def _setup_scene(self):
         configure_multi_door_assets_for_rank(self.cfg.door_cfg, int(self.cfg.scene.num_envs))
