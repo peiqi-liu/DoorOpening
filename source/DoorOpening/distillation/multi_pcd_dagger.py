@@ -1,6 +1,8 @@
+import json
 import os
 import math
 import pathlib
+import re
 import time
 from collections import OrderedDict, deque
 from pathlib import Path
@@ -244,7 +246,7 @@ class Dagger:
         self._init_student()
         self._init_history_buffers()
         self._init_pointcloud_assets()
-        self._init_wrong_push_pull_rollout()
+        self._init_twin_student_action_replay()
         self._init_viser_debug_tools()
 
     def _init_teacher(self):
@@ -1264,6 +1266,518 @@ class Dagger:
         self.wrong_pp_target_motion_ids = wrong_motion_idx
         ref_motion_lib.set_wrong_motion_map(self.wrong_pp_target_motion_ids)
         self._print_wrong_pp_sanity_info(family_id_by_family_id)
+
+    def _init_twin_student_action_replay(self):
+        default_family_map = {
+            "PartNetv5_plus": "PartNetv8_plus",
+            "PartNetv8_plus": "PartNetv5_plus",
+            "PartNetv6_plus": "PartNetv7_plus",
+            "PartNetv7_plus": "PartNetv6_plus",
+        }
+        cfg = {
+            "enabled": False,
+            "record_enabled": True,
+            "buffer_capacity_per_key": 64,
+            "min_sequence_len": 5,
+            "phase_range_to_record": [2.2, 3.4],
+            "perturb_enabled": True,
+            "prob_per_episode": 0.10,
+            "start_phase_range": [2.4, 3.1],
+            "duration_steps_range": [5, 8],
+            "max_bursts_per_episode": 1,
+            "replace_components": ["base", "arm"],
+            "active_visual_envs_only": True,
+            "skip_if_no_replay_available": True,
+            "strict_same_geometry": True,
+            "family_map": default_family_map,
+            "log": True,
+            "debug_print_first_n": 10,
+        }
+        user_cfg = dict(self.runtime_cfg.get("twin_student_action_replay", {}) or {})
+        if "family_map" in user_cfg:
+            family_map = dict(user_cfg.pop("family_map") or {})
+        else:
+            family_map = dict(default_family_map)
+        cfg.update(user_cfg)
+        cfg["family_map"] = family_map
+
+        self.twin_replay_cfg = cfg
+        self.twin_replay_enabled = bool(cfg.get("enabled", False))
+        self.twin_replay_record_enabled = bool(cfg.get("record_enabled", True))
+        self.twin_replay_perturb_enabled = bool(cfg.get("perturb_enabled", True))
+        self.twin_replay_buffer_capacity_per_key = int(cfg.get("buffer_capacity_per_key", 64))
+        self.twin_replay_min_sequence_len = int(cfg.get("min_sequence_len", 5))
+        self.twin_replay_record_phase_min, self.twin_replay_record_phase_max = map(
+            float, cfg.get("phase_range_to_record", [2.2, 3.4])
+        )
+        self.twin_replay_prob_per_episode = float(cfg.get("prob_per_episode", 0.10))
+        self.twin_replay_phase_min, self.twin_replay_phase_max = map(float, cfg.get("start_phase_range", [2.4, 3.1]))
+        duration_min, duration_max = cfg.get("duration_steps_range", [5, 8])
+        self.twin_replay_duration_min = int(duration_min)
+        self.twin_replay_duration_max = int(duration_max)
+        self.twin_replay_max_bursts_per_episode = int(cfg.get("max_bursts_per_episode", 1))
+        self.twin_replay_active_visual_envs_only = bool(cfg.get("active_visual_envs_only", True))
+        self.twin_replay_skip_if_no_replay_available = bool(cfg.get("skip_if_no_replay_available", True))
+        self.twin_replay_strict_same_geometry = bool(cfg.get("strict_same_geometry", True))
+        self.twin_replay_log_enabled = bool(cfg.get("log", True))
+        self.twin_replay_debug_print_limit = int(cfg.get("debug_print_first_n", 10))
+        self.twin_replay_debug_print_count = 0
+
+        self.twin_replay_family_id_map = torch.full(
+            (len(DOOR_FAMILY_NAMES),), -1, dtype=torch.long, device=self.device
+        )
+        self.twin_replay_replace_action_indices = torch.empty(0, dtype=torch.long, device=self.device)
+        self.twin_replay_visual_env_mask = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+        self.twin_replay_env_geometry_keys = ["" for _ in range(self.num_envs)]
+
+        self.twin_student_replay_buffer = {}
+        self.twin_replay_current_actions = [[] for _ in range(self.num_envs)]
+        self.twin_replay_current_phases = [[] for _ in range(self.num_envs)]
+        self.twin_replay_active_sequences = {}
+
+        self.twin_replay_should_burst = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.twin_replay_active_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.twin_replay_remaining_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.twin_replay_used_burst_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.twin_replay_start_phase = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self.twin_replay_selected_family_id = torch.full((self.num_envs,), -1, dtype=torch.long, device=self.device)
+        self.twin_replay_duration_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._reset_twin_replay_log_accumulators()
+
+        if not self.twin_replay_enabled:
+            return
+        ref_motion_lib = getattr(self.ov_env, "ref_motion_lib", None)
+        if ref_motion_lib is None:
+            raise RuntimeError("twin_student_action_replay requires reference motions.")
+        if not 0.0 <= self.twin_replay_prob_per_episode <= 1.0:
+            raise ValueError("twin_student_action_replay.prob_per_episode must be in [0, 1].")
+        if self.twin_replay_duration_min <= 0 or self.twin_replay_duration_max < self.twin_replay_duration_min:
+            raise ValueError("twin_student_action_replay.duration_steps_range must be positive and ordered.")
+        if self.twin_replay_max_bursts_per_episode <= 0:
+            raise ValueError("twin_student_action_replay.max_bursts_per_episode must be positive when enabled.")
+        if self.twin_replay_buffer_capacity_per_key <= 0:
+            raise ValueError("twin_student_action_replay.buffer_capacity_per_key must be positive.")
+        if self.twin_replay_min_sequence_len <= 0:
+            raise ValueError("twin_student_action_replay.min_sequence_len must be positive.")
+
+        self.twin_replay_replace_action_indices = self._build_wrong_pp_replace_action_indices(
+            cfg.get("replace_components", ["base", "arm"])
+        )
+        self.twin_replay_family_id_map = self._build_twin_replay_family_id_map(family_map)
+        self.twin_replay_visual_env_mask = self._get_twin_replay_visual_env_mask()
+        self.twin_replay_env_geometry_keys = self._build_twin_replay_env_geometry_keys()
+        self._print_twin_replay_geometry_samples()
+
+    def _reset_twin_replay_log_accumulators(self):
+        self.twin_replay_log_active_fraction_sum = 0.0
+        self.twin_replay_log_step_count = 0
+        self.twin_replay_log_new_sequences = 0
+        self.twin_replay_log_new_bursts = 0
+        self.twin_replay_log_skipped_no_buffer = 0
+        self.twin_replay_log_skipped_no_same_geometry = 0
+        self.twin_replay_log_duration_sum = 0.0
+        self.twin_replay_log_start_phase_sum = 0.0
+        self.twin_replay_log_burst_count = 0
+        self.twin_replay_log_action_l2_sum = 0.0
+        self.twin_replay_log_action_l2_count = 0
+        self.twin_replay_log_base_cosine_sum = 0.0
+        self.twin_replay_log_base_cosine_count = 0
+        self.twin_replay_log_arm_cosine_sum = 0.0
+        self.twin_replay_log_arm_cosine_count = 0
+        self.twin_replay_log_family_bursts = torch.zeros(
+            len(DOOR_FAMILY_NAMES), dtype=torch.long, device=self.device
+        )
+
+    def _build_twin_replay_family_id_map(self, family_map):
+        family_name_to_id = {family_name: family_id for family_id, family_name in enumerate(DOOR_FAMILY_NAMES)}
+        unknown_names = sorted(
+            {
+                family_name
+                for pair in family_map.items()
+                for family_name in pair
+                if family_name not in family_name_to_id
+            }
+        )
+        if unknown_names:
+            raise ValueError(
+                "twin_student_action_replay.family_map references families that are not active in DOOR_FAMILY_NAMES: "
+                f"{unknown_names}. Active families: {list(DOOR_FAMILY_NAMES)}."
+            )
+        family_id_by_family_id = torch.full(
+            (len(DOOR_FAMILY_NAMES),), -1, dtype=torch.long, device=self.device
+        )
+        for family_name, twin_family_name in family_map.items():
+            family_id = family_name_to_id[family_name]
+            twin_family_id = family_name_to_id[twin_family_name]
+            if family_id == twin_family_id:
+                raise ValueError(
+                    f"twin_student_action_replay.family_map must not map a family to itself: {family_name}."
+                )
+            source_semantics = self._infer_wrong_pp_family_semantics(family_name)
+            target_semantics = self._infer_wrong_pp_family_semantics(twin_family_name)
+            if source_semantics is None or target_semantics is None:
+                raise ValueError(
+                    "Cannot validate twin_student_action_replay.family_map without known family semantics: "
+                    f"{family_name}, {twin_family_name}."
+                )
+            source_side, source_direction = source_semantics
+            target_side, target_direction = target_semantics
+            if source_side != target_side or source_direction == target_direction:
+                raise ValueError(
+                    "twin_student_action_replay.family_map must preserve handle side and flip push/pull: "
+                    f"{family_name} ({source_side}, {source_direction}) -> "
+                    f"{twin_family_name} ({target_side}, {target_direction})."
+                )
+            family_id_by_family_id[family_id] = twin_family_id
+        return family_id_by_family_id
+
+    def _get_twin_replay_visual_env_mask(self):
+        # The current student policy builds visual point-cloud observations for every env each iteration.
+        return torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+
+    def _normalize_twin_asset_folder_name(self, asset_folder):
+        normalized = re.sub(r"^(PartNetv\d+_plus[_-]*)", "", str(asset_folder))
+        return normalized or str(asset_folder)
+
+    def _get_twin_geometry_key(self, asset_path: str) -> str:
+        asset_dir = Path(asset_path).resolve().parent
+        meta_path = asset_dir / "variant_meta.json"
+        if meta_path.is_file():
+            try:
+                with meta_path.open("r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                for field_name in ("copied_from_pull_asset", "source_asset", "variant_name"):
+                    value = meta.get(field_name)
+                    if isinstance(value, str) and value:
+                        if field_name == "variant_name":
+                            return self._normalize_twin_asset_folder_name(value.split("__", 1)[0])
+                        return self._normalize_twin_asset_folder_name(value)
+            except Exception:
+                pass
+        return self._normalize_twin_asset_folder_name(asset_dir.name.split("__", 1)[0])
+
+    def _build_twin_replay_env_geometry_keys(self):
+        geometry_keys = []
+        for asset_idx in self.env_asset_idx.detach().cpu().tolist():
+            geometry_keys.append(self._get_twin_geometry_key(door_asset_paths[int(asset_idx)]))
+        return geometry_keys
+
+    def _print_twin_replay_geometry_samples(self):
+        if self.rank != 0:
+            return
+        sample_count = min(10, int(self.num_envs))
+        for env_id in range(sample_count):
+            asset_idx = int(self.env_asset_idx[env_id].detach().cpu().item())
+            family_id = int(self.env_family_ids[env_id].detach().cpu().item())
+            asset_folder = Path(door_asset_paths[asset_idx]).resolve().parent.name
+            print(
+                "[INFO] twin_student_action_replay geometry key: "
+                f"env_id={env_id}, asset_idx={asset_idx}, family_name={DOOR_FAMILY_NAMES[family_id]}, "
+                f"asset_folder={asset_folder}, geometry_key={self.twin_replay_env_geometry_keys[env_id]}"
+            )
+
+    def _get_current_ref_phase(self, env_ids=None):
+        ref_motion_lib = getattr(self.ov_env, "ref_motion_lib", None)
+        if ref_motion_lib is None:
+            raise RuntimeError("Reference motion manager is required to query current phase.")
+        phase = ref_motion_lib.get_current_phase(env_ids=env_ids)
+        return phase.to(device=self.device, dtype=torch.float32)
+
+    def _finalize_twin_replay_recordings(self, env_ids=None):
+        if not getattr(self, "twin_replay_enabled", False):
+            return
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+        elif not isinstance(env_ids, torch.Tensor):
+            env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+        if env_ids.numel() == 0:
+            return
+
+        for env_id in env_ids.detach().cpu().tolist():
+            env_id = int(env_id)
+            actions = self.twin_replay_current_actions[env_id]
+            phases = self.twin_replay_current_phases[env_id]
+            if len(actions) >= self.twin_replay_min_sequence_len:
+                geometry_key = self.twin_replay_env_geometry_keys[env_id]
+                family_id = int(self.env_family_ids[env_id].detach().cpu().item())
+                key = (geometry_key, family_id)
+                buffer = self.twin_student_replay_buffer.setdefault(
+                    key, deque(maxlen=self.twin_replay_buffer_capacity_per_key)
+                )
+                buffer.append(
+                    {
+                        "actions": torch.stack(actions, dim=0).to(dtype=torch.float32, device="cpu"),
+                        "phases": torch.tensor(phases, dtype=torch.float32, device="cpu"),
+                        "source_rank": int(self.rank),
+                        "source_env_id": env_id,
+                        "source_asset_idx": int(self.env_asset_idx[env_id].detach().cpu().item()),
+                        "source_family_id": family_id,
+                        "geometry_key": geometry_key,
+                    }
+                )
+                self.twin_replay_log_new_sequences += 1
+            self.twin_replay_current_actions[env_id] = []
+            self.twin_replay_current_phases[env_id] = []
+
+    def _reset_twin_student_action_replay_state(self, env_ids=None):
+        if not getattr(self, "twin_replay_enabled", False):
+            return
+        self._finalize_twin_replay_recordings(env_ids)
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+        elif not isinstance(env_ids, torch.Tensor):
+            env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+        if env_ids.numel() == 0:
+            return
+
+        self.twin_replay_should_burst[env_ids] = torch.rand(env_ids.numel(), device=self.device) < self.twin_replay_prob_per_episode
+        self.twin_replay_active_mask[env_ids] = False
+        self.twin_replay_remaining_steps[env_ids] = 0
+        self.twin_replay_used_burst_count[env_ids] = 0
+        self.twin_replay_start_phase[env_ids] = 0.0
+        self.twin_replay_selected_family_id[env_ids] = -1
+        self.twin_replay_duration_steps[env_ids] = 0
+        for env_id in env_ids.detach().cpu().tolist():
+            self.twin_replay_active_sequences.pop(int(env_id), None)
+            self.twin_replay_current_actions[int(env_id)] = []
+            self.twin_replay_current_phases[int(env_id)] = []
+
+    def _record_twin_student_actions(self, student_env_actions):
+        if not getattr(self, "twin_replay_enabled", False) or not self.twin_replay_record_enabled:
+            return
+        if student_env_actions.shape[0] != self.num_envs:
+            raise RuntimeError(
+                "Twin student replay expected per-env student env actions for all envs: "
+                f"{tuple(student_env_actions.shape)}."
+            )
+        phase = self._get_current_ref_phase()
+        eligible = (phase >= self.twin_replay_record_phase_min) & (phase <= self.twin_replay_record_phase_max)
+        if self.twin_replay_active_visual_envs_only:
+            eligible = eligible & self.twin_replay_visual_env_mask
+        eligible_env_ids = torch.nonzero(eligible, as_tuple=False).squeeze(-1)
+        if eligible_env_ids.numel() == 0:
+            return
+        detached_actions = student_env_actions.detach()
+        for env_id in eligible_env_ids.detach().cpu().tolist():
+            env_id = int(env_id)
+            self.twin_replay_current_actions[env_id].append(detached_actions[env_id].to(device="cpu", dtype=torch.float32).clone())
+            self.twin_replay_current_phases[env_id].append(float(phase[env_id].detach().cpu().item()))
+
+    def _sample_twin_replay_sequence(self, geometry_key, target_family_id, duration):
+        if self.twin_replay_strict_same_geometry:
+            candidate_keys = [(geometry_key, target_family_id)]
+        else:
+            candidate_keys = [
+                (buffer_geometry_key, buffer_family_id)
+                for (buffer_geometry_key, buffer_family_id), sequences in self.twin_student_replay_buffer.items()
+                if buffer_family_id == target_family_id and len(sequences) > 0
+            ]
+            if (geometry_key, target_family_id) in self.twin_student_replay_buffer:
+                candidate_keys = [(geometry_key, target_family_id)] + [
+                    key for key in candidate_keys if key != (geometry_key, target_family_id)
+                ]
+        for key in candidate_keys:
+            sequences = self.twin_student_replay_buffer.get(key)
+            if not sequences:
+                continue
+            valid_sequences = [seq for seq in sequences if int(seq["actions"].shape[0]) >= int(duration)]
+            if not valid_sequences:
+                continue
+            chosen_seq = valid_sequences[int(torch.randint(0, len(valid_sequences), (1,), device=self.device).item())]
+            max_start = int(chosen_seq["actions"].shape[0]) - int(duration)
+            start_idx = int(torch.randint(0, max_start + 1, (1,), device=self.device).item()) if max_start > 0 else 0
+            return chosen_seq, start_idx
+        return None, None
+
+    def _maybe_start_twin_replay_bursts(self):
+        if not getattr(self, "twin_replay_enabled", False) or not self.twin_replay_perturb_enabled:
+            return torch.empty(0, dtype=torch.long, device=self.device), None
+        phase = self._get_current_ref_phase()
+        eligible = (
+            self.twin_replay_should_burst
+            & (~self.twin_replay_active_mask)
+            & (self.twin_replay_used_burst_count < self.twin_replay_max_bursts_per_episode)
+            & (phase >= self.twin_replay_phase_min)
+            & (phase <= self.twin_replay_phase_max)
+        )
+        if self.twin_replay_active_visual_envs_only:
+            eligible = eligible & self.twin_replay_visual_env_mask
+        candidate_env_ids = torch.nonzero(eligible, as_tuple=False).squeeze(-1)
+        if candidate_env_ids.numel() == 0:
+            return candidate_env_ids, phase
+
+        started_env_ids = []
+        for env_id in candidate_env_ids.detach().cpu().tolist():
+            env_id = int(env_id)
+            duration = int(
+                torch.randint(
+                    low=self.twin_replay_duration_min,
+                    high=self.twin_replay_duration_max + 1,
+                    size=(1,),
+                    device=self.device,
+                    dtype=torch.long,
+                ).item()
+            )
+            geometry_key = self.twin_replay_env_geometry_keys[env_id]
+            current_family_id = int(self.env_family_ids[env_id].detach().cpu().item())
+            twin_family_id = int(self.twin_replay_family_id_map[current_family_id].detach().cpu().item())
+            if twin_family_id < 0:
+                self.twin_replay_log_skipped_no_buffer += 1
+                continue
+            replay_seq, start_idx = self._sample_twin_replay_sequence(geometry_key, twin_family_id, duration)
+            if replay_seq is None:
+                if self.twin_replay_strict_same_geometry:
+                    self.twin_replay_log_skipped_no_same_geometry += 1
+                else:
+                    self.twin_replay_log_skipped_no_buffer += 1
+                if self.twin_replay_skip_if_no_replay_available:
+                    continue
+                continue
+            window = replay_seq["actions"][start_idx : start_idx + duration].to(device=self.device, dtype=torch.float32)
+            self.twin_replay_active_sequences[env_id] = {
+                "actions": window,
+                "cursor": 0,
+                "source_meta": replay_seq,
+            }
+            self.twin_replay_active_mask[env_id] = True
+            self.twin_replay_remaining_steps[env_id] = int(duration)
+            self.twin_replay_used_burst_count[env_id] += 1
+            self.twin_replay_start_phase[env_id] = phase[env_id]
+            self.twin_replay_selected_family_id[env_id] = twin_family_id
+            self.twin_replay_duration_steps[env_id] = int(duration)
+            self.twin_replay_log_new_bursts += 1
+            self.twin_replay_log_duration_sum += float(duration)
+            self.twin_replay_log_start_phase_sum += float(phase[env_id].detach().cpu().item())
+            self.twin_replay_log_burst_count += 1
+            self.twin_replay_log_family_bursts[current_family_id] += 1
+            started_env_ids.append(env_id)
+            if self.rank == 0 and self.twin_replay_debug_print_count < self.twin_replay_debug_print_limit:
+                source_family_id = int(replay_seq["source_family_id"])
+                print(
+                    "[INFO] twin_student_action_replay burst start: "
+                    f"env_id={env_id}, current_family={DOOR_FAMILY_NAMES[current_family_id]}, "
+                    f"twin_family={DOOR_FAMILY_NAMES[twin_family_id]}, geometry_key={geometry_key}, "
+                    f"duration={duration}, phase={float(phase[env_id].detach().cpu().item()):.3f}, "
+                    f"source_env_id={int(replay_seq['source_env_id'])}, source_family={DOOR_FAMILY_NAMES[source_family_id]}"
+                )
+                self.twin_replay_debug_print_count += 1
+        if not started_env_ids:
+            return torch.empty(0, dtype=torch.long, device=self.device), phase
+        return torch.tensor(started_env_ids, device=self.device, dtype=torch.long), phase
+
+    def _record_twin_replay_action_metrics(self, env_ids, replay_actions, normal_step_actions):
+        if env_ids.numel() == 0:
+            return
+        normal_actions = normal_step_actions[env_ids]
+        diff = replay_actions - normal_actions
+        self.twin_replay_log_action_l2_sum += float(diff.norm(dim=-1).sum().detach().cpu().item())
+        self.twin_replay_log_action_l2_count += int(env_ids.numel())
+        base_cosine = self._cosine_mean_for_action_indices(
+            replay_actions,
+            normal_actions,
+            self.action_component_history_indices["base"],
+        )
+        if base_cosine is not None:
+            self.twin_replay_log_base_cosine_sum += base_cosine * int(env_ids.numel())
+            self.twin_replay_log_base_cosine_count += int(env_ids.numel())
+        arm_cosine = self._cosine_mean_for_action_indices(
+            replay_actions,
+            normal_actions,
+            self.action_component_history_indices["arm"],
+        )
+        if arm_cosine is not None:
+            self.twin_replay_log_arm_cosine_sum += arm_cosine * int(env_ids.numel())
+            self.twin_replay_log_arm_cosine_count += int(env_ids.numel())
+
+    def _apply_twin_student_action_replay(self, step_actions):
+        if not getattr(self, "twin_replay_enabled", False) or not self.twin_replay_perturb_enabled:
+            return step_actions
+        self._maybe_start_twin_replay_bursts()
+        active_env_ids = torch.nonzero(self.twin_replay_active_mask, as_tuple=False).squeeze(-1)
+        active_fraction = float(self.twin_replay_active_mask.float().mean().detach().cpu().item())
+        self.twin_replay_log_active_fraction_sum += active_fraction
+        self.twin_replay_log_step_count += 1
+        if active_env_ids.numel() == 0:
+            return step_actions
+
+        adjusted_step_actions = step_actions.clone()
+        replay_actions = []
+        applied_env_ids = []
+        for env_id in active_env_ids.detach().cpu().tolist():
+            env_id = int(env_id)
+            seq_state = self.twin_replay_active_sequences.get(env_id)
+            if seq_state is None:
+                self.twin_replay_active_mask[env_id] = False
+                self.twin_replay_remaining_steps[env_id] = 0
+                self.twin_replay_selected_family_id[env_id] = -1
+                continue
+            cursor = int(seq_state["cursor"])
+            replay_action = seq_state["actions"][cursor]
+            adjusted_step_actions[env_id, self.twin_replay_replace_action_indices] = replay_action[
+                self.twin_replay_replace_action_indices
+            ]
+            replay_actions.append(replay_action)
+            applied_env_ids.append(env_id)
+            seq_state["cursor"] = cursor + 1
+            self.twin_replay_remaining_steps[env_id] -= 1
+            if (
+                int(self.twin_replay_remaining_steps[env_id].detach().cpu().item()) <= 0
+                or seq_state["cursor"] >= int(seq_state["actions"].shape[0])
+            ):
+                self.twin_replay_active_mask[env_id] = False
+                self.twin_replay_remaining_steps[env_id] = 0
+                self.twin_replay_selected_family_id[env_id] = -1
+                self.twin_replay_active_sequences.pop(env_id, None)
+        if replay_actions:
+            self._record_twin_replay_action_metrics(
+                torch.tensor(applied_env_ids, device=self.device, dtype=torch.long),
+                torch.stack(replay_actions, dim=0),
+                step_actions,
+            )
+        return adjusted_step_actions
+
+    def _get_twin_replay_log_metrics(self, reset: bool = True):
+        metrics = {"twin_replay/enabled": float(bool(getattr(self, "twin_replay_enabled", False)))}
+        if not getattr(self, "twin_replay_enabled", False) or not self.twin_replay_log_enabled:
+            return metrics
+        metrics["twin_replay/buffer_num_keys"] = float(len(self.twin_student_replay_buffer))
+        metrics["twin_replay/buffer_num_sequences"] = float(
+            sum(len(sequences) for sequences in self.twin_student_replay_buffer.values())
+        )
+        metrics["twin_replay/new_sequences"] = float(self.twin_replay_log_new_sequences)
+        metrics["twin_replay/new_bursts"] = float(self.twin_replay_log_new_bursts)
+        metrics["twin_replay/skipped_no_buffer"] = float(self.twin_replay_log_skipped_no_buffer)
+        metrics["twin_replay/skipped_no_same_geometry"] = float(self.twin_replay_log_skipped_no_same_geometry)
+        if self.twin_replay_log_step_count > 0:
+            metrics["twin_replay/active_env_fraction"] = (
+                self.twin_replay_log_active_fraction_sum / float(self.twin_replay_log_step_count)
+            )
+        if self.twin_replay_log_burst_count > 0:
+            metrics["twin_replay/mean_duration"] = (
+                self.twin_replay_log_duration_sum / float(self.twin_replay_log_burst_count)
+            )
+            metrics["twin_replay/mean_start_phase"] = (
+                self.twin_replay_log_start_phase_sum / float(self.twin_replay_log_burst_count)
+            )
+        if self.twin_replay_log_action_l2_count > 0:
+            metrics["twin_replay/action_l2_replay_vs_normal"] = (
+                self.twin_replay_log_action_l2_sum / float(self.twin_replay_log_action_l2_count)
+            )
+        if self.twin_replay_log_base_cosine_count > 0:
+            metrics["twin_replay/base_cosine_replay_vs_normal"] = (
+                self.twin_replay_log_base_cosine_sum / float(self.twin_replay_log_base_cosine_count)
+            )
+        if self.twin_replay_log_arm_cosine_count > 0:
+            metrics["twin_replay/arm_cosine_replay_vs_normal"] = (
+                self.twin_replay_log_arm_cosine_sum / float(self.twin_replay_log_arm_cosine_count)
+            )
+        for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
+            metrics[f"twin_replay/family_{family_name}_bursts"] = float(
+                self.twin_replay_log_family_bursts[family_id].detach().cpu().item()
+            )
+        if reset:
+            self._reset_twin_replay_log_accumulators()
+        return metrics
 
     def _reset_wrong_pp_log_accumulators(self):
         self.wrong_pp_log_active_fraction_sum = 0.0
@@ -3034,7 +3548,7 @@ class Dagger:
         teacher_env_fraction = self._get_teacher_forcing_env_fraction()
         student_env_fraction = 1.0 - teacher_env_fraction
         iteration_time_ms = self._consume_timing_means()
-        wrong_pp_metrics = self._get_wrong_pp_log_metrics(reset=True)
+        twin_replay_metrics = self._get_twin_replay_log_metrics(reset=True)
 
         if self.rank == 0:
             print("=" * 10)
@@ -3050,9 +3564,10 @@ class Dagger:
             print("Teacher Forcing Beta:", teacher_forcing_beta)
             print("Teacher Rollout Env Fraction:", teacher_env_fraction)
             print("Student Rollout Env Fraction:", student_env_fraction)
-            if getattr(self, "wrong_pp_enabled", False):
-                print("Wrong Push/Pull Active Fraction:", wrong_pp_metrics.get("wrong_pp/env_fraction_active", 0.0))
-                print("Wrong Push/Pull New Bursts:", wrong_pp_metrics.get("wrong_pp/new_bursts", 0.0))
+            if getattr(self, "twin_replay_enabled", False):
+                print("Twin Replay Active Fraction:", twin_replay_metrics.get("twin_replay/active_env_fraction", 0.0))
+                print("Twin Replay New Bursts:", twin_replay_metrics.get("twin_replay/new_bursts", 0.0))
+                print("Twin Replay New Sequences:", twin_replay_metrics.get("twin_replay/new_sequences", 0.0))
             print("Student Update Steps:", self.student_update_steps)
             print("Last Local Update Batch Size:", self.last_local_update_batch_size)
             print("Last Global Update Batch Size:", self.last_global_update_batch_size)
@@ -3114,7 +3629,7 @@ class Dagger:
                 if key == "stats/success_rate" or key.startswith("stats/success_rate/"):
                     continue
                 metrics[key] = value
-        metrics.update(wrong_pp_metrics)
+        metrics.update(twin_replay_metrics)
         self._wandb_log(metrics, step=iteration)
 
     def distill(self):
@@ -3138,7 +3653,7 @@ class Dagger:
             self._seed_temporal_histories()
             self._seed_aux_buffer()
             self._resample_teacher_forcing_env_mask(self.resume_iteration)
-            self._reset_wrong_pp_state()
+            self._reset_twin_student_action_replay_state()
 
             for iteration in range(start_iteration, end_iteration):
                 self._sync_timing_device()
@@ -3156,6 +3671,7 @@ class Dagger:
                         print("Iteration ", iteration, ": Mode Pred:", mode_logits.detach().cpu().tolist())
                 student_actions = student_output["action"][:, 0, :]
                 student_env_actions = self._student_actions_to_env_actions(student_actions)
+                self._record_twin_student_actions(student_env_actions)
                 aux_prediction_for_replay = None
                 if self.has_aux_prediction:
                     aux_prediction_for_replay = self._decode_aux_prediction(student_output["aux"].detach())
@@ -3210,12 +3726,7 @@ class Dagger:
                     teacher_actions,
                     iteration,
                 )
-                step_actions = self._apply_wrong_push_pull_rollout(
-                    step_actions,
-                    teacher_actions,
-                    obs,
-                    iteration,
-                )
+                step_actions = self._apply_twin_student_action_replay(step_actions)
                 obs, rew, out_of_reach, timed_out, step_extras = self.env.step(step_actions)
                 self._update_logged_env_metrics(step_extras)
                 self.temporal_current_time_s = self._iteration_to_time_s(iteration + 1)
@@ -3242,7 +3753,7 @@ class Dagger:
                     self._seed_temporal_histories(done_mask)
                     self._seed_aux_buffer(done_mask)
                     self._resample_teacher_forcing_env_mask(iteration + 1, done_mask)
-                    self._reset_wrong_pp_state(done_mask)
+                    self._reset_twin_student_action_replay_state(done_mask)
 
                 if total_loss is not None:
                     self._sync_timing_device()
