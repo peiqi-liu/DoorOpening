@@ -1543,6 +1543,20 @@ class Dagger:
             geometry_key=source_meta.get("geometry_key"),
         )
 
+    def _clear_twin_replay_all_state(self, clear_buffer: bool = False):
+        env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+        self.twin_replay_active_mask[env_ids] = False
+        self.twin_replay_remaining_steps[env_ids] = 0
+        self.twin_replay_used_burst_count[env_ids] = 0
+        self.twin_replay_start_phase[env_ids] = 0.0
+        self.twin_replay_selected_family_id[env_ids] = -1
+        self.twin_replay_duration_steps[env_ids] = 0
+        self.twin_replay_active_sequences.clear()
+        for env_id in range(self.num_envs):
+            self._clear_twin_replay_current_recording(env_id)
+        if clear_buffer:
+            self.twin_student_replay_buffer = {}
+
     def _is_valid_twin_replay_sequence(self, seq):
         actions = seq.get("actions")
         if not isinstance(actions, torch.Tensor):
@@ -1754,8 +1768,8 @@ class Dagger:
                     geometry_key=replay_seq.get("geometry_key"),
                 )
                 continue
-            window = window.to(device=self.device, dtype=torch.float32).contiguous()
-            if not torch.isfinite(window).all():
+            window = window.to(device="cpu", dtype=torch.float32).contiguous()
+            if not bool(torch.isfinite(window).all().detach().cpu().item()):
                 self._purge_twin_replay_sequences_for_source(
                     source_env_id=replay_seq.get("source_env_id", -1),
                     source_family_id=replay_seq.get("source_family_id"),
@@ -1820,7 +1834,11 @@ class Dagger:
     def _apply_twin_student_action_replay(self, step_actions):
         if not getattr(self, "twin_replay_enabled", False) or not self.twin_replay_perturb_enabled:
             return step_actions
-        self._maybe_start_twin_replay_bursts()
+        try:
+            self._maybe_start_twin_replay_bursts()
+        except RuntimeError:
+            self._clear_twin_replay_all_state(clear_buffer=True)
+            return step_actions
         active_env_ids = torch.nonzero(self.twin_replay_active_mask, as_tuple=False).squeeze(-1)
         active_fraction = float(self.twin_replay_active_mask.float().mean().detach().cpu().item())
         self.twin_replay_log_active_fraction_sum += active_fraction
@@ -1841,14 +1859,21 @@ class Dagger:
             if cursor < 0 or cursor >= int(seq_state["actions"].shape[0]):
                 self._drop_twin_replay_env_and_source(env_id, source_meta=seq_state.get("source_meta"))
                 continue
-            replay_action = seq_state["actions"][cursor]
+            try:
+                replay_action = seq_state["actions"][cursor].to(device=self.device, dtype=torch.float32)
+            except RuntimeError:
+                self._drop_twin_replay_env_and_source(env_id, source_meta=seq_state.get("source_meta"))
+                adjusted_step_actions[env_id] = step_actions[env_id]
+                continue
             if (
                 replay_action.ndim != 1
                 or replay_action.shape[0] != self.num_actions
                 or not bool(torch.isfinite(replay_action).all().detach().cpu().item())
             ):
                 self._drop_twin_replay_env_and_source(env_id, source_meta=seq_state.get("source_meta"))
+                adjusted_step_actions[env_id] = step_actions[env_id]
                 continue
+            replay_action = replay_action.clamp(-1.0, 1.0)
             adjusted_step_actions[env_id, self.twin_replay_replace_action_indices] = replay_action[
                 self.twin_replay_replace_action_indices
             ]
@@ -3297,6 +3322,48 @@ class Dagger:
         self.latest_aux_target_vector = None if aux_target_vector is None else aux_target_vector.detach().clone()
         return obs
 
+    def _get_invalid_student_obs_env_ids(self, student_obs):
+        invalid_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        for value in student_obs.values():
+            if not isinstance(value, torch.Tensor):
+                continue
+            if value.shape[0] != self.num_envs:
+                invalid_mask[:] = True
+                break
+            flat_value = value.reshape(value.shape[0], -1)
+            invalid_mask |= ~torch.isfinite(flat_value).all(dim=1)
+        return torch.nonzero(invalid_mask, as_tuple=False).squeeze(-1)
+
+    def _reset_bad_student_obs_envs(self, env_ids, iteration):
+        if env_ids is None:
+            return
+        if not isinstance(env_ids, torch.Tensor):
+            env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+        else:
+            env_ids = env_ids.to(device=self.device, dtype=torch.long)
+        if env_ids.numel() == 0:
+            return
+
+        reset_idx = getattr(self.ov_env, "_reset_idx", None)
+        if callable(reset_idx):
+            reset_idx(env_ids)
+        self.current_rewards[env_ids] = 0.0
+        self.current_lengths[env_ids] = 0.0
+        self._resample_wall_distractors(env_ids)
+        self._seed_temporal_histories(env_ids)
+        self._seed_aux_buffer(env_ids)
+        self._resample_teacher_forcing_env_mask(iteration, env_ids)
+        self._reset_twin_student_action_replay_state(env_ids)
+
+    def _zero_student_obs_envs(self, student_obs, env_ids):
+        if env_ids.numel() == 0:
+            return student_obs
+        for key, value in student_obs.items():
+            if isinstance(value, torch.Tensor) and value.shape[0] == self.num_envs:
+                student_obs[key] = value.clone()
+                student_obs[key][env_ids] = 0.0
+        return student_obs
+
     def _student_forward(self, student_obs):
         return self.student_model_ddp(student_obs)
 
@@ -3805,6 +3872,15 @@ class Dagger:
                 iteration_start_time = time.perf_counter()
 
                 student_obs = self._build_student_obs(iteration=iteration)
+                invalid_student_obs_env_ids = self._get_invalid_student_obs_env_ids(student_obs)
+                if invalid_student_obs_env_ids.numel() > 0:
+                    self._clear_twin_replay_all_state(clear_buffer=False)
+                    self._reset_bad_student_obs_envs(invalid_student_obs_env_ids, iteration=iteration)
+                    obs = self.ov_env._get_observations()
+                    student_obs = self._build_student_obs(iteration=iteration)
+                    invalid_student_obs_env_ids = self._get_invalid_student_obs_env_ids(student_obs)
+                    if invalid_student_obs_env_ids.numel() > 0:
+                        student_obs = self._zero_student_obs_envs(student_obs, invalid_student_obs_env_ids)
                 student_output = self._student_forward(student_obs)
                 mode_pred = None
                 mode_target = None
