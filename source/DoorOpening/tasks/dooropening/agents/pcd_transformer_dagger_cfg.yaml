@@ -191,7 +191,7 @@ dagger:
     start_phase_range: [1.9, 3.1]
     duration_steps_range: [5, 8]
     max_bursts_per_episode: 1
-    replace_components: ["base", "arm", "hand"]
+    replace_components: ["base", "arm"]
     active_visual_envs_only: true
     skip_if_no_replay_available: true
     strict_same_geometry: true
