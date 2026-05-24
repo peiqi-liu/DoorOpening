@@ -3948,6 +3948,12 @@ class Dagger:
                     iteration,
                 )
                 step_actions = self._apply_twin_student_action_replay(step_actions)
+                if not torch.isfinite(step_actions).all():
+                    bad = torch.nonzero(~torch.isfinite(step_actions).all(dim=-1), as_tuple=False).squeeze(-1)
+                    raise RuntimeError(
+                        f"Non-finite step_actions before env.step: {bad[:20].detach().cpu().tolist()}"
+                    )
+                step_actions = step_actions.clamp(-1.0, 1.0)
                 obs, rew, out_of_reach, timed_out, step_extras = self.env.step(step_actions)
                 self._update_logged_env_metrics(step_extras)
                 self.temporal_current_time_s = self._iteration_to_time_s(iteration + 1)
