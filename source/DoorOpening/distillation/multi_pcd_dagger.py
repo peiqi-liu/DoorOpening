@@ -1276,11 +1276,14 @@ class Dagger:
         cfg = {
             "enabled": False,
             "record_enabled": True,
+            "record_start_iteration": 0,
             "buffer_capacity_per_key": 64,
             "min_sequence_len": 5,
             "phase_range_to_record": [2.2, 3.4],
             "perturb_enabled": True,
+            "perturb_start_iteration": 0,
             "prob_per_episode": 0.10,
+            "prob_ramp_iterations": 0,
             "start_phase_range": [2.4, 3.1],
             "duration_steps_range": [5, 8],
             "max_bursts_per_episode": 1,
@@ -1303,13 +1306,16 @@ class Dagger:
         self.twin_replay_cfg = cfg
         self.twin_replay_enabled = bool(cfg.get("enabled", False))
         self.twin_replay_record_enabled = bool(cfg.get("record_enabled", True))
+        self.twin_replay_record_start_iteration = int(cfg.get("record_start_iteration", 0))
         self.twin_replay_perturb_enabled = bool(cfg.get("perturb_enabled", True))
+        self.twin_replay_perturb_start_iteration = int(cfg.get("perturb_start_iteration", 0))
         self.twin_replay_buffer_capacity_per_key = int(cfg.get("buffer_capacity_per_key", 64))
         self.twin_replay_min_sequence_len = int(cfg.get("min_sequence_len", 5))
         self.twin_replay_record_phase_min, self.twin_replay_record_phase_max = map(
             float, cfg.get("phase_range_to_record", [2.2, 3.4])
         )
         self.twin_replay_prob_per_episode = float(cfg.get("prob_per_episode", 0.10))
+        self.twin_replay_prob_ramp_iterations = int(cfg.get("prob_ramp_iterations", 0))
         self.twin_replay_phase_min, self.twin_replay_phase_max = map(float, cfg.get("start_phase_range", [2.4, 3.1]))
         duration_min, duration_max = cfg.get("duration_steps_range", [5, 8])
         self.twin_replay_duration_min = int(duration_min)
@@ -1358,6 +1364,12 @@ class Dagger:
             raise ValueError("twin_student_action_replay.buffer_capacity_per_key must be positive.")
         if self.twin_replay_min_sequence_len <= 0:
             raise ValueError("twin_student_action_replay.min_sequence_len must be positive.")
+        if self.twin_replay_record_start_iteration < 0:
+            raise ValueError("twin_student_action_replay.record_start_iteration must be non-negative.")
+        if self.twin_replay_perturb_start_iteration < 0:
+            raise ValueError("twin_student_action_replay.perturb_start_iteration must be non-negative.")
+        if self.twin_replay_prob_ramp_iterations < 0:
+            raise ValueError("twin_student_action_replay.prob_ramp_iterations must be non-negative.")
 
         self.twin_replay_replace_action_indices = self._build_wrong_pp_replace_action_indices(
             cfg.get("replace_components", ["base", "arm"])
@@ -1494,6 +1506,27 @@ class Dagger:
         phase = ref_motion_lib.get_current_phase(env_ids=env_ids)
         return phase.to(device=self.device, dtype=torch.float32)
 
+    def _is_twin_replay_recording_active(self, iteration):
+        return int(iteration) >= self.twin_replay_record_start_iteration
+
+    def _get_twin_replay_prob_per_episode(self, iteration):
+        if not self.twin_replay_perturb_enabled:
+            return 0.0
+        iteration = int(iteration)
+        if iteration < self.twin_replay_perturb_start_iteration:
+            return 0.0
+        if self.twin_replay_prob_ramp_iterations <= 0:
+            return self.twin_replay_prob_per_episode
+        ramp_progress = min(
+            1.0,
+            max(
+                0.0,
+                float(iteration - self.twin_replay_perturb_start_iteration + 1)
+                / float(self.twin_replay_prob_ramp_iterations),
+            ),
+        )
+        return ramp_progress * self.twin_replay_prob_per_episode
+
     def _clear_twin_replay_current_recording(self, env_id):
         env_id = int(env_id)
         self.twin_replay_current_actions[env_id] = []
@@ -1506,64 +1539,6 @@ class Dagger:
         self.twin_replay_selected_family_id[env_id] = -1
         self.twin_replay_duration_steps[env_id] = 0
         self.twin_replay_active_sequences.pop(env_id, None)
-
-    def _purge_twin_replay_sequences_for_source(self, source_env_id, source_family_id=None, geometry_key=None):
-        source_env_id = int(source_env_id)
-        if source_family_id is not None:
-            source_family_id = int(source_family_id)
-        updated_buffer = {}
-        for key, sequences in self.twin_student_replay_buffer.items():
-            kept_sequences = deque(maxlen=sequences.maxlen)
-            for seq in sequences:
-                if int(seq.get("source_env_id", -1)) != source_env_id:
-                    kept_sequences.append(seq)
-                    continue
-                if source_family_id is not None and int(seq.get("source_family_id", -1)) != source_family_id:
-                    kept_sequences.append(seq)
-                    continue
-                if geometry_key is not None and str(seq.get("geometry_key", "")) != str(geometry_key):
-                    kept_sequences.append(seq)
-                    continue
-            if kept_sequences:
-                updated_buffer[key] = kept_sequences
-        self.twin_student_replay_buffer = updated_buffer
-
-    def _drop_twin_replay_env_and_source(self, env_id, source_meta=None):
-        env_id = int(env_id)
-        self._clear_twin_replay_current_recording(env_id)
-        self._deactivate_twin_replay_env(env_id)
-        if source_meta is None:
-            return
-        source_env_id = source_meta.get("source_env_id")
-        if source_env_id is None:
-            return
-        self._purge_twin_replay_sequences_for_source(
-            source_env_id=source_env_id,
-            source_family_id=source_meta.get("source_family_id"),
-            geometry_key=source_meta.get("geometry_key"),
-        )
-
-    def _clear_twin_replay_all_state(self, clear_buffer: bool = False):
-        env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
-        self.twin_replay_active_mask[env_ids] = False
-        self.twin_replay_remaining_steps[env_ids] = 0
-        self.twin_replay_used_burst_count[env_ids] = 0
-        self.twin_replay_start_phase[env_ids] = 0.0
-        self.twin_replay_selected_family_id[env_ids] = -1
-        self.twin_replay_duration_steps[env_ids] = 0
-        self.twin_replay_active_sequences.clear()
-        for env_id in range(self.num_envs):
-            self._clear_twin_replay_current_recording(env_id)
-        if clear_buffer:
-            self.twin_student_replay_buffer = {}
-
-    def _is_valid_twin_replay_sequence(self, seq):
-        actions = seq.get("actions")
-        if not isinstance(actions, torch.Tensor):
-            return False
-        if actions.ndim != 2 or actions.shape[1] != self.num_actions:
-            return False
-        return bool(torch.isfinite(actions).all().detach().cpu().item())
 
     def _finalize_twin_replay_recordings(self, env_ids=None):
         if not getattr(self, "twin_replay_enabled", False):
@@ -1601,7 +1576,7 @@ class Dagger:
             self.twin_replay_current_actions[env_id] = []
             self.twin_replay_current_phases[env_id] = []
 
-    def _reset_twin_student_action_replay_state(self, env_ids=None):
+    def _reset_twin_student_action_replay_state(self, env_ids=None, iteration=0):
         if not getattr(self, "twin_replay_enabled", False):
             return
         self._finalize_twin_replay_recordings(env_ids)
@@ -1612,7 +1587,8 @@ class Dagger:
         if env_ids.numel() == 0:
             return
 
-        self.twin_replay_should_burst[env_ids] = torch.rand(env_ids.numel(), device=self.device) < self.twin_replay_prob_per_episode
+        prob_per_episode = self._get_twin_replay_prob_per_episode(iteration)
+        self.twin_replay_should_burst[env_ids] = torch.rand(env_ids.numel(), device=self.device) < prob_per_episode
         self.twin_replay_active_mask[env_ids] = False
         self.twin_replay_remaining_steps[env_ids] = 0
         self.twin_replay_used_burst_count[env_ids] = 0
@@ -1624,22 +1600,19 @@ class Dagger:
             self.twin_replay_current_actions[int(env_id)] = []
             self.twin_replay_current_phases[int(env_id)] = []
 
-    def _record_twin_student_actions(self, student_env_actions):
+    def _record_twin_student_actions(self, student_env_actions, iteration):
         if not getattr(self, "twin_replay_enabled", False) or not self.twin_replay_record_enabled:
+            return
+        if not self._is_twin_replay_recording_active(iteration):
             return
         if student_env_actions.shape[0] != self.num_envs:
             return
         if student_env_actions.ndim != 2 or student_env_actions.shape[1] != self.num_actions:
             return
-        valid_action_mask = torch.isfinite(student_env_actions).all(dim=1)
-        invalid_env_ids = torch.nonzero(~valid_action_mask, as_tuple=False).squeeze(-1)
-        for env_id in invalid_env_ids.detach().cpu().tolist():
-            self._clear_twin_replay_current_recording(int(env_id))
         phase = self._get_current_ref_phase()
         eligible = (phase >= self.twin_replay_record_phase_min) & (phase <= self.twin_replay_record_phase_max)
         if self.twin_replay_active_visual_envs_only:
             eligible = eligible & self.twin_replay_visual_env_mask
-        eligible = eligible & valid_action_mask
         eligible_env_ids = torch.nonzero(eligible, as_tuple=False).squeeze(-1)
         if eligible_env_ids.numel() == 0:
             return
@@ -1693,8 +1666,10 @@ class Dagger:
             ).item()
         )
 
-    def _maybe_start_twin_replay_bursts(self):
+    def _maybe_start_twin_replay_bursts(self, iteration):
         if not getattr(self, "twin_replay_enabled", False) or not self.twin_replay_perturb_enabled:
+            return torch.empty(0, dtype=torch.long, device=self.device), None
+        if int(iteration) < self.twin_replay_perturb_start_iteration:
             return torch.empty(0, dtype=torch.long, device=self.device), None
         phase = self._get_current_ref_phase()
         eligible = (
@@ -1733,20 +1708,6 @@ class Dagger:
                 if self.twin_replay_skip_if_no_replay_available:
                     continue
                 continue
-            valid_candidate_sequences = []
-            for seq in candidate_sequences:
-                if self._is_valid_twin_replay_sequence(seq):
-                    valid_candidate_sequences.append(seq)
-                else:
-                    self._purge_twin_replay_sequences_for_source(
-                        source_env_id=seq.get("source_env_id", -1),
-                        source_family_id=seq.get("source_family_id"),
-                        geometry_key=seq.get("geometry_key"),
-                    )
-            candidate_sequences = valid_candidate_sequences
-            if not candidate_sequences:
-                self.twin_replay_log_skipped_no_buffer += 1
-                continue
 
             duration = self._sample_twin_replay_duration(candidate_sequences)
             if duration is None:
@@ -1760,26 +1721,10 @@ class Dagger:
                 if self.twin_replay_skip_if_no_replay_available:
                     continue
                 continue
-            window = replay_seq["actions"][start_idx : start_idx + duration]
-            if window.ndim != 2 or window.shape[1] != self.num_actions or int(window.shape[0]) != int(duration):
-                self._purge_twin_replay_sequences_for_source(
-                    source_env_id=replay_seq.get("source_env_id", -1),
-                    source_family_id=replay_seq.get("source_family_id"),
-                    geometry_key=replay_seq.get("geometry_key"),
-                )
-                continue
-            window = window.to(device="cpu", dtype=torch.float32).contiguous()
-            if not bool(torch.isfinite(window).all().detach().cpu().item()):
-                self._purge_twin_replay_sequences_for_source(
-                    source_env_id=replay_seq.get("source_env_id", -1),
-                    source_family_id=replay_seq.get("source_family_id"),
-                    geometry_key=replay_seq.get("geometry_key"),
-                )
-                continue
+            window = replay_seq["actions"][start_idx : start_idx + duration].to(device="cpu", dtype=torch.float32).contiguous()
             self.twin_replay_active_sequences[env_id] = {
                 "actions": window,
                 "cursor": 0,
-                "source_meta": replay_seq,
             }
             self.twin_replay_active_mask[env_id] = True
             self.twin_replay_remaining_steps[env_id] = int(duration)
@@ -1831,14 +1776,10 @@ class Dagger:
             self.twin_replay_log_arm_cosine_sum += arm_cosine * int(env_ids.numel())
             self.twin_replay_log_arm_cosine_count += int(env_ids.numel())
 
-    def _apply_twin_student_action_replay(self, step_actions):
+    def _apply_twin_student_action_replay(self, step_actions, iteration):
         if not getattr(self, "twin_replay_enabled", False) or not self.twin_replay_perturb_enabled:
             return step_actions
-        try:
-            self._maybe_start_twin_replay_bursts()
-        except RuntimeError:
-            self._clear_twin_replay_all_state(clear_buffer=True)
-            return step_actions
+        self._maybe_start_twin_replay_bursts(iteration)
         active_env_ids = torch.nonzero(self.twin_replay_active_mask, as_tuple=False).squeeze(-1)
         active_fraction = float(self.twin_replay_active_mask.float().mean().detach().cpu().item())
         self.twin_replay_log_active_fraction_sum += active_fraction
@@ -1856,24 +1797,10 @@ class Dagger:
                 self._deactivate_twin_replay_env(env_id)
                 continue
             cursor = int(seq_state["cursor"])
-            if cursor < 0 or cursor >= int(seq_state["actions"].shape[0]):
-                self._drop_twin_replay_env_and_source(env_id, source_meta=seq_state.get("source_meta"))
+            if cursor >= int(seq_state["actions"].shape[0]):
+                self._deactivate_twin_replay_env(env_id)
                 continue
-            try:
-                replay_action = seq_state["actions"][cursor].to(device=self.device, dtype=torch.float32)
-            except RuntimeError:
-                self._drop_twin_replay_env_and_source(env_id, source_meta=seq_state.get("source_meta"))
-                adjusted_step_actions[env_id] = step_actions[env_id]
-                continue
-            if (
-                replay_action.ndim != 1
-                or replay_action.shape[0] != self.num_actions
-                or not bool(torch.isfinite(replay_action).all().detach().cpu().item())
-            ):
-                self._drop_twin_replay_env_and_source(env_id, source_meta=seq_state.get("source_meta"))
-                adjusted_step_actions[env_id] = step_actions[env_id]
-                continue
-            replay_action = replay_action.clamp(-1.0, 1.0)
+            replay_action = seq_state["actions"][cursor].to(device=self.device, dtype=torch.float32)
             adjusted_step_actions[env_id, self.twin_replay_replace_action_indices] = replay_action[
                 self.twin_replay_replace_action_indices
             ]
@@ -1891,15 +1818,6 @@ class Dagger:
                 torch.tensor(applied_env_ids, device=self.device, dtype=torch.long),
                 torch.stack(replay_actions, dim=0),
                 step_actions,
-            )
-        invalid_step_env_ids = torch.nonzero(~torch.isfinite(adjusted_step_actions).all(dim=1), as_tuple=False).squeeze(-1)
-        for env_id in invalid_step_env_ids.detach().cpu().tolist():
-            env_id = int(env_id)
-            seq_state = self.twin_replay_active_sequences.get(env_id)
-            adjusted_step_actions[env_id] = step_actions[env_id]
-            self._drop_twin_replay_env_and_source(
-                env_id,
-                source_meta=None if seq_state is None else seq_state.get("source_meta"),
             )
         return adjusted_step_actions
 
@@ -3322,48 +3240,6 @@ class Dagger:
         self.latest_aux_target_vector = None if aux_target_vector is None else aux_target_vector.detach().clone()
         return obs
 
-    def _get_invalid_student_obs_env_ids(self, student_obs):
-        invalid_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        for value in student_obs.values():
-            if not isinstance(value, torch.Tensor):
-                continue
-            if value.shape[0] != self.num_envs:
-                invalid_mask[:] = True
-                break
-            flat_value = value.reshape(value.shape[0], -1)
-            invalid_mask |= ~torch.isfinite(flat_value).all(dim=1)
-        return torch.nonzero(invalid_mask, as_tuple=False).squeeze(-1)
-
-    def _reset_bad_student_obs_envs(self, env_ids, iteration):
-        if env_ids is None:
-            return
-        if not isinstance(env_ids, torch.Tensor):
-            env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
-        else:
-            env_ids = env_ids.to(device=self.device, dtype=torch.long)
-        if env_ids.numel() == 0:
-            return
-
-        reset_idx = getattr(self.ov_env, "_reset_idx", None)
-        if callable(reset_idx):
-            reset_idx(env_ids)
-        self.current_rewards[env_ids] = 0.0
-        self.current_lengths[env_ids] = 0.0
-        self._resample_wall_distractors(env_ids)
-        self._seed_temporal_histories(env_ids)
-        self._seed_aux_buffer(env_ids)
-        self._resample_teacher_forcing_env_mask(iteration, env_ids)
-        self._reset_twin_student_action_replay_state(env_ids)
-
-    def _zero_student_obs_envs(self, student_obs, env_ids):
-        if env_ids.numel() == 0:
-            return student_obs
-        for key, value in student_obs.items():
-            if isinstance(value, torch.Tensor) and value.shape[0] == self.num_envs:
-                student_obs[key] = value.clone()
-                student_obs[key][env_ids] = 0.0
-        return student_obs
-
     def _student_forward(self, student_obs):
         return self.student_model_ddp(student_obs)
 
@@ -3865,22 +3741,13 @@ class Dagger:
             self._seed_temporal_histories()
             self._seed_aux_buffer()
             self._resample_teacher_forcing_env_mask(self.resume_iteration)
-            self._reset_twin_student_action_replay_state()
+            self._reset_twin_student_action_replay_state(iteration=self.resume_iteration)
 
             for iteration in range(start_iteration, end_iteration):
                 self._sync_timing_device()
                 iteration_start_time = time.perf_counter()
 
                 student_obs = self._build_student_obs(iteration=iteration)
-                invalid_student_obs_env_ids = self._get_invalid_student_obs_env_ids(student_obs)
-                if invalid_student_obs_env_ids.numel() > 0:
-                    self._clear_twin_replay_all_state(clear_buffer=False)
-                    self._reset_bad_student_obs_envs(invalid_student_obs_env_ids, iteration=iteration)
-                    obs = self.ov_env._get_observations()
-                    student_obs = self._build_student_obs(iteration=iteration)
-                    invalid_student_obs_env_ids = self._get_invalid_student_obs_env_ids(student_obs)
-                    if invalid_student_obs_env_ids.numel() > 0:
-                        student_obs = self._zero_student_obs_envs(student_obs, invalid_student_obs_env_ids)
                 student_output = self._student_forward(student_obs)
                 mode_pred = None
                 mode_target = None
@@ -3892,7 +3759,7 @@ class Dagger:
                         print("Iteration ", iteration, ": Mode Pred:", mode_logits.detach().cpu().tolist())
                 student_actions = student_output["action"][:, 0, :]
                 student_env_actions = self._student_actions_to_env_actions(student_actions)
-                self._record_twin_student_actions(student_env_actions)
+                self._record_twin_student_actions(student_env_actions, iteration=iteration)
                 aux_prediction_for_replay = None
                 if self.has_aux_prediction:
                     aux_prediction_for_replay = self._decode_aux_prediction(student_output["aux"].detach())
@@ -3947,13 +3814,7 @@ class Dagger:
                     teacher_actions,
                     iteration,
                 )
-                step_actions = self._apply_twin_student_action_replay(step_actions)
-                if not torch.isfinite(step_actions).all():
-                    bad = torch.nonzero(~torch.isfinite(step_actions).all(dim=-1), as_tuple=False).squeeze(-1)
-                    raise RuntimeError(
-                        f"Non-finite step_actions before env.step: {bad[:20].detach().cpu().tolist()}"
-                    )
-                step_actions = step_actions.clamp(-1.0, 1.0)
+                step_actions = self._apply_twin_student_action_replay(step_actions, iteration=iteration)
                 obs, rew, out_of_reach, timed_out, step_extras = self.env.step(step_actions)
                 self._update_logged_env_metrics(step_extras)
                 self.temporal_current_time_s = self._iteration_to_time_s(iteration + 1)
@@ -3980,7 +3841,7 @@ class Dagger:
                     self._seed_temporal_histories(done_mask)
                     self._seed_aux_buffer(done_mask)
                     self._resample_teacher_forcing_env_mask(iteration + 1, done_mask)
-                    self._reset_twin_student_action_replay_state(done_mask)
+                    self._reset_twin_student_action_replay_state(done_mask, iteration=iteration + 1)
 
                 if total_loss is not None:
                     self._sync_timing_device()
