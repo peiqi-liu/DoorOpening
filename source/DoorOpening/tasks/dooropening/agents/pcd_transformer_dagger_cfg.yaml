@@ -181,17 +181,17 @@ dagger:
   aux_feedback_to_policy: true  # When false, aux input stays zero instead of feeding back predictions.
   aux_pregrasp_dropout_prob: 0.001  # Conservative start: 0.1% per pregrasp step while predicted aux feedback is carried over.
   twin_student_action_replay:
-    enabled: true
+    enabled: false
     record_enabled: true
     record_start_iteration: 60000
     buffer_capacity_per_key: 64
     min_sequence_len: 5
-    phase_range_to_record: [1.8, 3.4]
+    phase_range_to_record: [1.5, 3.0]
     perturb_enabled: true
     perturb_start_iteration: 80000
-    prob_per_episode: 0.25
+    prob_per_episode: 0.3
     prob_ramp_iterations: 20000
-    start_phase_range: [1.9, 3.1]
+    start_phase_range: [1.5, 3.0]
     duration_steps_range: [5, 8]
     max_bursts_per_episode: 1
     replace_components: ["base", "arm"]
