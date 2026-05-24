@@ -1302,6 +1302,10 @@ class Dagger:
             family_map = dict(default_family_map)
         cfg.update(user_cfg)
         cfg["family_map"] = family_map
+        if self.play_policy and bool(cfg.get("enabled", False)):
+            cfg["enabled"] = False
+            if self.rank == 0:
+                print("[INFO] Disabling twin_student_action_replay for play_policy rollout.")
 
         self.twin_replay_cfg = cfg
         self.twin_replay_enabled = bool(cfg.get("enabled", False))
