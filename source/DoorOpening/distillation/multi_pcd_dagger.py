@@ -2,7 +2,6 @@ import json
 import os
 import math
 import pathlib
-import re
 import time
 from collections import OrderedDict, deque
 from pathlib import Path
@@ -1375,6 +1374,7 @@ class Dagger:
         self.twin_replay_log_new_bursts = 0
         self.twin_replay_log_skipped_no_buffer = 0
         self.twin_replay_log_skipped_no_same_geometry = 0
+        self.twin_replay_log_skipped_sequence_too_short = 0
         self.twin_replay_log_duration_sum = 0.0
         self.twin_replay_log_start_phase_sum = 0.0
         self.twin_replay_log_burst_count = 0
@@ -1435,26 +1435,37 @@ class Dagger:
         # The current student policy builds visual point-cloud observations for every env each iteration.
         return torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
 
-    def _normalize_twin_asset_folder_name(self, asset_folder):
-        normalized = re.sub(r"^(PartNetv\d+_plus[_-]*)", "", str(asset_folder))
-        return normalized or str(asset_folder)
+    def _get_twin_asset_base_name(self, asset_path: str) -> str:
+        asset_dir = Path(asset_path).resolve().parent
+        return asset_dir.name.strip()
 
     def _get_twin_geometry_key(self, asset_path: str) -> str:
+        # Keep twin matching easy to reason about: copied push/pull twins should share the
+        # exact same copied asset folder name (for example `99688979960035__rnd_00`).
+        folder_base_name = self._get_twin_asset_base_name(asset_path)
+        if folder_base_name:
+            return folder_base_name
+
+        # Metadata is only a fallback for malformed or unexpected folder layouts.
         asset_dir = Path(asset_path).resolve().parent
         meta_path = asset_dir / "variant_meta.json"
-        if meta_path.is_file():
-            try:
-                with meta_path.open("r", encoding="utf-8") as f:
-                    meta = json.load(f)
-                for field_name in ("copied_from_pull_asset", "source_asset", "variant_name"):
-                    value = meta.get(field_name)
-                    if isinstance(value, str) and value:
-                        if field_name == "variant_name":
-                            return self._normalize_twin_asset_folder_name(value.split("__", 1)[0])
-                        return self._normalize_twin_asset_folder_name(value)
-            except Exception:
-                pass
-        return self._normalize_twin_asset_folder_name(asset_dir.name.split("__", 1)[0])
+        if not meta_path.is_file():
+            return asset_dir.name
+        try:
+            with meta_path.open("r", encoding="utf-8") as f:
+                meta = json.load(f)
+        except Exception:
+            return asset_dir.name
+
+        for field_name in ("copied_from_pull_asset", "source_asset", "variant_name"):
+            value = meta.get(field_name)
+            if not isinstance(value, str):
+                continue
+            value = value.strip()
+            if not value:
+                continue
+            return value
+        return asset_dir.name
 
     def _build_twin_replay_env_geometry_keys(self):
         geometry_keys = []
@@ -1563,31 +1574,49 @@ class Dagger:
             self.twin_replay_current_actions[env_id].append(detached_actions[env_id].to(device="cpu", dtype=torch.float32).clone())
             self.twin_replay_current_phases[env_id].append(float(phase[env_id].detach().cpu().item()))
 
-    def _sample_twin_replay_sequence(self, geometry_key, target_family_id, duration):
+    def _get_twin_replay_sequences_for_key(self, geometry_key, target_family_id):
         if self.twin_replay_strict_same_geometry:
-            candidate_keys = [(geometry_key, target_family_id)]
-        else:
-            candidate_keys = [
-                (buffer_geometry_key, buffer_family_id)
-                for (buffer_geometry_key, buffer_family_id), sequences in self.twin_student_replay_buffer.items()
-                if buffer_family_id == target_family_id and len(sequences) > 0
+            return list(self.twin_student_replay_buffer.get((geometry_key, target_family_id), ()))
+
+        candidate_keys = [
+            (buffer_geometry_key, buffer_family_id)
+            for (buffer_geometry_key, buffer_family_id), sequences in self.twin_student_replay_buffer.items()
+            if buffer_family_id == target_family_id and len(sequences) > 0
+        ]
+        if (geometry_key, target_family_id) in self.twin_student_replay_buffer:
+            candidate_keys = [(geometry_key, target_family_id)] + [
+                key for key in candidate_keys if key != (geometry_key, target_family_id)
             ]
-            if (geometry_key, target_family_id) in self.twin_student_replay_buffer:
-                candidate_keys = [(geometry_key, target_family_id)] + [
-                    key for key in candidate_keys if key != (geometry_key, target_family_id)
-                ]
+        sequences = []
         for key in candidate_keys:
-            sequences = self.twin_student_replay_buffer.get(key)
-            if not sequences:
-                continue
-            valid_sequences = [seq for seq in sequences if int(seq["actions"].shape[0]) >= int(duration)]
-            if not valid_sequences:
-                continue
-            chosen_seq = valid_sequences[int(torch.randint(0, len(valid_sequences), (1,), device=self.device).item())]
-            max_start = int(chosen_seq["actions"].shape[0]) - int(duration)
-            start_idx = int(torch.randint(0, max_start + 1, (1,), device=self.device).item()) if max_start > 0 else 0
-            return chosen_seq, start_idx
-        return None, None
+            sequences.extend(list(self.twin_student_replay_buffer.get(key, ())))
+        return sequences
+
+    def _sample_twin_replay_sequence(self, sequences, duration):
+        valid_sequences = [seq for seq in sequences if int(seq["actions"].shape[0]) >= int(duration)]
+        if not valid_sequences:
+            return None, None
+        chosen_seq = valid_sequences[int(torch.randint(0, len(valid_sequences), (1,), device=self.device).item())]
+        max_start = int(chosen_seq["actions"].shape[0]) - int(duration)
+        start_idx = int(torch.randint(0, max_start + 1, (1,), device=self.device).item()) if max_start > 0 else 0
+        return chosen_seq, start_idx
+
+    def _sample_twin_replay_duration(self, sequences):
+        if not sequences:
+            return None
+        max_sequence_len = max(int(seq["actions"].shape[0]) for seq in sequences)
+        feasible_duration_max = min(self.twin_replay_duration_max, max_sequence_len)
+        if feasible_duration_max < self.twin_replay_duration_min:
+            return None
+        return int(
+            torch.randint(
+                low=self.twin_replay_duration_min,
+                high=feasible_duration_max + 1,
+                size=(1,),
+                device=self.device,
+                dtype=torch.long,
+            ).item()
+        )
 
     def _maybe_start_twin_replay_bursts(self):
         if not getattr(self, "twin_replay_enabled", False) or not self.twin_replay_perturb_enabled:
@@ -1609,27 +1638,36 @@ class Dagger:
         started_env_ids = []
         for env_id in candidate_env_ids.detach().cpu().tolist():
             env_id = int(env_id)
-            duration = int(
-                torch.randint(
-                    low=self.twin_replay_duration_min,
-                    high=self.twin_replay_duration_max + 1,
-                    size=(1,),
-                    device=self.device,
-                    dtype=torch.long,
-                ).item()
-            )
             geometry_key = self.twin_replay_env_geometry_keys[env_id]
             current_family_id = int(self.env_family_ids[env_id].detach().cpu().item())
             twin_family_id = int(self.twin_replay_family_id_map[current_family_id].detach().cpu().item())
             if twin_family_id < 0:
                 self.twin_replay_log_skipped_no_buffer += 1
                 continue
-            replay_seq, start_idx = self._sample_twin_replay_sequence(geometry_key, twin_family_id, duration)
+            exact_key = (geometry_key, twin_family_id)
+            exact_sequences = list(self.twin_student_replay_buffer.get(exact_key, ()))
+            if self.twin_replay_strict_same_geometry and not exact_sequences:
+                self.twin_replay_log_skipped_no_same_geometry += 1
+                if self.twin_replay_skip_if_no_replay_available:
+                    continue
+                continue
+
+            candidate_sequences = self._get_twin_replay_sequences_for_key(geometry_key, twin_family_id)
+            if not candidate_sequences:
+                self.twin_replay_log_skipped_no_buffer += 1
+                if self.twin_replay_skip_if_no_replay_available:
+                    continue
+                continue
+
+            duration = self._sample_twin_replay_duration(candidate_sequences)
+            if duration is None:
+                self.twin_replay_log_skipped_sequence_too_short += 1
+                if self.twin_replay_skip_if_no_replay_available:
+                    continue
+                continue
+            replay_seq, start_idx = self._sample_twin_replay_sequence(candidate_sequences, duration)
             if replay_seq is None:
-                if self.twin_replay_strict_same_geometry:
-                    self.twin_replay_log_skipped_no_same_geometry += 1
-                else:
-                    self.twin_replay_log_skipped_no_buffer += 1
+                self.twin_replay_log_skipped_sequence_too_short += 1
                 if self.twin_replay_skip_if_no_replay_available:
                     continue
                 continue
@@ -1748,6 +1786,9 @@ class Dagger:
         metrics["twin_replay/new_bursts"] = float(self.twin_replay_log_new_bursts)
         metrics["twin_replay/skipped_no_buffer"] = float(self.twin_replay_log_skipped_no_buffer)
         metrics["twin_replay/skipped_no_same_geometry"] = float(self.twin_replay_log_skipped_no_same_geometry)
+        metrics["twin_replay/skipped_sequence_too_short"] = float(
+            self.twin_replay_log_skipped_sequence_too_short
+        )
         if self.twin_replay_log_step_count > 0:
             metrics["twin_replay/active_env_fraction"] = (
                 self.twin_replay_log_active_fraction_sum / float(self.twin_replay_log_step_count)
