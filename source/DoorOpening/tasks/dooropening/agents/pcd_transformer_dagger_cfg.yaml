@@ -187,7 +187,7 @@ dagger:
     min_sequence_len: 5
     phase_range_to_record: [1.8, 3.4]
     perturb_enabled: true
-    prob_per_episode: 0.10
+    prob_per_episode: 0.25
     start_phase_range: [1.9, 3.1]
     duration_steps_range: [5, 8]
     max_bursts_per_episode: 1
