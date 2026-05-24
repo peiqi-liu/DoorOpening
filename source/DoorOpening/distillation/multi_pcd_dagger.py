@@ -1494,6 +1494,63 @@ class Dagger:
         phase = ref_motion_lib.get_current_phase(env_ids=env_ids)
         return phase.to(device=self.device, dtype=torch.float32)
 
+    def _clear_twin_replay_current_recording(self, env_id):
+        env_id = int(env_id)
+        self.twin_replay_current_actions[env_id] = []
+        self.twin_replay_current_phases[env_id] = []
+
+    def _deactivate_twin_replay_env(self, env_id):
+        env_id = int(env_id)
+        self.twin_replay_active_mask[env_id] = False
+        self.twin_replay_remaining_steps[env_id] = 0
+        self.twin_replay_selected_family_id[env_id] = -1
+        self.twin_replay_duration_steps[env_id] = 0
+        self.twin_replay_active_sequences.pop(env_id, None)
+
+    def _purge_twin_replay_sequences_for_source(self, source_env_id, source_family_id=None, geometry_key=None):
+        source_env_id = int(source_env_id)
+        if source_family_id is not None:
+            source_family_id = int(source_family_id)
+        updated_buffer = {}
+        for key, sequences in self.twin_student_replay_buffer.items():
+            kept_sequences = deque(maxlen=sequences.maxlen)
+            for seq in sequences:
+                if int(seq.get("source_env_id", -1)) != source_env_id:
+                    kept_sequences.append(seq)
+                    continue
+                if source_family_id is not None and int(seq.get("source_family_id", -1)) != source_family_id:
+                    kept_sequences.append(seq)
+                    continue
+                if geometry_key is not None and str(seq.get("geometry_key", "")) != str(geometry_key):
+                    kept_sequences.append(seq)
+                    continue
+            if kept_sequences:
+                updated_buffer[key] = kept_sequences
+        self.twin_student_replay_buffer = updated_buffer
+
+    def _drop_twin_replay_env_and_source(self, env_id, source_meta=None):
+        env_id = int(env_id)
+        self._clear_twin_replay_current_recording(env_id)
+        self._deactivate_twin_replay_env(env_id)
+        if source_meta is None:
+            return
+        source_env_id = source_meta.get("source_env_id")
+        if source_env_id is None:
+            return
+        self._purge_twin_replay_sequences_for_source(
+            source_env_id=source_env_id,
+            source_family_id=source_meta.get("source_family_id"),
+            geometry_key=source_meta.get("geometry_key"),
+        )
+
+    def _is_valid_twin_replay_sequence(self, seq):
+        actions = seq.get("actions")
+        if not isinstance(actions, torch.Tensor):
+            return False
+        if actions.ndim != 2 or actions.shape[1] != self.num_actions:
+            return False
+        return bool(torch.isfinite(actions).all().detach().cpu().item())
+
     def _finalize_twin_replay_recordings(self, env_ids=None):
         if not getattr(self, "twin_replay_enabled", False):
             return
@@ -1557,14 +1614,18 @@ class Dagger:
         if not getattr(self, "twin_replay_enabled", False) or not self.twin_replay_record_enabled:
             return
         if student_env_actions.shape[0] != self.num_envs:
-            raise RuntimeError(
-                "Twin student replay expected per-env student env actions for all envs: "
-                f"{tuple(student_env_actions.shape)}."
-            )
+            return
+        if student_env_actions.ndim != 2 or student_env_actions.shape[1] != self.num_actions:
+            return
+        valid_action_mask = torch.isfinite(student_env_actions).all(dim=1)
+        invalid_env_ids = torch.nonzero(~valid_action_mask, as_tuple=False).squeeze(-1)
+        for env_id in invalid_env_ids.detach().cpu().tolist():
+            self._clear_twin_replay_current_recording(int(env_id))
         phase = self._get_current_ref_phase()
         eligible = (phase >= self.twin_replay_record_phase_min) & (phase <= self.twin_replay_record_phase_max)
         if self.twin_replay_active_visual_envs_only:
             eligible = eligible & self.twin_replay_visual_env_mask
+        eligible = eligible & valid_action_mask
         eligible_env_ids = torch.nonzero(eligible, as_tuple=False).squeeze(-1)
         if eligible_env_ids.numel() == 0:
             return
@@ -1658,6 +1719,20 @@ class Dagger:
                 if self.twin_replay_skip_if_no_replay_available:
                     continue
                 continue
+            valid_candidate_sequences = []
+            for seq in candidate_sequences:
+                if self._is_valid_twin_replay_sequence(seq):
+                    valid_candidate_sequences.append(seq)
+                else:
+                    self._purge_twin_replay_sequences_for_source(
+                        source_env_id=seq.get("source_env_id", -1),
+                        source_family_id=seq.get("source_family_id"),
+                        geometry_key=seq.get("geometry_key"),
+                    )
+            candidate_sequences = valid_candidate_sequences
+            if not candidate_sequences:
+                self.twin_replay_log_skipped_no_buffer += 1
+                continue
 
             duration = self._sample_twin_replay_duration(candidate_sequences)
             if duration is None:
@@ -1671,7 +1746,22 @@ class Dagger:
                 if self.twin_replay_skip_if_no_replay_available:
                     continue
                 continue
-            window = replay_seq["actions"][start_idx : start_idx + duration].to(device=self.device, dtype=torch.float32)
+            window = replay_seq["actions"][start_idx : start_idx + duration]
+            if window.ndim != 2 or window.shape[1] != self.num_actions or int(window.shape[0]) != int(duration):
+                self._purge_twin_replay_sequences_for_source(
+                    source_env_id=replay_seq.get("source_env_id", -1),
+                    source_family_id=replay_seq.get("source_family_id"),
+                    geometry_key=replay_seq.get("geometry_key"),
+                )
+                continue
+            window = window.to(device=self.device, dtype=torch.float32).contiguous()
+            if not torch.isfinite(window).all():
+                self._purge_twin_replay_sequences_for_source(
+                    source_env_id=replay_seq.get("source_env_id", -1),
+                    source_family_id=replay_seq.get("source_family_id"),
+                    geometry_key=replay_seq.get("geometry_key"),
+                )
+                continue
             self.twin_replay_active_sequences[env_id] = {
                 "actions": window,
                 "cursor": 0,
@@ -1745,12 +1835,20 @@ class Dagger:
             env_id = int(env_id)
             seq_state = self.twin_replay_active_sequences.get(env_id)
             if seq_state is None:
-                self.twin_replay_active_mask[env_id] = False
-                self.twin_replay_remaining_steps[env_id] = 0
-                self.twin_replay_selected_family_id[env_id] = -1
+                self._deactivate_twin_replay_env(env_id)
                 continue
             cursor = int(seq_state["cursor"])
+            if cursor < 0 or cursor >= int(seq_state["actions"].shape[0]):
+                self._drop_twin_replay_env_and_source(env_id, source_meta=seq_state.get("source_meta"))
+                continue
             replay_action = seq_state["actions"][cursor]
+            if (
+                replay_action.ndim != 1
+                or replay_action.shape[0] != self.num_actions
+                or not bool(torch.isfinite(replay_action).all().detach().cpu().item())
+            ):
+                self._drop_twin_replay_env_and_source(env_id, source_meta=seq_state.get("source_meta"))
+                continue
             adjusted_step_actions[env_id, self.twin_replay_replace_action_indices] = replay_action[
                 self.twin_replay_replace_action_indices
             ]
@@ -1762,15 +1860,21 @@ class Dagger:
                 int(self.twin_replay_remaining_steps[env_id].detach().cpu().item()) <= 0
                 or seq_state["cursor"] >= int(seq_state["actions"].shape[0])
             ):
-                self.twin_replay_active_mask[env_id] = False
-                self.twin_replay_remaining_steps[env_id] = 0
-                self.twin_replay_selected_family_id[env_id] = -1
-                self.twin_replay_active_sequences.pop(env_id, None)
+                self._deactivate_twin_replay_env(env_id)
         if replay_actions:
             self._record_twin_replay_action_metrics(
                 torch.tensor(applied_env_ids, device=self.device, dtype=torch.long),
                 torch.stack(replay_actions, dim=0),
                 step_actions,
+            )
+        invalid_step_env_ids = torch.nonzero(~torch.isfinite(adjusted_step_actions).all(dim=1), as_tuple=False).squeeze(-1)
+        for env_id in invalid_step_env_ids.detach().cpu().tolist():
+            env_id = int(env_id)
+            seq_state = self.twin_replay_active_sequences.get(env_id)
+            adjusted_step_actions[env_id] = step_actions[env_id]
+            self._drop_twin_replay_env_and_source(
+                env_id,
+                source_meta=None if seq_state is None else seq_state.get("source_meta"),
             )
         return adjusted_step_actions
 
