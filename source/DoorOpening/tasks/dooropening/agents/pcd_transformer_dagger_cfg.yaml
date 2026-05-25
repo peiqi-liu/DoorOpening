@@ -8,10 +8,14 @@ action_space: "absolute"
 action_dim: 19
 aux_weight: 0.1
 mode_prediction:
-  enabled: true
+  enabled: false
   num_modes: 4
   weight: 0.01
   return_latent: true
+force_prediction:
+  enabled: true
+  output_dim: 3
+  weight: 0.1
 
 door_pcd_num_points: 30000  # Dense scene-door sampling before local policy crops are taken.
 local_pcd_range: [1.2, 0.25, 0.25]
@@ -189,6 +193,15 @@ dagger:
     side_weight: 1.0
     direction_weight: 1.0
     full_weight: 0.0  # Leave the original 4-way mode CE off by default; use side + contact-gated direction instead.
+  force_prediction:
+    sensor_name: "contact_forces_door2"
+    target_frame: "base"  # Predict forces in robot-base coordinates so the target matches the policy's main reference frame.
+    loss_type: "mse"
+    use_contact_gate: true
+    sticky: false
+    force_gate_low: 1.0
+    force_gate_high: 5.0
+    min_weight: 0.1  # Keep a small zero-force penalty pre-contact without letting those steps dominate training.
   twin_student_action_replay:
     enabled: false
     record_enabled: true
