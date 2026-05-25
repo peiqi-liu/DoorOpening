@@ -132,6 +132,7 @@ class PCDTransformer(BaseModel):
         aux_prediction_mode="absolute",
         aux_delta_scale=0.01,
         mode_prediction=None,
+        force_prediction=None,
     ):
         super().__init__(
             normalize_state=normalize_state,
@@ -154,6 +155,12 @@ class PCDTransformer(BaseModel):
         self.num_modes = int(self.mode_prediction_cfg.get("num_modes", 4))
         self.mode_weight = float(self.mode_prediction_cfg.get("weight", 0.0))
         self.return_latent = bool(self.mode_prediction_cfg.get("return_latent", False))
+        self.force_prediction_cfg = force_prediction or {}
+        self.force_prediction_enabled = bool(self.force_prediction_cfg.get("enabled", False))
+        self.force_output_dim = int(self.force_prediction_cfg.get("output_dim", 3))
+        self.force_prediction_weight = float(self.force_prediction_cfg.get("weight", 0.0))
+        if self.force_prediction_enabled and self.force_output_dim <= 0:
+            raise ValueError("force_prediction.output_dim must be positive when force prediction is enabled.")
 
         # update config for auxiliary object state prediction
         self.aux_prediction = (aux_weight > 0)
@@ -186,10 +193,17 @@ class PCDTransformer(BaseModel):
 
         # Query tokens
         self.aux_query_idx = 0 if self.aux_prediction else None
-        self.action_query_start = 1 if self.aux_prediction else 0
+        next_query_idx = 1 if self.aux_prediction else 0
+        self.action_query_start = next_query_idx
         self.action_query_end = self.action_query_start + chunk_size
-        self.mode_query_idx = self.action_query_end if self.mode_prediction_enabled else None
-        num_query_tokens = self.action_query_end + (1 if self.mode_prediction_enabled else 0)
+        next_query_idx = self.action_query_end
+        self.mode_query_idx = next_query_idx if self.mode_prediction_enabled else None
+        if self.mode_prediction_enabled:
+            next_query_idx += 1
+        self.force_query_idx = next_query_idx if self.force_prediction_enabled else None
+        if self.force_prediction_enabled:
+            next_query_idx += 1
+        num_query_tokens = next_query_idx
         self.query_tokens = nn.Parameter(nn.init.xavier_uniform_(torch.zeros(num_query_tokens, hidden_dim)))
 
         # Transformer
@@ -220,6 +234,8 @@ class PCDTransformer(BaseModel):
             self.aux_head = nn.Linear(hidden_dim, self.aux_output_dim)
         if self.mode_prediction_enabled:
             self.mode_head = nn.Linear(hidden_dim, self.num_modes)
+        if self.force_prediction_enabled:
+            self.force_head = nn.Linear(hidden_dim, self.force_output_dim)
 
     def load_checkpoint(self, checkpoint_path):
         checkpoint = torch.load(checkpoint_path)
@@ -285,6 +301,12 @@ class PCDTransformer(BaseModel):
             tgt_mask[self.mode_query_idx, :] = True
             tgt_mask[self.mode_query_idx, self.mode_query_idx] = False
 
+        if self.force_prediction_enabled:
+            # Force prediction is also a readout-only branch with no influence on action decoding.
+            tgt_mask[self.action_query_start:self.action_query_end, self.force_query_idx] = True
+            tgt_mask[self.force_query_idx, :] = True
+            tgt_mask[self.force_query_idx, self.force_query_idx] = False
+
         return tgt_mask, memory_mask
 
     def forward(self, obs, target=None, action_chunk_idx=None):
@@ -310,7 +332,7 @@ class PCDTransformer(BaseModel):
 
         memory = self.encoder(obs_tokens)  # (B, N, H)
         query_tokens = self.query_tokens.expand(B, -1, -1)  # (B, chunk_size/C+1, H)
-        if self.aux_prediction or self.mode_prediction_enabled:
+        if self.aux_prediction or self.mode_prediction_enabled or self.force_prediction_enabled:
             tgt_mask, memory_mask = self._build_decoder_masks(query_tokens, token_ranges)
             output = self.decoder(
                 query_tokens,
@@ -328,6 +350,9 @@ class PCDTransformer(BaseModel):
         if self.mode_prediction_enabled:
             output_mode = output[:, self.mode_query_idx, :]  # (B, H)
             pred["mode_logits"] = self.mode_head(output_mode)
+        if self.force_prediction_enabled:
+            output_force = output[:, self.force_query_idx, :]  # (B, H)
+            pred["force"] = self.force_head(output_force)
         if self.aux_prediction:
             output_action = output[:, self.action_query_start:self.action_query_end, :]  # (B, chunk_size, H)
             output_aux = output[:, self.aux_query_idx:self.aux_query_idx+1, :]  # (B, 1, H)
