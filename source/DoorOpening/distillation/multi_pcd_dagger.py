@@ -358,6 +358,7 @@ class Dagger:
                 f"Student action_dim ({self.student_model.action_head.out_features}) "
                 f"does not match env action dim ({self.num_actions})."
             )
+        self._init_mode_prediction_training_state()
 
         # print(self.student_model)
         # print("state_encoders_cfg", self.student_model.state_encoders_cfg)
@@ -466,6 +467,260 @@ class Dagger:
         if self.robot_gt_policy_points is None:
             self.robot_gt_policy_points = 0
         self.robot_gt_policy_points = max(0, int(self.robot_gt_policy_points))
+
+    def _init_mode_prediction_training_state(self):
+        cfg = dict(self.runtime_cfg.get("mode_prediction_contact_gating", {}) or {})
+        self.mode_contact_gating_cfg = cfg
+        self.mode_contact_gating_enabled = self.mode_prediction_enabled and bool(cfg.get("enabled", True))
+        self.mode_contact_sensor_name = str(cfg.get("sensor_name", "contact_forces_door2"))
+        self.mode_contact_gate_sticky = bool(cfg.get("sticky", True))
+        self.mode_contact_force_gate_low = float(cfg.get("force_gate_low", 1.0))
+        self.mode_contact_force_gate_high = float(cfg.get("force_gate_high", 5.0))
+        if self.mode_contact_force_gate_high < self.mode_contact_force_gate_low:
+            raise ValueError(
+                "mode_prediction_contact_gating.force_gate_high must be >= force_gate_low."
+            )
+        self.mode_side_loss_weight = float(cfg.get("side_weight", 1.0))
+        self.mode_direction_loss_weight = float(cfg.get("direction_weight", 1.0))
+        self.mode_full_loss_weight = float(cfg.get("full_weight", 0.0))
+        if self.mode_side_loss_weight < 0.0 or self.mode_direction_loss_weight < 0.0 or self.mode_full_loss_weight < 0.0:
+            raise ValueError("Mode prediction contact-gating loss weights must be non-negative.")
+
+        self.mode_family_semantics = {}
+        self.mode_family_side_ids = None
+        self.mode_family_direction_ids = None
+        self.mode_contact_seen_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.latest_mode_side_loss = None
+        self.latest_mode_direction_loss = None
+        self.latest_mode_full_loss = None
+        self.latest_mode_side_acc = None
+        self.latest_mode_direction_acc = None
+        self.latest_mode_contact_force_mean = 0.0
+        self.latest_mode_contact_gate_mean = 0.0
+        self.latest_mode_contact_gate_active_fraction = 0.0
+        self.latest_mode_contact_seen_fraction = 0.0
+
+    def _load_family_mode_semantics(self):
+        handle_side_aliases = {
+            "min": "left",
+            "max": "right",
+            "left": "left",
+            "right": "right",
+        }
+        legacy_semantics = {
+            "PartNetv5_plus": ("left", "pull"),
+            "PartNetv8_plus": ("left", "push"),
+            "PartNetv6_plus": ("right", "pull"),
+            "PartNetv7_plus": ("right", "push"),
+        }
+        semantics_by_family_name = {}
+        for asset_path, family_id in zip(door_asset_paths, door_asset_family_ids.detach().cpu().tolist()):
+            family_name = DOOR_FAMILY_NAMES[int(family_id)]
+            if family_name in semantics_by_family_name:
+                continue
+
+            handle_side = None
+            opening_direction = None
+            meta_path = Path(asset_path).resolve().parent / "variant_meta.json"
+            if meta_path.exists():
+                try:
+                    with open(meta_path, "r", encoding="utf-8") as f:
+                        meta = json.load(f) or {}
+                except (OSError, json.JSONDecodeError):
+                    meta = {}
+                actual_props = meta.get("actual_properties", {})
+                target_props = meta.get("target_properties", {})
+                if not isinstance(actual_props, dict):
+                    actual_props = {}
+                if not isinstance(target_props, dict):
+                    target_props = {}
+
+                handle_side_raw = actual_props.get("handle_side") or target_props.get("handle_side")
+                opening_direction_raw = actual_props.get("opening_direction") or target_props.get("opening_direction")
+                if handle_side_raw is not None:
+                    handle_side = handle_side_aliases.get(str(handle_side_raw).lower(), str(handle_side_raw).lower())
+                if opening_direction_raw is not None:
+                    opening_direction = str(opening_direction_raw).lower()
+
+            if handle_side is None or opening_direction is None:
+                fallback = legacy_semantics.get(family_name)
+                if fallback is not None:
+                    fallback_side, fallback_direction = fallback
+                    if handle_side is None:
+                        handle_side = fallback_side
+                    if opening_direction is None:
+                        opening_direction = fallback_direction
+
+            semantics_by_family_name[family_name] = (handle_side, opening_direction)
+        return semantics_by_family_name
+
+    def _init_mode_prediction_targets(self):
+        if not self.mode_prediction_enabled:
+            return
+        if self.env_family_ids.numel() > 0:
+            max_family_id = int(self.env_family_ids.max().detach().cpu().item())
+            if max_family_id >= self.num_modes:
+                raise RuntimeError(
+                    f"Mode prediction head exposes {self.num_modes} modes, but env family ids go up to {max_family_id}."
+                )
+
+        self.mode_family_semantics = self._load_family_mode_semantics()
+        side_name_to_id = {"left": 0, "right": 1}
+        direction_name_to_id = {"pull": 0, "push": 1}
+        self.mode_family_side_ids = torch.full((self.num_modes,), -1, dtype=torch.long, device=self.device)
+        self.mode_family_direction_ids = torch.full((self.num_modes,), -1, dtype=torch.long, device=self.device)
+
+        missing_semantics = []
+        for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
+            if family_id >= self.num_modes:
+                break
+            handle_side, opening_direction = self.mode_family_semantics.get(family_name, (None, None))
+            if handle_side not in side_name_to_id or opening_direction not in direction_name_to_id:
+                missing_semantics.append(family_name)
+                continue
+            self.mode_family_side_ids[family_id] = side_name_to_id[handle_side]
+            self.mode_family_direction_ids[family_id] = direction_name_to_id[opening_direction]
+
+        if missing_semantics:
+            raise RuntimeError(
+                "Could not infer handle-side/opening-direction semantics for active mode-prediction families: "
+                f"{missing_semantics}."
+            )
+
+    def _aggregate_mode_group_logits(self, mode_logits, group_ids, num_groups, group_name):
+        group_logits = []
+        for group_id in range(int(num_groups)):
+            mode_mask = group_ids == int(group_id)
+            if not torch.any(mode_mask):
+                raise RuntimeError(
+                    f"Mode prediction grouping for '{group_name}' is missing classes for group {group_id}."
+                )
+            group_logits.append(torch.logsumexp(mode_logits[:, mode_mask], dim=-1))
+        return torch.stack(group_logits, dim=-1)
+
+    def _get_mode_contact_force_magnitude(self):
+        scene = getattr(self.ov_env, "scene", None)
+        sensors = None if scene is None else getattr(scene, "sensors", None)
+        if sensors is None or self.mode_contact_sensor_name not in sensors:
+            raise RuntimeError(
+                f"Mode prediction contact gating requires sensor '{self.mode_contact_sensor_name}' to be available."
+            )
+        contact_forces = sensors[self.mode_contact_sensor_name].data.net_forces_w
+        contact_force_mag = torch.linalg.vector_norm(contact_forces, dim=-1)
+        if contact_force_mag.ndim == 1:
+            return contact_force_mag.to(device=self.device, dtype=torch.float32)
+        return contact_force_mag.reshape(contact_force_mag.shape[0], -1).amax(dim=-1).to(
+            device=self.device,
+            dtype=torch.float32,
+        )
+
+    def _reset_mode_contact_gating_state(self, env_ids=None):
+        if self.mode_contact_seen_mask is None:
+            return
+        if env_ids is None:
+            self.mode_contact_seen_mask.zero_()
+            return
+        if env_ids.numel() == 0:
+            return
+        self.mode_contact_seen_mask[env_ids] = False
+
+    def _get_mode_contact_gate(self):
+        gate = torch.ones((self.num_envs,), dtype=torch.float32, device=self.device)
+        if not self.mode_contact_gating_enabled:
+            self.latest_mode_contact_force_mean = 0.0
+            self.latest_mode_contact_gate_mean = 1.0
+            self.latest_mode_contact_gate_active_fraction = 1.0
+            self.latest_mode_contact_seen_fraction = 0.0
+            return gate
+
+        contact_force_mag = self._get_mode_contact_force_magnitude()
+        current_contact_mask = contact_force_mag >= self.mode_contact_force_gate_low
+        if self.mode_contact_force_gate_high <= self.mode_contact_force_gate_low + 1.0e-6:
+            current_gate = current_contact_mask.to(dtype=torch.float32)
+        else:
+            current_gate = (
+                (contact_force_mag - self.mode_contact_force_gate_low)
+                / (self.mode_contact_force_gate_high - self.mode_contact_force_gate_low)
+            ).clamp(0.0, 1.0)
+
+        if self.mode_contact_gate_sticky:
+            self.mode_contact_seen_mask |= current_contact_mask
+            gate = torch.maximum(current_gate, self.mode_contact_seen_mask.to(dtype=torch.float32))
+        else:
+            gate = current_gate
+
+        self.latest_mode_contact_force_mean = float(contact_force_mag.mean().detach().cpu().item())
+        self.latest_mode_contact_gate_mean = float(gate.mean().detach().cpu().item())
+        self.latest_mode_contact_gate_active_fraction = float((gate > 0.0).float().mean().detach().cpu().item())
+        if self.mode_contact_gate_sticky:
+            self.latest_mode_contact_seen_fraction = float(self.mode_contact_seen_mask.float().mean().detach().cpu().item())
+        else:
+            self.latest_mode_contact_seen_fraction = float(current_contact_mask.float().mean().detach().cpu().item())
+        return gate
+
+    def _compute_mode_prediction_loss(self, mode_logits):
+        if not self.mode_prediction_enabled:
+            return None
+        if self.mode_family_side_ids is None or self.mode_family_direction_ids is None:
+            raise RuntimeError("Mode prediction targets are not initialized.")
+
+        mode_target = self.env_family_ids.long()
+        side_target = self.mode_family_side_ids[mode_target]
+        direction_target = self.mode_family_direction_ids[mode_target]
+        side_valid = side_target >= 0
+        direction_valid = direction_target >= 0
+        if not torch.any(side_valid):
+            raise RuntimeError("No valid side targets are available for mode prediction.")
+        if not torch.any(direction_valid):
+            raise RuntimeError("No valid direction targets are available for mode prediction.")
+
+        side_logits = self._aggregate_mode_group_logits(mode_logits, self.mode_family_side_ids, 2, "side")
+        direction_logits = self._aggregate_mode_group_logits(mode_logits, self.mode_family_direction_ids, 2, "direction")
+
+        side_loss = torch.nn.functional.cross_entropy(side_logits[side_valid], side_target[side_valid])
+        side_pred = side_logits[side_valid].argmax(dim=-1)
+        self.latest_mode_side_acc = float((side_pred == side_target[side_valid]).float().mean().detach().cpu().item())
+
+        contact_gate = self._get_mode_contact_gate()
+        direction_loss_per_env = torch.nn.functional.cross_entropy(
+            direction_logits[direction_valid],
+            direction_target[direction_valid],
+            reduction="none",
+        )
+        direction_gate = contact_gate[direction_valid]
+        direction_gate_sum = float(direction_gate.sum().detach().cpu().item())
+        if direction_gate_sum > 0.0:
+            direction_loss = (direction_loss_per_env * direction_gate).sum() / direction_gate.sum()
+            direction_pred = direction_logits[direction_valid].argmax(dim=-1)
+            direction_correct = (direction_pred == direction_target[direction_valid]).float()
+            self.latest_mode_direction_acc = float(
+                ((direction_correct * direction_gate).sum() / direction_gate.sum()).detach().cpu().item()
+            )
+        else:
+            direction_loss = direction_loss_per_env.mean() * 0.0
+            self.latest_mode_direction_acc = None
+
+        full_mode_loss = None
+        if self.mode_full_loss_weight > 0.0:
+            full_loss_per_env = torch.nn.functional.cross_entropy(mode_logits, mode_target, reduction="none")
+            if self.mode_contact_gating_enabled:
+                full_gate = contact_gate
+                full_gate_sum = float(full_gate.sum().detach().cpu().item())
+                if full_gate_sum > 0.0:
+                    full_mode_loss = (full_loss_per_env * full_gate).sum() / full_gate.sum()
+                else:
+                    full_mode_loss = full_loss_per_env.mean() * 0.0
+            else:
+                full_mode_loss = full_loss_per_env.mean()
+
+        mode_loss = self.mode_side_loss_weight * side_loss + self.mode_direction_loss_weight * direction_loss
+        if full_mode_loss is not None:
+            mode_loss = mode_loss + self.mode_full_loss_weight * full_mode_loss
+
+        self.latest_mode_side_loss = float(side_loss.detach().cpu().item())
+        self.latest_mode_direction_loss = float(direction_loss.detach().cpu().item())
+        self.latest_mode_full_loss = None if full_mode_loss is None else float(full_mode_loss.detach().cpu().item())
+        return mode_loss
 
     def _build_action_component_history_indices(self):
         target_joint_ids = torch.as_tensor(self.ov_env._robot_dof_idx, device=self.device, dtype=torch.long)
@@ -1010,6 +1265,7 @@ class Dagger:
         expected_asset_family_ids = door_asset_family_ids.to(device=self.device, dtype=torch.long)[self.env_asset_idx]
         if not torch.equal(expected_asset_family_ids, self.env_family_ids):
             raise RuntimeError("Door asset family ids and motion family ids are inconsistent.")
+        self._init_mode_prediction_targets()
         self.family_env_ids = {
             int(family_id): torch.nonzero(self.env_family_ids == int(family_id), as_tuple=False).squeeze(-1)
             for family_id in range(len(DOOR_FAMILY_NAMES))
@@ -1902,6 +2158,8 @@ class Dagger:
         return torch.unique(torch.cat(indices).to(device=self.device, dtype=torch.long), sorted=True)
 
     def _infer_wrong_pp_family_semantics(self, family_name):
+        if family_name in self.mode_family_semantics:
+            return self.mode_family_semantics[family_name]
         semantics = {
             "PartNetv5_plus": ("left", "pull"),
             "PartNetv8_plus": ("left", "push"),
@@ -3259,10 +3517,7 @@ class Dagger:
         if self.mode_prediction_enabled:
             if "mode_logits" not in student_output:
                 raise RuntimeError("Mode prediction is enabled, but student output does not contain 'mode_logits'.")
-            mode_loss = torch.nn.functional.cross_entropy(
-                student_output["mode_logits"],
-                self.env_family_ids.long(),
-            )
+            mode_loss = self._compute_mode_prediction_loss(student_output["mode_logits"])
             total_loss = total_loss + self.mode_weight * mode_loss
         return total_loss, action_loss, aux_loss, mode_loss
 
@@ -3651,8 +3906,23 @@ class Dagger:
                 print("Aux Loss:", float(aux_loss.detach().cpu()))
             if mode_loss is not None:
                 print("Mode Loss:", float(mode_loss.detach().cpu()))
+                if self.latest_mode_side_loss is not None:
+                    print("Mode Side Loss:", self.latest_mode_side_loss)
+                if self.latest_mode_direction_loss is not None:
+                    print("Mode Direction Loss:", self.latest_mode_direction_loss)
+                if self.latest_mode_full_loss is not None:
+                    print("Mode Full Loss:", self.latest_mode_full_loss)
             if mode_acc is not None:
                 print("Mode Acc:", float(mode_acc.detach().cpu()))
+            if self.latest_mode_side_acc is not None:
+                print("Mode Side Acc:", self.latest_mode_side_acc)
+            if self.latest_mode_direction_acc is not None:
+                print("Mode Direction Acc:", self.latest_mode_direction_acc)
+            if self.mode_contact_gating_enabled:
+                print("Mode Contact Force Mean:", self.latest_mode_contact_force_mean)
+                print("Mode Contact Gate Mean:", self.latest_mode_contact_gate_mean)
+                print("Mode Contact Gate Active Fraction:", self.latest_mode_contact_gate_active_fraction)
+                print("Mode Contact Seen Fraction:", self.latest_mode_contact_seen_fraction)
             print("Teacher Forcing Beta:", teacher_forcing_beta)
             print("Teacher Rollout Env Fraction:", teacher_env_fraction)
             print("Student Rollout Env Fraction:", student_env_fraction)
@@ -3694,8 +3964,23 @@ class Dagger:
             metrics["loss/aux"] = float(aux_loss.detach().cpu())
         if mode_loss is not None:
             metrics["loss/mode"] = float(mode_loss.detach().cpu())
+            if self.latest_mode_side_loss is not None:
+                metrics["loss/mode_side"] = self.latest_mode_side_loss
+            if self.latest_mode_direction_loss is not None:
+                metrics["loss/mode_direction"] = self.latest_mode_direction_loss
+            if self.latest_mode_full_loss is not None:
+                metrics["loss/mode_full"] = self.latest_mode_full_loss
         if mode_acc is not None:
             metrics["stats/mode_acc"] = float(mode_acc.detach().cpu())
+        if self.latest_mode_side_acc is not None:
+            metrics["stats/mode_side_acc"] = self.latest_mode_side_acc
+        if self.latest_mode_direction_acc is not None:
+            metrics["stats/mode_direction_acc"] = self.latest_mode_direction_acc
+        if self.mode_contact_gating_enabled:
+            metrics["stats/mode_contact_force_mean"] = self.latest_mode_contact_force_mean
+            metrics["stats/mode_contact_gate_mean"] = self.latest_mode_contact_gate_mean
+            metrics["stats/mode_contact_gate_active_fraction"] = self.latest_mode_contact_gate_active_fraction
+            metrics["stats/mode_contact_seen_fraction"] = self.latest_mode_contact_seen_fraction
         if episode_reward is not None:
             metrics["stats/episode_reward"] = episode_reward
         if episode_length is not None:
@@ -3746,6 +4031,7 @@ class Dagger:
             self._seed_aux_buffer()
             self._resample_teacher_forcing_env_mask(self.resume_iteration)
             self._reset_twin_student_action_replay_state(iteration=self.resume_iteration)
+            self._reset_mode_contact_gating_state()
 
             for iteration in range(start_iteration, end_iteration):
                 self._sync_timing_device()
@@ -3846,6 +4132,7 @@ class Dagger:
                     self._seed_aux_buffer(done_mask)
                     self._resample_teacher_forcing_env_mask(iteration + 1, done_mask)
                     self._reset_twin_student_action_replay_state(done_mask, iteration=iteration + 1)
+                    self._reset_mode_contact_gating_state(done_mask)
 
                 if total_loss is not None:
                     self._sync_timing_device()
