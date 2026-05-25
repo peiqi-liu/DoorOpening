@@ -15,7 +15,7 @@ mode_prediction:
 force_prediction:
   enabled: true
   output_dim: 3
-  weight: 0.1
+  weight: 0.01
 
 door_pcd_num_points: 30000  # Dense scene-door sampling before local policy crops are taken.
 local_pcd_range: [1.2, 0.25, 0.25]
@@ -187,7 +187,6 @@ dagger:
   mode_prediction_contact_gating:
     enabled: true
     sensor_name: "contact_forces_door2"
-    sticky: true  # Once meaningful hinge/handle contact is observed in an episode, keep direction supervision on.
     force_gate_low: 1.0  # Matches the reward-side contact threshold used for the hinge contact signal.
     force_gate_high: 5.0  # Softly ramp direction supervision from low to high contact force.
     side_weight: 1.0
@@ -196,12 +195,12 @@ dagger:
   force_prediction:
     sensor_name: "contact_forces_door2"
     target_frame: "base"  # Predict forces in robot-base coordinates so the target matches the policy's main reference frame.
-    loss_type: "mse"
+    loss_type: "direction_contrastive"
+    contrastive_temperature: 0.1
     use_contact_gate: true
-    sticky: false
     force_gate_low: 1.0
     force_gate_high: 5.0
-    min_weight: 0.1  # Keep a small zero-force penalty pre-contact without letting those steps dominate training.
+    min_weight: 0.0  # Direction is undefined without contact; zero-gate steps should not contribute.
   twin_student_action_replay:
     enabled: false
     record_enabled: true
