@@ -473,29 +473,17 @@ class Dagger:
         self.robot_gt_policy_points = max(0, int(self.robot_gt_policy_points))
 
     def _init_mode_prediction_training_state(self):
-        cfg = dict(self.runtime_cfg.get("mode_prediction_contact_gating", {}) or {})
-        self.mode_contact_gating_cfg = cfg
+        cfg = dict(self.runtime_cfg.get("direction_training", {}) or {})
         self.mode_contact_gating_enabled = self.mode_prediction_enabled and bool(cfg.get("enabled", True))
         self.mode_contact_sensor_name = str(cfg.get("sensor_name", "contact_forces_door2"))
         self.mode_contact_force_gate_low = float(cfg.get("force_gate_low", 1.0))
         self.mode_contact_force_gate_high = float(cfg.get("force_gate_high", 5.0))
         if self.mode_contact_force_gate_high < self.mode_contact_force_gate_low:
-            raise ValueError(
-                "mode_prediction_contact_gating.force_gate_high must be >= force_gate_low."
-            )
-        self.mode_side_loss_weight = float(cfg.get("side_weight", 1.0))
-        self.mode_direction_loss_weight = float(cfg.get("direction_weight", 1.0))
-        self.mode_full_loss_weight = float(cfg.get("full_weight", 0.0))
-        if self.mode_side_loss_weight < 0.0 or self.mode_direction_loss_weight < 0.0 or self.mode_full_loss_weight < 0.0:
-            raise ValueError("Mode prediction contact-gating loss weights must be non-negative.")
+            raise ValueError("direction_training.force_gate_high must be >= force_gate_low.")
 
         self.mode_family_semantics = {}
-        self.mode_family_side_ids = None
         self.mode_family_direction_ids = None
-        self.latest_mode_side_loss = None
         self.latest_mode_direction_loss = None
-        self.latest_mode_full_loss = None
-        self.latest_mode_side_acc = None
         self.latest_mode_direction_acc = None
         self.latest_mode_contact_force_mean = 0.0
         self.latest_mode_contact_force_max = 0.0
@@ -503,7 +491,7 @@ class Dagger:
         self.latest_mode_contact_gate_active_fraction = 0.0
 
     def _init_force_prediction_training_state(self):
-        cfg = dict(self.runtime_cfg.get("force_prediction", {}) or {})
+        cfg = dict(self.runtime_cfg.get("force_training", {}) or {})
         self.force_prediction_cfg = cfg
         self.force_prediction_sensor_name = str(cfg.get("sensor_name", "contact_forces_door2"))
         self.force_prediction_target_frame = str(cfg.get("target_frame", "base")).lower()
@@ -522,23 +510,14 @@ class Dagger:
         self.force_prediction_use_contact_gate = self.force_prediction_enabled and bool(cfg.get("use_contact_gate", True))
         self.force_prediction_force_gate_low = float(cfg.get("force_gate_low", 1.0))
         self.force_prediction_force_gate_high = float(cfg.get("force_gate_high", 5.0))
+        if self.force_prediction_force_gate_high < self.force_prediction_force_gate_low:
+            raise ValueError("force_training.force_gate_high must be >= force_gate_low.")
         self.force_prediction_min_weight = float(cfg.get("min_weight", 0.1))
+        if not 0.0 <= self.force_prediction_min_weight <= 1.0:
+            raise ValueError("force_training.min_weight must be in [0, 1].")
 
         self.latest_force_loss = None
-        self.latest_force_mae = None
-        self.latest_force_rmse = None
-        self.latest_force_cosine = None
         self.latest_force_angle_deg = None
-        self.latest_force_target_norm = 0.0
-        self.latest_force_pred_norm = 0.0
-        self.latest_force_contact_force_max = 0.0
-        self.latest_force_valid_fraction = 0.0
-        self.latest_force_gate_mean = 1.0
-        self.latest_force_sample_weight_mean = 1.0
-        self.latest_force_gate_active_fraction = 1.0
-        self.latest_force_target_component_mean = None
-        self.latest_force_pred_component_mean = None
-        self.latest_force_component_mae = None
 
     def _load_family_mode_semantics(self):
         handle_side_aliases = {
@@ -597,28 +576,26 @@ class Dagger:
     def _init_mode_prediction_targets(self):
         if not self.mode_prediction_enabled:
             return
-        if self.env_family_ids.numel() > 0:
-            max_family_id = int(self.env_family_ids.max().detach().cpu().item())
-            if max_family_id >= self.num_modes:
-                raise RuntimeError(
-                    f"Mode prediction head exposes {self.num_modes} modes, but env family ids go up to {max_family_id}."
-                )
+        if self.num_modes != 2:
+            raise RuntimeError(
+                f"Push/pull direction prediction expects num_modes=2, got {self.num_modes}."
+            )
 
         self.mode_family_semantics = self._load_family_mode_semantics()
-        side_name_to_id = {"left": 0, "right": 1}
         direction_name_to_id = {"pull": 0, "push": 1}
-        self.mode_family_side_ids = torch.full((self.num_modes,), -1, dtype=torch.long, device=self.device)
-        self.mode_family_direction_ids = torch.full((self.num_modes,), -1, dtype=torch.long, device=self.device)
+        self.mode_family_direction_ids = torch.full(
+            (len(DOOR_FAMILY_NAMES),),
+            -1,
+            dtype=torch.long,
+            device=self.device,
+        )
 
         missing_semantics = []
         for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
-            if family_id >= self.num_modes:
-                break
             handle_side, opening_direction = self.mode_family_semantics.get(family_name, (None, None))
-            if handle_side not in side_name_to_id or opening_direction not in direction_name_to_id:
+            if opening_direction not in direction_name_to_id:
                 missing_semantics.append(family_name)
                 continue
-            self.mode_family_side_ids[family_id] = side_name_to_id[handle_side]
             self.mode_family_direction_ids[family_id] = direction_name_to_id[opening_direction]
 
         if missing_semantics:
@@ -626,17 +603,6 @@ class Dagger:
                 "Could not infer handle-side/opening-direction semantics for active mode-prediction families: "
                 f"{missing_semantics}."
             )
-
-    def _aggregate_mode_group_logits(self, mode_logits, group_ids, num_groups, group_name):
-        group_logits = []
-        for group_id in range(int(num_groups)):
-            mode_mask = group_ids == int(group_id)
-            if not torch.any(mode_mask):
-                raise RuntimeError(
-                    f"Mode prediction grouping for '{group_name}' is missing classes for group {group_id}."
-                )
-            group_logits.append(torch.logsumexp(mode_logits[:, mode_mask], dim=-1))
-        return torch.stack(group_logits, dim=-1)
 
     def _get_contact_sensor_force_tensor_world(self, sensor_name):
         scene = getattr(self.ov_env, "scene", None)
@@ -690,29 +656,16 @@ class Dagger:
     def _compute_mode_prediction_loss(self, mode_logits):
         if not self.mode_prediction_enabled:
             return None
-        if self.mode_family_side_ids is None or self.mode_family_direction_ids is None:
+        if self.mode_family_direction_ids is None:
             raise RuntimeError("Mode prediction targets are not initialized.")
 
-        mode_target = self.env_family_ids.long()
-        side_target = self.mode_family_side_ids[mode_target]
-        direction_target = self.mode_family_direction_ids[mode_target]
-        side_valid = side_target >= 0
+        direction_target = self.mode_family_direction_ids[self.env_family_ids.long()]
         direction_valid = direction_target >= 0
-        if not torch.any(side_valid):
-            raise RuntimeError("No valid side targets are available for mode prediction.")
         if not torch.any(direction_valid):
             raise RuntimeError("No valid direction targets are available for mode prediction.")
-
-        side_logits = self._aggregate_mode_group_logits(mode_logits, self.mode_family_side_ids, 2, "side")
-        direction_logits = self._aggregate_mode_group_logits(mode_logits, self.mode_family_direction_ids, 2, "direction")
-
-        side_loss = torch.nn.functional.cross_entropy(side_logits[side_valid], side_target[side_valid])
-        side_pred = side_logits[side_valid].argmax(dim=-1)
-        self.latest_mode_side_acc = float((side_pred == side_target[side_valid]).float().mean().detach().cpu().item())
-
         contact_gate = self._get_mode_contact_gate()
         direction_loss_per_env = torch.nn.functional.cross_entropy(
-            direction_logits[direction_valid],
+            mode_logits[direction_valid],
             direction_target[direction_valid],
             reduction="none",
         )
@@ -720,7 +673,7 @@ class Dagger:
         direction_gate_sum = float(direction_gate.sum().detach().cpu().item())
         if direction_gate_sum > 0.0:
             direction_loss = (direction_loss_per_env * direction_gate).sum() / direction_gate.sum()
-            direction_pred = direction_logits[direction_valid].argmax(dim=-1)
+            direction_pred = mode_logits[direction_valid].argmax(dim=-1)
             direction_correct = (direction_pred == direction_target[direction_valid]).float()
             self.latest_mode_direction_acc = float(
                 ((direction_correct * direction_gate).sum() / direction_gate.sum()).detach().cpu().item()
@@ -728,28 +681,8 @@ class Dagger:
         else:
             direction_loss = direction_loss_per_env.mean() * 0.0
             self.latest_mode_direction_acc = None
-
-        full_mode_loss = None
-        if self.mode_full_loss_weight > 0.0:
-            full_loss_per_env = torch.nn.functional.cross_entropy(mode_logits, mode_target, reduction="none")
-            if self.mode_contact_gating_enabled:
-                full_gate = contact_gate
-                full_gate_sum = float(full_gate.sum().detach().cpu().item())
-                if full_gate_sum > 0.0:
-                    full_mode_loss = (full_loss_per_env * full_gate).sum() / full_gate.sum()
-                else:
-                    full_mode_loss = full_loss_per_env.mean() * 0.0
-            else:
-                full_mode_loss = full_loss_per_env.mean()
-
-        mode_loss = self.mode_side_loss_weight * side_loss + self.mode_direction_loss_weight * direction_loss
-        if full_mode_loss is not None:
-            mode_loss = mode_loss + self.mode_full_loss_weight * full_mode_loss
-
-        self.latest_mode_side_loss = float(side_loss.detach().cpu().item())
         self.latest_mode_direction_loss = float(direction_loss.detach().cpu().item())
-        self.latest_mode_full_loss = None if full_mode_loss is None else float(full_mode_loss.detach().cpu().item())
-        return mode_loss
+        return direction_loss
 
     def _get_force_prediction_target_raw(self):
         contact_forces = self._get_contact_sensor_force_tensor_world(self.force_prediction_sensor_name)
@@ -767,9 +700,6 @@ class Dagger:
         weight = torch.ones((self.num_envs,), dtype=torch.float32, device=self.device)
         gate = torch.ones((self.num_envs,), dtype=torch.float32, device=self.device)
         if not self.force_prediction_use_contact_gate:
-            self.latest_force_gate_mean = 1.0
-            self.latest_force_sample_weight_mean = 1.0
-            self.latest_force_gate_active_fraction = 1.0
             return weight, gate
 
         force_mag = torch.linalg.vector_norm(force_target_raw, dim=-1)
@@ -784,9 +714,6 @@ class Dagger:
 
         gate = current_gate
         weight = self.force_prediction_min_weight + (1.0 - self.force_prediction_min_weight) * gate
-        self.latest_force_gate_mean = float(gate.mean().detach().cpu().item())
-        self.latest_force_sample_weight_mean = float(weight.mean().detach().cpu().item())
-        self.latest_force_gate_active_fraction = float((gate > 0.0).float().mean().detach().cpu().item())
         return weight, gate
 
     def _compute_force_prediction_loss(self, force_pred):
@@ -801,13 +728,8 @@ class Dagger:
                 f"Force prediction head output dim ({force_pred.shape[-1]}) does not match target dim ({force_target_raw.shape[-1]})."
             )
 
-        force_raw_mag = torch.linalg.vector_norm(force_target_raw, dim=-1)
         sample_weight, gate = self._get_force_prediction_sample_weight(force_target_raw)
         valid_mask = gate > 0.0
-        self.latest_force_valid_fraction = float(valid_mask.float().mean().detach().cpu().item())
-        self.latest_force_target_norm = float(force_raw_mag.mean().detach().cpu().item())
-        self.latest_force_pred_norm = float(torch.linalg.vector_norm(force_pred, dim=-1).mean().detach().cpu().item())
-        self.latest_force_contact_force_max = float(force_raw_mag.max().detach().cpu().item())
 
         target_dir = self._normalize_force_direction(force_target_raw)
         pred_dir = self._normalize_force_direction(force_pred)
@@ -815,13 +737,7 @@ class Dagger:
         if self.force_prediction_loss_type == "direction_contrastive":
             if not torch.any(valid_mask):
                 loss = force_pred.mean() * 0.0
-                self.latest_force_mae = None
-                self.latest_force_rmse = None
-                self.latest_force_cosine = None
                 self.latest_force_angle_deg = None
-                self.latest_force_target_component_mean = None
-                self.latest_force_pred_component_mean = None
-                self.latest_force_component_mae = None
                 self.latest_force_loss = float(loss.detach().cpu().item())
                 return loss
 
@@ -843,14 +759,8 @@ class Dagger:
             else:
                 loss = ((1.0 - cosine_valid) * sample_weight_valid).sum() / sample_weight_valid.sum().clamp_min(1.0e-6)
 
-            self.latest_force_mae = None
-            self.latest_force_rmse = None
-            self.latest_force_cosine = float(cosine_valid.mean().detach().cpu().item())
             angle_deg = torch.rad2deg(torch.acos(cosine_valid.clamp(-1.0 + 1.0e-6, 1.0 - 1.0e-6)))
             self.latest_force_angle_deg = float(angle_deg.mean().detach().cpu().item())
-            self.latest_force_target_component_mean = target_dir_valid.mean(dim=0).detach().cpu()
-            self.latest_force_pred_component_mean = pred_dir_valid.mean(dim=0).detach().cpu()
-            self.latest_force_component_mae = (pred_dir_valid - target_dir_valid).abs().mean(dim=0).detach().cpu()
         else:
             if self.force_prediction_loss_type == "smooth_l1":
                 per_env_loss = torch.nn.functional.smooth_l1_loss(
@@ -860,16 +770,9 @@ class Dagger:
                 per_env_loss = torch.nn.functional.mse_loss(force_pred, force_target_raw, reduction="none").mean(dim=-1)
             loss = (per_env_loss * sample_weight).sum() / sample_weight.sum().clamp_min(1.0e-6)
 
-            error = force_pred - force_target_raw
-            self.latest_force_mae = float(error.abs().mean().detach().cpu().item())
-            self.latest_force_rmse = float(torch.sqrt(torch.mean(error.square())).detach().cpu().item())
             cosine_all = torch.nn.functional.cosine_similarity(pred_dir, target_dir, dim=-1, eps=1.0e-8)
-            self.latest_force_cosine = float(cosine_all.mean().detach().cpu().item())
             angle_deg = torch.rad2deg(torch.acos(cosine_all.clamp(-1.0 + 1.0e-6, 1.0 - 1.0e-6)))
             self.latest_force_angle_deg = float(angle_deg.mean().detach().cpu().item())
-            self.latest_force_target_component_mean = force_target_raw.mean(dim=0).detach().cpu()
-            self.latest_force_pred_component_mean = force_pred.mean(dim=0).detach().cpu()
-            self.latest_force_component_mae = error.abs().mean(dim=0).detach().cpu()
 
         self.latest_force_loss = float(loss.detach().cpu().item())
         return loss
@@ -4041,7 +3944,6 @@ class Dagger:
         aux_loss,
         mode_loss,
         force_loss,
-        mode_acc,
         teacher_forcing_beta,
     ):
         if iteration % self.log_interval != 0:
@@ -4064,48 +3966,20 @@ class Dagger:
             if aux_loss is not None:
                 print("Aux Loss:", float(aux_loss.detach().cpu()))
             if mode_loss is not None:
-                print("Mode Loss:", float(mode_loss.detach().cpu()))
-                if self.latest_mode_side_loss is not None:
-                    print("Mode Side Loss:", self.latest_mode_side_loss)
+                print("Direction Loss:", float(mode_loss.detach().cpu()))
                 if self.latest_mode_direction_loss is not None:
-                    print("Mode Direction Loss:", self.latest_mode_direction_loss)
-                if self.latest_mode_full_loss is not None:
-                    print("Mode Full Loss:", self.latest_mode_full_loss)
+                    print("Direction Loss (Gated):", self.latest_mode_direction_loss)
             if force_loss is not None:
                 print("Force Loss:", float(force_loss.detach().cpu()))
-                if self.latest_force_mae is not None:
-                    print("Force MAE:", self.latest_force_mae)
-                if self.latest_force_rmse is not None:
-                    print("Force RMSE:", self.latest_force_rmse)
-                if self.latest_force_cosine is not None:
-                    print("Force Cosine:", self.latest_force_cosine)
                 if self.latest_force_angle_deg is not None:
                     print("Force Angle Deg:", self.latest_force_angle_deg)
-                print("Force Target Norm:", self.latest_force_target_norm)
-                print("Force Pred Norm:", self.latest_force_pred_norm)
-                print("Force Contact Force Max:", self.latest_force_contact_force_max)
-                print("Force Valid Fraction:", self.latest_force_valid_fraction)
-                if self.force_prediction_use_contact_gate:
-                    print("Force Gate Mean:", self.latest_force_gate_mean)
-                    print("Force Sample Weight Mean:", self.latest_force_sample_weight_mean)
-                    print("Force Gate Active Fraction:", self.latest_force_gate_active_fraction)
-                if self.latest_force_target_component_mean is not None:
-                    print("Force Target Direction Mean:", self.latest_force_target_component_mean.tolist())
-                if self.latest_force_pred_component_mean is not None:
-                    print("Force Pred Direction Mean:", self.latest_force_pred_component_mean.tolist())
-                if self.latest_force_component_mae is not None:
-                    print("Force Direction Component MAE:", self.latest_force_component_mae.tolist())
-            if mode_acc is not None:
-                print("Mode Acc:", float(mode_acc.detach().cpu()))
-            if self.latest_mode_side_acc is not None:
-                print("Mode Side Acc:", self.latest_mode_side_acc)
             if self.latest_mode_direction_acc is not None:
-                print("Mode Direction Acc:", self.latest_mode_direction_acc)
+                print("Direction Acc:", self.latest_mode_direction_acc)
             if self.mode_contact_gating_enabled:
-                print("Mode Contact Force Mean:", self.latest_mode_contact_force_mean)
-                print("Mode Contact Force Max:", self.latest_mode_contact_force_max)
-                print("Mode Contact Gate Mean:", self.latest_mode_contact_gate_mean)
-                print("Mode Contact Gate Active Fraction:", self.latest_mode_contact_gate_active_fraction)
+                print("Direction Contact Force Mean:", self.latest_mode_contact_force_mean)
+                print("Direction Contact Force Max:", self.latest_mode_contact_force_max)
+                print("Direction Contact Gate Mean:", self.latest_mode_contact_gate_mean)
+                print("Direction Contact Gate Active Fraction:", self.latest_mode_contact_gate_active_fraction)
             print("Teacher Forcing Beta:", teacher_forcing_beta)
             print("Teacher Rollout Env Fraction:", teacher_env_fraction)
             print("Student Rollout Env Fraction:", student_env_fraction)
@@ -4146,59 +4020,18 @@ class Dagger:
         if aux_loss is not None:
             metrics["loss/aux"] = float(aux_loss.detach().cpu())
         if mode_loss is not None:
-            metrics["loss/mode"] = float(mode_loss.detach().cpu())
-            if self.latest_mode_side_loss is not None:
-                metrics["loss/mode_side"] = self.latest_mode_side_loss
-            if self.latest_mode_direction_loss is not None:
-                metrics["loss/mode_direction"] = self.latest_mode_direction_loss
-            if self.latest_mode_full_loss is not None:
-                metrics["loss/mode_full"] = self.latest_mode_full_loss
+            metrics["loss/direction"] = float(mode_loss.detach().cpu())
         if force_loss is not None:
             metrics["loss/force"] = float(force_loss.detach().cpu())
-            if self.latest_force_mae is not None:
-                metrics["stats/force_mae"] = self.latest_force_mae
-            if self.latest_force_rmse is not None:
-                metrics["stats/force_rmse"] = self.latest_force_rmse
-            if self.latest_force_cosine is not None:
-                metrics["stats/force_cosine"] = self.latest_force_cosine
             if self.latest_force_angle_deg is not None:
                 metrics["stats/force_angle_deg"] = self.latest_force_angle_deg
-            metrics["stats/force_target_norm"] = self.latest_force_target_norm
-            metrics["stats/force_pred_norm"] = self.latest_force_pred_norm
-            metrics["stats/force_contact_force_max"] = self.latest_force_contact_force_max
-            metrics["stats/force_valid_fraction"] = self.latest_force_valid_fraction
-            if self.force_prediction_use_contact_gate:
-                metrics["stats/force_gate_mean"] = self.latest_force_gate_mean
-                metrics["stats/force_sample_weight_mean"] = self.latest_force_sample_weight_mean
-                metrics["stats/force_gate_active_fraction"] = self.latest_force_gate_active_fraction
-            if self.latest_force_target_component_mean is not None:
-                component_names = ("x", "y", "z")
-                for idx, value in enumerate(self.latest_force_target_component_mean.tolist()):
-                    suffix = component_names[idx] if idx < len(component_names) else f"dim{idx}"
-                    metrics[f"stats/force_target_dir_mean/{suffix}"] = float(value)
-            if self.latest_force_pred_component_mean is not None:
-                component_names = ("x", "y", "z")
-                for idx, value in enumerate(self.latest_force_pred_component_mean.tolist()):
-                    suffix = component_names[idx] if idx < len(component_names) else f"dim{idx}"
-                    metrics[f"stats/force_pred_dir_mean/{suffix}"] = float(value)
-            if self.latest_force_component_mae is not None:
-                component_names = ("x", "y", "z")
-                for idx, value in enumerate(self.latest_force_component_mae.tolist()):
-                    suffix = component_names[idx] if idx < len(component_names) else f"dim{idx}"
-                    metrics[f"stats/force_dir_mae/{suffix}"] = float(value)
-        if mode_acc is not None:
-            metrics["stats/mode_acc"] = float(mode_acc.detach().cpu())
-        if self.latest_mode_side_acc is not None:
-            metrics["stats/mode_side_acc"] = self.latest_mode_side_acc
-            metrics["stats/side_acc"] = self.latest_mode_side_acc
         if self.latest_mode_direction_acc is not None:
-            metrics["stats/mode_direction_acc"] = self.latest_mode_direction_acc
             metrics["stats/dir_acc"] = self.latest_mode_direction_acc
         if self.mode_contact_gating_enabled:
-            metrics["stats/mode_contact_force_mean"] = self.latest_mode_contact_force_mean
-            metrics["stats/mode_contact_force_max"] = self.latest_mode_contact_force_max
-            metrics["stats/mode_contact_gate_mean"] = self.latest_mode_contact_gate_mean
-            metrics["stats/mode_contact_gate_active_fraction"] = self.latest_mode_contact_gate_active_fraction
+            metrics["stats/dir_contact_force_mean"] = self.latest_mode_contact_force_mean
+            metrics["stats/dir_contact_force_max"] = self.latest_mode_contact_force_max
+            metrics["stats/dir_contact_gate_mean"] = self.latest_mode_contact_gate_mean
+            metrics["stats/dir_contact_gate_active_fraction"] = self.latest_mode_contact_gate_active_fraction
         if episode_reward is not None:
             metrics["stats/episode_reward"] = episode_reward
         if episode_length is not None:
@@ -4256,14 +4089,9 @@ class Dagger:
 
                 student_obs = self._build_student_obs(iteration=iteration)
                 student_output = self._student_forward(student_obs)
-                mode_pred = None
-                mode_target = None
-                if self.mode_prediction_enabled:
+                if self.mode_prediction_enabled and self.play_policy and iteration % 10 == 0:
                     mode_logits = student_output["mode_logits"].detach()
-                    mode_target = self.env_family_ids.long()
-                    mode_pred = mode_logits.argmax(dim=-1)
-                    if self.play_policy and iteration % 10 == 0:
-                        print("Iteration ", iteration, ": Mode Pred:", mode_logits.detach().cpu().tolist())
+                    print("Iteration ", iteration, ": Direction Pred:", mode_logits.detach().cpu().tolist())
                 student_actions = student_output["action"][:, 0, :]
                 student_env_actions = self._student_actions_to_env_actions(student_actions)
                 self._record_twin_student_actions(student_env_actions, iteration=iteration)
@@ -4290,7 +4118,6 @@ class Dagger:
                 aux_loss = None
                 mode_loss = None
                 force_loss = None
-                mode_acc = None
 
                 if not self.play_policy:
                     teacher_output = self._get_teacher_actions(obs)
@@ -4305,8 +4132,6 @@ class Dagger:
                         teacher_output["mus"],
                         aux_target=aux_target,
                     )
-                    if self.mode_prediction_enabled:
-                        mode_acc = (mode_pred == mode_target).float().mean()
                     local_batch_size = int(student_actions.shape[0])
                     global_batch_size = self._get_global_batch_size(local_batch_size)
                     self.optimizer.zero_grad()
@@ -4361,7 +4186,6 @@ class Dagger:
                         aux_loss,
                         mode_loss,
                         force_loss,
-                        mode_acc,
                         teacher_forcing_beta,
                     )
                 else:
