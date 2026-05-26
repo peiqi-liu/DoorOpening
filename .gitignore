@@ -76,4 +76,9 @@ tests/
 **/*.ply
 
 materials/
-pretrained_ckpts/
+**/*.pt
+**/*.zip
+**/*.pkl
+**/PartNet*/*
+**/prompts/
+**/pretrained_checkpoints/

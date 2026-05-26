@@ -187,17 +187,13 @@ dagger:
   direction_training:
     enabled: true
     sensor_name: "contact_forces_door2"
-    force_gate_low: 1.0  # Matches the reward-side contact threshold used for the hinge contact signal.
-    force_gate_high: 5.0  # Only train push/pull strongly once contact is informative.
+    loss_contact_force_threshold: 5.0
   force_training:
     sensor_name: "contact_forces_door2"
     target_frame: "base"  # Predict forces in robot-base coordinates so the target matches the policy's main reference frame.
     loss_type: "direction_contrastive"
     contrastive_temperature: 0.1
-    use_contact_gate: true
-    force_gate_low: 1.0
-    force_gate_high: 5.0
-    min_weight: 0.0  # Direction is undefined without contact; zero-gate steps should not contribute.
+    loss_contact_force_threshold: 5.0
   twin_student_action_replay:
     enabled: false
     record_enabled: true

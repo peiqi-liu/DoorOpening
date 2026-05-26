@@ -34,12 +34,59 @@ from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
 from isaaclab.utils import configclass
 
-from isaaclab.assets import ArticulationCfg
-
 from DoorOpening.assets.door.door_cfg import ALL_DOOR_CONFIGS
 
 
 torch.set_printoptions(precision=4, sci_mode=False)
+
+def _body_names(door):
+    names = getattr(door, "body_names", None)
+    if names is None:
+        names = getattr(door.data, "body_names", None)
+    return list(names) if names is not None else []
+
+
+def _body_indices_for_stats(door):
+    names = _body_names(door)
+    if names:
+        wanted_names = ("link_1", "link_2")
+        indices = [(names.index(name), name) for name in wanted_names if name in names]
+        if indices:
+            return indices
+
+    num_bodies = door.data.body_pos_w.shape[1]
+    fallback_indices = [idx for idx in (2, 3) if idx < num_bodies]
+    return [(idx, f"body_{idx}") for idx in fallback_indices]
+
+
+def _format_vec(values):
+    return "[" + ", ".join(f"{value:.4f}" for value in values.tolist()) + "]"
+
+
+def print_door_body_position_stats(scene: InteractiveScene, count: int):
+    door = scene["door"]
+    body_pos_w = door.data.body_pos_w
+    body_pos_env = body_pos_w - scene.env_origins[:, None, :]
+
+    print(f"[DOOR POS STATS] step={count}")
+    for body_idx, body_name in _body_indices_for_stats(door):
+        pos_w = body_pos_w[:, body_idx, :]
+        pos_env = body_pos_env[:, body_idx, :]
+        print(
+            f"  {body_name}[{body_idx}] world_z "
+            f"max={pos_w[:, 2].max().item():.4f} "
+            f"min={pos_w[:, 2].min().item():.4f} "
+            f"std={pos_w[:, 2].std(unbiased=False).item():.4f} "
+            f"var={pos_w[:, 2].var(unbiased=False).item():.6f}"
+        )
+        print(
+            f"  {body_name}[{body_idx}] env_pos "
+            f"mean={_format_vec(pos_env.mean(dim=0))} "
+            f"std={_format_vec(pos_env.std(dim=0, unbiased=False))} "
+            f"min={_format_vec(pos_env.min(dim=0).values)} "
+            f"max={_format_vec(pos_env.max(dim=0).values)}"
+        )
+
 
 @configclass
 class SensorsSceneCfg(InteractiveSceneCfg):
@@ -105,12 +152,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         if count % 100 == 0:
             # print("joint_pos: ", scene["door"].data.joint_pos)
             print("door pos: ", scene["door"].data.body_pos_w[..., 2, 2].max(), scene["door"].data.body_pos_w[..., 2, 2].min())
-        #     print("effort_limit_sim: ", scene["door"].data.effort_limit_sim)
-        #     print("velocity_limit_sim: ", scene["door"].data.velocity_limit_sim)
-        #     print("position_limit_sim: ", scene["door"].data.position_limit_sim)
-        #     print("velocity_limit_sim: ", scene["door"].data.velocity_limit_sim)
-        #     print("velocity_limit_sim: ", scene["door"].data.velocity_limit_sim)
-        #     print("joint_pos_target: ", door_target_pos)
+            print_door_body_position_stats(scene, count)
         scene.write_data_to_sim()
 
 
