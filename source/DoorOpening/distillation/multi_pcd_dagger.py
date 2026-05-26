@@ -28,7 +28,6 @@ from DoorOpening.assets.door.multi_door_cfg import motion_family_ids, motion_tra
 from DoorOpening.assets.glorbot.glorbot_cfg import glorbot_urdf_path
 from DoorOpening.model.transformer import PCDTransformer, strip_prefix_from_state_dict
 from DoorOpening.tasks.dooropening.contact_force_utils import (
-    HANDLE_CONTACT_FORCE_THRESHOLD,
     get_filtered_contact_force_w,
 )
 from DoorOpening.utils.camera_utils import (
@@ -212,6 +211,7 @@ class Dagger:
             self._init_wandb(summaries_dir)
 
         self.temporal_obs_cfg = {}
+        self.observation_lag_cfg = {}
         self.temporal_derived_state_specs = OrderedDict()
         self.temporal_history_s = 0.0
         self.temporal_obs_delay_range_s = (0.0, 0.0)
@@ -224,6 +224,29 @@ class Dagger:
         self.temporal_q_history = None
         self.temporal_target_history = None
         self.temporal_base_vel_history = None
+        self.proprio_temporal_enabled = False
+        self.proprio_temporal_obs_key = None
+        self.proprio_temporal_timestamps_ms = tuple()
+        self.proprio_temporal_timestamps_s = tuple()
+        self.proprio_temporal_fields = tuple()
+        self.proprio_temporal_field_state_keys = OrderedDict()
+        self.proprio_temporal_field_dims = OrderedDict()
+        self.proprio_temporal_covered_state_keys = frozenset()
+        self.observation_lag_enabled = False
+        self.observation_lag_apply_during_training = True
+        self.observation_lag_apply_during_eval = False
+        self.observation_lag_apply_to_proprio = True
+        self.observation_lag_apply_to_pointcloud = False
+        self.observation_lag_per_env = True
+        self.observation_lag_per_timestamp = True
+        self.observation_lag_clamp_to_available_history = True
+        self.observation_lag_max_jitter_ms = 0
+        self.observation_lag_mode = "symmetric"
+        self.latest_obs_lag_enabled = 0.0
+        self.latest_obs_lag_mean_ms = 0.0
+        self.latest_obs_lag_min_ms = 0.0
+        self.latest_obs_lag_max_ms = 0.0
+        self.latest_obs_lag_effective_age_ms_by_timestamp = OrderedDict()
         self.teacher_forcing_env_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.current_rewards = torch.zeros((self.num_envs, 1), dtype=torch.float32, device=self.device)
         self.current_lengths = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
@@ -344,6 +367,7 @@ class Dagger:
         self.local_pcd_x_direction_cutoff = student_cfg_data.pop("x_direction_cutoff", -0.5)
         self.door_pcd_num_points = int(student_cfg_data.pop("door_pcd_num_points", 4096))
         self.temporal_obs_cfg = dict(student_cfg_data.pop("temporal_obs", {}) or {})
+        self.observation_lag_cfg = dict(student_cfg_data.pop("observation_lag", {}) or {})
         self.temporal_history_s = float(self.temporal_obs_cfg.get("history_s", 0.0))
         self.temporal_obs_delay_range_s = self.temporal_obs_cfg.get("obs_delay_s", [0.0, 0.0])
         self.temporal_command_delay_range_s = self.temporal_obs_cfg.get("command_delay_s", [0.0, 0.0])
@@ -354,6 +378,25 @@ class Dagger:
             if not str(key).startswith("_")
         }
         self.student_model = PCDTransformer(**student_model_kwargs).to(self.device)
+        self.proprio_temporal_enabled = bool(getattr(self.student_model, "proprio_temporal_enabled", False))
+        self.proprio_temporal_obs_key = getattr(self.student_model, "proprio_temporal_obs_key", None)
+        self.proprio_temporal_timestamps_ms = tuple(
+            int(timestamp) for timestamp in getattr(self.student_model, "proprio_temporal_timestamps_ms", ())
+        )
+        self.proprio_temporal_timestamps_s = tuple(float(timestamp) / 1000.0 for timestamp in self.proprio_temporal_timestamps_ms)
+        self.proprio_temporal_fields = tuple(
+            str(field) for field in getattr(self.student_model, "proprio_temporal_fields", ())
+        )
+        self.proprio_temporal_field_state_keys = OrderedDict(
+            getattr(self.student_model, "proprio_temporal_field_state_keys", OrderedDict())
+        )
+        self.proprio_temporal_field_dims = OrderedDict(
+            (str(key), int(value))
+            for key, value in getattr(self.student_model, "proprio_temporal_field_dims", OrderedDict()).items()
+        )
+        self.proprio_temporal_covered_state_keys = frozenset(
+            getattr(self.student_model, "proprio_temporal_covered_state_keys", frozenset())
+        )
         self.mode_prediction_enabled = bool(getattr(self.student_model, "mode_prediction_enabled", False))
         self.mode_weight = float(getattr(self.student_model, "mode_weight", 0.0))
         self.num_modes = int(getattr(self.student_model, "num_modes", 4))
@@ -389,17 +432,24 @@ class Dagger:
         if student_ckpt is not None:
             self.load_student_weights(student_ckpt)
 
-        self.state_encoders_keys = tuple(
+        all_state_encoder_keys = tuple(
             key
             for key, cfg in self.student_model.state_encoders_cfg.items()
             if cfg.get("use_state", False)
+        )
+        self.state_encoders_keys = tuple(
+            key
+            for key in all_state_encoder_keys
+            if key not in self.proprio_temporal_covered_state_keys
         )
         self.pcd_encoders_keys = tuple(
             key
             for key, cfg in self.student_model.pcd_encoders_cfg.items()
             if cfg.get("use_pcd", False)
         )
-        if "q_hand" not in self.state_encoders_keys:
+        has_q_hand_state = "q_hand" in self.state_encoders_keys
+        has_q_hand_temporal = "q_hand" in self.proprio_temporal_field_state_keys.values()
+        if not has_q_hand_state and not has_q_hand_temporal:
             raise ValueError("PCDTransformer student config must include q_hand in state_encoders_cfg.")
 
         self.temporal_derived_state_specs = OrderedDict()
@@ -422,11 +472,18 @@ class Dagger:
             for spec in self.temporal_derived_state_specs.values()
             if spec["offset_s"] is not None
         ]
-        self.max_temporal_history_s = max([0.0, self.temporal_history_s, *spec_offsets])
+        self.max_temporal_history_s = max([0.0, self.temporal_history_s, *spec_offsets, *self.proprio_temporal_timestamps_s])
+        self._init_observation_lag_state()
         if student_ckpt is not None and self.temporal_derived_state_specs and self.rank == 0:
             print(
                 "Warning: student checkpoint was loaded while temporal derived inputs are active. "
                 "New temporal state encoder weights may need fresh training."
+            )
+        if student_ckpt is not None and self.proprio_temporal_enabled and self.rank == 0:
+            print(
+                "Warning: student checkpoint was loaded while the shared proprio_temporal_encoder is enabled. "
+                "Legacy timestamp-specific state encoders are replaced by a shared temporal encoder; "
+                "checkpoint loading is non-strict and may leave new temporal weights to train from scratch."
             )
 
         self.aux_state_specs = OrderedDict()
@@ -511,6 +568,30 @@ class Dagger:
         self.latest_filtered_handle_force_norm_mean = 0.0
         self.latest_filtered_handle_force_norm_max = 0.0
         self.latest_filtered_handle_contact_frac = 0.0
+
+    def _init_observation_lag_state(self):
+        cfg = dict(self.observation_lag_cfg or {})
+        self.observation_lag_enabled = bool(cfg.get("enabled", False))
+        self.observation_lag_apply_during_training = bool(cfg.get("apply_during_training", True))
+        self.observation_lag_apply_during_eval = bool(cfg.get("apply_during_eval", False))
+        self.observation_lag_max_jitter_ms = int(cfg.get("max_jitter_ms", 0))
+        self.observation_lag_mode = str(cfg.get("mode", "symmetric")).lower()
+        self.observation_lag_apply_to_proprio = bool(cfg.get("apply_to_proprio", True))
+        self.observation_lag_apply_to_pointcloud = bool(cfg.get("apply_to_pointcloud", False))
+        self.observation_lag_per_env = bool(cfg.get("per_env", True))
+        self.observation_lag_per_timestamp = bool(cfg.get("per_timestamp", True))
+        self.observation_lag_clamp_to_available_history = bool(cfg.get("clamp_to_available_history", True))
+
+        if self.observation_lag_max_jitter_ms < 0:
+            raise ValueError("observation_lag.max_jitter_ms must be non-negative.")
+        if self.observation_lag_mode != "symmetric":
+            raise ValueError("observation_lag.mode must be 'symmetric'.")
+        if self.observation_lag_apply_to_pointcloud:
+            raise NotImplementedError(
+                "observation_lag.apply_to_pointcloud=true is not implemented in this patch. "
+                "Set apply_to_pointcloud=false."
+            )
+        self._reset_observation_lag_stats()
 
     def _load_family_mode_semantics(self):
         handle_side_aliases = {
@@ -886,6 +967,140 @@ class Dagger:
     def _get_current_time_s(self):
         return float(self.temporal_current_time_s)
 
+    def _reset_observation_lag_stats(self):
+        self.latest_obs_lag_enabled = 0.0
+        self.latest_obs_lag_mean_ms = 0.0
+        self.latest_obs_lag_min_ms = 0.0
+        self.latest_obs_lag_max_ms = 0.0
+        self.latest_obs_lag_effective_age_ms_by_timestamp = OrderedDict()
+
+    def _is_observation_lag_active(self):
+        if not self.observation_lag_enabled or not self.observation_lag_apply_to_proprio:
+            return False
+        if self.play_policy:
+            return self.observation_lag_apply_during_eval
+        return self.observation_lag_apply_during_training
+
+    def _merge_unique_offsets_s(self, *offset_sequences):
+        merged = OrderedDict()
+        for offsets in offset_sequences:
+            for offset_s in offsets:
+                merged[float(offset_s)] = None
+        return tuple(merged.keys())
+
+    def _sample_observation_lag_steps(self, offsets_s):
+        if not offsets_s:
+            raise RuntimeError("Observation lag sampling requires at least one requested offset.")
+        num_offsets = len(offsets_s)
+        nominal_offsets_ms = torch.as_tensor(offsets_s, dtype=torch.float32, device=self.device) * 1000.0
+        sample_shape = (
+            self.num_envs if self.observation_lag_per_env else 1,
+            num_offsets if self.observation_lag_per_timestamp else 1,
+        )
+        if self.observation_lag_max_jitter_ms > 0:
+            jitter_ms = torch.randint(
+                low=-self.observation_lag_max_jitter_ms,
+                high=self.observation_lag_max_jitter_ms + 1,
+                size=sample_shape,
+                device=self.device,
+            ).to(torch.float32)
+        else:
+            jitter_ms = torch.zeros(sample_shape, dtype=torch.float32, device=self.device)
+        if not self.observation_lag_per_env:
+            jitter_ms = jitter_ms.expand(self.num_envs, -1)
+        if not self.observation_lag_per_timestamp:
+            jitter_ms = jitter_ms.expand(-1, num_offsets)
+
+        effective_age_ms = nominal_offsets_ms.view(1, num_offsets) + jitter_ms
+        max_available_age_ms = float(max(self.temporal_history_len - 1, 0)) * float(self.temporal_dt_s) * 1000.0
+        if self.observation_lag_clamp_to_available_history:
+            effective_age_ms = effective_age_ms.clamp(0.0, max_available_age_ms)
+        else:
+            effective_age_ms = effective_age_ms.clamp_min(0.0)
+
+        dt_ms = max(float(self.temporal_dt_s) * 1000.0, 1.0e-6)
+        effective_steps = torch.round(effective_age_ms / dt_ms).to(dtype=torch.long)
+        effective_steps = effective_steps.clamp(0, self.temporal_history_len - 1)
+        if torch.any(effective_steps < 0) or torch.any(effective_steps >= self.temporal_history_len):
+            raise RuntimeError("Observation lag produced out-of-range temporal history indices.")
+        effective_age_ms = effective_steps.to(dtype=torch.float32) * dt_ms
+        return effective_steps, effective_age_ms
+
+    def _record_observation_lag_stats(self, offsets_s, effective_age_ms):
+        self._reset_observation_lag_stats()
+        self.latest_obs_lag_enabled = 1.0
+        nominal_offsets_ms = torch.as_tensor(offsets_s, dtype=torch.float32, device=effective_age_ms.device) * 1000.0
+        lag_delta_ms = effective_age_ms - nominal_offsets_ms.view(1, -1)
+        self.latest_obs_lag_mean_ms = float(lag_delta_ms.mean().detach().cpu().item())
+        self.latest_obs_lag_min_ms = float(lag_delta_ms.min().detach().cpu().item())
+        self.latest_obs_lag_max_ms = float(lag_delta_ms.max().detach().cpu().item())
+        self.latest_obs_lag_effective_age_ms_by_timestamp = OrderedDict(
+            (
+                int(round(float(offset_s) * 1000.0)),
+                float(effective_age_ms[:, idx].mean().detach().cpu().item()),
+            )
+            for idx, offset_s in enumerate(offsets_s)
+        )
+
+    def _get_temporal_sample_from_cache(self, sample_cache, sample_key, offset_s):
+        if sample_cache is None:
+            raise RuntimeError("Temporal sample cache is required.")
+        offset_to_index = sample_cache["offset_to_index"]
+        if float(offset_s) not in offset_to_index:
+            raise RuntimeError(
+                f"Temporal sample cache does not include requested offset {float(offset_s):.4f}s. "
+                f"Available offsets: {list(offset_to_index.keys())}."
+            )
+        return sample_cache[sample_key][:, offset_to_index[float(offset_s)], :]
+
+    def _build_temporal_sample_cache(self, q_pos, target_t, base_vel, offsets_s, apply_observation_lag=False):
+        if not offsets_s:
+            return None
+
+        offsets_s = tuple(float(offset_s) for offset_s in offsets_s)
+        offset_to_index = {offset_s: idx for idx, offset_s in enumerate(offsets_s)}
+        if apply_observation_lag:
+            effective_steps, effective_age_ms = self._sample_observation_lag_steps(offsets_s)
+            q_samples_full = self._gather_temporal_values(self.temporal_q_history, effective_steps)
+            target_samples = self._gather_temporal_values(self.temporal_target_history, effective_steps)
+            base_vel_samples = self._gather_temporal_values(self.temporal_base_vel_history, effective_steps)
+        else:
+            nonzero_offsets = [offset_s for offset_s in offsets_s if abs(offset_s) > 1.0e-9]
+            q_history_by_offset = self._sample_temporal_history_offsets(self.temporal_q_history, nonzero_offsets)
+            target_history_by_offset = self._sample_temporal_history_offsets(self.temporal_target_history, nonzero_offsets)
+            base_vel_history_by_offset = self._sample_temporal_history_offsets(self.temporal_base_vel_history, nonzero_offsets)
+            q_samples_full = torch.stack(
+                [q_pos if abs(offset_s) <= 1.0e-9 else q_history_by_offset[offset_s] for offset_s in offsets_s],
+                dim=1,
+            )
+            target_samples = torch.stack(
+                [target_t if abs(offset_s) <= 1.0e-9 else target_history_by_offset[offset_s] for offset_s in offsets_s],
+                dim=1,
+            )
+            base_vel_samples = torch.stack(
+                [base_vel if abs(offset_s) <= 1.0e-9 else base_vel_history_by_offset[offset_s] for offset_s in offsets_s],
+                dim=1,
+            )
+            effective_age_ms = (
+                torch.as_tensor(offsets_s, dtype=torch.float32, device=self.device).view(1, -1) * 1000.0
+            ).expand(self.num_envs, -1)
+
+        q_samples_control = q_samples_full[:, :, self.ov_env._robot_dof_idx]
+        target_err_samples = target_samples - q_samples_control
+        if q_samples_full.ndim != 3 or target_samples.ndim != 3 or base_vel_samples.ndim != 3:
+            raise RuntimeError("Temporal sample cache tensors must all be rank-3.")
+
+        return {
+            "offsets_s": offsets_s,
+            "offset_to_index": offset_to_index,
+            "q_full": q_samples_full,
+            "q_control": q_samples_control,
+            "target": target_samples,
+            "target_err": target_err_samples,
+            "base_vel": base_vel_samples,
+            "effective_age_ms": effective_age_ms,
+        }
+
     def _gather_temporal_values(self, value_history, indices):
         expanded_values = value_history.unsqueeze(1).expand(-1, indices.shape[1], -1, -1)
         gather_indices = indices.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, value_history.shape[-1])
@@ -1083,72 +1298,49 @@ class Dagger:
             raise RuntimeError(f"Expected PD target tensor to be rank-2, got shape {tuple(pd_targets.shape)}.")
         return pd_targets
 
-    def _build_temporal_derived_state_values(self, q_pos, target_t):
+    def _build_temporal_derived_state_values(self, q_pos, target_t, base_vel, sample_cache=None):
         if not self.temporal_derived_state_specs:
             return {}
 
         q_t = q_pos[:, self.ov_env._robot_dof_idx]
         target_err = target_t - q_t
-        required_q_offsets = sorted(
+        required_offsets = self._merge_unique_offsets_s(
             {
                 float(spec["offset_s"])
                 for spec in self.temporal_derived_state_specs.values()
-                if spec["kind"] in {"q", "delta_q", "target_err"} and spec["offset_s"] is not None
-            }
+                if spec["offset_s"] is not None
+            },
+            (0.0,) if self._is_observation_lag_active() else (),
         )
-        required_target_offsets = sorted(
-            {
-                float(spec["offset_s"])
-                for spec in self.temporal_derived_state_specs.values()
-                if spec["kind"] in {"delta_target", "target_err"} and spec["offset_s"] is not None
-            }
-        )
-        required_base_vel_offsets = sorted(
-            {
-                float(spec["offset_s"])
-                for spec in self.temporal_derived_state_specs.values()
-                if spec["kind"] == "base_vel" and spec["offset_s"] is not None
-            }
-        )
-
-        delta_q_by_offset = {}
-        q_history_by_offset = self._sample_temporal_history_offsets(self.temporal_q_history, required_q_offsets)
-        for offset_s, q_history in q_history_by_offset.items():
-            delta_q_by_offset[offset_s] = q_t - q_history[:, self.ov_env._robot_dof_idx]
-
-        delta_target_by_offset = {}
-        target_history_by_offset = self._sample_temporal_history_offsets(
-            self.temporal_target_history,
-            required_target_offsets,
-        )
-        for offset_s, target_history in target_history_by_offset.items():
-            delta_target_by_offset[offset_s] = target_t - target_history
-
-        base_vel_history_by_offset = self._sample_temporal_history_offsets(
-            self.temporal_base_vel_history,
-            required_base_vel_offsets,
-        )
+        if sample_cache is None:
+            sample_cache = self._build_temporal_sample_cache(
+                q_pos,
+                target_t,
+                base_vel,
+                required_offsets,
+                apply_observation_lag=self._is_observation_lag_active(),
+            )
 
         values_by_key = {}
         for key, spec in self.temporal_derived_state_specs.items():
             kind = spec["kind"]
             offset_s = spec["offset_s"]
             if kind == "q":
-                full_value = q_history_by_offset[offset_s]
+                full_value = self._get_temporal_sample_from_cache(sample_cache, "q_full", offset_s)
             elif kind == "base_vel":
-                full_value = base_vel_history_by_offset[offset_s]
+                full_value = self._get_temporal_sample_from_cache(sample_cache, "base_vel", offset_s)
             elif kind == "target_err":
                 if offset_s is None:
-                    full_value = target_err
+                    if self._is_observation_lag_active():
+                        full_value = self._get_temporal_sample_from_cache(sample_cache, "target_err", 0.0)
+                    else:
+                        full_value = target_err
                 else:
-                    full_value = (
-                        target_history_by_offset[offset_s]
-                        - q_history_by_offset[offset_s][:, self.ov_env._robot_dof_idx]
-                    )
+                    full_value = self._get_temporal_sample_from_cache(sample_cache, "target_err", offset_s)
             elif kind == "delta_q":
-                full_value = delta_q_by_offset[offset_s]
+                full_value = q_t - self._get_temporal_sample_from_cache(sample_cache, "q_control", offset_s)
             elif kind == "delta_target":
-                full_value = delta_target_by_offset[offset_s]
+                full_value = target_t - self._get_temporal_sample_from_cache(sample_cache, "target", offset_s)
             else:
                 raise KeyError(f"Unsupported temporal derived state kind '{kind}' for key '{key}'.")
 
@@ -1157,6 +1349,58 @@ class Dagger:
             else:
                 values_by_key[key] = full_value[:, spec["indices"]]
         return values_by_key
+
+    def _extract_proprio_temporal_field_tensor(self, field_name, actual_state_key, sample_cache):
+        per_timestamp_values = []
+        for timestamp_s in self.proprio_temporal_timestamps_s:
+            if actual_state_key == "q_arm":
+                full_value = self._get_temporal_sample_from_cache(sample_cache, "q_full", timestamp_s)
+                value = full_value[:, self.ov_env._robot_arm_dof_idx]
+            elif actual_state_key == "q_hand":
+                full_value = self._get_temporal_sample_from_cache(sample_cache, "q_full", timestamp_s)
+                value = full_value[:, self.ov_env._robot_finger_dof_idx]
+            elif actual_state_key == "base_vel":
+                value = self._get_temporal_sample_from_cache(sample_cache, "base_vel", timestamp_s)
+            elif actual_state_key == "target_err_arm":
+                full_value = self._get_temporal_sample_from_cache(sample_cache, "target_err", timestamp_s)
+                value = full_value[:, self.action_component_history_indices["arm"]]
+            elif actual_state_key == "target_err_hand":
+                full_value = self._get_temporal_sample_from_cache(sample_cache, "target_err", timestamp_s)
+                value = full_value[:, self.action_component_history_indices["hand"]]
+            else:
+                raise RuntimeError(
+                    f"Unsupported proprio_temporal field mapping '{field_name}' -> '{actual_state_key}'."
+                )
+            per_timestamp_values.append(value)
+
+        field_tensor = torch.stack(per_timestamp_values, dim=1)
+        expected_dim = int(self.proprio_temporal_field_dims[field_name])
+        if field_tensor.ndim != 3 or field_tensor.shape[1] != len(self.proprio_temporal_timestamps_s):
+            raise RuntimeError(
+                f"Expected proprio_temporal['{field_name}'] shape [B, {len(self.proprio_temporal_timestamps_s)}, {expected_dim}], "
+                f"got {tuple(field_tensor.shape)}."
+            )
+        if field_tensor.shape[-1] != expected_dim:
+            raise RuntimeError(
+                f"Unexpected proprio_temporal['{field_name}'] feature dim: "
+                f"expected {expected_dim}, got {field_tensor.shape[-1]}."
+            )
+        return field_tensor
+
+    def _build_proprio_temporal_obs(self, sample_cache):
+        if not self.proprio_temporal_enabled:
+            return None
+        if sample_cache is None:
+            raise RuntimeError("Shared proprio_temporal_encoder requires a temporal sample cache.")
+
+        proprio_temporal_obs = OrderedDict()
+        for field_name, actual_state_key in self.proprio_temporal_field_state_keys.items():
+            proprio_temporal_obs[field_name] = self._extract_proprio_temporal_field_tensor(
+                field_name,
+                actual_state_key,
+                sample_cache,
+            )
+        return proprio_temporal_obs
 
     def _get_handle_position_base(self):
         getter = getattr(self.ov_env, "get_handle_position_in_base_frame", None)
@@ -3449,7 +3693,42 @@ class Dagger:
         door_pcd_base = self._sample_door_pointcloud_base()
         robot_pcd_base = self._sample_robot_pointcloud_base_sampler() if self.append_robot_gt_to_policy_cloud else None
         target_t = self._get_implemented_action_vector()
-        temporal_state_values = self._build_temporal_derived_state_values(q_pos, target_t)
+        lag_active = self._is_observation_lag_active()
+        required_temporal_offsets_s = self._merge_unique_offsets_s(
+            self.proprio_temporal_timestamps_s,
+            (
+                float(spec["offset_s"])
+                for spec in self.temporal_derived_state_specs.values()
+                if spec["offset_s"] is not None
+            ),
+            (0.0,) if (lag_active or self.proprio_temporal_enabled) else (),
+        )
+        temporal_sample_cache = self._build_temporal_sample_cache(
+            q_pos,
+            target_t,
+            base_vel,
+            required_temporal_offsets_s,
+            apply_observation_lag=lag_active,
+        ) if required_temporal_offsets_s else None
+        if lag_active and temporal_sample_cache is not None:
+            self._record_observation_lag_stats(
+                temporal_sample_cache["offsets_s"],
+                temporal_sample_cache["effective_age_ms"],
+            )
+        else:
+            self._reset_observation_lag_stats()
+            self.latest_obs_lag_enabled = 1.0 if lag_active else 0.0
+        temporal_state_values = self._build_temporal_derived_state_values(
+            q_pos,
+            target_t,
+            base_vel,
+            sample_cache=temporal_sample_cache,
+        )
+        lagged_q_full = None
+        lagged_base_vel = None
+        if temporal_sample_cache is not None and 0.0 in temporal_sample_cache["offset_to_index"]:
+            lagged_q_full = self._get_temporal_sample_from_cache(temporal_sample_cache, "q_full", 0.0)
+            lagged_base_vel = self._get_temporal_sample_from_cache(temporal_sample_cache, "base_vel", 0.0)
         need_aux_target_vector = self.has_aux_input and (not self.play_policy and self.has_aux_prediction)
         aux_target_vector = (
             self._stack_aux_state_values(self._get_aux_state_values()) if need_aux_target_vector else None
@@ -3469,11 +3748,17 @@ class Dagger:
             if key == "q_base":
                 raise KeyError("Raw q_base is disabled for the student policy; use base_vel instead.")
             elif key == "q_arm":
-                obs[key] = q_pos[:, self.ov_env._robot_arm_dof_idx]
+                if lag_active and lagged_q_full is not None:
+                    obs[key] = lagged_q_full[:, self.ov_env._robot_arm_dof_idx]
+                else:
+                    obs[key] = q_pos[:, self.ov_env._robot_arm_dof_idx]
             elif key == "q_hand":
-                obs[key] = q_pos[:, self.ov_env._robot_finger_dof_idx]
+                if lag_active and lagged_q_full is not None:
+                    obs[key] = lagged_q_full[:, self.ov_env._robot_finger_dof_idx]
+                else:
+                    obs[key] = q_pos[:, self.ov_env._robot_finger_dof_idx]
             elif key == "base_vel":
-                obs[key] = base_vel
+                obs[key] = lagged_base_vel if lag_active and lagged_base_vel is not None else base_vel
             elif key in self.temporal_derived_state_specs:
                 obs[key] = temporal_state_values[key]
             elif key in self.aux_state_specs:
@@ -3482,6 +3767,11 @@ class Dagger:
                 obs[key] = aux_input_vector[:, self.aux_state_specs[key]["slice"]]
             else:
                 raise KeyError(f"Unsupported student state key '{key}' in config.")
+
+        if self.proprio_temporal_enabled:
+            if self.proprio_temporal_obs_key is None:
+                raise RuntimeError("Shared proprio_temporal_encoder is enabled but no observation key is configured.")
+            obs[self.proprio_temporal_obs_key] = self._build_proprio_temporal_obs(temporal_sample_cache)
 
         for key in self.pcd_encoders_keys:
             if key == "local_pcd_t":
@@ -3932,6 +4222,11 @@ class Dagger:
                 print("Filtered Handle Force Norm Mean:", self.latest_filtered_handle_force_norm_mean)
                 print("Filtered Handle Force Norm Max:", self.latest_filtered_handle_force_norm_max)
                 print("Filtered Handle Contact Fraction:", self.latest_filtered_handle_contact_frac)
+            if self.observation_lag_enabled:
+                print("Obs Lag Enabled:", bool(self.latest_obs_lag_enabled))
+                print("Obs Lag Mean (ms):", self.latest_obs_lag_mean_ms)
+                print("Obs Lag Min (ms):", self.latest_obs_lag_min_ms)
+                print("Obs Lag Max (ms):", self.latest_obs_lag_max_ms)
             print("Teacher Forcing Beta:", teacher_forcing_beta)
             print("Teacher Rollout Env Fraction:", teacher_env_fraction)
             print("Student Rollout Env Fraction:", student_env_fraction)
@@ -3987,6 +4282,13 @@ class Dagger:
             metrics["stats/filtered_handle_force_norm_mean"] = self.latest_filtered_handle_force_norm_mean
             metrics["stats/filtered_handle_force_norm_max"] = self.latest_filtered_handle_force_norm_max
             metrics["stats/filtered_handle_contact_frac"] = self.latest_filtered_handle_contact_frac
+        if self.observation_lag_enabled:
+            metrics["stats/obs_lag_enabled"] = self.latest_obs_lag_enabled
+            metrics["stats/obs_lag_mean_ms"] = self.latest_obs_lag_mean_ms
+            metrics["stats/obs_lag_min_ms"] = self.latest_obs_lag_min_ms
+            metrics["stats/obs_lag_max_ms"] = self.latest_obs_lag_max_ms
+            for timestamp_ms, mean_age_ms in self.latest_obs_lag_effective_age_ms_by_timestamp.items():
+                metrics[f"stats/obs_lag_effective_age_{timestamp_ms}ms"] = mean_age_ms
         if episode_reward is not None:
             metrics["stats/episode_reward"] = episode_reward
         if episode_length is not None:

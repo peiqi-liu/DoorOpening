@@ -1,5 +1,7 @@
 import torch
 import torch.nn as nn
+from collections import OrderedDict
+from collections.abc import Mapping
 
 try:
     from DoorOpening.model.base_model import BaseModel
@@ -7,7 +9,6 @@ except ImportError:
     from .base_model import BaseModel
 from pointnet2_ops.pointnet2_utils import furthest_point_sample, gather_operation
 from pointnet2_ops.pointnet2_modules import PointnetSAModule
-import copy
 
 
 def sample_points_fps(points, features, npoint):
@@ -94,22 +95,145 @@ class MLPEncoder(nn.Module):
         return features
 
 class StateEncoder(nn.Module):
-    def __init__(self, input_dim, hidden_dims, output_dim, dropout=0.1):
+    def __init__(
+        self,
+        input_dim,
+        hidden_dims,
+        output_dim,
+        dropout=0.1,
+        activation="relu",
+        use_layer_norm=False,
+    ):
         super().__init__()
         layers = []
         prev_dim = input_dim
         for dim in hidden_dims:
+            dim = int(dim)
             layers.extend([
                 nn.Linear(prev_dim, dim),
-                nn.ReLU(),
+            ])
+            if use_layer_norm:
+                layers.append(nn.LayerNorm(dim))
+            layers.extend([
+                _make_activation(activation),
                 nn.Dropout(dropout)
             ])
             prev_dim = dim
         layers.append(nn.Linear(prev_dim, output_dim))
+        if use_layer_norm:
+            layers.append(nn.LayerNorm(output_dim))
         self.net = nn.Sequential(*layers)
 
     def forward(self, x):
         return self.net(x)
+
+def _make_activation(name):
+    name = str(name).lower()
+    if name == "relu":
+        return nn.ReLU()
+    if name == "elu":
+        return nn.ELU()
+    if name == "gelu":
+        return nn.GELU()
+    if name == "leaky_relu":
+        return nn.LeakyReLU()
+    raise ValueError(f"Unsupported activation '{name}'.")
+
+
+class SharedTemporalProprioEncoder(nn.Module):
+    def __init__(
+        self,
+        field_dims,
+        timestamps_ms,
+        hidden_dims,
+        output_dim,
+        activation="elu",
+        dropout=0.0,
+        use_layer_norm=True,
+        add_time_embedding=True,
+    ):
+        super().__init__()
+        self.field_dims = OrderedDict((str(key), int(value)) for key, value in field_dims.items())
+        self.field_names = tuple(self.field_dims.keys())
+        self.timestamps_ms = tuple(int(timestamp) for timestamp in timestamps_ms)
+        self.num_timestamps = len(self.timestamps_ms)
+        self.input_dim = sum(self.field_dims.values())
+        self.output_dim = int(output_dim)
+        self.add_time_embedding = bool(add_time_embedding)
+        self.use_layer_norm = bool(use_layer_norm)
+        self.net = StateEncoder(
+            input_dim=self.input_dim,
+            hidden_dims=hidden_dims,
+            output_dim=self.output_dim,
+            dropout=dropout,
+            activation=activation,
+            use_layer_norm=use_layer_norm,
+        )
+        self.time_embedding = nn.Embedding(self.num_timestamps, self.output_dim) if self.add_time_embedding else None
+
+    def _concatenate_fields(self, proprio_inputs):
+        if isinstance(proprio_inputs, torch.Tensor):
+            if proprio_inputs.ndim != 3:
+                raise RuntimeError(
+                    "Expected proprio_temporal tensor with shape [B, T, D], "
+                    f"got {tuple(proprio_inputs.shape)}."
+                )
+            return proprio_inputs
+        if not isinstance(proprio_inputs, Mapping):
+            raise RuntimeError(
+                "proprio_temporal input must be a tensor or mapping of field tensors, "
+                f"got {type(proprio_inputs).__name__}."
+            )
+
+        batch_size = None
+        num_timestamps = None
+        parts = []
+        for field_name, expected_dim in self.field_dims.items():
+            if field_name not in proprio_inputs:
+                raise RuntimeError(
+                    f"Missing proprio_temporal field '{field_name}'. "
+                    f"Expected fields: {list(self.field_names)}."
+                )
+            value = proprio_inputs[field_name]
+            if not isinstance(value, torch.Tensor) or value.ndim != 3:
+                raise RuntimeError(
+                    f"Expected proprio_temporal['{field_name}'] to have shape [B, T, {expected_dim}], "
+                    f"got {tuple(value.shape) if isinstance(value, torch.Tensor) else type(value).__name__}."
+                )
+            if batch_size is None:
+                batch_size = value.shape[0]
+                num_timestamps = value.shape[1]
+            elif value.shape[:2] != (batch_size, num_timestamps):
+                raise RuntimeError(
+                    f"Inconsistent batch/timestamp dimensions for proprio_temporal['{field_name}']: "
+                    f"expected {(batch_size, num_timestamps)}, got {tuple(value.shape[:2])}."
+                )
+            if value.shape[-1] != expected_dim:
+                raise RuntimeError(
+                    f"Unexpected feature dimension for proprio_temporal['{field_name}']: "
+                    f"expected {expected_dim}, got {value.shape[-1]}."
+                )
+            parts.append(value)
+        return torch.cat(parts, dim=-1)
+
+    def forward(self, proprio_inputs):
+        proprio_tensor = self._concatenate_fields(proprio_inputs)
+        batch_size, num_timestamps, input_dim = proprio_tensor.shape
+        if num_timestamps != self.num_timestamps:
+            raise RuntimeError(
+                f"Expected {self.num_timestamps} proprio timestamps, got {num_timestamps}."
+            )
+        if input_dim != self.input_dim:
+            raise RuntimeError(
+                f"Expected proprio_temporal feature dim {self.input_dim}, got {input_dim}."
+            )
+
+        tokens = self.net(proprio_tensor.reshape(batch_size * num_timestamps, input_dim))
+        tokens = tokens.view(batch_size, num_timestamps, self.output_dim)
+        if self.time_embedding is not None:
+            time_ids = torch.arange(self.num_timestamps, device=tokens.device)
+            tokens = tokens + self.time_embedding(time_ids).unsqueeze(0)
+        return tokens
 
 class PCDTransformer(BaseModel):
     def __init__(
@@ -133,6 +257,7 @@ class PCDTransformer(BaseModel):
         aux_delta_scale=0.01,
         mode_prediction=None,
         force_prediction=None,
+        proprio_temporal_encoder=None,
     ):
         super().__init__(
             normalize_state=normalize_state,
@@ -150,6 +275,15 @@ class PCDTransformer(BaseModel):
         self.pcd_encoders_cfg = pcd_encoders_cfg
         self.state_encoders_cfg = state_encoders_cfg
         self.transformer_cfg = transformer_cfg
+        self.proprio_temporal_cfg = dict(proprio_temporal_encoder or {})
+        self.proprio_temporal_enabled = bool(self.proprio_temporal_cfg.get("enabled", False))
+        self.proprio_temporal_obs_key = "proprio_temporal"
+        self.proprio_temporal_encoder = None
+        self.proprio_temporal_fields = tuple()
+        self.proprio_temporal_timestamps_ms = tuple()
+        self.proprio_temporal_field_state_keys = OrderedDict()
+        self.proprio_temporal_field_dims = OrderedDict()
+        self.proprio_temporal_covered_state_keys = frozenset()
         self.mode_prediction_cfg = mode_prediction or {}
         self.mode_prediction_enabled = bool(self.mode_prediction_cfg.get("enabled", False))
         self.num_modes = int(self.mode_prediction_cfg.get("num_modes", 4))
@@ -182,14 +316,28 @@ class PCDTransformer(BaseModel):
         # Type embeddings and encodersfor different modalities
         self.type_embeddings = nn.ParameterDict()
         self.encoders = nn.ModuleDict()
+        self.obs_encoder_order = []
+        if self.proprio_temporal_enabled:
+            self._initialize_proprio_temporal_encoder()
         for key, cfg in pcd_encoders_cfg.items():
             if cfg["use_pcd"]:
                 self.type_embeddings[key] = nn.Parameter(nn.init.xavier_uniform_(torch.zeros(1, 1, type_dim)))
                 self.encoders[key] = self._initialize_pcd_encoder(self.hidden_dim-self.type_dim, cfg)
+                self.obs_encoder_order.append(key)
+        proprio_temporal_inserted = False
         for key, cfg in state_encoders_cfg.items():
-            if cfg["use_state"]:
-                self.type_embeddings[key] = nn.Parameter(nn.init.xavier_uniform_(torch.zeros(1, 1, type_dim)))
-                self.encoders[key] = StateEncoder(cfg["input_dim"], cfg["hidden_dims"], self.hidden_dim-self.type_dim, cfg["dropout"])
+            if not cfg["use_state"]:
+                continue
+            if self.proprio_temporal_enabled and key in self.proprio_temporal_covered_state_keys:
+                if not proprio_temporal_inserted:
+                    self.obs_encoder_order.append(self.proprio_temporal_obs_key)
+                    proprio_temporal_inserted = True
+                continue
+            self.type_embeddings[key] = nn.Parameter(nn.init.xavier_uniform_(torch.zeros(1, 1, type_dim)))
+            self.encoders[key] = StateEncoder(cfg["input_dim"], cfg["hidden_dims"], self.hidden_dim-self.type_dim, cfg["dropout"])
+            self.obs_encoder_order.append(key)
+        if self.proprio_temporal_enabled and not proprio_temporal_inserted:
+            self.obs_encoder_order.append(self.proprio_temporal_obs_key)
 
         # Query tokens
         self.aux_query_idx = 0 if self.aux_prediction else None
@@ -262,6 +410,82 @@ class PCDTransformer(BaseModel):
         else:
             raise ValueError(f"Unknown encoder type: {encoder_cfg['type']}")
 
+    def _get_proprio_temporal_field_alias_candidates(self, field_name):
+        alias_map = {
+            "tracking_err_arm": ("tracking_err_arm", "target_err_arm"),
+            "tracking_err_hand": ("tracking_err_hand", "target_err_hand"),
+            "target_err_arm": ("target_err_arm", "tracking_err_arm"),
+            "target_err_hand": ("target_err_hand", "tracking_err_hand"),
+        }
+        return alias_map.get(field_name, (field_name,))
+
+    def _resolve_proprio_temporal_state_key(self, field_name):
+        for candidate in self._get_proprio_temporal_field_alias_candidates(field_name):
+            if candidate in self.state_encoders_cfg:
+                return candidate
+        raise RuntimeError(
+            f"Could not resolve proprio_temporal field '{field_name}' in state_encoders_cfg. "
+            f"Tried aliases {list(self._get_proprio_temporal_field_alias_candidates(field_name))}."
+        )
+
+    def _format_temporal_state_key(self, base_key, timestamp_ms):
+        timestamp_ms = int(timestamp_ms)
+        if timestamp_ms == 0:
+            return str(base_key)
+        return f"{base_key}_{timestamp_ms}ms"
+
+    def _initialize_proprio_temporal_encoder(self):
+        encoder_type = str(self.proprio_temporal_cfg.get("type", "shared_mlp_time_embedding")).lower()
+        if encoder_type != "shared_mlp_time_embedding":
+            raise ValueError(
+                "proprio_temporal_encoder.type must be 'shared_mlp_time_embedding', "
+                f"got '{encoder_type}'."
+            )
+        timestamps_ms = tuple(int(timestamp) for timestamp in self.proprio_temporal_cfg.get("timestamps_ms", []))
+        if not timestamps_ms:
+            raise ValueError("proprio_temporal_encoder.timestamps_ms must be non-empty when enabled.")
+        fields = tuple(str(field) for field in self.proprio_temporal_cfg.get("fields", []))
+        if not fields:
+            raise ValueError("proprio_temporal_encoder.fields must be non-empty when enabled.")
+        hidden_dims = self.proprio_temporal_cfg.get("hidden_dims", [])
+        output_dim = int(self.proprio_temporal_cfg.get("output_dim", self.hidden_dim))
+        if output_dim != self.hidden_dim:
+            raise ValueError(
+                "proprio_temporal_encoder.output_dim must match model hidden_dim when the shared encoder is enabled: "
+                f"{output_dim} != {self.hidden_dim}."
+            )
+
+        field_state_keys = OrderedDict()
+        field_dims = OrderedDict()
+        covered_state_keys = []
+        for field_name in fields:
+            state_key = self._resolve_proprio_temporal_state_key(field_name)
+            if state_key in field_state_keys.values():
+                raise ValueError(
+                    f"Duplicate proprio_temporal field mapping for '{field_name}' -> '{state_key}'. "
+                    "Each configured field must map to a distinct base state key."
+                )
+            field_state_keys[field_name] = state_key
+            field_dims[field_name] = int(self.state_encoders_cfg[state_key]["input_dim"])
+            for timestamp_ms in timestamps_ms:
+                covered_state_keys.append(self._format_temporal_state_key(state_key, timestamp_ms))
+
+        self.proprio_temporal_fields = fields
+        self.proprio_temporal_timestamps_ms = timestamps_ms
+        self.proprio_temporal_field_state_keys = field_state_keys
+        self.proprio_temporal_field_dims = field_dims
+        self.proprio_temporal_covered_state_keys = frozenset(covered_state_keys)
+        self.proprio_temporal_encoder = SharedTemporalProprioEncoder(
+            field_dims=field_dims,
+            timestamps_ms=timestamps_ms,
+            hidden_dims=hidden_dims,
+            output_dim=output_dim,
+            activation=self.proprio_temporal_cfg.get("activation", "elu"),
+            dropout=float(self.proprio_temporal_cfg.get("dropout", 0.0)),
+            use_layer_norm=bool(self.proprio_temporal_cfg.get("use_layer_norm", True)),
+            add_time_embedding=bool(self.proprio_temporal_cfg.get("add_time_embedding", True)),
+        )
+
     def _add_type_embeddings(self, tokens, token_type):
         B = tokens.shape[0]
         type_emb = self.type_embeddings[token_type].expand(B, tokens.shape[1], -1)
@@ -309,21 +533,41 @@ class PCDTransformer(BaseModel):
 
         return tgt_mask, memory_mask
 
+    def _infer_batch_size(self, obs_dict):
+        for value in obs_dict.values():
+            if isinstance(value, torch.Tensor):
+                return int(value.shape[0])
+            if isinstance(value, Mapping):
+                return self._infer_batch_size(value)
+        raise RuntimeError("Could not infer batch size from observation dictionary.")
+
     def forward(self, obs, target=None, action_chunk_idx=None):
         # Get inputs
-        obs_dict = copy.deepcopy(obs)
-        B = obs_dict["q_hand"].shape[0]
+        obs_dict = obs
+        B = self._infer_batch_size(obs_dict)
 
         obs_tokens = []
         token_ranges = {}
         token_start_idx = 0
 
-        for key in self.encoders.keys():
-            tokens = self.encoders[key](obs_dict[key])
+        for key in self.obs_encoder_order:
+            if key == self.proprio_temporal_obs_key:
+                if not self.proprio_temporal_enabled or self.proprio_temporal_encoder is None:
+                    raise RuntimeError("proprio_temporal token was requested but the encoder is not initialized.")
+                if key not in obs_dict:
+                    raise RuntimeError(
+                        f"Observation is missing '{key}' while proprio_temporal_encoder is enabled."
+                    )
+                tokens = self.proprio_temporal_encoder(obs_dict[key])
+                typed_tokens = tokens
+            else:
+                if key not in obs_dict:
+                    raise RuntimeError(f"Observation is missing '{key}'.")
+                tokens = self.encoders[key](obs_dict[key])
+                if len(tokens.shape) == 2:
+                    tokens = tokens.unsqueeze(1)
+                typed_tokens = self._add_type_embeddings(tokens, key)
             # print(key, tokens.shape)
-            if len(tokens.shape) == 2:
-                tokens = tokens.unsqueeze(1)
-            typed_tokens = self._add_type_embeddings(tokens, key)
             # print(typed_tokens.shape)
             obs_tokens.append(typed_tokens)
             token_ranges[key] = slice(token_start_idx, token_start_idx + typed_tokens.shape[1])

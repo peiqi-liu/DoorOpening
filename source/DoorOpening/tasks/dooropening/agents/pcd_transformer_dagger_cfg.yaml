@@ -26,6 +26,35 @@ temporal_obs:
   obs_delay_s: [0.0, 0.0]
   command_delay_s: [0.0, 0.0]
 
+proprio_temporal_encoder:
+  enabled: true
+  type: shared_mlp_time_embedding
+  timestamps_ms: [0, 200, 400, 600, 800]
+  fields:
+    - q_arm
+    - q_hand
+    - tracking_err_arm
+    - tracking_err_hand
+    - base_vel
+  hidden_dims: [256, 256]
+  output_dim: 256
+  activation: elu
+  dropout: 0.0
+  use_layer_norm: true
+  add_time_embedding: true
+
+observation_lag:
+  enabled: true
+  apply_during_training: true
+  apply_during_eval: false
+  max_jitter_ms: 100
+  mode: symmetric
+  apply_to_proprio: true
+  apply_to_pointcloud: false
+  per_env: true
+  per_timestamp: true
+  clamp_to_available_history: true
+
 pcd_encoders_cfg:
   local_pcd_t:
     type: "pointnet"
