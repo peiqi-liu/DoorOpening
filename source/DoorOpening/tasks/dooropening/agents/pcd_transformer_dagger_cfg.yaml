@@ -8,12 +8,12 @@ action_space: "absolute"
 action_dim: 19
 aux_weight: 0.1
 mode_prediction:
-  enabled: false
+  enabled: true
   num_modes: 2  # Push/pull discriminator only.
   weight: 0.01
   return_latent: true
 force_prediction:
-  enabled: true
+  enabled: false
   output_dim: 3
   weight: 0.01
 
@@ -29,7 +29,7 @@ temporal_obs:
 proprio_temporal_encoder:
   enabled: true
   type: shared_mlp_time_embedding
-  timestamps_ms: [0, 200, 400, 600, 800]
+  timestamps_ms: [0, 400, 800, 1200, 1600, 2000, 2400, 2800]
   fields:
     - q_arm
     - q_hand
