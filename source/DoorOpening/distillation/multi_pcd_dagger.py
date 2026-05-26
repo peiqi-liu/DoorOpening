@@ -534,15 +534,27 @@ class Dagger:
     def _init_mode_prediction_training_state(self):
         cfg = dict(self.runtime_cfg.get("direction_training", {}) or {})
         self.mode_prediction_loss_enabled = self.mode_prediction_enabled and bool(cfg.get("enabled", True))
-        self.mode_contact_sensor_name = str(cfg.get("sensor_name", "contact_forces_door2"))
-        self.mode_loss_contact_force_threshold = float(cfg.get("loss_contact_force_threshold", 5.0))
+        self.direction_loss_window_start = int(cfg.get("direction_loss_window_start", 40))
+        self.direction_loss_window_end = int(cfg.get("direction_loss_window_end", 100))
+        if self.direction_loss_window_start < 0:
+            raise ValueError("direction_training.direction_loss_window_start must be non-negative.")
+        if self.direction_loss_window_end < self.direction_loss_window_start:
+            raise ValueError(
+                "direction_training.direction_loss_window_end must be greater than or equal to "
+                "direction_loss_window_start."
+            )
 
         self.mode_family_semantics = {}
         self.mode_family_direction_ids = None
         self.latest_mode_direction_acc = None
-        self.latest_mode_contact_force_mean = 0.0
-        self.latest_mode_contact_gate_mean = 0.0
-        self.latest_mode_contact_gate_active_fraction = 0.0
+        self.latest_dir_window_acc = 0.0
+        self.latest_dir_window_balanced_acc = 0.0
+        self.latest_dir_window_push_acc = 0.0
+        self.latest_dir_window_pull_acc = 0.0
+        self.latest_dir_window_num_push_labels = 0
+        self.latest_dir_window_num_pull_labels = 0
+        self.latest_dir_window_num_push_preds = 0
+        self.latest_dir_window_num_pull_preds = 0
 
     def _init_force_prediction_training_state(self):
         cfg = dict(self.runtime_cfg.get("force_training", {}) or {})
@@ -560,12 +572,10 @@ class Dagger:
         self.force_prediction_contrastive_temperature = float(cfg.get("contrastive_temperature", 0.1))
         if self.force_prediction_contrastive_temperature <= 0.0:
             raise ValueError("force_prediction.contrastive_temperature must be positive.")
-        self.force_loss_contact_force_threshold = float(cfg.get("loss_contact_force_threshold", 5.0))
 
         self.latest_force_angle_deg = None
         self.latest_filtered_handle_force_norm_mean = 0.0
         self.latest_filtered_handle_force_norm_max = 0.0
-        self.latest_filtered_handle_contact_frac = 0.0
 
     def _init_observation_lag_state(self):
         cfg = dict(self.observation_lag_cfg or {})
@@ -694,9 +704,6 @@ class Dagger:
         force_norm = torch.linalg.vector_norm(force_world, dim=-1)
         self.latest_filtered_handle_force_norm_mean = float(force_norm.mean().detach().cpu().item())
         self.latest_filtered_handle_force_norm_max = float(force_norm.max().detach().cpu().item())
-        self.latest_filtered_handle_contact_frac = float(
-            (force_norm > self.force_loss_contact_force_threshold).float().mean().detach().cpu().item()
-        )
         return force_world.to(device=self.device, dtype=torch.float32)
 
     def _aggregate_contact_force_tensor(self, contact_forces):
@@ -704,27 +711,144 @@ class Dagger:
             return contact_forces
         return contact_forces.reshape(contact_forces.shape[0], -1, 3).sum(dim=1)
 
+    def _get_rollout_step_ids(self):
+        rollout_step_ids = getattr(self.ov_env, "episode_length_buf", None)
+        if rollout_step_ids is None:
+            rollout_step_ids = self.current_lengths
+        return rollout_step_ids.to(device=self.device)
+
+    def _get_active_rollout_mask(self, rollout_step_ids):
+        max_trial_steps = getattr(self.ov_env, "max_trial_steps", None)
+        if max_trial_steps is not None:
+            max_trial_steps = max_trial_steps.to(device=rollout_step_ids.device, dtype=rollout_step_ids.dtype)
+            return rollout_step_ids < max_trial_steps
+
+        reset_buf = getattr(self.ov_env, "reset_buf", None)
+        if reset_buf is not None:
+            return ~reset_buf.to(device=rollout_step_ids.device, dtype=torch.bool)
+
+        return torch.ones_like(rollout_step_ids, dtype=torch.bool, device=rollout_step_ids.device)
+
+    def _align_env_tensor_to_prediction(self, tensor, prediction_leading_shape, name):
+        prediction_leading_shape = torch.Size(prediction_leading_shape)
+        if tensor.shape == prediction_leading_shape:
+            return tensor
+
+        if tensor.ndim == 1 and prediction_leading_shape and tensor.shape[0] == prediction_leading_shape[0]:
+            view_shape = (tensor.shape[0],) + (1,) * (len(prediction_leading_shape) - 1)
+            return tensor.reshape(view_shape).expand(prediction_leading_shape)
+
+        if tensor.numel() == math.prod(prediction_leading_shape):
+            return tensor.reshape(prediction_leading_shape)
+
+        raise RuntimeError(
+            f"Could not align {name} with direction logits: "
+            f"{tuple(tensor.shape)} vs leading shape {tuple(prediction_leading_shape)}."
+        )
+
+    def _prepare_direction_prediction_tensors(self, mode_logits):
+        if mode_logits.ndim < 2:
+            raise RuntimeError(f"Expected direction logits to have a class dimension, got {tuple(mode_logits.shape)}.")
+        if mode_logits.shape[-1] != self.num_modes:
+            raise RuntimeError(
+                f"Direction logits last dim ({mode_logits.shape[-1]}) does not match num_modes ({self.num_modes})."
+            )
+
+        prediction_leading_shape = mode_logits.shape[:-1]
+        direction_target = self.mode_family_direction_ids[self.env_family_ids.long()]
+        direction_valid = direction_target >= 0
+        rollout_step_ids = self._get_rollout_step_ids()
+        active_mask = self._get_active_rollout_mask(rollout_step_ids)
+
+        tensors = {
+            "direction_target": direction_target,
+            "direction_valid": direction_valid,
+            "rollout_step_ids": rollout_step_ids,
+            "active_mask": active_mask,
+        }
+        aligned = {
+            name: self._align_env_tensor_to_prediction(tensor, prediction_leading_shape, name)
+            for name, tensor in tensors.items()
+        }
+        return (
+            mode_logits.reshape(-1, mode_logits.shape[-1]),
+            aligned["direction_target"].reshape(-1).long(),
+            aligned["direction_valid"].reshape(-1).bool(),
+            aligned["active_mask"].reshape(-1).bool(),
+            aligned["rollout_step_ids"].reshape(-1),
+            prediction_leading_shape,
+        )
+
+    def _get_direction_step_mask(self, rollout_step_ids):
+        # Per-environment rollout timesteps, not optimizer/global training steps.
+        # At 15 Hz, step 40 is about 2.67s and step 100 is about 6.67s.
+        return (
+            (rollout_step_ids >= self.direction_loss_window_start)
+            & (rollout_step_ids <= self.direction_loss_window_end)
+        )
+
+    def _update_direction_window_metrics(self, mode_logits, direction_target, direction_valid, active_mask, rollout_step_ids):
+        step_mask = self._get_direction_step_mask(rollout_step_ids)
+        window_mask = direction_valid & active_mask & step_mask
+        direction_pred = mode_logits.argmax(dim=-1)
+
+        push_label_mask = window_mask & (direction_target == 1)
+        pull_label_mask = window_mask & (direction_target == 0)
+        push_pred_mask = window_mask & (direction_pred == 1)
+        pull_pred_mask = window_mask & (direction_pred == 0)
+
+        num_push_labels = int(push_label_mask.sum().detach().cpu().item())
+        num_pull_labels = int(pull_label_mask.sum().detach().cpu().item())
+        num_push_preds = int(push_pred_mask.sum().detach().cpu().item())
+        num_pull_preds = int(pull_pred_mask.sum().detach().cpu().item())
+
+        correct_mask = direction_pred == direction_target
+        correct_push = int((correct_mask & push_label_mask).sum().detach().cpu().item())
+        correct_pull = int((correct_mask & pull_label_mask).sum().detach().cpu().item())
+        total_labels = num_push_labels + num_pull_labels
+        total_correct = correct_push + correct_pull
+
+        push_acc = float(correct_push / num_push_labels) if num_push_labels > 0 else 0.0
+        pull_acc = float(correct_pull / num_pull_labels) if num_pull_labels > 0 else 0.0
+        available_class_accs = []
+        if num_push_labels > 0:
+            available_class_accs.append(push_acc)
+        if num_pull_labels > 0:
+            available_class_accs.append(pull_acc)
+        balanced_acc = float(sum(available_class_accs) / len(available_class_accs)) if available_class_accs else 0.0
+
+        self.latest_dir_window_acc = float(total_correct / total_labels) if total_labels > 0 else 0.0
+        self.latest_dir_window_balanced_acc = balanced_acc
+        self.latest_dir_window_push_acc = push_acc
+        self.latest_dir_window_pull_acc = pull_acc
+        self.latest_dir_window_num_push_labels = num_push_labels
+        self.latest_dir_window_num_pull_labels = num_pull_labels
+        self.latest_dir_window_num_push_preds = num_push_preds
+        self.latest_dir_window_num_pull_preds = num_pull_preds
+        return window_mask
+
     def _compute_mode_prediction_loss(self, mode_logits):
         if not self.mode_prediction_loss_enabled:
             return None
         if self.mode_family_direction_ids is None:
             raise RuntimeError("Mode prediction targets are not initialized.")
 
-        direction_target = self.mode_family_direction_ids[self.env_family_ids.long()]
-        direction_valid = direction_target >= 0
+        mode_logits, direction_target, direction_valid, active_mask, rollout_step_ids, _ = (
+            self._prepare_direction_prediction_tensors(mode_logits)
+        )
         if not torch.any(direction_valid):
             raise RuntimeError("No valid direction targets are available for mode prediction.")
 
-        contact_force_mag = torch.linalg.vector_norm(
-            self._get_contact_sensor_force_tensor_world(self.mode_contact_sensor_name),
-            dim=-1,
+        self._update_direction_window_metrics(
+            mode_logits,
+            direction_target,
+            direction_valid,
+            active_mask,
+            rollout_step_ids,
         )
-        contact_mask = contact_force_mag > self.mode_loss_contact_force_threshold
-        self.latest_mode_contact_force_mean = float(contact_force_mag.mean().detach().cpu().item())
-        self.latest_mode_contact_gate_mean = float(contact_mask.float().mean().detach().cpu().item())
-        self.latest_mode_contact_gate_active_fraction = self.latest_mode_contact_gate_mean
 
-        valid_mask = direction_valid & contact_mask
+        step_mask = self._get_direction_step_mask(rollout_step_ids)
+        valid_mask = direction_valid & active_mask & step_mask
         if torch.any(valid_mask):
             direction_loss = torch.nn.functional.cross_entropy(
                 mode_logits[valid_mask],
@@ -766,7 +890,10 @@ class Dagger:
                 f"Force prediction head output dim ({force_pred.shape[-1]}) does not match target dim ({force_target_raw.shape[-1]})."
             )
 
-        valid_mask = torch.linalg.vector_norm(force_target_raw, dim=-1) > self.force_loss_contact_force_threshold
+        rollout_step_ids = self._get_rollout_step_ids()
+        active_mask = self._get_active_rollout_mask(rollout_step_ids)
+        step_mask = self._get_direction_step_mask(rollout_step_ids)
+        valid_mask = active_mask & step_mask
         if not torch.any(valid_mask):
             loss = force_pred.mean() * 0.0
             self.latest_force_angle_deg = None
@@ -4213,13 +4340,17 @@ class Dagger:
             if self.latest_mode_direction_acc is not None:
                 print("Direction Acc:", self.latest_mode_direction_acc)
             if self.mode_prediction_loss_enabled:
-                print("Direction Contact Force Mean:", self.latest_mode_contact_force_mean)
-                print("Direction Contact Gate Mean:", self.latest_mode_contact_gate_mean)
-                print("Direction Contact Gate Active Fraction:", self.latest_mode_contact_gate_active_fraction)
-            if self.mode_prediction_enabled or self.force_prediction_enabled:
+                print("Direction Window Acc:", self.latest_dir_window_acc)
+                print("Direction Window Balanced Acc:", self.latest_dir_window_balanced_acc)
+                print("Direction Window Push Acc:", self.latest_dir_window_push_acc)
+                print("Direction Window Pull Acc:", self.latest_dir_window_pull_acc)
+                print("Direction Window Num Push Labels:", self.latest_dir_window_num_push_labels)
+                print("Direction Window Num Pull Labels:", self.latest_dir_window_num_pull_labels)
+                print("Direction Window Num Push Preds:", self.latest_dir_window_num_push_preds)
+                print("Direction Window Num Pull Preds:", self.latest_dir_window_num_pull_preds)
+            if self.force_prediction_enabled:
                 print("Filtered Handle Force Norm Mean:", self.latest_filtered_handle_force_norm_mean)
                 print("Filtered Handle Force Norm Max:", self.latest_filtered_handle_force_norm_max)
-                print("Filtered Handle Contact Fraction:", self.latest_filtered_handle_contact_frac)
             if self.observation_lag_enabled:
                 print("Obs Lag Enabled:", bool(self.latest_obs_lag_enabled))
                 print("Obs Lag Mean (ms):", self.latest_obs_lag_mean_ms)
@@ -4273,13 +4404,17 @@ class Dagger:
         if self.latest_mode_direction_acc is not None:
             metrics["stats/dir_acc"] = self.latest_mode_direction_acc
         if self.mode_prediction_loss_enabled:
-            metrics["stats/dir_contact_force_mean"] = self.latest_mode_contact_force_mean
-            metrics["stats/dir_contact_gate_mean"] = self.latest_mode_contact_gate_mean
-            metrics["stats/dir_contact_gate_active_fraction"] = self.latest_mode_contact_gate_active_fraction
-        if self.mode_prediction_enabled or self.force_prediction_enabled:
+            metrics["stats/dir_window_acc"] = self.latest_dir_window_acc
+            metrics["stats/dir_window_balanced_acc"] = self.latest_dir_window_balanced_acc
+            metrics["stats/dir_window_push_acc"] = self.latest_dir_window_push_acc
+            metrics["stats/dir_window_pull_acc"] = self.latest_dir_window_pull_acc
+            metrics["stats/dir_window_num_push_labels"] = self.latest_dir_window_num_push_labels
+            metrics["stats/dir_window_num_pull_labels"] = self.latest_dir_window_num_pull_labels
+            metrics["stats/dir_window_num_push_preds"] = self.latest_dir_window_num_push_preds
+            metrics["stats/dir_window_num_pull_preds"] = self.latest_dir_window_num_pull_preds
+        if self.force_prediction_enabled:
             metrics["stats/filtered_handle_force_norm_mean"] = self.latest_filtered_handle_force_norm_mean
             metrics["stats/filtered_handle_force_norm_max"] = self.latest_filtered_handle_force_norm_max
-            metrics["stats/filtered_handle_contact_frac"] = self.latest_filtered_handle_contact_frac
         if self.observation_lag_enabled:
             metrics["stats/obs_lag_enabled"] = self.latest_obs_lag_enabled
             metrics["stats/obs_lag_mean_ms"] = self.latest_obs_lag_mean_ms
