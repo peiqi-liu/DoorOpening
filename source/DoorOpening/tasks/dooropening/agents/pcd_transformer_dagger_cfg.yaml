@@ -8,7 +8,7 @@ action_space: "absolute"
 action_dim: 19
 aux_weight: 0.1
 mode_prediction:
-  enabled: true
+  enabled: false
   num_modes: 2  # Push/pull discriminator only.
   weight: 0.01
   return_latent: true
@@ -16,6 +16,14 @@ force_prediction:
   enabled: false
   output_dim: 3
   weight: 0.01
+
+oracle_push_pull_condition:
+  enabled: true
+  obs_key: push_pull_cond
+  input_dim: 2
+  hidden_dims: [64, 256]
+  dropout: 0.0
+  use_layer_norm: true
 
 door_pcd_num_points: 30000  # Dense scene-door sampling before local policy crops are taken.
 local_pcd_range: [1.2, 0.25, 0.25]
@@ -78,68 +86,14 @@ state_encoders_cfg:
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
+  push_pull_cond:
+    input_dim: 2
+    hidden_dims: [64, 256]
+    dropout: 0.0
+    use_layer_norm: true
+    use_state: true
   base_vel:
     input_dim: 3
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  base_vel_200ms:
-    input_dim: 3
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  base_vel_400ms:
-    input_dim: 3
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  base_vel_600ms:
-    input_dim: 3
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  base_vel_800ms:
-    input_dim: 3
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  q_arm_200ms:
-    input_dim: 7
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  q_hand_200ms:
-    input_dim: 9
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  q_arm_400ms:
-    input_dim: 7
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  q_hand_400ms:
-    input_dim: 9
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  q_arm_600ms:
-    input_dim: 7
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  q_hand_600ms:
-    input_dim: 9
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  q_arm_800ms:
-    input_dim: 7
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  q_hand_800ms:
-    input_dim: 9
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
@@ -149,46 +103,6 @@ state_encoders_cfg:
     dropout: 0.0
     use_state: true
   target_err_hand:
-    input_dim: 9
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  target_err_arm_200ms:
-    input_dim: 7
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  target_err_hand_200ms:
-    input_dim: 9
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  target_err_arm_400ms:
-    input_dim: 7
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  target_err_hand_400ms:
-    input_dim: 9
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  target_err_arm_600ms:
-    input_dim: 7
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  target_err_hand_600ms:
-    input_dim: 9
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  target_err_arm_800ms:
-    input_dim: 7
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  target_err_hand_800ms:
     input_dim: 9
     hidden_dims: [128, 256]
     dropout: 0.0

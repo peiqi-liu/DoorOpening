@@ -258,6 +258,7 @@ class PCDTransformer(BaseModel):
         mode_prediction=None,
         force_prediction=None,
         proprio_temporal_encoder=None,
+        oracle_push_pull_condition=None,
     ):
         super().__init__(
             normalize_state=normalize_state,
@@ -272,9 +273,13 @@ class PCDTransformer(BaseModel):
         self.num_layers = num_layers
         self.dropout = dropout
         self.chunk_size = chunk_size
-        self.pcd_encoders_cfg = pcd_encoders_cfg
-        self.state_encoders_cfg = state_encoders_cfg
-        self.transformer_cfg = transformer_cfg
+        self.pcd_encoders_cfg = OrderedDict(
+            (str(key), dict(cfg)) for key, cfg in (pcd_encoders_cfg or {}).items()
+        )
+        self.state_encoders_cfg = OrderedDict(
+            (str(key), dict(cfg)) for key, cfg in (state_encoders_cfg or {}).items()
+        )
+        self.transformer_cfg = dict(transformer_cfg or {})
         self.proprio_temporal_cfg = dict(proprio_temporal_encoder or {})
         self.proprio_temporal_enabled = bool(self.proprio_temporal_cfg.get("enabled", False))
         self.proprio_temporal_obs_key = "proprio_temporal"
@@ -284,6 +289,22 @@ class PCDTransformer(BaseModel):
         self.proprio_temporal_field_state_keys = OrderedDict()
         self.proprio_temporal_field_dims = OrderedDict()
         self.proprio_temporal_covered_state_keys = frozenset()
+        self.oracle_push_pull_condition_cfg = dict(oracle_push_pull_condition or {})
+        self.oracle_push_pull_obs_key = str(
+            self.oracle_push_pull_condition_cfg.get("obs_key", "push_pull_cond")
+        )
+        explicit_oracle_cfg = oracle_push_pull_condition is not None
+        state_encoder_has_oracle = (
+            self.oracle_push_pull_obs_key in self.state_encoders_cfg
+            and bool(self.state_encoders_cfg[self.oracle_push_pull_obs_key].get("use_state", False))
+        )
+        self.oracle_push_pull_condition_enabled = bool(
+            self.oracle_push_pull_condition_cfg.get("enabled", False)
+        ) or (not explicit_oracle_cfg and state_encoder_has_oracle)
+        if self.oracle_push_pull_condition_enabled:
+            self._configure_oracle_push_pull_state_encoder()
+        elif explicit_oracle_cfg:
+            self.state_encoders_cfg.pop(self.oracle_push_pull_obs_key, None)
         self.mode_prediction_cfg = mode_prediction or {}
         self.mode_prediction_enabled = bool(self.mode_prediction_cfg.get("enabled", False))
         self.num_modes = int(self.mode_prediction_cfg.get("num_modes", 4))
@@ -301,10 +322,10 @@ class PCDTransformer(BaseModel):
         self.aux_weight = aux_weight
         self.aux_state_keys = [
             key
-            for key, cfg in state_encoders_cfg.items()
+            for key, cfg in self.state_encoders_cfg.items()
             if cfg.get("use_state", False) and str(key).startswith("aux_")
         ]
-        self.aux_output_dim = sum(int(state_encoders_cfg[key]["input_dim"]) for key in self.aux_state_keys)
+        self.aux_output_dim = sum(int(self.state_encoders_cfg[key]["input_dim"]) for key in self.aux_state_keys)
         self.aux_memory_allowlist = ["local_pcd_t", *self.aux_state_keys]
         self.aux_prediction_mode = str(aux_prediction_mode).lower()
         if self.aux_prediction_mode not in ["absolute", "delta"]:
@@ -319,13 +340,13 @@ class PCDTransformer(BaseModel):
         self.obs_encoder_order = []
         if self.proprio_temporal_enabled:
             self._initialize_proprio_temporal_encoder()
-        for key, cfg in pcd_encoders_cfg.items():
+        for key, cfg in self.pcd_encoders_cfg.items():
             if cfg["use_pcd"]:
                 self.type_embeddings[key] = nn.Parameter(nn.init.xavier_uniform_(torch.zeros(1, 1, type_dim)))
                 self.encoders[key] = self._initialize_pcd_encoder(self.hidden_dim-self.type_dim, cfg)
                 self.obs_encoder_order.append(key)
         proprio_temporal_inserted = False
-        for key, cfg in state_encoders_cfg.items():
+        for key, cfg in self.state_encoders_cfg.items():
             if not cfg["use_state"]:
                 continue
             if self.proprio_temporal_enabled and key in self.proprio_temporal_covered_state_keys:
@@ -334,7 +355,14 @@ class PCDTransformer(BaseModel):
                     proprio_temporal_inserted = True
                 continue
             self.type_embeddings[key] = nn.Parameter(nn.init.xavier_uniform_(torch.zeros(1, 1, type_dim)))
-            self.encoders[key] = StateEncoder(cfg["input_dim"], cfg["hidden_dims"], self.hidden_dim-self.type_dim, cfg["dropout"])
+            self.encoders[key] = StateEncoder(
+                input_dim=int(cfg["input_dim"]),
+                hidden_dims=cfg.get("hidden_dims", []),
+                output_dim=self.hidden_dim-self.type_dim,
+                dropout=float(cfg.get("dropout", 0.0)),
+                activation=cfg.get("activation", "relu"),
+                use_layer_norm=bool(cfg.get("use_layer_norm", False)),
+            )
             self.obs_encoder_order.append(key)
         if self.proprio_temporal_enabled and not proprio_temporal_inserted:
             self.obs_encoder_order.append(self.proprio_temporal_obs_key)
@@ -355,26 +383,26 @@ class PCDTransformer(BaseModel):
         self.query_tokens = nn.Parameter(nn.init.xavier_uniform_(torch.zeros(num_query_tokens, hidden_dim)))
 
         # Transformer
-        if transformer_cfg["type"] == "encoder_decoder":
+        if self.transformer_cfg["type"] == "encoder_decoder":
             encoder_layer = nn.TransformerEncoderLayer(
                 d_model=hidden_dim,
-                nhead=transformer_cfg["encoder_heads"],
-                dim_feedforward=transformer_cfg["encoder_dim_feedforward"],
+                nhead=self.transformer_cfg["encoder_heads"],
+                dim_feedforward=self.transformer_cfg["encoder_dim_feedforward"],
                 dropout=dropout,
                 batch_first=True
             )
-            self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=transformer_cfg["encoder_layers"])
+            self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=self.transformer_cfg["encoder_layers"])
 
             decoder_layer = nn.TransformerDecoderLayer(
                 d_model=hidden_dim,
-                nhead=transformer_cfg["decoder_heads"],
-                dim_feedforward=transformer_cfg["decoder_dim_feedforward"],
+                nhead=self.transformer_cfg["decoder_heads"],
+                dim_feedforward=self.transformer_cfg["decoder_dim_feedforward"],
                 dropout=dropout,
                 batch_first=True
             )
-            self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=transformer_cfg["decoder_layers"])
+            self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=self.transformer_cfg["decoder_layers"])
         else:
-            raise NotImplementedError(f"Transformer type {transformer_cfg['type']} not implemented")
+            raise NotImplementedError(f"Transformer type {self.transformer_cfg['type']} not implemented")
 
         # Output head
         self.action_head = nn.Linear(hidden_dim, action_dim)  # eef (6) + hand (16)
@@ -384,6 +412,46 @@ class PCDTransformer(BaseModel):
             self.mode_head = nn.Linear(hidden_dim, self.num_modes)
         if self.force_prediction_enabled:
             self.force_head = nn.Linear(hidden_dim, self.force_output_dim)
+
+    def _configure_oracle_push_pull_state_encoder(self):
+        input_dim = int(self.oracle_push_pull_condition_cfg.get("input_dim", 2))
+        if input_dim != 2:
+            raise ValueError("oracle_push_pull_condition.input_dim must be 2.")
+
+        encoder_cfg = self.state_encoders_cfg.get(self.oracle_push_pull_obs_key)
+        if encoder_cfg is None:
+            self.state_encoders_cfg[self.oracle_push_pull_obs_key] = {
+                "input_dim": 2,
+                "hidden_dims": list(
+                    self.oracle_push_pull_condition_cfg.get("hidden_dims", [64, self.hidden_dim])
+                ),
+                "dropout": float(self.oracle_push_pull_condition_cfg.get("dropout", 0.0)),
+                "use_state": True,
+                "activation": self.oracle_push_pull_condition_cfg.get("activation", "relu"),
+                "use_layer_norm": bool(self.oracle_push_pull_condition_cfg.get("use_layer_norm", False)),
+            }
+            return
+
+        if int(encoder_cfg.get("input_dim", -1)) != 2:
+            raise ValueError(
+                f"State encoder '{self.oracle_push_pull_obs_key}' must have input_dim=2 "
+                "when oracle_push_pull_condition is enabled."
+            )
+        if not bool(encoder_cfg.get("use_state", False)):
+            raise ValueError(
+                f"State encoder '{self.oracle_push_pull_obs_key}' must set use_state=true "
+                "when oracle_push_pull_condition is enabled."
+            )
+        encoder_cfg.setdefault(
+            "hidden_dims",
+            list(self.oracle_push_pull_condition_cfg.get("hidden_dims", [64, self.hidden_dim])),
+        )
+        encoder_cfg.setdefault("dropout", float(self.oracle_push_pull_condition_cfg.get("dropout", 0.0)))
+        encoder_cfg.setdefault("activation", self.oracle_push_pull_condition_cfg.get("activation", "relu"))
+        encoder_cfg.setdefault(
+            "use_layer_norm",
+            bool(self.oracle_push_pull_condition_cfg.get("use_layer_norm", False)),
+        )
 
     def load_checkpoint(self, checkpoint_path):
         checkpoint = torch.load(checkpoint_path)
@@ -556,7 +624,19 @@ class PCDTransformer(BaseModel):
                 typed_tokens = tokens
             else:
                 if key not in obs_dict:
+                    if self.oracle_push_pull_condition_enabled and key == self.oracle_push_pull_obs_key:
+                        raise RuntimeError(
+                            f"{self.oracle_push_pull_obs_key} is required when "
+                            "oracle_push_pull_condition is enabled."
+                        )
                     raise RuntimeError(f"Observation is missing '{key}'.")
+                if self.oracle_push_pull_condition_enabled and key == self.oracle_push_pull_obs_key:
+                    condition = obs_dict[key]
+                    if not isinstance(condition, torch.Tensor) or condition.ndim != 2 or condition.shape[-1] != 2:
+                        raise RuntimeError(
+                            f"{self.oracle_push_pull_obs_key} must have shape [B, 2] when "
+                            "oracle_push_pull_condition is enabled."
+                        )
                 tokens = self.encoders[key](obs_dict[key])
                 if len(tokens.shape) == 2:
                     tokens = tokens.unsqueeze(1)
