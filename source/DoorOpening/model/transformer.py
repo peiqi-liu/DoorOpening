@@ -435,12 +435,6 @@ class PCDTransformer(BaseModel):
         return f"{base_key}_{timestamp_ms}ms"
 
     def _initialize_proprio_temporal_encoder(self):
-        encoder_type = str(self.proprio_temporal_cfg.get("type", "shared_mlp_time_embedding")).lower()
-        if encoder_type != "shared_mlp_time_embedding":
-            raise ValueError(
-                "proprio_temporal_encoder.type must be 'shared_mlp_time_embedding', "
-                f"got '{encoder_type}'."
-            )
         timestamps_ms = tuple(int(timestamp) for timestamp in self.proprio_temporal_cfg.get("timestamps_ms", []))
         if not timestamps_ms:
             raise ValueError("proprio_temporal_encoder.timestamps_ms must be non-empty when enabled.")
