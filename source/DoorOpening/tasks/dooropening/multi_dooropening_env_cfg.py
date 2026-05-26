@@ -14,6 +14,7 @@ from DoorOpening.constants.robot_constants import (
     ROBOT_PALM_LINK_NAME,
     ROBOT_BASE_BODY_LINK_NAME,
 )
+from DoorOpening.tasks.dooropening.contact_force_utils import HANDLE_CONTACT_FILTER_PRIM_PATHS
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.envs.mdp.events import randomize_actuator_gains, randomize_rigid_body_material
@@ -189,25 +190,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         update_period=0.0,
         history_length=1,
         debug_vis=False,
-        filter_prim_paths_expr=[
-            "/World/envs/env_.*/Robot/palm_center", 
-            "/World/envs/env_.*/Robot/palm_lower", 
-            "/World/envs/env_.*/Robot/mcp_joint_1", 
-            "/World/envs/env_.*/Robot/pip_1", 
-            "/World/envs/env_.*/Robot/dip_1", 
-            "/World/envs/env_.*/Robot/realtip_1",
-            "/World/envs/env_.*/Robot/fingertip_1",
-            "/World/envs/env_.*/Robot/mcp_joint_2", 
-            "/World/envs/env_.*/Robot/pip_2", 
-            "/World/envs/env_.*/Robot/dip_2", 
-            "/World/envs/env_.*/Robot/realtip_2", 
-            "/World/envs/env_.*/Robot/fingertip_2",
-            "/World/envs/env_.*/Robot/mcp_joint_3", 
-            "/World/envs/env_.*/Robot/pip_3", 
-            "/World/envs/env_.*/Robot/dip_3", 
-            "/World/envs/env_.*/Robot/realtip_3", 
-            "/World/envs/env_.*/Robot/fingertip_3",
-        ],
+        filter_prim_paths_expr=list(HANDLE_CONTACT_FILTER_PRIM_PATHS),
     )
 
     # Pointcloud render mode:

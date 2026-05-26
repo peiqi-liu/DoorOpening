@@ -20,6 +20,10 @@ from DoorOpening.assets.door.door_cfg import motion_traj_paths, handle_offsets, 
 from DoorOpening.assets.glorbot.glorbot_cfg import glorbot_urdf_path
 from isaaclab.sensors import Camera, ContactSensor
 from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES, ROBOT_KEY_BODY_NAMES
+from DoorOpening.tasks.dooropening.contact_force_utils import (
+    HANDLE_CONTACT_FORCE_THRESHOLD,
+    get_filtered_contact_force_w,
+)
 from DoorOpening.utils.pose_utils import world_to_local
 from isaaclab.utils.math import quat_conjugate, quat_apply, quat_mul
 from DoorOpening.utils.quat_utils import quat_to_6d
@@ -221,6 +225,9 @@ class DooropeningEnv(DirectRLEnv):
         self._dr_metrics_interval = max(int(self.cfg.dr_metrics_interval), 1)
         self._log_verbose_dr_metrics = bool(self.cfg.log_verbose_dr_metrics)
         self._init_viser_pointcloud_recording()
+
+    def _get_filtered_contact_force_w(self, sensor, expected_num_envs=None) -> torch.Tensor:
+        return get_filtered_contact_force_w(sensor, expected_num_envs=expected_num_envs)
 
     def set_train_info(self, env_frames: int, algo=None, **kwargs):
         self._rlgames_env_frames = int(env_frames)
@@ -1370,7 +1377,18 @@ class DooropeningEnv(DirectRLEnv):
         if self.prob_get_first_key_frame is not None:
             self.extras["reset/prob_get_first_key_frame"] = float(self.prob_get_first_key_frame)
 
-        contact_forces_door2 = self.scene.sensors["contact_forces_door2"].data.net_forces_w
+        # Use filtered handle-hand force. Do not use net_forces_w here because
+        # net_forces_w includes all contacts acting on Door/link_2.
+        contact_forces_door2 = self._get_filtered_contact_force_w(
+            self.scene.sensors["contact_forces_door2"],
+            expected_num_envs=self.num_envs,
+        )
+        handle_force_norm = torch.linalg.vector_norm(contact_forces_door2, dim=-1)
+        self.extras["stats/filtered_handle_force_norm_mean"] = float(handle_force_norm.mean().detach().cpu().item())
+        self.extras["stats/filtered_handle_force_norm_max"] = float(handle_force_norm.max().detach().cpu().item())
+        self.extras["stats/filtered_handle_contact_frac"] = float(
+            (handle_force_norm > HANDLE_CONTACT_FORCE_THRESHOLD).float().mean().detach().cpu().item()
+        )
 
         deep_mimic_reward = compute_deep_mimic_rewards(
             robot_key_body_pos = self.robot_key_body_pos, 
@@ -1678,7 +1696,12 @@ def compute_deep_mimic_rewards(
     else:
         robot_body_ang_vel_r = torch.zeros_like(key_body_pos_r)
 
-    contact_reward = torch.where(torch.norm(contact_forces, dim=-1) > 1, 1.0, 0.0).squeeze()
+    contact_force_norm = torch.linalg.vector_norm(contact_forces, dim=-1)
+    if contact_force_norm.ndim != 1:
+        raise RuntimeError(
+            f"Expected handle contact force norm shape [N], got {tuple(contact_force_norm.shape)}"
+        )
+    contact_reward = (contact_force_norm > HANDLE_CONTACT_FORCE_THRESHOLD).to(dtype=key_body_pos_r.dtype)
     # ----------------------------------
     # Final reward
     # ----------------------------------

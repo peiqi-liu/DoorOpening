@@ -27,6 +27,10 @@ from DoorOpening.assets.door.multi_door_cfg import board_bboxes as door_board_bb
 from DoorOpening.assets.door.multi_door_cfg import motion_family_ids, motion_traj_paths
 from DoorOpening.assets.glorbot.glorbot_cfg import glorbot_urdf_path
 from DoorOpening.model.transformer import PCDTransformer, strip_prefix_from_state_dict
+from DoorOpening.tasks.dooropening.contact_force_utils import (
+    HANDLE_CONTACT_FORCE_THRESHOLD,
+    get_filtered_contact_force_w,
+)
 from DoorOpening.utils.camera_utils import (
     build_pinhole_intrinsics,
     crop_local_pcd,
@@ -474,25 +478,19 @@ class Dagger:
 
     def _init_mode_prediction_training_state(self):
         cfg = dict(self.runtime_cfg.get("direction_training", {}) or {})
-        self.mode_contact_gating_enabled = self.mode_prediction_enabled and bool(cfg.get("enabled", True))
+        self.mode_prediction_loss_enabled = self.mode_prediction_enabled and bool(cfg.get("enabled", True))
         self.mode_contact_sensor_name = str(cfg.get("sensor_name", "contact_forces_door2"))
-        self.mode_contact_force_gate_low = float(cfg.get("force_gate_low", 1.0))
-        self.mode_contact_force_gate_high = float(cfg.get("force_gate_high", 5.0))
-        if self.mode_contact_force_gate_high < self.mode_contact_force_gate_low:
-            raise ValueError("direction_training.force_gate_high must be >= force_gate_low.")
+        self.mode_loss_contact_force_threshold = float(cfg.get("loss_contact_force_threshold", 5.0))
 
         self.mode_family_semantics = {}
         self.mode_family_direction_ids = None
-        self.latest_mode_direction_loss = None
         self.latest_mode_direction_acc = None
         self.latest_mode_contact_force_mean = 0.0
-        self.latest_mode_contact_force_max = 0.0
         self.latest_mode_contact_gate_mean = 0.0
         self.latest_mode_contact_gate_active_fraction = 0.0
 
     def _init_force_prediction_training_state(self):
         cfg = dict(self.runtime_cfg.get("force_training", {}) or {})
-        self.force_prediction_cfg = cfg
         self.force_prediction_sensor_name = str(cfg.get("sensor_name", "contact_forces_door2"))
         self.force_prediction_target_frame = str(cfg.get("target_frame", "base")).lower()
         if self.force_prediction_target_frame not in {"base", "world"}:
@@ -507,17 +505,12 @@ class Dagger:
         self.force_prediction_contrastive_temperature = float(cfg.get("contrastive_temperature", 0.1))
         if self.force_prediction_contrastive_temperature <= 0.0:
             raise ValueError("force_prediction.contrastive_temperature must be positive.")
-        self.force_prediction_use_contact_gate = self.force_prediction_enabled and bool(cfg.get("use_contact_gate", True))
-        self.force_prediction_force_gate_low = float(cfg.get("force_gate_low", 1.0))
-        self.force_prediction_force_gate_high = float(cfg.get("force_gate_high", 5.0))
-        if self.force_prediction_force_gate_high < self.force_prediction_force_gate_low:
-            raise ValueError("force_training.force_gate_high must be >= force_gate_low.")
-        self.force_prediction_min_weight = float(cfg.get("min_weight", 0.1))
-        if not 0.0 <= self.force_prediction_min_weight <= 1.0:
-            raise ValueError("force_training.min_weight must be in [0, 1].")
+        self.force_loss_contact_force_threshold = float(cfg.get("loss_contact_force_threshold", 5.0))
 
-        self.latest_force_loss = None
         self.latest_force_angle_deg = None
+        self.latest_filtered_handle_force_norm_mean = 0.0
+        self.latest_filtered_handle_force_norm_max = 0.0
+        self.latest_filtered_handle_contact_frac = 0.0
 
     def _load_family_mode_semantics(self):
         handle_side_aliases = {
@@ -609,52 +602,31 @@ class Dagger:
         sensors = None if scene is None else getattr(scene, "sensors", None)
         if sensors is None or sensor_name not in sensors:
             raise RuntimeError(f"Contact sensor '{sensor_name}' is required but not available.")
-        return sensors[sensor_name].data.net_forces_w.to(device=self.device, dtype=torch.float32)
+        # force_matrix_w gives filtered contact force between Door/link_2 and robot hand links.
+        # net_forces_w is intentionally not used because it is the total contact force on the handle body.
+        force_world = get_filtered_contact_force_w(
+            sensors[sensor_name],
+            expected_num_envs=self.num_envs,
+        )
+        if force_world.ndim != 2 or force_world.shape[-1] != 3:
+            raise RuntimeError(
+                f"Expected filtered contact force shape [N, 3], got {tuple(force_world.shape)}"
+            )
+        force_norm = torch.linalg.vector_norm(force_world, dim=-1)
+        self.latest_filtered_handle_force_norm_mean = float(force_norm.mean().detach().cpu().item())
+        self.latest_filtered_handle_force_norm_max = float(force_norm.max().detach().cpu().item())
+        self.latest_filtered_handle_contact_frac = float(
+            (force_norm > self.force_loss_contact_force_threshold).float().mean().detach().cpu().item()
+        )
+        return force_world.to(device=self.device, dtype=torch.float32)
 
     def _aggregate_contact_force_tensor(self, contact_forces):
         if contact_forces.ndim == 2:
             return contact_forces
         return contact_forces.reshape(contact_forces.shape[0], -1, 3).sum(dim=1)
 
-    def _get_mode_contact_force_magnitude(self):
-        contact_forces = self._get_contact_sensor_force_tensor_world(self.mode_contact_sensor_name)
-        contact_force_mag = torch.linalg.vector_norm(contact_forces, dim=-1)
-        if contact_force_mag.ndim == 1:
-            return contact_force_mag.to(device=self.device, dtype=torch.float32)
-        return contact_force_mag.reshape(contact_force_mag.shape[0], -1).amax(dim=-1).to(
-            device=self.device,
-            dtype=torch.float32,
-        )
-
-    def _get_mode_contact_gate(self):
-        gate = torch.ones((self.num_envs,), dtype=torch.float32, device=self.device)
-        if not self.mode_contact_gating_enabled:
-            self.latest_mode_contact_force_mean = 0.0
-            self.latest_mode_contact_force_max = 0.0
-            self.latest_mode_contact_gate_mean = 1.0
-            self.latest_mode_contact_gate_active_fraction = 1.0
-            return gate
-
-        contact_force_mag = self._get_mode_contact_force_magnitude()
-        current_contact_mask = contact_force_mag >= self.mode_contact_force_gate_low
-        if self.mode_contact_force_gate_high <= self.mode_contact_force_gate_low + 1.0e-6:
-            current_gate = current_contact_mask.to(dtype=torch.float32)
-        else:
-            current_gate = (
-                (contact_force_mag - self.mode_contact_force_gate_low)
-                / (self.mode_contact_force_gate_high - self.mode_contact_force_gate_low)
-            ).clamp(0.0, 1.0)
-
-        gate = current_gate
-
-        self.latest_mode_contact_force_mean = float(contact_force_mag.mean().detach().cpu().item())
-        self.latest_mode_contact_force_max = float(contact_force_mag.max().detach().cpu().item())
-        self.latest_mode_contact_gate_mean = float(gate.mean().detach().cpu().item())
-        self.latest_mode_contact_gate_active_fraction = float((gate > 0.0).float().mean().detach().cpu().item())
-        return gate
-
     def _compute_mode_prediction_loss(self, mode_logits):
-        if not self.mode_prediction_enabled:
+        if not self.mode_prediction_loss_enabled:
             return None
         if self.mode_family_direction_ids is None:
             raise RuntimeError("Mode prediction targets are not initialized.")
@@ -663,30 +635,37 @@ class Dagger:
         direction_valid = direction_target >= 0
         if not torch.any(direction_valid):
             raise RuntimeError("No valid direction targets are available for mode prediction.")
-        contact_gate = self._get_mode_contact_gate()
-        direction_loss_per_env = torch.nn.functional.cross_entropy(
-            mode_logits[direction_valid],
-            direction_target[direction_valid],
-            reduction="none",
+
+        contact_force_mag = torch.linalg.vector_norm(
+            self._get_contact_sensor_force_tensor_world(self.mode_contact_sensor_name),
+            dim=-1,
         )
-        direction_gate = contact_gate[direction_valid]
-        direction_gate_sum = float(direction_gate.sum().detach().cpu().item())
-        if direction_gate_sum > 0.0:
-            direction_loss = (direction_loss_per_env * direction_gate).sum() / direction_gate.sum()
-            direction_pred = mode_logits[direction_valid].argmax(dim=-1)
-            direction_correct = (direction_pred == direction_target[direction_valid]).float()
-            self.latest_mode_direction_acc = float(
-                ((direction_correct * direction_gate).sum() / direction_gate.sum()).detach().cpu().item()
+        contact_mask = contact_force_mag > self.mode_loss_contact_force_threshold
+        self.latest_mode_contact_force_mean = float(contact_force_mag.mean().detach().cpu().item())
+        self.latest_mode_contact_gate_mean = float(contact_mask.float().mean().detach().cpu().item())
+        self.latest_mode_contact_gate_active_fraction = self.latest_mode_contact_gate_mean
+
+        valid_mask = direction_valid & contact_mask
+        if torch.any(valid_mask):
+            direction_loss = torch.nn.functional.cross_entropy(
+                mode_logits[valid_mask],
+                direction_target[valid_mask],
             )
+            direction_pred = mode_logits[valid_mask].argmax(dim=-1)
+            direction_correct = (direction_pred == direction_target[valid_mask]).float()
+            self.latest_mode_direction_acc = float(direction_correct.mean().detach().cpu().item())
         else:
-            direction_loss = direction_loss_per_env.mean() * 0.0
+            direction_loss = mode_logits.mean() * 0.0
             self.latest_mode_direction_acc = None
-        self.latest_mode_direction_loss = float(direction_loss.detach().cpu().item())
         return direction_loss
 
     def _get_force_prediction_target_raw(self):
         contact_forces = self._get_contact_sensor_force_tensor_world(self.force_prediction_sensor_name)
         force_world = self._aggregate_contact_force_tensor(contact_forces)
+        if force_world.ndim != 2 or force_world.shape[-1] != 3:
+            raise RuntimeError(
+                f"Expected force prediction target shape [N, 3], got {tuple(force_world.shape)}"
+            )
         if self.force_prediction_target_frame == "world":
             return force_world
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
@@ -695,26 +674,6 @@ class Dagger:
     def _normalize_force_direction(self, force_tensor):
         force_mag = torch.linalg.vector_norm(force_tensor, dim=-1, keepdim=True)
         return force_tensor / force_mag.clamp_min(1.0e-6)
-
-    def _get_force_prediction_sample_weight(self, force_target_raw):
-        weight = torch.ones((self.num_envs,), dtype=torch.float32, device=self.device)
-        gate = torch.ones((self.num_envs,), dtype=torch.float32, device=self.device)
-        if not self.force_prediction_use_contact_gate:
-            return weight, gate
-
-        force_mag = torch.linalg.vector_norm(force_target_raw, dim=-1)
-        current_contact_mask = force_mag >= self.force_prediction_force_gate_low
-        if self.force_prediction_force_gate_high <= self.force_prediction_force_gate_low + 1.0e-6:
-            current_gate = current_contact_mask.to(dtype=torch.float32)
-        else:
-            current_gate = (
-                (force_mag - self.force_prediction_force_gate_low)
-                / (self.force_prediction_force_gate_high - self.force_prediction_force_gate_low)
-            ).clamp(0.0, 1.0)
-
-        gate = current_gate
-        weight = self.force_prediction_min_weight + (1.0 - self.force_prediction_min_weight) * gate
-        return weight, gate
 
     def _compute_force_prediction_loss(self, force_pred):
         if not self.force_prediction_enabled:
@@ -728,22 +687,18 @@ class Dagger:
                 f"Force prediction head output dim ({force_pred.shape[-1]}) does not match target dim ({force_target_raw.shape[-1]})."
             )
 
-        sample_weight, gate = self._get_force_prediction_sample_weight(force_target_raw)
-        valid_mask = gate > 0.0
+        valid_mask = torch.linalg.vector_norm(force_target_raw, dim=-1) > self.force_loss_contact_force_threshold
+        if not torch.any(valid_mask):
+            loss = force_pred.mean() * 0.0
+            self.latest_force_angle_deg = None
+            return loss
 
         target_dir = self._normalize_force_direction(force_target_raw)
         pred_dir = self._normalize_force_direction(force_pred)
 
         if self.force_prediction_loss_type == "direction_contrastive":
-            if not torch.any(valid_mask):
-                loss = force_pred.mean() * 0.0
-                self.latest_force_angle_deg = None
-                self.latest_force_loss = float(loss.detach().cpu().item())
-                return loss
-
             pred_dir_valid = pred_dir[valid_mask]
             target_dir_valid = target_dir[valid_mask]
-            sample_weight_valid = sample_weight[valid_mask]
             cosine_valid = torch.nn.functional.cosine_similarity(pred_dir_valid, target_dir_valid, dim=-1, eps=1.0e-8)
 
             if pred_dir_valid.shape[0] >= 2:
@@ -752,12 +707,9 @@ class Dagger:
                 labels = torch.arange(pred_dir_valid.shape[0], device=self.device)
                 row_loss = torch.nn.functional.cross_entropy(logits, labels, reduction="none")
                 col_loss = torch.nn.functional.cross_entropy(logits.T, labels, reduction="none")
-                loss = 0.5 * (
-                    (row_loss * sample_weight_valid).sum() / sample_weight_valid.sum().clamp_min(1.0e-6)
-                    + (col_loss * sample_weight_valid).sum() / sample_weight_valid.sum().clamp_min(1.0e-6)
-                )
+                loss = 0.5 * (row_loss.mean() + col_loss.mean())
             else:
-                loss = ((1.0 - cosine_valid) * sample_weight_valid).sum() / sample_weight_valid.sum().clamp_min(1.0e-6)
+                loss = (1.0 - cosine_valid).mean()
 
             angle_deg = torch.rad2deg(torch.acos(cosine_valid.clamp(-1.0 + 1.0e-6, 1.0 - 1.0e-6)))
             self.latest_force_angle_deg = float(angle_deg.mean().detach().cpu().item())
@@ -768,13 +720,12 @@ class Dagger:
                 ).mean(dim=-1)
             else:
                 per_env_loss = torch.nn.functional.mse_loss(force_pred, force_target_raw, reduction="none").mean(dim=-1)
-            loss = (per_env_loss * sample_weight).sum() / sample_weight.sum().clamp_min(1.0e-6)
+            loss = per_env_loss[valid_mask].mean()
 
             cosine_all = torch.nn.functional.cosine_similarity(pred_dir, target_dir, dim=-1, eps=1.0e-8)
             angle_deg = torch.rad2deg(torch.acos(cosine_all.clamp(-1.0 + 1.0e-6, 1.0 - 1.0e-6)))
-            self.latest_force_angle_deg = float(angle_deg.mean().detach().cpu().item())
+            self.latest_force_angle_deg = float(angle_deg[valid_mask].mean().detach().cpu().item())
 
-        self.latest_force_loss = float(loss.detach().cpu().item())
         return loss
 
     def _build_action_component_history_indices(self):
@@ -3967,19 +3918,20 @@ class Dagger:
                 print("Aux Loss:", float(aux_loss.detach().cpu()))
             if mode_loss is not None:
                 print("Direction Loss:", float(mode_loss.detach().cpu()))
-                if self.latest_mode_direction_loss is not None:
-                    print("Direction Loss (Gated):", self.latest_mode_direction_loss)
             if force_loss is not None:
                 print("Force Loss:", float(force_loss.detach().cpu()))
                 if self.latest_force_angle_deg is not None:
                     print("Force Angle Deg:", self.latest_force_angle_deg)
             if self.latest_mode_direction_acc is not None:
                 print("Direction Acc:", self.latest_mode_direction_acc)
-            if self.mode_contact_gating_enabled:
+            if self.mode_prediction_loss_enabled:
                 print("Direction Contact Force Mean:", self.latest_mode_contact_force_mean)
-                print("Direction Contact Force Max:", self.latest_mode_contact_force_max)
                 print("Direction Contact Gate Mean:", self.latest_mode_contact_gate_mean)
                 print("Direction Contact Gate Active Fraction:", self.latest_mode_contact_gate_active_fraction)
+            if self.mode_prediction_enabled or self.force_prediction_enabled:
+                print("Filtered Handle Force Norm Mean:", self.latest_filtered_handle_force_norm_mean)
+                print("Filtered Handle Force Norm Max:", self.latest_filtered_handle_force_norm_max)
+                print("Filtered Handle Contact Fraction:", self.latest_filtered_handle_contact_frac)
             print("Teacher Forcing Beta:", teacher_forcing_beta)
             print("Teacher Rollout Env Fraction:", teacher_env_fraction)
             print("Student Rollout Env Fraction:", student_env_fraction)
@@ -4027,11 +3979,14 @@ class Dagger:
                 metrics["stats/force_angle_deg"] = self.latest_force_angle_deg
         if self.latest_mode_direction_acc is not None:
             metrics["stats/dir_acc"] = self.latest_mode_direction_acc
-        if self.mode_contact_gating_enabled:
+        if self.mode_prediction_loss_enabled:
             metrics["stats/dir_contact_force_mean"] = self.latest_mode_contact_force_mean
-            metrics["stats/dir_contact_force_max"] = self.latest_mode_contact_force_max
             metrics["stats/dir_contact_gate_mean"] = self.latest_mode_contact_gate_mean
             metrics["stats/dir_contact_gate_active_fraction"] = self.latest_mode_contact_gate_active_fraction
+        if self.mode_prediction_enabled or self.force_prediction_enabled:
+            metrics["stats/filtered_handle_force_norm_mean"] = self.latest_filtered_handle_force_norm_mean
+            metrics["stats/filtered_handle_force_norm_max"] = self.latest_filtered_handle_force_norm_max
+            metrics["stats/filtered_handle_contact_frac"] = self.latest_filtered_handle_contact_frac
         if episode_reward is not None:
             metrics["stats/episode_reward"] = episode_reward
         if episode_length is not None:

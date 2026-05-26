@@ -203,6 +203,8 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
 
         # print("-------------------------------")
         if count % 10 == 0 and args_cli.debug:
+            # Keep net_forces_w in this debug script because it is intended to show
+            # total contact load on each door link, not filtered handle-hand contact.
             # print(scene["contact_forces_door1"])
             # print("Received force matrix of: ", scene["contact_forces_door1"].data.force_matrix_w)
             print("Received contact force of link 1: ", scene["contact_forces_door1"].data.net_forces_w)
