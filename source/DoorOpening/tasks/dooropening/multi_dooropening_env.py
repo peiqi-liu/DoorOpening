@@ -26,10 +26,7 @@ from DoorOpening.tasks.dooropening.multi_dooropening_env_cfg import DooropeningE
 from DoorOpening.assets.glorbot.glorbot_cfg import glorbot_urdf_path
 from isaaclab.sensors import Camera, ContactSensor
 from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES, ROBOT_KEY_BODY_NAMES
-from DoorOpening.tasks.dooropening.contact_force_utils import (
-    HANDLE_CONTACT_FORCE_THRESHOLD,
-    get_filtered_contact_force_w,
-)
+from DoorOpening.tasks.dooropening.contact_force_utils import get_filtered_contact_force_w
 from DoorOpening.utils.pose_utils import world_to_local
 from isaaclab.utils.math import quat_conjugate, quat_apply, quat_mul
 from DoorOpening.utils.quat_utils import quat_to_6d
@@ -1413,8 +1410,6 @@ class DooropeningEnv(DirectRLEnv):
         # self.door_keypoints = self.compute_door_keypoints()
         self.robot_body_lin_vel = self.robot.data.body_link_lin_vel_w[:, self._robot_key_body_idx]
         self.robot_body_ang_vel = self.robot.data.body_link_ang_vel_w[:, self._robot_key_body_idx]
-        # print("door keypoints: ", self.compute_door_keypoints())
-        # print("door link pos: ", self.door_link_pos)
 
         if self.ref_motion_lib is None:
             self._set_current_state_as_reference()
@@ -1521,7 +1516,7 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["stats/filtered_handle_force_norm_mean"] = float(handle_force_norm.mean().detach().cpu().item())
         self.extras["stats/filtered_handle_force_norm_max"] = float(handle_force_norm.max().detach().cpu().item())
         self.extras["stats/filtered_handle_contact_frac"] = float(
-            (handle_force_norm > HANDLE_CONTACT_FORCE_THRESHOLD).float().mean().detach().cpu().item()
+            (handle_force_norm > self.cfg.handle_contact_force_threshold).float().mean().detach().cpu().item()
         )
 
         deep_mimic_reward = compute_deep_mimic_rewards(
@@ -1575,6 +1570,7 @@ class DooropeningEnv(DirectRLEnv):
 
             contact_forces = contact_forces_door2,
             contact_force_w = self.hinge_contact_reward_w * self.ref_hinge_contact_mask,
+            contact_force_threshold = self.cfg.handle_contact_force_threshold,
         )
 
         joint_limit_penalty, joint_limit_active_fraction = compute_joint_limit_penalty(
@@ -1789,6 +1785,7 @@ def compute_deep_mimic_rewards(
 
     contact_force_w: torch.Tensor,
     contact_forces: torch.Tensor,
+    contact_force_threshold: float,
 ) -> torch.Tensor:
     # ----------------------------------
     # Robot body position error
@@ -1859,12 +1856,10 @@ def compute_deep_mimic_rewards(
     else:
         robot_body_ang_vel_r = torch.zeros_like(key_body_pos_r)
 
+    if contact_forces.dim() != 2 or contact_forces.size(-1) != 3:
+        raise RuntimeError("Expected filtered handle contact force shape [N, 3].")
     contact_force_norm = torch.linalg.vector_norm(contact_forces, dim=-1)
-    if contact_force_norm.ndim != 1:
-        raise RuntimeError(
-            f"Expected handle contact force norm shape [N], got {tuple(contact_force_norm.shape)}"
-        )
-    contact_reward = (contact_force_norm > HANDLE_CONTACT_FORCE_THRESHOLD).to(dtype=key_body_pos_r.dtype)
+    contact_reward = (contact_force_norm > contact_force_threshold).to(dtype=key_body_pos_r.dtype)
     # ----------------------------------
     # Final reward
     # ----------------------------------
@@ -1909,26 +1904,20 @@ def compute_tracking_error(
     # [B, N, 3]
     key_body_pos_diff = ref_robot_key_body_pos - robot_key_body_pos
     key_body_pos_err = torch.sum(key_body_pos_diff * key_body_pos_diff, dim=-1)  # [B, N]
-    # print("key_body_pos_diff: ", key_body_pos_err)
     key_body_pos_err = torch.max(key_body_pos_err, dim=-1).values
-    # print("key_body_pos_err: ", key_body_pos_err)
     # ----------------------------------
     # Robot body orientation error
     # ----------------------------------
     # [B, N]
     key_body_quat_diff = quat_diff_angle(robot_key_body_quat, ref_robot_key_body_quat)
-    # print("key_body_quat_diff: ", key_body_quat_diff)
     # key_body_quat_err = torch.sum(key_body_quat_diff * key_body_quat_diff, dim=-1)  # [B]
     key_body_quat_err = torch.max(key_body_quat_diff * key_body_quat_diff, dim=-1).values
-    # print("key_body_quat_err: ", key_body_quat_err)
     # ----------------------------------
     # Door joint error
     # ----------------------------------
     door_diff = ref_door_joint_pos - door_joint_pos
-    # print("door_diff: ", door_diff)
     # door_err = torch.sum(door_diff * door_diff, dim=-1)  # [B]
     door_err = torch.max(door_diff * door_diff, dim=-1).values
-    # print("door_err: ", door_err)
     # ----------------------------------
     # Robot joint position error
     # ----------------------------------

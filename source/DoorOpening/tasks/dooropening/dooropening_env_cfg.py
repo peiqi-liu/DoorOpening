@@ -192,6 +192,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         debug_vis=False,
         filter_prim_paths_expr=list(HANDLE_CONTACT_FILTER_PRIM_PATHS),
     )
+    handle_contact_force_threshold = 1.0
 
     # Pointcloud render mode:
     # - "none": no on-robot pointcloud camera sensor (default).
