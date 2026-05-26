@@ -1,8 +1,5 @@
 import torch
 
-
-HANDLE_CONTACT_FORCE_THRESHOLD = 1.0
-
 # Keep the handle contact sensor filtered to palm/finger bodies only so force_matrix_w
 # reports robot-hand contact on Door/link_2 instead of total handle contact.
 HANDLE_CONTACT_FILTER_PRIM_PATHS = (
