@@ -1859,11 +1859,9 @@ def compute_deep_mimic_rewards(
     else:
         robot_body_ang_vel_r = torch.zeros_like(key_body_pos_r)
 
+    if contact_forces.dim() != 2 or contact_forces.size(-1) != 3:
+        raise RuntimeError("Expected filtered handle contact force shape [N, 3].")
     contact_force_norm = torch.linalg.vector_norm(contact_forces, dim=-1)
-    if contact_force_norm.ndim != 1:
-        raise RuntimeError(
-            f"Expected handle contact force norm shape [N], got {tuple(contact_force_norm.shape)}"
-        )
     contact_reward = (contact_force_norm > HANDLE_CONTACT_FORCE_THRESHOLD).to(dtype=key_body_pos_r.dtype)
     # ----------------------------------
     # Final reward
