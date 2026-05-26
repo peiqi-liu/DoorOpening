@@ -27,9 +27,7 @@ from DoorOpening.assets.door.multi_door_cfg import board_bboxes as door_board_bb
 from DoorOpening.assets.door.multi_door_cfg import motion_family_ids, motion_traj_paths
 from DoorOpening.assets.glorbot.glorbot_cfg import glorbot_urdf_path
 from DoorOpening.model.transformer import PCDTransformer, strip_prefix_from_state_dict
-from DoorOpening.tasks.dooropening.contact_force_utils import (
-    get_filtered_contact_force_w,
-)
+from DoorOpening.tasks.dooropening.contact_force_utils import get_filtered_contact_force_w
 from DoorOpening.utils.camera_utils import (
     build_pinhole_intrinsics,
     crop_local_pcd,
