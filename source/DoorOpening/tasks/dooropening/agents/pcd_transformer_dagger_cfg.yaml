@@ -215,14 +215,13 @@ dagger:
   aux_pregrasp_dropout_prob: 0.001  # Conservative start: 0.1% per pregrasp step while predicted aux feedback is carried over.
   direction_training:
     enabled: true
-    sensor_name: "contact_forces_door2"
-    loss_contact_force_threshold: 5.0
+    direction_loss_window_start: 40
+    direction_loss_window_end: 100
   force_training:
     sensor_name: "contact_forces_door2"
     target_frame: "base"  # Predict forces in robot-base coordinates so the target matches the policy's main reference frame.
     loss_type: "direction_contrastive"
     contrastive_temperature: 0.1
-    loss_contact_force_threshold: 5.0
   twin_student_action_replay:
     enabled: false
     record_enabled: true
