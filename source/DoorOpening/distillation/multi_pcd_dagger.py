@@ -261,6 +261,11 @@ class Dagger:
         self.latest_student_proprio_vector = None
         self.latest_aux_input_vector = None
         self.latest_aux_target_vector = None
+        self.oracle_push_pull_enabled = False
+        self.oracle_push_pull_obs_key = "push_pull_cond"
+        self.oracle_push_pull_family_one_hot = None
+        self.latest_fraction_push = 0.0
+        self.latest_fraction_pull = 0.0
         self._timing_stats = {"sum_ms": 0.0, "count": 0}
         self.logged_env_metric_prefixes = ("dr/", "dr_limit/", "dr_sample/", "reset/")
         self.latest_env_log_metrics = {}
@@ -376,6 +381,12 @@ class Dagger:
             if not str(key).startswith("_")
         }
         self.student_model = PCDTransformer(**student_model_kwargs).to(self.device)
+        self.oracle_push_pull_enabled = bool(
+            getattr(self.student_model, "oracle_push_pull_condition_enabled", False)
+        )
+        self.oracle_push_pull_obs_key = str(
+            getattr(self.student_model, "oracle_push_pull_obs_key", "push_pull_cond")
+        )
         self.proprio_temporal_enabled = bool(getattr(self.student_model, "proprio_temporal_enabled", False))
         self.proprio_temporal_obs_key = getattr(self.student_model, "proprio_temporal_obs_key", None)
         self.proprio_temporal_timestamps_ms = tuple(
@@ -685,6 +696,76 @@ class Dagger:
                 "Could not infer handle-side/opening-direction semantics for active mode-prediction families: "
                 f"{missing_semantics}."
             )
+
+    def _init_oracle_push_pull_condition_targets(self):
+        self.oracle_push_pull_family_one_hot = None
+        self.latest_fraction_push = 0.0
+        self.latest_fraction_pull = 0.0
+        if not self.oracle_push_pull_enabled:
+            return
+
+        semantics_by_family_name = self._load_family_mode_semantics()
+        family_one_hot = torch.zeros(
+            (len(DOOR_FAMILY_NAMES), 2),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        missing_semantics = []
+        for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
+            _, opening_direction = semantics_by_family_name.get(family_name, (None, None))
+            if opening_direction == "push":
+                family_one_hot[family_id] = torch.tensor(
+                    [1.0, 0.0], dtype=torch.float32, device=self.device
+                )
+            elif opening_direction == "pull":
+                family_one_hot[family_id] = torch.tensor(
+                    [0.0, 1.0], dtype=torch.float32, device=self.device
+                )
+            else:
+                missing_semantics.append(family_name)
+
+        if missing_semantics:
+            raise RuntimeError(
+                "Could not infer push/pull oracle condition for active door families: "
+                f"{missing_semantics}."
+            )
+        self.oracle_push_pull_family_one_hot = family_one_hot
+
+    def _validate_oracle_push_pull_condition(self, push_pull_cond):
+        if not isinstance(push_pull_cond, torch.Tensor):
+            raise RuntimeError("push_pull_cond is required when oracle_push_pull_condition is enabled.")
+        expected_shape = (self.num_envs, 2)
+        if tuple(push_pull_cond.shape) != expected_shape:
+            raise RuntimeError(
+                "push_pull_cond must have shape [num_envs, 2] when "
+                f"oracle_push_pull_condition is enabled; got {tuple(push_pull_cond.shape)}."
+            )
+        if push_pull_cond.dtype != torch.float32:
+            raise RuntimeError("push_pull_cond must be a float32 tensor.")
+        if push_pull_cond.device != self.device:
+            raise RuntimeError(
+                f"push_pull_cond must be on device {self.device}; got {push_pull_cond.device}."
+            )
+        row_sums = push_pull_cond.sum(dim=-1)
+        if not torch.allclose(row_sums, torch.ones_like(row_sums), atol=1.0e-5, rtol=1.0e-5):
+            raise RuntimeError("Every push_pull_cond row must sum to 1.0.")
+
+    def _build_oracle_push_pull_condition(self):
+        if not self.oracle_push_pull_enabled:
+            return None
+        if self.oracle_push_pull_family_one_hot is None:
+            raise RuntimeError("Oracle push/pull condition targets are not initialized.")
+        if self.env_family_ids.ndim != 1 or self.env_family_ids.shape[0] != self.num_envs:
+            raise RuntimeError(
+                f"Expected env_family_ids shape [{self.num_envs}], got {tuple(self.env_family_ids.shape)}."
+            )
+
+        push_pull_cond = self.oracle_push_pull_family_one_hot[self.env_family_ids.long()]
+        push_pull_cond = push_pull_cond.to(device=self.device, dtype=torch.float32)
+        self._validate_oracle_push_pull_condition(push_pull_cond)
+        self.latest_fraction_push = float(push_pull_cond[:, 0].mean().detach().cpu().item())
+        self.latest_fraction_pull = float(push_pull_cond[:, 1].mean().detach().cpu().item())
+        return push_pull_cond
 
     def _get_contact_sensor_force_tensor_world(self, sensor_name):
         scene = getattr(self.ov_env, "scene", None)
@@ -1641,6 +1722,7 @@ class Dagger:
         if not torch.equal(expected_asset_family_ids, self.env_family_ids):
             raise RuntimeError("Door asset family ids and motion family ids are inconsistent.")
         self._init_mode_prediction_targets()
+        self._init_oracle_push_pull_condition_targets()
         self.family_env_ids = {
             int(family_id): torch.nonzero(self.env_family_ids == int(family_id), as_tuple=False).squeeze(-1)
             for family_id in range(len(DOOR_FAMILY_NAMES))
@@ -3867,6 +3949,7 @@ class Dagger:
         else:
             aux_input_vector = None
         aux_input_vector = self._maybe_drop_aux_feedback(aux_input_vector)
+        push_pull_cond = self._build_oracle_push_pull_condition() if self.oracle_push_pull_enabled else None
 
         obs = OrderedDict()
         for key in self.state_encoders_keys:
@@ -3890,8 +3973,16 @@ class Dagger:
                 if aux_input_vector is None:
                     raise RuntimeError(f"Aux state '{key}' is enabled but aux input vector is unavailable.")
                 obs[key] = aux_input_vector[:, self.aux_state_specs[key]["slice"]]
+            elif key == self.oracle_push_pull_obs_key:
+                if push_pull_cond is None:
+                    raise RuntimeError("push_pull_cond is required when oracle_push_pull_condition is enabled.")
+                # Oracle convention: push is [1, 0], pull is [0, 1].
+                obs[key] = push_pull_cond
             else:
                 raise KeyError(f"Unsupported student state key '{key}' in config.")
+
+        if self.oracle_push_pull_enabled and self.oracle_push_pull_obs_key not in obs:
+            raise RuntimeError("push_pull_cond is required when oracle_push_pull_condition is enabled.")
 
         if self.proprio_temporal_enabled:
             if self.proprio_temporal_obs_key is None:
@@ -3924,6 +4015,10 @@ class Dagger:
         return obs
 
     def _student_forward(self, student_obs):
+        if self.oracle_push_pull_enabled:
+            if self.oracle_push_pull_obs_key not in student_obs:
+                raise RuntimeError("push_pull_cond is required when oracle_push_pull_condition is enabled.")
+            self._validate_oracle_push_pull_condition(student_obs[self.oracle_push_pull_obs_key])
         return self.student_model_ddp(student_obs)
 
     def _compute_student_loss(self, student_output, teacher_actions, aux_target=None):
@@ -4356,6 +4451,9 @@ class Dagger:
                 print("Obs Lag Mean (ms):", self.latest_obs_lag_mean_ms)
                 print("Obs Lag Min (ms):", self.latest_obs_lag_min_ms)
                 print("Obs Lag Max (ms):", self.latest_obs_lag_max_ms)
+            if self.oracle_push_pull_enabled:
+                print("Fraction Push:", self.latest_fraction_push)
+                print("Fraction Pull:", self.latest_fraction_pull)
             print("Teacher Forcing Beta:", teacher_forcing_beta)
             print("Teacher Rollout Env Fraction:", teacher_env_fraction)
             print("Student Rollout Env Fraction:", student_env_fraction)
@@ -4422,6 +4520,9 @@ class Dagger:
             metrics["stats/obs_lag_max_ms"] = self.latest_obs_lag_max_ms
             for timestamp_ms, mean_age_ms in self.latest_obs_lag_effective_age_ms_by_timestamp.items():
                 metrics[f"stats/obs_lag_effective_age_{timestamp_ms}ms"] = mean_age_ms
+        if self.oracle_push_pull_enabled:
+            metrics["stats/fraction_push"] = self.latest_fraction_push
+            metrics["stats/fraction_pull"] = self.latest_fraction_pull
         if episode_reward is not None:
             metrics["stats/episode_reward"] = episode_reward
         if episode_length is not None:
