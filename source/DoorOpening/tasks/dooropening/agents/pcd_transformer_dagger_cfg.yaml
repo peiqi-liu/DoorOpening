@@ -8,12 +8,12 @@ action_space: "absolute"
 action_dim: 19
 aux_weight: 0.1
 mode_prediction:
-  enabled: true
+  enabled: false
   num_modes: 2  # Push/pull discriminator only.
   weight: 0.01
   return_latent: true
 force_prediction:
-  enabled: false
+  enabled: true
   output_dim: 3
   weight: 0.01
 
