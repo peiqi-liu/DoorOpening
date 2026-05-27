@@ -272,8 +272,6 @@ class Dagger:
         self.latest_push_pull_condition_source = "disabled"
         self.latest_push_pull_perturb_to_push_count = 0
         self.latest_push_pull_perturb_to_pull_count = 0
-        self._last_push_pull_perturb_mask = None
-        self._last_push_pull_perturb_step = -1
         self._logged_temporal_state_input_keys = False
         self._timing_stats = {"sum_ms": 0.0, "count": 0}
         self.logged_env_metric_prefixes = ("dr/", "dr_limit/", "dr_sample/", "reset/")
@@ -479,6 +477,7 @@ class Dagger:
                 f"does not match env action dim ({self.num_actions})."
         )
         self._init_force_prediction_training_state()
+        self._init_prediction_training_state()
         self._init_mode_prediction_training_state()
         self._init_push_pull_condition_runtime_state(student_yaml_runtime_cfg)
 
@@ -607,12 +606,7 @@ class Dagger:
         self.robot_gt_policy_points = max(0, int(self.robot_gt_policy_points))
 
     def _init_mode_prediction_training_state(self):
-        cfg = dict(getattr(self.student_model, "mode_prediction_cfg", {}) or {})
         self.mode_prediction_loss_enabled = self.mode_prediction_enabled and self.mode_weight > 0.0
-        self.direction_force_threshold = float(cfg.get("force_threshold", 1.0))
-        if self.direction_force_threshold < 0.0:
-            raise ValueError("mode_prediction.force_threshold must be non-negative.")
-
         self.mode_family_semantics = {}
         self.mode_family_direction_ids = None
         self.latest_mode_direction_acc = None
@@ -624,6 +618,21 @@ class Dagger:
         self.latest_dir_window_num_pull_labels = 0
         self.latest_dir_window_num_push_preds = 0
         self.latest_dir_window_num_pull_preds = 0
+
+    def _init_prediction_training_state(self):
+        cfg = dict(self.runtime_cfg.get("prediction_training", {}) or {})
+        self.direction_loss_window_start = int(cfg.get("loss_window_start", 40))
+        self.direction_loss_window_end = int(cfg.get("loss_window_end", 100))
+        self.direction_loss_outside_window_weight = float(cfg.get("outside_window_weight", 0.25))
+        if self.direction_loss_window_start < 0:
+            raise ValueError("prediction_training.loss_window_start must be non-negative.")
+        if self.direction_loss_window_end < self.direction_loss_window_start:
+            raise ValueError(
+                "prediction_training.loss_window_end must be greater than or equal to "
+                "prediction_training.loss_window_start."
+            )
+        if not 0.0 <= self.direction_loss_outside_window_weight <= 1.0:
+            raise ValueError("prediction_training.outside_window_weight must be in [0, 1].")
 
     def _init_force_prediction_training_state(self):
         cfg = dict(self.runtime_cfg.get("force_training", {}) or {})
@@ -641,15 +650,6 @@ class Dagger:
         self.force_prediction_contrastive_temperature = float(cfg.get("contrastive_temperature", 0.1))
         if self.force_prediction_contrastive_temperature <= 0.0:
             raise ValueError("force_prediction.contrastive_temperature must be positive.")
-        self.direction_loss_window_start = int(cfg.get("loss_window_start", 40))
-        self.direction_loss_window_end = int(cfg.get("loss_window_end", 100))
-        if self.direction_loss_window_start < 0:
-            raise ValueError("force_training.loss_window_start must be non-negative.")
-        if self.direction_loss_window_end < self.direction_loss_window_start:
-            raise ValueError(
-                "force_training.loss_window_end must be greater than or equal to "
-                "force_training.loss_window_start."
-            )
 
         self.latest_force_angle_deg = None
         self.latest_filtered_handle_force_norm_mean = 0.0
@@ -837,30 +837,6 @@ class Dagger:
             )
         self.push_pull_family_one_hot = family_one_hot
 
-    def _validate_push_pull_condition(self, push_pull_cond, name="push_pull_cond"):
-        if not isinstance(push_pull_cond, torch.Tensor):
-            raise RuntimeError(f"{name} must be a torch.Tensor.")
-        expected_shape = (self.num_envs, 2)
-        if tuple(push_pull_cond.shape) != expected_shape:
-            raise RuntimeError(
-                f"{name} must have shape [num_envs, 2]; got {tuple(push_pull_cond.shape)}."
-            )
-        if push_pull_cond.dtype != torch.float32:
-            raise RuntimeError(f"{name} must be a float32 tensor.")
-        if push_pull_cond.device != self.device:
-            raise RuntimeError(
-                f"{name} must be on device {self.device}; got {push_pull_cond.device}."
-            )
-        if torch.isnan(push_pull_cond).any():
-            raise RuntimeError(f"{name} contains NaNs.")
-        if torch.isinf(push_pull_cond).any():
-            raise RuntimeError(f"{name} contains Inf values.")
-        if torch.any(push_pull_cond < -1.0e-6) or torch.any(push_pull_cond > 1.0 + 1.0e-6):
-            raise RuntimeError(f"{name} must have values in [0, 1].")
-        row_sums = push_pull_cond.sum(dim=-1)
-        if not torch.allclose(row_sums, torch.ones_like(row_sums), atol=1.0e-5, rtol=1.0e-5):
-            raise RuntimeError(f"Every {name} row must sum to 1.0.")
-
     def _build_gt_push_pull_condition(self):
         if self.push_pull_family_one_hot is None:
             raise RuntimeError("Push/pull condition targets are not initialized.")
@@ -871,7 +847,6 @@ class Dagger:
 
         push_pull_cond = self.push_pull_family_one_hot[self.env_family_ids.long()]
         push_pull_cond = push_pull_cond.to(device=self.device, dtype=torch.float32)
-        self._validate_push_pull_condition(push_pull_cond)
         return push_pull_cond
 
     def _build_initial_predicted_push_pull_condition(self, num_envs):
@@ -913,7 +888,6 @@ class Dagger:
                 raise RuntimeError(
                     "Predicted push/pull conditioning requires push_pull_condition_buffer to be initialized."
                 )
-            self._validate_push_pull_condition(self.push_pull_condition_buffer, name="push_pull_condition_buffer")
             return self.push_pull_condition_buffer.clone()
         raise ValueError(f"Unsupported push_pull_condition.source '{self.push_pull_condition_source}'.")
 
@@ -937,7 +911,6 @@ class Dagger:
         wrong_condition[gt_is_push, 1] = wrong_confidence[gt_is_push]
         wrong_condition[~gt_is_push, 0] = wrong_confidence[~gt_is_push]
         wrong_condition[~gt_is_push, 1] = 1.0 - wrong_confidence[~gt_is_push]
-        self._validate_push_pull_condition(wrong_condition)
         return wrong_condition
 
     def _build_gt_push_pull_class_ids(self):
@@ -954,7 +927,6 @@ class Dagger:
             )
         mode_probs = torch.softmax(mode_logits, dim=-1)
         push_pull_cond = torch.stack([mode_probs[:, 1], mode_probs[:, 0]], dim=-1)
-        self._validate_push_pull_condition(push_pull_cond)
         return push_pull_cond
 
     def _record_push_pull_prediction_metrics(self, mode_logits):
@@ -985,17 +957,13 @@ class Dagger:
             return False
         return not self.play_policy
 
-    def _apply_push_pull_condition_perturb(self, push_pull_cond, step_id=None):
-        self._validate_push_pull_condition(push_pull_cond)
-
+    def _apply_push_pull_condition_perturb(self, push_pull_cond):
         perturb_active = self._is_push_pull_condition_perturb_active()
         self.latest_push_pull_perturb_to_push_count = 0
         self.latest_push_pull_perturb_to_pull_count = 0
         if not perturb_active:
             self.latest_fraction_push = float(push_pull_cond[:, 0].mean().detach().cpu().item())
             self.latest_fraction_pull = float(push_pull_cond[:, 1].mean().detach().cpu().item())
-            self._last_push_pull_perturb_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-            self._last_push_pull_perturb_step = -1 if step_id is None else int(step_id)
             return push_pull_cond
 
         # Fresh per-step, per-env Bernoulli sampling. No duration window or persistent mask is kept.
@@ -1015,9 +983,6 @@ class Dagger:
                 (perturbed_argmax[perturb_mask] == 1).sum().detach().cpu().item()
             )
 
-        self._validate_push_pull_condition(perturbed, name="perturbed_push_pull_cond")
-        self._last_push_pull_perturb_mask = perturb_mask.detach().clone()
-        self._last_push_pull_perturb_step = -1 if step_id is None else int(step_id)
         self.latest_fraction_push = float(perturbed[:, 0].mean().detach().cpu().item())
         self.latest_fraction_pull = float(perturbed[:, 1].mean().detach().cpu().item())
         return perturbed
@@ -1115,17 +1080,17 @@ class Dagger:
             prediction_leading_shape,
         )
 
-    def _get_direction_force_mask(self, prediction_leading_shape):
-        force_world = self._get_contact_sensor_force_tensor_world(self.force_prediction_sensor_name)
-        force_norm = torch.linalg.vector_norm(force_world, dim=-1)
-        force_mask = force_norm > self.direction_force_threshold
-        return self._align_env_tensor_to_prediction(force_mask, prediction_leading_shape, "direction_force_mask").reshape(-1).bool()
-
     def _get_direction_step_mask(self, rollout_step_ids):
-        # Force prediction still uses the existing rollout-step window. Mode prediction no longer does.
         return (
             (rollout_step_ids >= self.direction_loss_window_start)
             & (rollout_step_ids <= self.direction_loss_window_end)
+        )
+
+    def _get_direction_step_weights(self, rollout_step_ids):
+        return torch.where(
+            self._get_direction_step_mask(rollout_step_ids),
+            torch.ones_like(rollout_step_ids, dtype=torch.float32),
+            torch.full_like(rollout_step_ids, self.direction_loss_outside_window_weight, dtype=torch.float32),
         )
 
     def _update_direction_window_metrics(
@@ -1135,11 +1100,8 @@ class Dagger:
         direction_valid,
         active_mask,
         rollout_step_ids,
-        prediction_leading_shape,
     ):
-        del rollout_step_ids
-        force_mask = self._get_direction_force_mask(prediction_leading_shape)
-        window_mask = direction_valid & active_mask & force_mask
+        window_mask = direction_valid & active_mask & self._get_direction_step_mask(rollout_step_ids)
         direction_pred = mode_logits.argmax(dim=-1)
 
         push_label_mask = window_mask & (direction_target == 1)
@@ -1183,7 +1145,7 @@ class Dagger:
         if self.mode_family_direction_ids is None:
             raise RuntimeError("Mode prediction targets are not initialized.")
 
-        mode_logits, direction_target, direction_valid, active_mask, rollout_step_ids, prediction_leading_shape = (
+        mode_logits, direction_target, direction_valid, active_mask, rollout_step_ids, _ = (
             self._prepare_direction_prediction_tensors(mode_logits)
         )
         if not torch.any(direction_valid):
@@ -1195,16 +1157,17 @@ class Dagger:
             direction_valid,
             active_mask,
             rollout_step_ids,
-            prediction_leading_shape,
         )
 
-        force_mask = self._get_direction_force_mask(prediction_leading_shape)
-        valid_mask = direction_valid & active_mask & force_mask
+        valid_mask = direction_valid & active_mask
         if torch.any(valid_mask):
-            direction_loss = torch.nn.functional.cross_entropy(
+            per_sample_loss = torch.nn.functional.cross_entropy(
                 mode_logits[valid_mask],
                 direction_target[valid_mask],
+                reduction="none",
             )
+            step_weights = self._get_direction_step_weights(rollout_step_ids[valid_mask])
+            direction_loss = (per_sample_loss * step_weights).sum() / step_weights.sum().clamp_min(1.0e-6)
             direction_pred = mode_logits[valid_mask].argmax(dim=-1)
             direction_correct = (direction_pred == direction_target[valid_mask]).float()
             self.latest_mode_direction_acc = float(direction_correct.mean().detach().cpu().item())
@@ -1243,12 +1206,12 @@ class Dagger:
 
         rollout_step_ids = self._get_rollout_step_ids()
         active_mask = self._get_active_rollout_mask(rollout_step_ids)
-        step_mask = self._get_direction_step_mask(rollout_step_ids)
-        valid_mask = active_mask & step_mask
+        valid_mask = active_mask
         if not torch.any(valid_mask):
             loss = force_pred.mean() * 0.0
             self.latest_force_angle_deg = None
             return loss
+        step_weights = self._get_direction_step_weights(rollout_step_ids[valid_mask])
 
         target_dir = self._normalize_force_direction(force_target_raw)
         pred_dir = self._normalize_force_direction(force_pred)
@@ -1264,9 +1227,11 @@ class Dagger:
                 labels = torch.arange(pred_dir_valid.shape[0], device=self.device)
                 row_loss = torch.nn.functional.cross_entropy(logits, labels, reduction="none")
                 col_loss = torch.nn.functional.cross_entropy(logits.T, labels, reduction="none")
-                loss = 0.5 * (row_loss.mean() + col_loss.mean())
+                weighted_row_loss = (row_loss * step_weights).sum() / step_weights.sum().clamp_min(1.0e-6)
+                weighted_col_loss = (col_loss * step_weights).sum() / step_weights.sum().clamp_min(1.0e-6)
+                loss = 0.5 * (weighted_row_loss + weighted_col_loss)
             else:
-                loss = (1.0 - cosine_valid).mean()
+                loss = ((1.0 - cosine_valid) * step_weights).sum() / step_weights.sum().clamp_min(1.0e-6)
 
             angle_deg = torch.rad2deg(torch.acos(cosine_valid.clamp(-1.0 + 1.0e-6, 1.0 - 1.0e-6)))
             self.latest_force_angle_deg = float(angle_deg.mean().detach().cpu().item())
@@ -1277,7 +1242,7 @@ class Dagger:
                 ).mean(dim=-1)
             else:
                 per_env_loss = torch.nn.functional.mse_loss(force_pred, force_target_raw, reduction="none").mean(dim=-1)
-            loss = per_env_loss[valid_mask].mean()
+            loss = (per_env_loss[valid_mask] * step_weights).sum() / step_weights.sum().clamp_min(1.0e-6)
 
             cosine_all = torch.nn.functional.cosine_similarity(pred_dir, target_dir, dim=-1, eps=1.0e-8)
             angle_deg = torch.rad2deg(torch.acos(cosine_all.clamp(-1.0 + 1.0e-6, 1.0 - 1.0e-6)))
@@ -3638,6 +3603,13 @@ class Dagger:
         else:
             aux_input_vector = None
         aux_input_vector = self._maybe_drop_aux_feedback(aux_input_vector)
+        push_pull_cond = None
+        if self.push_pull_condition_enabled:
+            self.latest_push_pull_condition_source = self.push_pull_condition_source
+            # Oracle source uses GT one-hot. Predicted source uses the recurrent condition carried from the previous step.
+            push_pull_cond = self._build_push_pull_condition_from_source(self.push_pull_condition_source)
+            # Perturbation modifies only the condition input fed to the action policy, not labels or target actions.
+            push_pull_cond = self._apply_push_pull_condition_perturb(push_pull_cond)
 
         obs = OrderedDict()
         for key in self.state_encoders_keys:
@@ -3661,6 +3633,12 @@ class Dagger:
                 if aux_input_vector is None:
                     raise RuntimeError(f"Aux state '{key}' is enabled but aux input vector is unavailable.")
                 obs[key] = aux_input_vector[:, self.aux_state_specs[key]["slice"]]
+            elif key == self.push_pull_condition_obs_key:
+                if push_pull_cond is None:
+                    raise RuntimeError(
+                        f"Push/pull condition '{self.push_pull_condition_obs_key}' is enabled but unavailable."
+                    )
+                obs[key] = push_pull_cond
             else:
                 raise KeyError(f"Unsupported student state key '{key}' in config.")
 
@@ -3696,13 +3674,8 @@ class Dagger:
 
     def _student_forward(self, student_obs, iteration=None):
         base_obs = OrderedDict(student_obs)
-        self.latest_push_pull_condition_source = "disabled"
-        if self.push_pull_condition_enabled and self.push_pull_condition_obs_key in base_obs:
-            raise RuntimeError(
-                "Base student observations must not contain push_pull_cond; "
-                "the condition is selected after observation building."
-            )
         if not self.push_pull_condition_enabled:
+            self.latest_push_pull_condition_source = "disabled"
             self.latest_push_pull_perturb_to_push_count = 0
             self.latest_push_pull_perturb_to_pull_count = 0
             student_output = self.student_model_ddp(base_obs)
@@ -3710,17 +3683,7 @@ class Dagger:
                 self._record_push_pull_prediction_metrics(student_output["mode_logits"])
             return student_output
 
-        self.latest_push_pull_condition_source = self.push_pull_condition_source
-        # Oracle source uses GT one-hot. Predicted source uses the recurrent condition carried from the previous step.
-        push_pull_cond = self._build_push_pull_condition_from_source(self.push_pull_condition_source)
-        self._validate_push_pull_condition(push_pull_cond)
-
-        # Perturbation modifies only the condition input fed to the action policy, not labels or target actions.
-        push_pull_cond = self._apply_push_pull_condition_perturb(push_pull_cond, step_id=iteration)
-        action_obs = OrderedDict(base_obs)
-        action_obs[self.push_pull_condition_obs_key] = push_pull_cond
-        self._validate_push_pull_condition(action_obs[self.push_pull_condition_obs_key])
-        student_output = self.student_model_ddp(action_obs)
+        student_output = self.student_model_ddp(base_obs)
         if self.mode_prediction_enabled and "mode_logits" in student_output:
             self._record_push_pull_prediction_metrics(student_output["mode_logits"])
             # Recurrent predicted conditioning: timestep t consumes the current condition and writes the next one.
