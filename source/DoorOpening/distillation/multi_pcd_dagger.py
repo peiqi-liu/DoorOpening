@@ -264,6 +264,7 @@ class Dagger:
         self.push_pull_condition_source = "oracle"
         self.push_pull_detach_predicted_condition = True
         self.push_pull_family_one_hot = None
+        self.push_pull_condition_buffer = None
         self.latest_fraction_push = 0.0
         self.latest_fraction_pull = 0.0
         self.latest_push_pull_pred_entropy = 0.0
@@ -588,7 +589,6 @@ class Dagger:
         self.aux_buffer = None
         if self.has_aux_input:
             self.aux_buffer = torch.zeros((self.num_envs, self.aux_input_dim), dtype=torch.float32, device=self.device)
-        self.latest_aux_pregrasp_env_fraction = 0.0
         self.latest_aux_pregrasp_dropout_fraction = 0.0
         if student_ckpt is not None and self.has_aux_input and self.rank == 0:
             print(
@@ -874,6 +874,57 @@ class Dagger:
         self._validate_push_pull_condition(push_pull_cond)
         return push_pull_cond
 
+    def _build_initial_predicted_push_pull_condition(self, num_envs):
+        num_envs = int(num_envs)
+        initial_condition = torch.full(
+            (num_envs, 2),
+            0.5,
+            dtype=torch.float32,
+            device=self.device,
+        )
+        if initial_condition.ndim != 2 or initial_condition.shape != (num_envs, 2):
+            raise RuntimeError(
+                f"initial_push_pull_cond must have shape [{num_envs}, 2], got {tuple(initial_condition.shape)}."
+            )
+        return initial_condition
+
+    def _seed_push_pull_condition_buffer(self, env_ids=None):
+        if not self.push_pull_condition_enabled or self.push_pull_condition_source != "predicted":
+            self.push_pull_condition_buffer = None
+            return
+
+        if self.push_pull_condition_buffer is None:
+            self.push_pull_condition_buffer = self._build_initial_predicted_push_pull_condition(self.num_envs)
+
+        if env_ids is None:
+            self.push_pull_condition_buffer[:] = self._build_initial_predicted_push_pull_condition(self.num_envs)
+            return
+
+        if env_ids.numel() == 0:
+            return
+        self.push_pull_condition_buffer[env_ids] = self._build_initial_predicted_push_pull_condition(env_ids.numel())
+
+    def _get_recurrent_push_pull_condition(self):
+        if self.push_pull_condition_source == "oracle":
+            # Oracle source uses ground-truth one-hot each step.
+            return self._build_gt_push_pull_condition()
+        if self.push_pull_condition_source == "predicted":
+            if self.push_pull_condition_buffer is None:
+                raise RuntimeError(
+                    "Predicted push/pull conditioning requires push_pull_condition_buffer to be initialized."
+                )
+            self._validate_push_pull_condition(self.push_pull_condition_buffer, name="push_pull_condition_buffer")
+            return self.push_pull_condition_buffer.clone()
+        raise ValueError(f"Unsupported push_pull_condition.source '{self.push_pull_condition_source}'.")
+
+    def _update_push_pull_condition_buffer(self, mode_logits):
+        if self.push_pull_condition_source != "predicted":
+            return
+        # Recurrent push/pull conditioning is step-to-step state, not BPTT.
+        # The next-step condition must be a fixed value from the previous step.
+        next_push_pull_cond = self._mode_logits_to_push_pull_condition(mode_logits)
+        self.push_pull_condition_buffer = next_push_pull_cond.detach()
+
     def _sample_soft_wrong_push_pull_condition(self):
         gt_condition = self._build_gt_push_pull_condition()
         wrong_confidence = torch.empty(self.num_envs, dtype=torch.float32, device=self.device).uniform_(
@@ -920,17 +971,13 @@ class Dagger:
             (pred_class_ids == gt_class_ids).float().mean().detach().cpu().item()
         )
 
-    def _build_push_pull_condition_from_source(self, source, mode_logits=None):
+    def _build_push_pull_condition_from_source(self, source):
         source = str(source).lower()
         if source == "oracle":
-            # Oracle source uses the ground-truth push/pull one-hot condition.
             return self._build_gt_push_pull_condition()
         if source == "predicted":
-            # Predicted source uses softmax logits converted into [p_push, p_pull].
-            push_pull_cond = self._mode_logits_to_push_pull_condition(mode_logits)
-            if self.push_pull_detach_predicted_condition:
-                push_pull_cond = push_pull_cond.detach()
-            return push_pull_cond
+            # Predicted source uses the recurrent condition carried over from the previous step.
+            return self._get_recurrent_push_pull_condition()
         raise ValueError(f"Unsupported push_pull_condition.source '{source}'.")
 
     def _is_push_pull_condition_perturb_active(self):
@@ -1897,7 +1944,6 @@ class Dagger:
         return current_abs_aux
 
     def _maybe_drop_aux_feedback(self, aux_input_vector):
-        self.latest_aux_pregrasp_env_fraction = 0.0
         self.latest_aux_pregrasp_dropout_fraction = 0.0
         if aux_input_vector is None or not self.aux_feedback_to_policy or self.aux_pregrasp_dropout_prob <= 0.0:
             return aux_input_vector
@@ -1911,12 +1957,13 @@ class Dagger:
             return aux_input_vector
 
         pregrasp_mask = get_pregrasp_mask().to(device=self.device, dtype=torch.bool)
-        self.latest_aux_pregrasp_env_fraction = float(pregrasp_mask.float().mean().item())
         if not torch.any(pregrasp_mask):
             return aux_input_vector
 
         drop_mask = pregrasp_mask & torch.rand(self.num_envs, device=self.device).lt(self.aux_pregrasp_dropout_prob)
-        self.latest_aux_pregrasp_dropout_fraction = float(drop_mask.float().mean().item())
+        num_pregrasp = int(pregrasp_mask.sum().detach().cpu().item())
+        num_dropped = int(drop_mask.sum().detach().cpu().item())
+        self.latest_aux_pregrasp_dropout_fraction = float(num_dropped / num_pregrasp) if num_pregrasp > 0 else 0.0
         if not torch.any(drop_mask):
             return aux_input_vector
 
@@ -3649,7 +3696,6 @@ class Dagger:
 
     def _student_forward(self, student_obs, iteration=None):
         base_obs = OrderedDict(student_obs)
-        predicted_mode_logits = None
         self.latest_push_pull_condition_source = "disabled"
         if self.push_pull_condition_enabled and self.push_pull_condition_obs_key in base_obs:
             raise RuntimeError(
@@ -3665,25 +3711,8 @@ class Dagger:
             return student_output
 
         self.latest_push_pull_condition_source = self.push_pull_condition_source
-        if self.push_pull_condition_source == "predicted":
-            # Predicted source runs a first pass without the push/pull condition token.
-            prediction_output = self.student_model_ddp(
-                base_obs,
-                omit_state_keys=(self.push_pull_condition_obs_key,),
-            )
-            predicted_mode_logits = prediction_output.get("mode_logits")
-            if predicted_mode_logits is None:
-                raise RuntimeError(
-                    "push_pull_condition.source requires the student to produce mode_logits in the "
-                    "prediction-only pass."
-                )
-            self._record_push_pull_prediction_metrics(predicted_mode_logits)
-
-        # Oracle source uses GT one-hot; predicted source uses softmax logits converted into [p_push, p_pull].
-        push_pull_cond = self._build_push_pull_condition_from_source(
-            self.push_pull_condition_source,
-            mode_logits=predicted_mode_logits,
-        )
+        # Oracle source uses GT one-hot. Predicted source uses the recurrent condition carried from the previous step.
+        push_pull_cond = self._build_push_pull_condition_from_source(self.push_pull_condition_source)
         self._validate_push_pull_condition(push_pull_cond)
 
         # Perturbation modifies only the condition input fed to the action policy, not labels or target actions.
@@ -3692,12 +3721,10 @@ class Dagger:
         action_obs[self.push_pull_condition_obs_key] = push_pull_cond
         self._validate_push_pull_condition(action_obs[self.push_pull_condition_obs_key])
         student_output = self.student_model_ddp(action_obs)
-        if predicted_mode_logits is not None:
-            student_output = dict(student_output)
-            # Keep the push/pull supervision on the first-pass logits that generated the condition.
-            student_output["mode_logits"] = predicted_mode_logits
-        elif self.mode_prediction_enabled and "mode_logits" in student_output:
+        if self.mode_prediction_enabled and "mode_logits" in student_output:
             self._record_push_pull_prediction_metrics(student_output["mode_logits"])
+            # Recurrent predicted conditioning: timestep t consumes the current condition and writes the next one.
+            self._update_push_pull_condition_buffer(student_output["mode_logits"])
         return student_output
 
     def _compute_student_loss(self, student_output, teacher_actions, aux_target=None):
@@ -4145,7 +4172,6 @@ class Dagger:
             print("Last Local Update Batch Size:", self.last_local_update_batch_size)
             print("Last Global Update Batch Size:", self.last_global_update_batch_size)
             if self.aux_pregrasp_dropout_prob > 0.0:
-                print("Aux Pregrasp Env Fraction:", self.latest_aux_pregrasp_env_fraction)
                 print("Aux Pregrasp Dropout Fraction:", self.latest_aux_pregrasp_dropout_fraction)
             if episode_reward is not None:
                 print("Episode Reward:", episode_reward)
@@ -4216,17 +4242,14 @@ class Dagger:
         if episode_length_seconds is not None:
             metrics["stats/episode_length_seconds"] = episode_length_seconds
         if success_rate is not None:
-            metrics["stats/success_rate"] = success_rate
+            metrics["success/success_rate"] = success_rate
         for family_name, family_success_rate in family_success_rates.items():
             if family_success_rate is not None:
-                metrics[f"stats/success_rate/{family_name}"] = family_success_rate
+                metrics[f"success/success_rate/{family_name}"] = family_success_rate
         if teacher_forcing_beta is not None:
-            metrics["stats/teacher_forcing_beta"] = teacher_forcing_beta
-        metrics["stats/teacher_rollout_env_fraction"] = teacher_env_fraction
-        metrics["stats/student_rollout_env_fraction"] = student_env_fraction
-        if self.aux_pregrasp_dropout_prob > 0.0:
-            metrics["stats/aux_pregrasp_env_fraction"] = self.latest_aux_pregrasp_env_fraction
-            metrics["stats/aux_pregrasp_dropout_fraction"] = self.latest_aux_pregrasp_dropout_fraction
+            metrics["schedule/teacher_forcing_beta"] = teacher_forcing_beta
+        metrics["schedule/teacher_rollout_env_fraction"] = teacher_env_fraction
+        metrics["schedule/student_rollout_env_fraction"] = student_env_fraction
         if iteration_time_ms is not None:
             metrics["timing/iteration_ms"] = iteration_time_ms
         if self.latest_env_log_metrics:
@@ -4256,6 +4279,7 @@ class Dagger:
             self.temporal_current_time_s = self._iteration_to_time_s(start_iteration)
             self._seed_temporal_histories()
             self._seed_aux_buffer()
+            self._seed_push_pull_condition_buffer()
             self._resample_teacher_forcing_env_mask(self.resume_iteration)
 
             for iteration in range(start_iteration, end_iteration):
@@ -4346,6 +4370,7 @@ class Dagger:
                     self._resample_wall_distractors(done_mask)
                     self._seed_temporal_histories(done_mask)
                     self._seed_aux_buffer(done_mask)
+                    self._seed_push_pull_condition_buffer(done_mask)
                     self._resample_teacher_forcing_env_mask(iteration + 1, done_mask)
 
                 if total_loss is not None:
