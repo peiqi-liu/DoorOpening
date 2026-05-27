@@ -231,8 +231,6 @@ class Dagger:
         self.proprio_temporal_field_dims = OrderedDict()
         self.proprio_temporal_covered_state_keys = frozenset()
         self.observation_lag_enabled = False
-        self.observation_lag_apply_during_training = True
-        self.observation_lag_apply_during_eval = False
         self.observation_lag_apply_to_proprio = True
         self.observation_lag_apply_to_pointcloud = False
         self.observation_lag_per_env = True
@@ -660,8 +658,6 @@ class Dagger:
     def _init_observation_lag_state(self):
         cfg = dict(self.observation_lag_cfg or {})
         self.observation_lag_enabled = bool(cfg.get("enabled", False))
-        self.observation_lag_apply_during_training = bool(cfg.get("apply_during_training", True))
-        self.observation_lag_apply_during_eval = bool(cfg.get("apply_during_eval", False))
         self.observation_lag_max_jitter_ms = int(cfg.get("max_jitter_ms", 0))
         self.observation_lag_mode = str(cfg.get("mode", "symmetric")).lower()
         self.observation_lag_apply_to_proprio = bool(cfg.get("apply_to_proprio", True))
@@ -702,8 +698,6 @@ class Dagger:
 
         default_perturb_cfg = {
             "enabled": False,
-            "apply_during_training": False,
-            "apply_during_eval": True,
             "probability": 0.1,
             "wrong_class_confidence_range": [0.85, 0.95],
         }
@@ -713,12 +707,6 @@ class Dagger:
         merged_perturb_cfg.update(dict(self.push_pull_condition_perturb_cfg or {}))
         self.push_pull_condition_perturb_cfg = merged_perturb_cfg
         self.push_pull_condition_perturb_enabled = bool(merged_perturb_cfg.get("enabled", False))
-        self.push_pull_condition_perturb_apply_during_training = bool(
-            merged_perturb_cfg.get("apply_during_training", False)
-        )
-        self.push_pull_condition_perturb_apply_during_eval = bool(
-            merged_perturb_cfg.get("apply_during_eval", True)
-        )
         self.push_pull_condition_perturb_probability = float(merged_perturb_cfg.get("probability", 0.1))
         wrong_confidence_min, wrong_confidence_max = merged_perturb_cfg.get(
             "wrong_class_confidence_range",
@@ -948,9 +936,7 @@ class Dagger:
     def _is_push_pull_condition_perturb_active(self):
         if not self.push_pull_condition_perturb_enabled:
             return False
-        if not self.play_policy:
-            return self.push_pull_condition_perturb_apply_during_training
-        return self.push_pull_condition_perturb_apply_during_eval
+        return not self.play_policy
 
     def _apply_push_pull_condition_perturb(self, push_pull_cond, step_id=None):
         self._validate_push_pull_condition(push_pull_cond)
@@ -1420,9 +1406,7 @@ class Dagger:
     def _is_observation_lag_active(self):
         if not self.observation_lag_enabled or not self.observation_lag_apply_to_proprio:
             return False
-        if self.play_policy:
-            return self.observation_lag_apply_during_eval
-        return self.observation_lag_apply_during_training
+        return not self.play_policy
 
     def _merge_unique_offsets_s(self, *offset_sequences):
         merged = OrderedDict()

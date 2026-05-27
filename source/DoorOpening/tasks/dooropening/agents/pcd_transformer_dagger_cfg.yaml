@@ -39,7 +39,7 @@ temporal_obs:
 
 temporal_state_encoders:
   enabled: true
-  timestamps_ms: [0, 200, 400, 600, 800]
+  timestamps_ms: [0, 300, 600, 900, 1200, 1500]
   fields:
     - q_arm
     - q_hand
@@ -56,15 +56,11 @@ temporal_state_encoders:
 
 push_pull_condition_perturb:
   enabled: false
-  apply_during_training: false
-  apply_during_eval: false
   probability: 0.1
   wrong_class_confidence_range: [0.85, 0.95]
 
 observation_lag:
   enabled: true
-  apply_during_training: true
-  apply_during_eval: false
   max_jitter_ms: 100
   mode: symmetric
   apply_to_proprio: true
