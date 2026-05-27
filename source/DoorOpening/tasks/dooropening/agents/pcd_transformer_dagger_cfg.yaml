@@ -13,7 +13,7 @@ mode_prediction:
   weight: 0.01
   return_latent: true
 force_prediction:
-  enabled: false
+  enabled: true
   output_dim: 3
   weight: 0.01
 
@@ -38,6 +38,7 @@ proprio_temporal_encoder:
   enabled: true
   type: shared_mlp_time_embedding
   timestamps_ms: [0, 400, 800, 1200, 1600, 2000, 2400, 2800]
+  # timestamps_ms: [0, 200, 400, 600, 800]
   fields:
     - q_arm
     - q_hand

@@ -166,9 +166,9 @@ def create_door_cfg(
 
 root_path = os.path.dirname(os.path.dirname(__file__))
 asset_base_folder = os.path.join(root_path, "door")
-DOOR_FAMILY_NAMES = ["PartNetv9", "PartNetv10", "PartNetv11", "PartNetv12"]
+# DOOR_FAMILY_NAMES = ["PartNetv9", "PartNetv10", "PartNetv11", "PartNetv12"]
 # DOOR_FAMILY_NAMES = ["PartNetv5_plus"]
-# DOOR_FAMILY_NAMES = ["PartNetv5_plus", "PartNetv6_plus", "PartNetv7_plus", "PartNetv8_plus"]
+DOOR_FAMILY_NAMES = ["PartNetv5_plus", "PartNetv6_plus", "PartNetv7_plus", "PartNetv8_plus"]
 door_family_base_folders = OrderedDict(
     (family_name, os.path.join(asset_base_folder, family_name))
     for family_name in DOOR_FAMILY_NAMES
