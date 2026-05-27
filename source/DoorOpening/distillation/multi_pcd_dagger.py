@@ -4194,12 +4194,12 @@ class Dagger:
             metrics["stats/filtered_handle_force_norm_mean"] = self.latest_filtered_handle_force_norm_mean
             metrics["stats/filtered_handle_force_norm_max"] = self.latest_filtered_handle_force_norm_max
         if self.observation_lag_enabled:
-            metrics["stats/obs_lag_enabled"] = self.latest_obs_lag_enabled
-            metrics["stats/obs_lag_mean_ms"] = self.latest_obs_lag_mean_ms
-            metrics["stats/obs_lag_min_ms"] = self.latest_obs_lag_min_ms
-            metrics["stats/obs_lag_max_ms"] = self.latest_obs_lag_max_ms
+            metrics["timestamp/obs_lag_enabled"] = self.latest_obs_lag_enabled
+            metrics["timestamp/obs_lag_mean_ms"] = self.latest_obs_lag_mean_ms
+            metrics["timestamp/obs_lag_min_ms"] = self.latest_obs_lag_min_ms
+            metrics["timestamp/obs_lag_max_ms"] = self.latest_obs_lag_max_ms
             for timestamp_ms, mean_age_ms in self.latest_obs_lag_effective_age_ms_by_timestamp.items():
-                metrics[f"stats/obs_lag_effective_age_{timestamp_ms}ms"] = mean_age_ms
+                metrics[f"timestamp/obs_lag_effective_age_{timestamp_ms}ms"] = mean_age_ms
         if self.push_pull_condition_enabled:
             metrics["stats/push_pull_condition_source"] = self.latest_push_pull_condition_source
             metrics["stats/fraction_push"] = self.latest_fraction_push
