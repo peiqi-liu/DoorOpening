@@ -14,7 +14,7 @@ mode_prediction:
   force_threshold: 5.0
   return_latent: true
 force_prediction:
-  enabled: true
+  enabled: false
   output_dim: 3
   weight: 0.01
 
@@ -55,7 +55,7 @@ temporal_state_encoders:
   add_time_embedding: true
 
 push_pull_condition_perturb:
-  enabled: false
+  enabled: true
   probability: 0.1
   wrong_class_confidence_range: [0.85, 0.95]
 
