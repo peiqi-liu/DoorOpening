@@ -650,6 +650,20 @@ from pathlib import Path
 import open3d as o3d
 from typing import Sequence, Union
 from geometrout.primitive import Cuboid, Cylinder, Sphere
+
+
+def _quat_apply_wxyz(quat: torch.Tensor, points: torch.Tensor) -> torch.Tensor:
+    """Rotate batched points by batched wxyz quaternions without IsaacLab deps."""
+
+    if points.numel() == 0:
+        return points
+    quat = quat.to(device=points.device, dtype=points.dtype)
+    quat = quat / quat.norm(dim=-1, keepdim=True).clamp_min(1.0e-8)
+    q_xyz = quat[..., 1:]
+    q_w = quat[..., :1]
+    uv = torch.cross(q_xyz, points, dim=-1)
+    uuv = torch.cross(q_xyz, uv, dim=-1)
+    return points + 2.0 * (q_w * uv + uuv)
 # from isaacgymenvs.utils.geometry import ObjaMesh
 # from isaacgymenvs.utils.torch_urdf import TorchURDF
 
@@ -1260,6 +1274,99 @@ class FrankaLeapSampler:
             return pc
         idx = np.random.choice(pc.shape[1], num_points, replace=False)
         return pc[:, idx, :]
+
+
+def build_first_visual_link_pointcloud_cache(sampler, link_names=None, device=None):
+    """
+    Precompute each link's sampled point cloud in the link frame at zero joint state.
+
+    This matches the sampler's existing first-visual transform assumption so callers can
+    reuse the same semantics while avoiding repeated FK-based point transforms at runtime.
+    """
+    device = sampler.device if device is None else device
+    if link_names is None:
+        link_names = [link.name for link in sampler.links]
+
+    zero_joint = torch.zeros(
+        (1, len(sampler.robot.actuated_joints)),
+        dtype=torch.float32,
+        device=device,
+    )
+    link_fk = sampler.robot.link_fk_batch(zero_joint, use_names=True)
+    visual_fk = sampler.robot.visual_geometry_fk_batch(zero_joint)
+
+    link_points = {}
+    for link_name in link_names:
+        link = next((candidate for candidate in sampler.links if candidate.name == link_name), None)
+        if link is None:
+            link_points[link_name] = torch.zeros((0, 3), dtype=torch.float32, device=device)
+            continue
+        if link_name not in sampler.points or link_name not in link_fk:
+            link_points[link_name] = torch.zeros((0, 3), dtype=torch.float32, device=device)
+            continue
+        if not link.visuals:
+            link_points[link_name] = torch.zeros((0, 3), dtype=torch.float32, device=device)
+            continue
+
+        link_to_base = link_fk[link_name]
+        base_to_link = torch.linalg.inv(link_to_base)
+        first_visual_geometry = link.visuals[0].geometry
+        if first_visual_geometry not in visual_fk:
+            link_points[link_name] = torch.zeros((0, 3), dtype=torch.float32, device=device)
+            continue
+
+        points = sampler.points[link_name].to(device=device, dtype=torch.float32)
+        visual_to_base = visual_fk[first_visual_geometry]
+        visual_to_link = torch.matmul(base_to_link, visual_to_base)
+        hom_points = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
+        link_points[link_name] = (
+            torch.matmul(visual_to_link, hom_points.transpose(1, 2))[:, :3]
+            .transpose(1, 2)
+            .squeeze(0)
+            .contiguous()
+        )
+    return link_points
+
+
+def compose_cached_link_pointcloud_world(link_points_by_name, link_pos_w_by_name, link_quat_w_by_name, num_points=None):
+    """
+    Compose a batched world-frame point cloud from cached per-link local points and live body poses.
+    """
+    pcd_parts = []
+    batch_size = None
+    device = None
+    dtype = None
+    for link_name, link_points in link_points_by_name.items():
+        if link_points is None or link_points.numel() == 0:
+            continue
+        if link_name not in link_pos_w_by_name or link_name not in link_quat_w_by_name:
+            continue
+        link_pos_w = link_pos_w_by_name[link_name]
+        link_quat_w = link_quat_w_by_name[link_name]
+        if batch_size is None:
+            batch_size = int(link_pos_w.shape[0])
+            device = link_pos_w.device
+            dtype = link_pos_w.dtype
+        expanded_points = link_points.unsqueeze(0).expand(link_pos_w.shape[0], -1, -1)
+        expanded_quat = link_quat_w.unsqueeze(1).expand(-1, expanded_points.shape[1], -1)
+        pcd_parts.append(_quat_apply_wxyz(expanded_quat, expanded_points) + link_pos_w.unsqueeze(1))
+
+    if not pcd_parts:
+        if batch_size is None:
+            raise RuntimeError("compose_cached_link_pointcloud_world requires at least one valid posed link.")
+        return torch.zeros((batch_size, 0, 3), dtype=dtype, device=device)
+
+    pcd_world = torch.cat(pcd_parts, dim=1)
+    if num_points is not None and pcd_world.shape[1] != int(num_points):
+        sample_idx = torch.linspace(
+            0,
+            pcd_world.shape[1] - 1,
+            steps=int(num_points),
+            device=pcd_world.device,
+            dtype=torch.float32,
+        ).round().to(dtype=torch.long)
+        pcd_world = pcd_world[:, sample_idx]
+    return pcd_world
 
 def sample_pointcloud(urdf_path, joint_angles, device = "cuda", verbose = False):
     if not isinstance(joint_angles, torch.Tensor):

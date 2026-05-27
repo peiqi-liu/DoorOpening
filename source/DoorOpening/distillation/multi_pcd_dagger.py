@@ -35,7 +35,11 @@ from DoorOpening.utils.camera_utils import (
     simulate_depth_cam_render_from_pose,
     simulate_lidar_render_from_pose,
 )
-from DoorOpening.utils.extract_pointcloud_from_articulation import FrankaLeapSampler
+from DoorOpening.utils.extract_pointcloud_from_articulation import (
+    FrankaLeapSampler,
+    build_first_visual_link_pointcloud_cache,
+    compose_cached_link_pointcloud_world,
+)
 from DoorOpening.utils.glorbot_collision_checker import GlorbotCollisionChecker
 from DoorOpening.utils.pose_utils import world_to_local
 from DoorOpening.utils.viser_pt import (
@@ -163,7 +167,6 @@ class Dagger:
         self.lidar_occlusion_eps_rel = float(self.lidar_render_cfg.get("occlusion_eps_rel", 0.01))
         self.lidar_jitter_std_m = float(self.lidar_render_cfg.get("jitter_std_m", 0.001))
         self.lidar_use_compile = bool(self.lidar_render_cfg.get("use_compile", True))
-        self.use_sim_body_pose_door_pcd = bool(self.runtime_cfg.get("use_sim_body_pose_door_pcd", False))
         self.robot_pointcloud_filter_cfg = dict(self.runtime_cfg.get("robot_pointcloud_filter", {}))
         self.robot_pointcloud_filter_enabled = bool(self.robot_pointcloud_filter_cfg.get("enabled", True))
         self.robot_pointcloud_sdf_cutoff = float(self.robot_pointcloud_filter_cfg.get("sdf_cutoff", 0.02))
@@ -2032,7 +2035,7 @@ class Dagger:
             for idx in unique_asset_idx
         }
         self.door_link_pointclouds = {
-            idx: self._build_door_link_pointcloud_cache(sampler)
+            idx: build_first_visual_link_pointcloud_cache(sampler, link_names=("link_1", "link_2"), device=self.device)
             for idx, sampler in self.door_samplers.items()
         }
         if self.robot_pcd_num_points is None:
@@ -2044,6 +2047,13 @@ class Dagger:
         self.robot_sampler_joint_ids = torch.tensor(robot_joint_ids, device=self.device, dtype=torch.long)
         robot_joint_name_to_idx = {name: idx for idx, name in enumerate(robot_joint_names)}
         self.robot_sampler_joint_reorder = [robot_joint_name_to_idx[name] for name in robot_sampler_joint_names]
+        self.robot_link_pointclouds = build_first_visual_link_pointcloud_cache(self.robot_sampler, device=self.device)
+        self.robot_sampler_body_indices = {}
+        for link_name in self.robot_link_pointclouds.keys():
+            body_ids = self.ov_env.robot.find_bodies(link_name)[0]
+            if len(body_ids) == 0:
+                continue
+            self.robot_sampler_body_indices[link_name] = int(body_ids[0])
         self.robot_collision_checker = None
         self.robot_collision_checker_base_joint_indices = []
         if self.robot_pointcloud_filter_enabled:
@@ -2060,7 +2070,6 @@ class Dagger:
 
         self.robot_base_body_idx = int(self.ov_env._robot_base_body_link_idx)
         self.robot_palm_body_idx = int(self.ov_env._robot_key_body_idx[self.ov_env._robot_palm_id_in_key_body_idx])
-        self.robot_root_body_idx = int(self.ov_env._robot_base_link_idx[0])
         self.door_base_body_idx = int(self.ov_env._door_base_link_idx)
         self.door_link_body_indices = {
             link_name: int(self.ov_env._door_body_idx[self.ov_env.door_body_names.index(link_name)])
@@ -3138,15 +3147,18 @@ class Dagger:
         self._wall_distractor_local_points[env_ids] = self._sample_wall_pointcloud_local(env_ids=env_ids)
 
     def _sample_robot_pointcloud_world_sampler(self):
-        robot_joint_pos = self.ov_env.robot.data.joint_pos[:, self.robot_sampler_joint_ids]
-        robot_joint_pos = robot_joint_pos[:, self.robot_sampler_joint_reorder]
-        robot_local_pcd = self.robot_sampler.sample(robot_joint_pos)
-        # The URDF sampler already applies the mobile-base joints (base_x/base_y/base_rotation),
-        # so these points live in the URDF root frame, not the tidybot chassis frame.
-        robot_root_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_root_body_idx]
-        robot_root_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_root_body_idx]
-        quat = robot_root_quat_w.unsqueeze(1).expand(-1, robot_local_pcd.shape[1], -1)
-        return quat_apply(quat, robot_local_pcd) + robot_root_pos_w.unsqueeze(1)
+        return compose_cached_link_pointcloud_world(
+            link_points_by_name=self.robot_link_pointclouds,
+            link_pos_w_by_name={
+                link_name: self.ov_env.robot.data.body_pos_w[:, body_idx]
+                for link_name, body_idx in self.robot_sampler_body_indices.items()
+            },
+            link_quat_w_by_name={
+                link_name: self.ov_env.robot.data.body_quat_w[:, body_idx]
+                for link_name, body_idx in self.robot_sampler_body_indices.items()
+            },
+            num_points=self.robot_pcd_num_points,
+        )
 
     def _sample_robot_pointcloud_base_sampler(self):
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
@@ -3202,39 +3214,6 @@ class Dagger:
         quat = door_base_quat_w.unsqueeze(1).expand(-1, wall_points_base.shape[1], -1)
         return quat_apply(quat, wall_points_base) + door_base_pos_w.unsqueeze(1)
 
-    def _build_door_link_pointcloud_cache(self, sampler):
-        zero_joint = torch.zeros(
-            (1, len(sampler.robot.actuated_joints)),
-            dtype=torch.float32,
-            device=self.device,
-        )
-        link_fk = sampler.robot.link_fk_batch(zero_joint, use_names=True)
-        visual_fk = sampler.robot.visual_geometry_fk_batch(zero_joint)
-        link_points = {}
-        for link_name in ("link_1", "link_2"):
-            link = next((candidate for candidate in sampler.links if candidate.name == link_name), None)
-            if link is None:
-                link_points[link_name] = torch.zeros((0, 3), dtype=torch.float32, device=self.device)
-                continue
-
-            link_to_base = link_fk[link_name]
-            base_to_link = torch.linalg.inv(link_to_base)
-            first_visual_geometry = link.visuals[0].geometry
-            if first_visual_geometry not in visual_fk:
-                link_points[link_name] = torch.zeros((0, 3), dtype=torch.float32, device=self.device)
-                continue
-            points = sampler.points[link_name]
-            visual_to_base = visual_fk[first_visual_geometry]
-            visual_to_link = torch.matmul(base_to_link, visual_to_base)
-            hom_points = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
-            link_points[link_name] = (
-                torch.matmul(visual_to_link, hom_points.transpose(1, 2))[:, :3]
-                .transpose(1, 2)
-                .squeeze(0)
-                .contiguous()
-            )
-        return link_points
-
     def _sample_cached_door_pointcloud_world(self):
         door_pcd_world = torch.zeros(
             (self.num_envs, self.door_pcd_num_points, 3),
@@ -3247,32 +3226,31 @@ class Dagger:
                 env_ids = torch.nonzero(self.env_asset_idx == asset_idx, as_tuple=False).squeeze(-1)
             if env_ids.numel() == 0:
                 continue
-
-            pcd_parts = []
-            for link_name in ("link_1", "link_2"):
-                link_points = link_points_by_name.get(link_name)
-                if link_points is None or link_points.numel() == 0:
-                    continue
-                body_idx = self.door_link_body_indices[link_name]
-                link_pos_w = self.ov_env.door.data.body_pos_w[env_ids, body_idx]
-                link_quat_w = self.ov_env.door.data.body_quat_w[env_ids, body_idx]
-                expanded_points = link_points.unsqueeze(0).expand(env_ids.numel(), -1, -1)
-                expanded_quat = link_quat_w.unsqueeze(1).expand(-1, expanded_points.shape[1], -1)
-                pcd_parts.append(quat_apply(expanded_quat, expanded_points) + link_pos_w.unsqueeze(1))
-
-            if pcd_parts:
-                asset_pcd_world = torch.cat(pcd_parts, dim=1)
-                if asset_pcd_world.shape[1] != self.door_pcd_num_points:
-                    sample_idx = torch.linspace(
-                        0,
-                        asset_pcd_world.shape[1] - 1,
-                        steps=self.door_pcd_num_points,
-                        device=self.device,
-                        dtype=torch.float32,
-                    ).round().to(dtype=torch.long)
-                    asset_pcd_world = asset_pcd_world[:, sample_idx]
-                door_pcd_world[env_ids] = asset_pcd_world
+            asset_pcd_world = compose_cached_link_pointcloud_world(
+                link_points_by_name=link_points_by_name,
+                link_pos_w_by_name={
+                    link_name: self.ov_env.door.data.body_pos_w[env_ids, self.door_link_body_indices[link_name]]
+                    for link_name in ("link_1", "link_2")
+                    if link_name in self.door_link_body_indices
+                },
+                link_quat_w_by_name={
+                    link_name: self.ov_env.door.data.body_quat_w[env_ids, self.door_link_body_indices[link_name]]
+                    for link_name in ("link_1", "link_2")
+                    if link_name in self.door_link_body_indices
+                },
+                num_points=self.door_pcd_num_points,
+            )
+            door_pcd_world[env_ids] = asset_pcd_world
         return door_pcd_world
+
+    def _sample_scene_pointcloud_world_cached(self):
+        door_pcd_world = self._sample_cached_door_pointcloud_world()
+        robot_pcd_world = self._sample_robot_pointcloud_world_sampler()
+        scene_parts = [door_pcd_world, robot_pcd_world]
+        wall_pcd_world = self._sample_wall_pointcloud_world()
+        if wall_pcd_world.shape[1] > 0:
+            scene_parts.append(wall_pcd_world)
+        return torch.cat(scene_parts, dim=1)
 
     def _sample_scene_pointcloud_world_sampler(self):
         door_base_pos_w = self.ov_env.door.data.body_pos_w[:, self.door_base_body_idx]
@@ -3317,21 +3295,6 @@ class Dagger:
             use_compile=self.lidar_use_compile,
         )
         return world_to_local(rendered_pcd_world, robot_base_pos_w, robot_base_quat_w)
-
-    def _sample_door_pointcloud_base_from_sim_body_pose(self):
-        robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
-        robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
-        door_pcd_world = self._sample_cached_door_pointcloud_world()
-
-        robot_pcd_world = self._sample_robot_pointcloud_world_sampler()
-        scene_parts = [door_pcd_world, robot_pcd_world]
-        wall_pcd_world = self._sample_wall_pointcloud_world()
-        if wall_pcd_world.shape[1] > 0:
-            scene_parts.append(wall_pcd_world)
-        scene_pcd_world = torch.cat(scene_parts, dim=1)
-        if self.viser_raw_enabled:
-            self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(scene_pcd_world)
-        return self._render_lidar_scene_pointcloud_base(scene_pcd_world, robot_base_pos_w, robot_base_quat_w)
 
     def _sample_door_pointcloud_base_sampler(self):
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
@@ -3391,7 +3354,7 @@ class Dagger:
     def _sample_door_pointcloud_base_lidar(self):
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
-        gt_scene_pcd_world = self._sample_scene_pointcloud_world_sampler()
+        gt_scene_pcd_world = self._sample_scene_pointcloud_world_cached()
         if self.viser_raw_enabled:
             self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(gt_scene_pcd_world)
 
@@ -3403,8 +3366,6 @@ class Dagger:
             door_pcd_base = self._sample_door_pointcloud_base_sampler()
         elif self.pointcloud_source == "depth":
             door_pcd_base = self._sample_door_pointcloud_base_depth()
-        elif self.use_sim_body_pose_door_pcd:
-            door_pcd_base = self._sample_door_pointcloud_base_from_sim_body_pose()
         else:
             door_pcd_base = self._sample_door_pointcloud_base_lidar()
         door_pcd_base = self._filter_robot_points_base(door_pcd_base)
@@ -3633,14 +3594,15 @@ class Dagger:
                 if aux_input_vector is None:
                     raise RuntimeError(f"Aux state '{key}' is enabled but aux input vector is unavailable.")
                 obs[key] = aux_input_vector[:, self.aux_state_specs[key]["slice"]]
-            elif key == self.push_pull_condition_obs_key:
-                if push_pull_cond is None:
-                    raise RuntimeError(
-                        f"Push/pull condition '{self.push_pull_condition_obs_key}' is enabled but unavailable."
-                    )
-                obs[key] = push_pull_cond
             else:
                 raise KeyError(f"Unsupported student state key '{key}' in config.")
+
+        if self.push_pull_condition_enabled:
+            if push_pull_cond is None:
+                raise RuntimeError(
+                    f"Push/pull condition '{self.push_pull_condition_obs_key}' is enabled but unavailable."
+                )
+            obs[self.push_pull_condition_obs_key] = push_pull_cond
 
         if self.proprio_temporal_enabled:
             if self.proprio_temporal_obs_key is None:
