@@ -865,6 +865,28 @@ class DooropeningEnv(DirectRLEnv):
         )
         return student_joint_pos
 
+    def get_student_base_joint_vel_obs(self, use_noise: bool = False) -> torch.Tensor:
+        base_joint_vel = self.robot.data.joint_vel[:, self._robot_base_dof_idx]
+        if not use_noise:
+            return base_joint_vel
+
+        noisy_base_joint_vel = base_joint_vel.clone()
+        noisy_base_joint_vel[:, self._target_base_rot_slice] = self._uniform_noise_from_buffers(
+            noisy_base_joint_vel[:, self._target_base_rot_slice],
+            width_buffers=self.robot_state_noise_widths,
+            width_key="base_rot_joint_vel_noise",
+            bias_buffers=self.robot_state_biases,
+            bias_key="base_rot_joint_vel_bias",
+        )
+        noisy_base_joint_vel[:, self._target_base_xy_slice] = self._uniform_noise_from_buffers(
+            noisy_base_joint_vel[:, self._target_base_xy_slice],
+            width_buffers=self.robot_state_noise_widths,
+            width_key="base_xy_joint_vel_noise",
+            bias_buffers=self.robot_state_biases,
+            bias_key="base_xy_joint_vel_bias",
+        )
+        return noisy_base_joint_vel
+
     def _apply_spawn_noise(self, env_ids: torch.Tensor):
         # Reset disturbance is applied around the reference motion state, with separate scales for base, arm, and fingers.
         base_xy_noise = self.robot_spawn_noise_widths["base_xy_joint_pos_noise"][env_ids] * (

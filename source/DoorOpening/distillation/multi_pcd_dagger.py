@@ -261,11 +261,21 @@ class Dagger:
         self.latest_student_proprio_vector = None
         self.latest_aux_input_vector = None
         self.latest_aux_target_vector = None
-        self.oracle_push_pull_enabled = False
-        self.oracle_push_pull_obs_key = "push_pull_cond"
-        self.oracle_push_pull_family_one_hot = None
+        self.push_pull_condition_enabled = False
+        self.push_pull_condition_obs_key = "push_pull_cond"
+        self.push_pull_condition_source = "oracle"
+        self.push_pull_detach_predicted_condition = True
+        self.push_pull_family_one_hot = None
         self.latest_fraction_push = 0.0
         self.latest_fraction_pull = 0.0
+        self.latest_push_pull_pred_entropy = 0.0
+        self.latest_push_pull_pred_acc = None
+        self.latest_push_pull_condition_source = "disabled"
+        self.latest_push_pull_perturb_to_push_count = 0
+        self.latest_push_pull_perturb_to_pull_count = 0
+        self._last_push_pull_perturb_mask = None
+        self._last_push_pull_perturb_step = -1
+        self._logged_temporal_state_input_keys = False
         self._timing_stats = {"sum_ms": 0.0, "count": 0}
         self.logged_env_metric_prefixes = ("dr/", "dr_limit/", "dr_sample/", "reset/")
         self.latest_env_log_metrics = {}
@@ -275,7 +285,6 @@ class Dagger:
         self._init_student()
         self._init_history_buffers()
         self._init_pointcloud_assets()
-        self._init_twin_student_action_replay()
         self._init_viser_debug_tools()
 
     def _init_teacher(self):
@@ -365,12 +374,13 @@ class Dagger:
         student_cfg_data = self.load_yaml(cfg_path) or {}
         if not isinstance(student_cfg_data, dict):
             raise ValueError(f"Student config at '{cfg_path}' must be a YAML mapping.")
-        student_cfg_data.pop("dagger", None)
+        student_yaml_runtime_cfg = dict(student_cfg_data.pop("dagger", {}) or {})
         self.local_pcd_range = list(student_cfg_data.pop("local_pcd_range", [1.0, 0.35, 0.35]))
         self.local_pcd_x_direction_cutoff = student_cfg_data.pop("x_direction_cutoff", -0.5)
         self.door_pcd_num_points = int(student_cfg_data.pop("door_pcd_num_points", 4096))
         self.temporal_obs_cfg = dict(student_cfg_data.pop("temporal_obs", {}) or {})
         self.observation_lag_cfg = dict(student_cfg_data.pop("observation_lag", {}) or {})
+        self.push_pull_condition_perturb_cfg = dict(student_cfg_data.pop("push_pull_condition_perturb", {}) or {})
         self.temporal_history_s = float(self.temporal_obs_cfg.get("history_s", 0.0))
         self.temporal_obs_delay_range_s = self.temporal_obs_cfg.get("obs_delay_s", [0.0, 0.0])
         self.temporal_command_delay_range_s = self.temporal_obs_cfg.get("command_delay_s", [0.0, 0.0])
@@ -381,30 +391,82 @@ class Dagger:
             if not str(key).startswith("_")
         }
         self.student_model = PCDTransformer(**student_model_kwargs).to(self.device)
-        self.oracle_push_pull_enabled = bool(
-            getattr(self.student_model, "oracle_push_pull_condition_enabled", False)
+        self.push_pull_condition_enabled = bool(getattr(self.student_model, "push_pull_condition_enabled", False))
+        self.push_pull_condition_obs_key = str(
+            getattr(self.student_model, "push_pull_condition_obs_key", "push_pull_cond")
         )
-        self.oracle_push_pull_obs_key = str(
-            getattr(self.student_model, "oracle_push_pull_obs_key", "push_pull_cond")
+        self.push_pull_condition_source = str(
+            getattr(self.student_model, "push_pull_condition_source", "oracle")
+        ).lower()
+        self.push_pull_detach_predicted_condition = bool(
+            getattr(self.student_model, "push_pull_detach_predicted_condition", True)
         )
-        self.proprio_temporal_enabled = bool(getattr(self.student_model, "proprio_temporal_enabled", False))
-        self.proprio_temporal_obs_key = getattr(self.student_model, "proprio_temporal_obs_key", None)
+        self.push_pull_condition_cfg = dict(getattr(self.student_model, "push_pull_condition_cfg", {}) or {})
+        self.proprio_temporal_enabled = bool(
+            getattr(
+                self.student_model,
+                "temporal_state_enabled",
+                getattr(self.student_model, "proprio_temporal_enabled", False),
+            )
+        )
+        self.proprio_temporal_obs_key = getattr(
+            self.student_model,
+            "temporal_state_obs_key",
+            getattr(self.student_model, "proprio_temporal_obs_key", None),
+        )
         self.proprio_temporal_timestamps_ms = tuple(
-            int(timestamp) for timestamp in getattr(self.student_model, "proprio_temporal_timestamps_ms", ())
+            int(timestamp)
+            for timestamp in getattr(
+                self.student_model,
+                "temporal_state_timestamps_ms",
+                getattr(self.student_model, "proprio_temporal_timestamps_ms", ()),
+            )
         )
         self.proprio_temporal_timestamps_s = tuple(float(timestamp) / 1000.0 for timestamp in self.proprio_temporal_timestamps_ms)
         self.proprio_temporal_fields = tuple(
-            str(field) for field in getattr(self.student_model, "proprio_temporal_fields", ())
+            str(field)
+            for field in getattr(
+                self.student_model,
+                "temporal_state_fields",
+                getattr(self.student_model, "proprio_temporal_fields", ()),
+            )
         )
         self.proprio_temporal_field_state_keys = OrderedDict(
-            getattr(self.student_model, "proprio_temporal_field_state_keys", OrderedDict())
+            getattr(
+                self.student_model,
+                "temporal_state_field_state_keys",
+                getattr(self.student_model, "proprio_temporal_field_state_keys", OrderedDict()),
+            )
+        )
+        self.proprio_temporal_field_obs_keys = OrderedDict(
+            getattr(
+                self.student_model,
+                "temporal_state_field_obs_keys",
+                getattr(self.student_model, "proprio_temporal_field_obs_keys", OrderedDict()),
+            )
         )
         self.proprio_temporal_field_dims = OrderedDict(
             (str(key), int(value))
-            for key, value in getattr(self.student_model, "proprio_temporal_field_dims", OrderedDict()).items()
+            for key, value in getattr(
+                self.student_model,
+                "temporal_state_field_dims",
+                getattr(self.student_model, "proprio_temporal_field_dims", OrderedDict()),
+            ).items()
         )
         self.proprio_temporal_covered_state_keys = frozenset(
-            getattr(self.student_model, "proprio_temporal_covered_state_keys", frozenset())
+            getattr(
+                self.student_model,
+                "temporal_state_covered_state_keys",
+                getattr(self.student_model, "proprio_temporal_covered_state_keys", frozenset()),
+            )
+        )
+        self.temporal_state_uses_field_shared_encoders = bool(
+            getattr(self.student_model, "temporal_state_uses_field_shared_encoders", False)
+        )
+        self.temporal_state_input_obs_keys = tuple(
+            obs_key
+            for obs_keys in self.proprio_temporal_field_obs_keys.values()
+            for obs_key in obs_keys
         )
         self.mode_prediction_enabled = bool(getattr(self.student_model, "mode_prediction_enabled", False))
         self.mode_weight = float(getattr(self.student_model, "mode_weight", 0.0))
@@ -416,9 +478,10 @@ class Dagger:
             raise ValueError(
                 f"Student action_dim ({self.student_model.action_head.out_features}) "
                 f"does not match env action dim ({self.num_actions})."
-            )
+        )
         self._init_force_prediction_training_state()
         self._init_mode_prediction_training_state()
+        self._init_push_pull_condition_runtime_state(student_yaml_runtime_cfg)
 
         # print(self.student_model)
         # print("state_encoders_cfg", self.student_model.state_encoders_cfg)
@@ -449,7 +512,7 @@ class Dagger:
         self.state_encoders_keys = tuple(
             key
             for key in all_state_encoder_keys
-            if key not in self.proprio_temporal_covered_state_keys
+            if key not in self.proprio_temporal_covered_state_keys and key != self.push_pull_condition_obs_key
         )
         self.pcd_encoders_keys = tuple(
             key
@@ -490,10 +553,13 @@ class Dagger:
             )
         if student_ckpt is not None and self.proprio_temporal_enabled and self.rank == 0:
             print(
-                "Warning: student checkpoint was loaded while the shared proprio_temporal_encoder is enabled. "
-                "Legacy timestamp-specific state encoders are replaced by a shared temporal encoder; "
+                "Warning: student checkpoint was loaded while temporal_state_encoders are enabled. "
+                "Timestamp-specific state encoders are replaced by shared per-field temporal encoders; "
                 "checkpoint loading is non-strict and may leave new temporal weights to train from scratch."
             )
+        if self.rank == 0 and self.proprio_temporal_enabled and self.temporal_state_input_obs_keys and not self._logged_temporal_state_input_keys:
+            print("[INFO] temporal_state_encoders consume state keys:", ", ".join(self.temporal_state_input_obs_keys))
+            self._logged_temporal_state_input_keys = True
 
         self.aux_state_specs = OrderedDict()
         self.aux_input_dim = 0
@@ -543,17 +609,11 @@ class Dagger:
         self.robot_gt_policy_points = max(0, int(self.robot_gt_policy_points))
 
     def _init_mode_prediction_training_state(self):
-        cfg = dict(self.runtime_cfg.get("direction_training", {}) or {})
-        self.mode_prediction_loss_enabled = self.mode_prediction_enabled and bool(cfg.get("enabled", True))
-        self.direction_loss_window_start = int(cfg.get("direction_loss_window_start", 40))
-        self.direction_loss_window_end = int(cfg.get("direction_loss_window_end", 100))
-        if self.direction_loss_window_start < 0:
-            raise ValueError("direction_training.direction_loss_window_start must be non-negative.")
-        if self.direction_loss_window_end < self.direction_loss_window_start:
-            raise ValueError(
-                "direction_training.direction_loss_window_end must be greater than or equal to "
-                "direction_loss_window_start."
-            )
+        cfg = dict(getattr(self.student_model, "mode_prediction_cfg", {}) or {})
+        self.mode_prediction_loss_enabled = self.mode_prediction_enabled and self.mode_weight > 0.0
+        self.direction_force_threshold = float(cfg.get("force_threshold", 1.0))
+        if self.direction_force_threshold < 0.0:
+            raise ValueError("mode_prediction.force_threshold must be non-negative.")
 
         self.mode_family_semantics = {}
         self.mode_family_direction_ids = None
@@ -583,6 +643,15 @@ class Dagger:
         self.force_prediction_contrastive_temperature = float(cfg.get("contrastive_temperature", 0.1))
         if self.force_prediction_contrastive_temperature <= 0.0:
             raise ValueError("force_prediction.contrastive_temperature must be positive.")
+        self.direction_loss_window_start = int(cfg.get("loss_window_start", 40))
+        self.direction_loss_window_end = int(cfg.get("loss_window_end", 100))
+        if self.direction_loss_window_start < 0:
+            raise ValueError("force_training.loss_window_start must be non-negative.")
+        if self.direction_loss_window_end < self.direction_loss_window_start:
+            raise ValueError(
+                "force_training.loss_window_end must be greater than or equal to "
+                "force_training.loss_window_start."
+            )
 
         self.latest_force_angle_deg = None
         self.latest_filtered_handle_force_norm_mean = 0.0
@@ -611,6 +680,63 @@ class Dagger:
                 "Set apply_to_pointcloud=false."
             )
         self._reset_observation_lag_stats()
+
+    def _init_push_pull_condition_runtime_state(self, student_yaml_runtime_cfg):
+        allowed_sources = {"oracle", "predicted"}
+        if self.push_pull_condition_enabled and self.push_pull_condition_source not in allowed_sources:
+            raise ValueError(
+                f"push_pull_condition.source must be one of {sorted(allowed_sources)}, "
+                f"got '{self.push_pull_condition_source}'."
+            )
+        if self.push_pull_condition_enabled and self.push_pull_condition_source == "predicted":
+            if not self.mode_prediction_enabled:
+                raise RuntimeError(
+                    "push_pull_condition.source requires mode_prediction.enabled=true so the student can "
+                    "predict push/pull logits before the action pass."
+                )
+            if self.num_modes != 2:
+                raise RuntimeError(
+                    f"push_pull_condition.source='{self.push_pull_condition_source}' requires num_modes=2, "
+                    f"got {self.num_modes}."
+                )
+
+        default_perturb_cfg = {
+            "enabled": False,
+            "apply_during_training": False,
+            "apply_during_eval": True,
+            "probability": 0.1,
+            "wrong_class_confidence_range": [0.85, 0.95],
+        }
+        merged_perturb_cfg = dict(default_perturb_cfg)
+        merged_perturb_cfg.update(dict(student_yaml_runtime_cfg.get("push_pull_condition_perturb", {}) or {}))
+        merged_perturb_cfg.update(dict(self.runtime_cfg.get("push_pull_condition_perturb", {}) or {}))
+        merged_perturb_cfg.update(dict(self.push_pull_condition_perturb_cfg or {}))
+        self.push_pull_condition_perturb_cfg = merged_perturb_cfg
+        self.push_pull_condition_perturb_enabled = bool(merged_perturb_cfg.get("enabled", False))
+        self.push_pull_condition_perturb_apply_during_training = bool(
+            merged_perturb_cfg.get("apply_during_training", False)
+        )
+        self.push_pull_condition_perturb_apply_during_eval = bool(
+            merged_perturb_cfg.get("apply_during_eval", True)
+        )
+        self.push_pull_condition_perturb_probability = float(merged_perturb_cfg.get("probability", 0.1))
+        wrong_confidence_min, wrong_confidence_max = merged_perturb_cfg.get(
+            "wrong_class_confidence_range",
+            [0.85, 0.95],
+        )
+        self.push_pull_condition_perturb_wrong_confidence_min = float(wrong_confidence_min)
+        self.push_pull_condition_perturb_wrong_confidence_max = float(wrong_confidence_max)
+        if not 0.0 <= self.push_pull_condition_perturb_probability <= 1.0:
+            raise ValueError("push_pull_condition_perturb.probability must be in [0, 1].")
+        if self.push_pull_condition_perturb_enabled and not self.push_pull_condition_enabled:
+            raise RuntimeError(
+                "push_pull_condition_perturb.enabled=true requires push_pull_condition.enabled=true."
+            )
+        if not 0.5 <= self.push_pull_condition_perturb_wrong_confidence_min <= self.push_pull_condition_perturb_wrong_confidence_max <= 1.0:
+            raise ValueError(
+                "push_pull_condition_perturb.wrong_class_confidence_range must satisfy "
+                "0.5 <= min <= max <= 1.0."
+            )
 
     def _load_family_mode_semantics(self):
         handle_side_aliases = {
@@ -666,106 +792,202 @@ class Dagger:
             semantics_by_family_name[family_name] = (handle_side, opening_direction)
         return semantics_by_family_name
 
-    def _init_mode_prediction_targets(self):
-        if not self.mode_prediction_enabled:
+    def _init_push_pull_semantics_and_targets(self):
+        self.push_pull_family_one_hot = None
+        self.mode_family_direction_ids = None
+        self.latest_fraction_push = 0.0
+        self.latest_fraction_pull = 0.0
+        if not (
+            self.push_pull_condition_enabled
+            or self.push_pull_condition_perturb_enabled
+            or self.mode_prediction_enabled
+        ):
             return
-        if self.num_modes != 2:
+
+        if self.mode_prediction_enabled and self.num_modes != 2:
             raise RuntimeError(
                 f"Push/pull direction prediction expects num_modes=2, got {self.num_modes}."
             )
 
         self.mode_family_semantics = self._load_family_mode_semantics()
         direction_name_to_id = {"pull": 0, "push": 1}
-        self.mode_family_direction_ids = torch.full(
-            (len(DOOR_FAMILY_NAMES),),
-            -1,
-            dtype=torch.long,
-            device=self.device,
-        )
-
-        missing_semantics = []
-        for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
-            handle_side, opening_direction = self.mode_family_semantics.get(family_name, (None, None))
-            if opening_direction not in direction_name_to_id:
-                missing_semantics.append(family_name)
-                continue
-            self.mode_family_direction_ids[family_id] = direction_name_to_id[opening_direction]
-
-        if missing_semantics:
-            raise RuntimeError(
-                "Could not infer handle-side/opening-direction semantics for active mode-prediction families: "
-                f"{missing_semantics}."
-            )
-
-    def _init_oracle_push_pull_condition_targets(self):
-        self.oracle_push_pull_family_one_hot = None
-        self.latest_fraction_push = 0.0
-        self.latest_fraction_pull = 0.0
-        if not self.oracle_push_pull_enabled:
-            return
-
-        semantics_by_family_name = self._load_family_mode_semantics()
         family_one_hot = torch.zeros(
             (len(DOOR_FAMILY_NAMES), 2),
             dtype=torch.float32,
             device=self.device,
         )
+        if self.mode_prediction_enabled:
+            self.mode_family_direction_ids = torch.full(
+                (len(DOOR_FAMILY_NAMES),),
+                -1,
+                dtype=torch.long,
+                device=self.device,
+            )
+
         missing_semantics = []
         for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
-            _, opening_direction = semantics_by_family_name.get(family_name, (None, None))
+            _, opening_direction = self.mode_family_semantics.get(family_name, (None, None))
             if opening_direction == "push":
                 family_one_hot[family_id] = torch.tensor(
                     [1.0, 0.0], dtype=torch.float32, device=self.device
                 )
+                if self.mode_family_direction_ids is not None:
+                    self.mode_family_direction_ids[family_id] = direction_name_to_id[opening_direction]
             elif opening_direction == "pull":
                 family_one_hot[family_id] = torch.tensor(
                     [0.0, 1.0], dtype=torch.float32, device=self.device
                 )
+                if self.mode_family_direction_ids is not None:
+                    self.mode_family_direction_ids[family_id] = direction_name_to_id[opening_direction]
             else:
                 missing_semantics.append(family_name)
 
         if missing_semantics:
             raise RuntimeError(
-                "Could not infer push/pull oracle condition for active door families: "
+                "Could not infer push/pull semantics for active door families: "
                 f"{missing_semantics}."
             )
-        self.oracle_push_pull_family_one_hot = family_one_hot
+        self.push_pull_family_one_hot = family_one_hot
 
-    def _validate_oracle_push_pull_condition(self, push_pull_cond):
+    def _validate_push_pull_condition(self, push_pull_cond, name="push_pull_cond"):
         if not isinstance(push_pull_cond, torch.Tensor):
-            raise RuntimeError("push_pull_cond is required when oracle_push_pull_condition is enabled.")
+            raise RuntimeError(f"{name} must be a torch.Tensor.")
         expected_shape = (self.num_envs, 2)
         if tuple(push_pull_cond.shape) != expected_shape:
             raise RuntimeError(
-                "push_pull_cond must have shape [num_envs, 2] when "
-                f"oracle_push_pull_condition is enabled; got {tuple(push_pull_cond.shape)}."
+                f"{name} must have shape [num_envs, 2]; got {tuple(push_pull_cond.shape)}."
             )
         if push_pull_cond.dtype != torch.float32:
-            raise RuntimeError("push_pull_cond must be a float32 tensor.")
+            raise RuntimeError(f"{name} must be a float32 tensor.")
         if push_pull_cond.device != self.device:
             raise RuntimeError(
-                f"push_pull_cond must be on device {self.device}; got {push_pull_cond.device}."
+                f"{name} must be on device {self.device}; got {push_pull_cond.device}."
             )
+        if torch.isnan(push_pull_cond).any():
+            raise RuntimeError(f"{name} contains NaNs.")
+        if torch.isinf(push_pull_cond).any():
+            raise RuntimeError(f"{name} contains Inf values.")
+        if torch.any(push_pull_cond < -1.0e-6) or torch.any(push_pull_cond > 1.0 + 1.0e-6):
+            raise RuntimeError(f"{name} must have values in [0, 1].")
         row_sums = push_pull_cond.sum(dim=-1)
         if not torch.allclose(row_sums, torch.ones_like(row_sums), atol=1.0e-5, rtol=1.0e-5):
-            raise RuntimeError("Every push_pull_cond row must sum to 1.0.")
+            raise RuntimeError(f"Every {name} row must sum to 1.0.")
 
-    def _build_oracle_push_pull_condition(self):
-        if not self.oracle_push_pull_enabled:
-            return None
-        if self.oracle_push_pull_family_one_hot is None:
-            raise RuntimeError("Oracle push/pull condition targets are not initialized.")
+    def _build_gt_push_pull_condition(self):
+        if self.push_pull_family_one_hot is None:
+            raise RuntimeError("Push/pull condition targets are not initialized.")
         if self.env_family_ids.ndim != 1 or self.env_family_ids.shape[0] != self.num_envs:
             raise RuntimeError(
                 f"Expected env_family_ids shape [{self.num_envs}], got {tuple(self.env_family_ids.shape)}."
             )
 
-        push_pull_cond = self.oracle_push_pull_family_one_hot[self.env_family_ids.long()]
+        push_pull_cond = self.push_pull_family_one_hot[self.env_family_ids.long()]
         push_pull_cond = push_pull_cond.to(device=self.device, dtype=torch.float32)
-        self._validate_oracle_push_pull_condition(push_pull_cond)
-        self.latest_fraction_push = float(push_pull_cond[:, 0].mean().detach().cpu().item())
-        self.latest_fraction_pull = float(push_pull_cond[:, 1].mean().detach().cpu().item())
+        self._validate_push_pull_condition(push_pull_cond)
         return push_pull_cond
+
+    def _sample_soft_wrong_push_pull_condition(self):
+        gt_condition = self._build_gt_push_pull_condition()
+        wrong_confidence = torch.empty(self.num_envs, dtype=torch.float32, device=self.device).uniform_(
+            self.push_pull_condition_perturb_wrong_confidence_min,
+            self.push_pull_condition_perturb_wrong_confidence_max,
+        )
+        wrong_condition = torch.empty_like(gt_condition)
+        gt_is_push = gt_condition[:, 0] > gt_condition[:, 1]
+        wrong_condition[gt_is_push, 0] = 1.0 - wrong_confidence[gt_is_push]
+        wrong_condition[gt_is_push, 1] = wrong_confidence[gt_is_push]
+        wrong_condition[~gt_is_push, 0] = wrong_confidence[~gt_is_push]
+        wrong_condition[~gt_is_push, 1] = 1.0 - wrong_confidence[~gt_is_push]
+        self._validate_push_pull_condition(wrong_condition)
+        return wrong_condition
+
+    def _build_gt_push_pull_class_ids(self):
+        gt_condition = self._build_gt_push_pull_condition()
+        return gt_condition[:, 0].round().to(dtype=torch.long)
+
+    def _mode_logits_to_push_pull_condition(self, mode_logits):
+        if not isinstance(mode_logits, torch.Tensor):
+            raise RuntimeError("Predicted push/pull condition requires mode logits from the student.")
+        if mode_logits.ndim != 2 or mode_logits.shape != (self.num_envs, 2):
+            raise RuntimeError(
+                "Predicted push/pull logits must have shape [num_envs, 2] with class order [pull, push]; "
+                f"got {tuple(mode_logits.shape)}."
+            )
+        mode_probs = torch.softmax(mode_logits, dim=-1)
+        push_pull_cond = torch.stack([mode_probs[:, 1], mode_probs[:, 0]], dim=-1)
+        self._validate_push_pull_condition(push_pull_cond)
+        return push_pull_cond
+
+    def _record_push_pull_prediction_metrics(self, mode_logits):
+        if mode_logits is None:
+            self.latest_push_pull_pred_entropy = 0.0
+            self.latest_push_pull_pred_acc = None
+            return
+        push_pull_cond = self._mode_logits_to_push_pull_condition(mode_logits.detach())
+        entropy = -(push_pull_cond * torch.log(push_pull_cond.clamp_min(1.0e-6))).sum(dim=-1)
+        self.latest_push_pull_pred_entropy = float(entropy.mean().detach().cpu().item())
+        gt_class_ids = self._build_gt_push_pull_class_ids()
+        pred_class_ids = mode_logits.detach().argmax(dim=-1)
+        self.latest_push_pull_pred_acc = float(
+            (pred_class_ids == gt_class_ids).float().mean().detach().cpu().item()
+        )
+
+    def _build_push_pull_condition_from_source(self, source, mode_logits=None):
+        source = str(source).lower()
+        if source == "oracle":
+            # Oracle source uses the ground-truth push/pull one-hot condition.
+            return self._build_gt_push_pull_condition()
+        if source == "predicted":
+            # Predicted source uses softmax logits converted into [p_push, p_pull].
+            push_pull_cond = self._mode_logits_to_push_pull_condition(mode_logits)
+            if self.push_pull_detach_predicted_condition:
+                push_pull_cond = push_pull_cond.detach()
+            return push_pull_cond
+        raise ValueError(f"Unsupported push_pull_condition.source '{source}'.")
+
+    def _is_push_pull_condition_perturb_active(self):
+        if not self.push_pull_condition_perturb_enabled:
+            return False
+        if not self.play_policy:
+            return self.push_pull_condition_perturb_apply_during_training
+        return self.push_pull_condition_perturb_apply_during_eval
+
+    def _apply_push_pull_condition_perturb(self, push_pull_cond, step_id=None):
+        self._validate_push_pull_condition(push_pull_cond)
+
+        perturb_active = self._is_push_pull_condition_perturb_active()
+        self.latest_push_pull_perturb_to_push_count = 0
+        self.latest_push_pull_perturb_to_pull_count = 0
+        if not perturb_active:
+            self.latest_fraction_push = float(push_pull_cond[:, 0].mean().detach().cpu().item())
+            self.latest_fraction_pull = float(push_pull_cond[:, 1].mean().detach().cpu().item())
+            self._last_push_pull_perturb_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+            self._last_push_pull_perturb_step = -1 if step_id is None else int(step_id)
+            return push_pull_cond
+
+        # Fresh per-step, per-env Bernoulli sampling. No duration window or persistent mask is kept.
+        perturb_mask = torch.rand(self.num_envs, device=self.device) < self.push_pull_condition_perturb_probability
+        perturbed = push_pull_cond.clone()
+        if torch.any(perturb_mask):
+            replacement = self._sample_soft_wrong_push_pull_condition()
+            perturbed[perturb_mask] = replacement[perturb_mask]
+            gt_argmax = self._build_gt_push_pull_condition().argmax(dim=-1)
+            perturbed_argmax = perturbed.argmax(dim=-1)
+            if not torch.all(perturbed_argmax[perturb_mask] != gt_argmax[perturb_mask]):
+                raise RuntimeError("push_pull_condition perturbation did not flip GT labels.")
+            self.latest_push_pull_perturb_to_push_count = int(
+                (perturbed_argmax[perturb_mask] == 0).sum().detach().cpu().item()
+            )
+            self.latest_push_pull_perturb_to_pull_count = int(
+                (perturbed_argmax[perturb_mask] == 1).sum().detach().cpu().item()
+            )
+
+        self._validate_push_pull_condition(perturbed, name="perturbed_push_pull_cond")
+        self._last_push_pull_perturb_mask = perturb_mask.detach().clone()
+        self._last_push_pull_perturb_step = -1 if step_id is None else int(step_id)
+        self.latest_fraction_push = float(perturbed[:, 0].mean().detach().cpu().item())
+        self.latest_fraction_pull = float(perturbed[:, 1].mean().detach().cpu().item())
+        return perturbed
 
     def _get_contact_sensor_force_tensor_world(self, sensor_name):
         scene = getattr(self.ov_env, "scene", None)
@@ -860,17 +1082,31 @@ class Dagger:
             prediction_leading_shape,
         )
 
+    def _get_direction_force_mask(self, prediction_leading_shape):
+        force_world = self._get_contact_sensor_force_tensor_world(self.force_prediction_sensor_name)
+        force_norm = torch.linalg.vector_norm(force_world, dim=-1)
+        force_mask = force_norm > self.direction_force_threshold
+        return self._align_env_tensor_to_prediction(force_mask, prediction_leading_shape, "direction_force_mask").reshape(-1).bool()
+
     def _get_direction_step_mask(self, rollout_step_ids):
-        # Per-environment rollout timesteps, not optimizer/global training steps.
-        # At 15 Hz, step 40 is about 2.67s and step 100 is about 6.67s.
+        # Force prediction still uses the existing rollout-step window. Mode prediction no longer does.
         return (
             (rollout_step_ids >= self.direction_loss_window_start)
             & (rollout_step_ids <= self.direction_loss_window_end)
         )
 
-    def _update_direction_window_metrics(self, mode_logits, direction_target, direction_valid, active_mask, rollout_step_ids):
-        step_mask = self._get_direction_step_mask(rollout_step_ids)
-        window_mask = direction_valid & active_mask & step_mask
+    def _update_direction_window_metrics(
+        self,
+        mode_logits,
+        direction_target,
+        direction_valid,
+        active_mask,
+        rollout_step_ids,
+        prediction_leading_shape,
+    ):
+        del rollout_step_ids
+        force_mask = self._get_direction_force_mask(prediction_leading_shape)
+        window_mask = direction_valid & active_mask & force_mask
         direction_pred = mode_logits.argmax(dim=-1)
 
         push_label_mask = window_mask & (direction_target == 1)
@@ -914,7 +1150,7 @@ class Dagger:
         if self.mode_family_direction_ids is None:
             raise RuntimeError("Mode prediction targets are not initialized.")
 
-        mode_logits, direction_target, direction_valid, active_mask, rollout_step_ids, _ = (
+        mode_logits, direction_target, direction_valid, active_mask, rollout_step_ids, prediction_leading_shape = (
             self._prepare_direction_prediction_tensors(mode_logits)
         )
         if not torch.any(direction_valid):
@@ -926,10 +1162,11 @@ class Dagger:
             direction_valid,
             active_mask,
             rollout_step_ids,
+            prediction_leading_shape,
         )
 
-        step_mask = self._get_direction_step_mask(rollout_step_ids)
-        valid_mask = direction_valid & active_mask & step_mask
+        force_mask = self._get_direction_force_mask(prediction_leading_shape)
+        valid_mask = direction_valid & active_mask & force_mask
         if torch.any(valid_mask):
             direction_loss = torch.nn.functional.cross_entropy(
                 mode_logits[valid_mask],
@@ -1488,7 +1725,11 @@ class Dagger:
     def _get_student_base_velocity_vector(self):
         # joint_vel is already per-second in env/base-joint order [wz, vx_w, vy_w].
         # Convert it to the deployment-facing robot-frame order [vx_robot, vy_robot, wz_robot].
-        base_joint_vel = self.ov_env.robot.data.joint_vel[:, self.ov_env._robot_base_dof_idx]
+        get_student_base_joint_vel_obs = getattr(self.ov_env, "get_student_base_joint_vel_obs", None)
+        if callable(get_student_base_joint_vel_obs):
+            base_joint_vel = get_student_base_joint_vel_obs(use_noise=True)
+        else:
+            base_joint_vel = self.ov_env.robot.data.joint_vel[:, self.ov_env._robot_base_dof_idx]
         if base_joint_vel.ndim != 2 or base_joint_vel.shape[-1] != 3:
             raise RuntimeError(f"Expected base joint velocity shape [N, 3], got {tuple(base_joint_vel.shape)}.")
         base_vel = self._env_base_vector_to_robot_frame(base_joint_vel)
@@ -1556,56 +1797,79 @@ class Dagger:
                 values_by_key[key] = full_value[:, spec["indices"]]
         return values_by_key
 
-    def _extract_proprio_temporal_field_tensor(self, field_name, actual_state_key, sample_cache):
-        per_timestamp_values = []
-        for timestamp_s in self.proprio_temporal_timestamps_s:
-            if actual_state_key == "q_arm":
-                full_value = self._get_temporal_sample_from_cache(sample_cache, "q_full", timestamp_s)
-                value = full_value[:, self.ov_env._robot_arm_dof_idx]
-            elif actual_state_key == "q_hand":
-                full_value = self._get_temporal_sample_from_cache(sample_cache, "q_full", timestamp_s)
-                value = full_value[:, self.ov_env._robot_finger_dof_idx]
-            elif actual_state_key == "base_vel":
-                value = self._get_temporal_sample_from_cache(sample_cache, "base_vel", timestamp_s)
-            elif actual_state_key == "target_err_arm":
-                full_value = self._get_temporal_sample_from_cache(sample_cache, "target_err", timestamp_s)
-                value = full_value[:, self.action_component_history_indices["arm"]]
-            elif actual_state_key == "target_err_hand":
-                full_value = self._get_temporal_sample_from_cache(sample_cache, "target_err", timestamp_s)
-                value = full_value[:, self.action_component_history_indices["hand"]]
-            else:
-                raise RuntimeError(
-                    f"Unsupported proprio_temporal field mapping '{field_name}' -> '{actual_state_key}'."
-                )
-            per_timestamp_values.append(value)
-
-        field_tensor = torch.stack(per_timestamp_values, dim=1)
+    def _extract_proprio_temporal_field_value(self, field_name, actual_state_key, sample_cache, timestamp_s):
+        if actual_state_key == "q_arm":
+            full_value = self._get_temporal_sample_from_cache(sample_cache, "q_full", timestamp_s)
+            value = full_value[:, self.ov_env._robot_arm_dof_idx]
+        elif actual_state_key == "q_hand":
+            full_value = self._get_temporal_sample_from_cache(sample_cache, "q_full", timestamp_s)
+            value = full_value[:, self.ov_env._robot_finger_dof_idx]
+        elif actual_state_key == "base_vel":
+            value = self._get_temporal_sample_from_cache(sample_cache, "base_vel", timestamp_s)
+        elif actual_state_key in {"target_err_arm", "tracking_err_arm"}:
+            full_value = self._get_temporal_sample_from_cache(sample_cache, "target_err", timestamp_s)
+            value = full_value[:, self.action_component_history_indices["arm"]]
+        elif actual_state_key in {"target_err_hand", "tracking_err_hand"}:
+            full_value = self._get_temporal_sample_from_cache(sample_cache, "target_err", timestamp_s)
+            value = full_value[:, self.action_component_history_indices["hand"]]
+        else:
+            raise RuntimeError(
+                f"Unsupported temporal_state_encoders field mapping '{field_name}' -> '{actual_state_key}'."
+            )
         expected_dim = int(self.proprio_temporal_field_dims[field_name])
-        if field_tensor.ndim != 3 or field_tensor.shape[1] != len(self.proprio_temporal_timestamps_s):
+        if value.ndim != 2 or value.shape[-1] != expected_dim:
             raise RuntimeError(
-                f"Expected proprio_temporal['{field_name}'] shape [B, {len(self.proprio_temporal_timestamps_s)}, {expected_dim}], "
-                f"got {tuple(field_tensor.shape)}."
+                f"Temporal field '{field_name}' at {timestamp_s:.3f}s must have shape [B, {expected_dim}], "
+                f"got {tuple(value.shape)}."
             )
-        if field_tensor.shape[-1] != expected_dim:
-            raise RuntimeError(
-                f"Unexpected proprio_temporal['{field_name}'] feature dim: "
-                f"expected {expected_dim}, got {field_tensor.shape[-1]}."
-            )
-        return field_tensor
+        return value
 
     def _build_proprio_temporal_obs(self, sample_cache):
         if not self.proprio_temporal_enabled:
             return None
         if sample_cache is None:
-            raise RuntimeError("Shared proprio_temporal_encoder requires a temporal sample cache.")
+            raise RuntimeError("temporal_state_encoders require a temporal sample cache.")
 
         proprio_temporal_obs = OrderedDict()
+        if not self.temporal_state_uses_field_shared_encoders:
+            for field_name, actual_state_key in self.proprio_temporal_field_state_keys.items():
+                per_timestamp_values = [
+                    self._extract_proprio_temporal_field_value(
+                        field_name=field_name,
+                        actual_state_key=actual_state_key,
+                        sample_cache=sample_cache,
+                        timestamp_s=timestamp_s,
+                    )
+                    for timestamp_s in self.proprio_temporal_timestamps_s
+                ]
+                field_tensor = torch.stack(per_timestamp_values, dim=1)
+                expected_dim = int(self.proprio_temporal_field_dims[field_name])
+                if field_tensor.ndim != 3 or field_tensor.shape[1] != len(self.proprio_temporal_timestamps_s):
+                    raise RuntimeError(
+                        f"Expected temporal field '{field_name}' to have shape "
+                        f"[B, {len(self.proprio_temporal_timestamps_s)}, {expected_dim}], got {tuple(field_tensor.shape)}."
+                    )
+                if field_tensor.shape[-1] != expected_dim:
+                    raise RuntimeError(
+                        f"Temporal field '{field_name}' must have feature dim {expected_dim}, "
+                        f"got {field_tensor.shape[-1]}."
+                    )
+                proprio_temporal_obs[field_name] = field_tensor
+            return proprio_temporal_obs
+
         for field_name, actual_state_key in self.proprio_temporal_field_state_keys.items():
-            proprio_temporal_obs[field_name] = self._extract_proprio_temporal_field_tensor(
-                field_name,
-                actual_state_key,
-                sample_cache,
-            )
+            obs_keys = self.proprio_temporal_field_obs_keys.get(field_name)
+            if obs_keys is None or len(obs_keys) != len(self.proprio_temporal_timestamps_s):
+                raise RuntimeError(
+                    f"Temporal field '{field_name}' must expose one observation key per timestamp; got {obs_keys}."
+                )
+            for obs_key, timestamp_s in zip(obs_keys, self.proprio_temporal_timestamps_s):
+                proprio_temporal_obs[obs_key] = self._extract_proprio_temporal_field_value(
+                    field_name=field_name,
+                    actual_state_key=actual_state_key,
+                    sample_cache=sample_cache,
+                    timestamp_s=timestamp_s,
+                )
         return proprio_temporal_obs
 
     def _get_handle_position_base(self):
@@ -1721,8 +1985,7 @@ class Dagger:
         expected_asset_family_ids = door_asset_family_ids.to(device=self.device, dtype=torch.long)[self.env_asset_idx]
         if not torch.equal(expected_asset_family_ids, self.env_family_ids):
             raise RuntimeError("Door asset family ids and motion family ids are inconsistent.")
-        self._init_mode_prediction_targets()
-        self._init_oracle_push_pull_condition_targets()
+        self._init_push_pull_semantics_and_targets()
         self.family_env_ids = {
             int(family_id): torch.nonzero(self.env_family_ids == int(family_id), as_tuple=False).squeeze(-1)
             for family_id in range(len(DOOR_FAMILY_NAMES))
@@ -1978,611 +2241,6 @@ class Dagger:
         self.wrong_pp_target_motion_ids = wrong_motion_idx
         ref_motion_lib.set_wrong_motion_map(self.wrong_pp_target_motion_ids)
         self._print_wrong_pp_sanity_info(family_id_by_family_id)
-
-    def _init_twin_student_action_replay(self):
-        default_family_map = {
-            "PartNetv5_plus": "PartNetv8_plus",
-            "PartNetv8_plus": "PartNetv5_plus",
-            "PartNetv6_plus": "PartNetv7_plus",
-            "PartNetv7_plus": "PartNetv6_plus",
-        }
-        cfg = {
-            "enabled": False,
-            "record_enabled": True,
-            "record_start_iteration": 0,
-            "buffer_capacity_per_key": 64,
-            "min_sequence_len": 5,
-            "phase_range_to_record": [2.2, 3.4],
-            "perturb_enabled": True,
-            "perturb_start_iteration": 0,
-            "prob_per_episode": 0.10,
-            "prob_ramp_iterations": 0,
-            "start_phase_range": [2.4, 3.1],
-            "duration_steps_range": [5, 8],
-            "max_bursts_per_episode": 1,
-            "replace_components": ["base", "arm"],
-            "active_visual_envs_only": True,
-            "skip_if_no_replay_available": True,
-            "strict_same_geometry": True,
-            "family_map": default_family_map,
-            "log": True,
-            "debug_print_first_n": 10,
-        }
-        user_cfg = dict(self.runtime_cfg.get("twin_student_action_replay", {}) or {})
-        if "family_map" in user_cfg:
-            family_map = dict(user_cfg.pop("family_map") or {})
-        else:
-            family_map = dict(default_family_map)
-        cfg.update(user_cfg)
-        cfg["family_map"] = family_map
-        if self.play_policy and bool(cfg.get("enabled", False)):
-            cfg["enabled"] = False
-            if self.rank == 0:
-                print("[INFO] Disabling twin_student_action_replay for play_policy rollout.")
-
-        self.twin_replay_cfg = cfg
-        self.twin_replay_enabled = bool(cfg.get("enabled", False))
-        self.twin_replay_record_enabled = bool(cfg.get("record_enabled", True))
-        self.twin_replay_record_start_iteration = int(cfg.get("record_start_iteration", 0))
-        self.twin_replay_perturb_enabled = bool(cfg.get("perturb_enabled", True))
-        self.twin_replay_perturb_start_iteration = int(cfg.get("perturb_start_iteration", 0))
-        self.twin_replay_buffer_capacity_per_key = int(cfg.get("buffer_capacity_per_key", 64))
-        self.twin_replay_min_sequence_len = int(cfg.get("min_sequence_len", 5))
-        self.twin_replay_record_phase_min, self.twin_replay_record_phase_max = map(
-            float, cfg.get("phase_range_to_record", [2.2, 3.4])
-        )
-        self.twin_replay_prob_per_episode = float(cfg.get("prob_per_episode", 0.10))
-        self.twin_replay_prob_ramp_iterations = int(cfg.get("prob_ramp_iterations", 0))
-        self.twin_replay_phase_min, self.twin_replay_phase_max = map(float, cfg.get("start_phase_range", [2.4, 3.1]))
-        duration_min, duration_max = cfg.get("duration_steps_range", [5, 8])
-        self.twin_replay_duration_min = int(duration_min)
-        self.twin_replay_duration_max = int(duration_max)
-        self.twin_replay_max_bursts_per_episode = int(cfg.get("max_bursts_per_episode", 1))
-        self.twin_replay_active_visual_envs_only = bool(cfg.get("active_visual_envs_only", True))
-        self.twin_replay_skip_if_no_replay_available = bool(cfg.get("skip_if_no_replay_available", True))
-        self.twin_replay_strict_same_geometry = bool(cfg.get("strict_same_geometry", True))
-        self.twin_replay_log_enabled = bool(cfg.get("log", True))
-        self.twin_replay_debug_print_limit = int(cfg.get("debug_print_first_n", 10))
-        self.twin_replay_debug_print_count = 0
-
-        self.twin_replay_family_id_map = torch.full(
-            (len(DOOR_FAMILY_NAMES),), -1, dtype=torch.long, device=self.device
-        )
-        self.twin_replay_replace_action_indices = torch.empty(0, dtype=torch.long, device=self.device)
-        self.twin_replay_visual_env_mask = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
-        self.twin_replay_env_geometry_keys = ["" for _ in range(self.num_envs)]
-
-        self.twin_student_replay_buffer = {}
-        self.twin_replay_current_actions = [[] for _ in range(self.num_envs)]
-        self.twin_replay_current_phases = [[] for _ in range(self.num_envs)]
-        self.twin_replay_active_sequences = {}
-
-        self.twin_replay_should_burst = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self.twin_replay_active_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self.twin_replay_remaining_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-        self.twin_replay_used_burst_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-        self.twin_replay_start_phase = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
-        self.twin_replay_selected_family_id = torch.full((self.num_envs,), -1, dtype=torch.long, device=self.device)
-        self.twin_replay_duration_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-        self._reset_twin_replay_log_accumulators()
-
-        if not self.twin_replay_enabled:
-            return
-        ref_motion_lib = getattr(self.ov_env, "ref_motion_lib", None)
-        if ref_motion_lib is None:
-            raise RuntimeError("twin_student_action_replay requires reference motions.")
-        if not 0.0 <= self.twin_replay_prob_per_episode <= 1.0:
-            raise ValueError("twin_student_action_replay.prob_per_episode must be in [0, 1].")
-        if self.twin_replay_duration_min <= 0 or self.twin_replay_duration_max < self.twin_replay_duration_min:
-            raise ValueError("twin_student_action_replay.duration_steps_range must be positive and ordered.")
-        if self.twin_replay_max_bursts_per_episode <= 0:
-            raise ValueError("twin_student_action_replay.max_bursts_per_episode must be positive when enabled.")
-        if self.twin_replay_buffer_capacity_per_key <= 0:
-            raise ValueError("twin_student_action_replay.buffer_capacity_per_key must be positive.")
-        if self.twin_replay_min_sequence_len <= 0:
-            raise ValueError("twin_student_action_replay.min_sequence_len must be positive.")
-        if self.twin_replay_record_start_iteration < 0:
-            raise ValueError("twin_student_action_replay.record_start_iteration must be non-negative.")
-        if self.twin_replay_perturb_start_iteration < 0:
-            raise ValueError("twin_student_action_replay.perturb_start_iteration must be non-negative.")
-        if self.twin_replay_prob_ramp_iterations < 0:
-            raise ValueError("twin_student_action_replay.prob_ramp_iterations must be non-negative.")
-
-        self.twin_replay_replace_action_indices = self._build_wrong_pp_replace_action_indices(
-            cfg.get("replace_components", ["base", "arm"])
-        )
-        self.twin_replay_family_id_map = self._build_twin_replay_family_id_map(family_map)
-        self.twin_replay_visual_env_mask = self._get_twin_replay_visual_env_mask()
-        self.twin_replay_env_geometry_keys = self._build_twin_replay_env_geometry_keys()
-        self._print_twin_replay_geometry_samples()
-
-    def _reset_twin_replay_log_accumulators(self):
-        self.twin_replay_log_active_fraction_sum = 0.0
-        self.twin_replay_log_step_count = 0
-        self.twin_replay_log_new_sequences = 0
-        self.twin_replay_log_new_bursts = 0
-        self.twin_replay_log_skipped_no_buffer = 0
-        self.twin_replay_log_skipped_no_same_geometry = 0
-        self.twin_replay_log_skipped_sequence_too_short = 0
-        self.twin_replay_log_duration_sum = 0.0
-        self.twin_replay_log_start_phase_sum = 0.0
-        self.twin_replay_log_burst_count = 0
-        self.twin_replay_log_action_l2_sum = 0.0
-        self.twin_replay_log_action_l2_count = 0
-        self.twin_replay_log_base_cosine_sum = 0.0
-        self.twin_replay_log_base_cosine_count = 0
-        self.twin_replay_log_arm_cosine_sum = 0.0
-        self.twin_replay_log_arm_cosine_count = 0
-        self.twin_replay_log_family_bursts = torch.zeros(
-            len(DOOR_FAMILY_NAMES), dtype=torch.long, device=self.device
-        )
-
-    def _build_twin_replay_family_id_map(self, family_map):
-        family_name_to_id = {family_name: family_id for family_id, family_name in enumerate(DOOR_FAMILY_NAMES)}
-        unknown_names = sorted(
-            {
-                family_name
-                for pair in family_map.items()
-                for family_name in pair
-                if family_name not in family_name_to_id
-            }
-        )
-        if unknown_names:
-            raise ValueError(
-                "twin_student_action_replay.family_map references families that are not active in DOOR_FAMILY_NAMES: "
-                f"{unknown_names}. Active families: {list(DOOR_FAMILY_NAMES)}."
-            )
-        family_id_by_family_id = torch.full(
-            (len(DOOR_FAMILY_NAMES),), -1, dtype=torch.long, device=self.device
-        )
-        for family_name, twin_family_name in family_map.items():
-            family_id = family_name_to_id[family_name]
-            twin_family_id = family_name_to_id[twin_family_name]
-            if family_id == twin_family_id:
-                raise ValueError(
-                    f"twin_student_action_replay.family_map must not map a family to itself: {family_name}."
-                )
-            source_semantics = self._infer_wrong_pp_family_semantics(family_name)
-            target_semantics = self._infer_wrong_pp_family_semantics(twin_family_name)
-            if source_semantics is None or target_semantics is None:
-                raise ValueError(
-                    "Cannot validate twin_student_action_replay.family_map without known family semantics: "
-                    f"{family_name}, {twin_family_name}."
-                )
-            source_side, source_direction = source_semantics
-            target_side, target_direction = target_semantics
-            if source_side != target_side or source_direction == target_direction:
-                raise ValueError(
-                    "twin_student_action_replay.family_map must preserve handle side and flip push/pull: "
-                    f"{family_name} ({source_side}, {source_direction}) -> "
-                    f"{twin_family_name} ({target_side}, {target_direction})."
-                )
-            family_id_by_family_id[family_id] = twin_family_id
-        return family_id_by_family_id
-
-    def _get_twin_replay_visual_env_mask(self):
-        # The current student policy builds visual point-cloud observations for every env each iteration.
-        return torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
-
-    def _get_twin_asset_base_name(self, asset_path: str) -> str:
-        asset_dir = Path(asset_path).resolve().parent
-        return asset_dir.name.strip()
-
-    def _get_twin_geometry_key(self, asset_path: str) -> str:
-        # Keep twin matching easy to reason about: copied push/pull twins should share the
-        # exact same copied asset folder name (for example `99688979960035__rnd_00`).
-        folder_base_name = self._get_twin_asset_base_name(asset_path)
-        if folder_base_name:
-            return folder_base_name
-
-        # Metadata is only a fallback for malformed or unexpected folder layouts.
-        asset_dir = Path(asset_path).resolve().parent
-        meta_path = asset_dir / "variant_meta.json"
-        if not meta_path.is_file():
-            return asset_dir.name
-        try:
-            with meta_path.open("r", encoding="utf-8") as f:
-                meta = json.load(f)
-        except Exception:
-            return asset_dir.name
-
-        for field_name in ("copied_from_pull_asset", "source_asset", "variant_name"):
-            value = meta.get(field_name)
-            if not isinstance(value, str):
-                continue
-            value = value.strip()
-            if not value:
-                continue
-            return value
-        return asset_dir.name
-
-    def _build_twin_replay_env_geometry_keys(self):
-        geometry_keys = []
-        for asset_idx in self.env_asset_idx.detach().cpu().tolist():
-            geometry_keys.append(self._get_twin_geometry_key(door_asset_paths[int(asset_idx)]))
-        return geometry_keys
-
-    def _print_twin_replay_geometry_samples(self):
-        if self.rank != 0:
-            return
-        sample_count = min(10, int(self.num_envs))
-        for env_id in range(sample_count):
-            asset_idx = int(self.env_asset_idx[env_id].detach().cpu().item())
-            family_id = int(self.env_family_ids[env_id].detach().cpu().item())
-            asset_folder = Path(door_asset_paths[asset_idx]).resolve().parent.name
-            print(
-                "[INFO] twin_student_action_replay geometry key: "
-                f"env_id={env_id}, asset_idx={asset_idx}, family_name={DOOR_FAMILY_NAMES[family_id]}, "
-                f"asset_folder={asset_folder}, geometry_key={self.twin_replay_env_geometry_keys[env_id]}"
-            )
-
-    def _get_current_ref_phase(self, env_ids=None):
-        ref_motion_lib = getattr(self.ov_env, "ref_motion_lib", None)
-        if ref_motion_lib is None:
-            raise RuntimeError("Reference motion manager is required to query current phase.")
-        phase = ref_motion_lib.get_current_phase(env_ids=env_ids)
-        return phase.to(device=self.device, dtype=torch.float32)
-
-    def _is_twin_replay_recording_active(self, iteration):
-        return int(iteration) >= self.twin_replay_record_start_iteration
-
-    def _get_twin_replay_prob_per_episode(self, iteration):
-        if not self.twin_replay_perturb_enabled:
-            return 0.0
-        iteration = int(iteration)
-        if iteration < self.twin_replay_perturb_start_iteration:
-            return 0.0
-        if self.twin_replay_prob_ramp_iterations <= 0:
-            return self.twin_replay_prob_per_episode
-        ramp_progress = min(
-            1.0,
-            max(
-                0.0,
-                float(iteration - self.twin_replay_perturb_start_iteration + 1)
-                / float(self.twin_replay_prob_ramp_iterations),
-            ),
-        )
-        return ramp_progress * self.twin_replay_prob_per_episode
-
-    def _clear_twin_replay_current_recording(self, env_id):
-        env_id = int(env_id)
-        self.twin_replay_current_actions[env_id] = []
-        self.twin_replay_current_phases[env_id] = []
-
-    def _deactivate_twin_replay_env(self, env_id):
-        env_id = int(env_id)
-        self.twin_replay_active_mask[env_id] = False
-        self.twin_replay_remaining_steps[env_id] = 0
-        self.twin_replay_selected_family_id[env_id] = -1
-        self.twin_replay_duration_steps[env_id] = 0
-        self.twin_replay_active_sequences.pop(env_id, None)
-
-    def _finalize_twin_replay_recordings(self, env_ids=None):
-        if not getattr(self, "twin_replay_enabled", False):
-            return
-        if env_ids is None:
-            env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
-        elif not isinstance(env_ids, torch.Tensor):
-            env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
-        if env_ids.numel() == 0:
-            return
-
-        for env_id in env_ids.detach().cpu().tolist():
-            env_id = int(env_id)
-            actions = self.twin_replay_current_actions[env_id]
-            phases = self.twin_replay_current_phases[env_id]
-            if len(actions) >= self.twin_replay_min_sequence_len:
-                geometry_key = self.twin_replay_env_geometry_keys[env_id]
-                family_id = int(self.env_family_ids[env_id].detach().cpu().item())
-                key = (geometry_key, family_id)
-                buffer = self.twin_student_replay_buffer.setdefault(
-                    key, deque(maxlen=self.twin_replay_buffer_capacity_per_key)
-                )
-                buffer.append(
-                    {
-                        "actions": torch.stack(actions, dim=0).to(dtype=torch.float32, device="cpu"),
-                        "phases": torch.tensor(phases, dtype=torch.float32, device="cpu"),
-                        "source_rank": int(self.rank),
-                        "source_env_id": env_id,
-                        "source_asset_idx": int(self.env_asset_idx[env_id].detach().cpu().item()),
-                        "source_family_id": family_id,
-                        "geometry_key": geometry_key,
-                    }
-                )
-                self.twin_replay_log_new_sequences += 1
-            self.twin_replay_current_actions[env_id] = []
-            self.twin_replay_current_phases[env_id] = []
-
-    def _reset_twin_student_action_replay_state(self, env_ids=None, iteration=0):
-        if not getattr(self, "twin_replay_enabled", False):
-            return
-        self._finalize_twin_replay_recordings(env_ids)
-        if env_ids is None:
-            env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
-        elif not isinstance(env_ids, torch.Tensor):
-            env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
-        if env_ids.numel() == 0:
-            return
-
-        prob_per_episode = self._get_twin_replay_prob_per_episode(iteration)
-        self.twin_replay_should_burst[env_ids] = torch.rand(env_ids.numel(), device=self.device) < prob_per_episode
-        self.twin_replay_active_mask[env_ids] = False
-        self.twin_replay_remaining_steps[env_ids] = 0
-        self.twin_replay_used_burst_count[env_ids] = 0
-        self.twin_replay_start_phase[env_ids] = 0.0
-        self.twin_replay_selected_family_id[env_ids] = -1
-        self.twin_replay_duration_steps[env_ids] = 0
-        for env_id in env_ids.detach().cpu().tolist():
-            self.twin_replay_active_sequences.pop(int(env_id), None)
-            self.twin_replay_current_actions[int(env_id)] = []
-            self.twin_replay_current_phases[int(env_id)] = []
-
-    def _record_twin_student_actions(self, student_env_actions, iteration):
-        if not getattr(self, "twin_replay_enabled", False) or not self.twin_replay_record_enabled:
-            return
-        if not self._is_twin_replay_recording_active(iteration):
-            return
-        if student_env_actions.shape[0] != self.num_envs:
-            return
-        if student_env_actions.ndim != 2 or student_env_actions.shape[1] != self.num_actions:
-            return
-        phase = self._get_current_ref_phase()
-        eligible = (phase >= self.twin_replay_record_phase_min) & (phase <= self.twin_replay_record_phase_max)
-        if self.twin_replay_active_visual_envs_only:
-            eligible = eligible & self.twin_replay_visual_env_mask
-        eligible_env_ids = torch.nonzero(eligible, as_tuple=False).squeeze(-1)
-        if eligible_env_ids.numel() == 0:
-            return
-        detached_actions = student_env_actions.detach()
-        for env_id in eligible_env_ids.detach().cpu().tolist():
-            env_id = int(env_id)
-            self.twin_replay_current_actions[env_id].append(detached_actions[env_id].to(device="cpu", dtype=torch.float32).clone())
-            self.twin_replay_current_phases[env_id].append(float(phase[env_id].detach().cpu().item()))
-
-    def _get_twin_replay_sequences_for_key(self, geometry_key, target_family_id):
-        if self.twin_replay_strict_same_geometry:
-            return list(self.twin_student_replay_buffer.get((geometry_key, target_family_id), ()))
-
-        candidate_keys = [
-            (buffer_geometry_key, buffer_family_id)
-            for (buffer_geometry_key, buffer_family_id), sequences in self.twin_student_replay_buffer.items()
-            if buffer_family_id == target_family_id and len(sequences) > 0
-        ]
-        if (geometry_key, target_family_id) in self.twin_student_replay_buffer:
-            candidate_keys = [(geometry_key, target_family_id)] + [
-                key for key in candidate_keys if key != (geometry_key, target_family_id)
-            ]
-        sequences = []
-        for key in candidate_keys:
-            sequences.extend(list(self.twin_student_replay_buffer.get(key, ())))
-        return sequences
-
-    def _sample_twin_replay_sequence(self, sequences, duration):
-        valid_sequences = [seq for seq in sequences if int(seq["actions"].shape[0]) >= int(duration)]
-        if not valid_sequences:
-            return None, None
-        chosen_seq = valid_sequences[int(torch.randint(0, len(valid_sequences), (1,), device=self.device).item())]
-        max_start = int(chosen_seq["actions"].shape[0]) - int(duration)
-        start_idx = int(torch.randint(0, max_start + 1, (1,), device=self.device).item()) if max_start > 0 else 0
-        return chosen_seq, start_idx
-
-    def _sample_twin_replay_duration(self, sequences):
-        if not sequences:
-            return None
-        max_sequence_len = max(int(seq["actions"].shape[0]) for seq in sequences)
-        feasible_duration_max = min(self.twin_replay_duration_max, max_sequence_len)
-        if feasible_duration_max < self.twin_replay_duration_min:
-            return None
-        return int(
-            torch.randint(
-                low=self.twin_replay_duration_min,
-                high=feasible_duration_max + 1,
-                size=(1,),
-                device=self.device,
-                dtype=torch.long,
-            ).item()
-        )
-
-    def _maybe_start_twin_replay_bursts(self, iteration):
-        if not getattr(self, "twin_replay_enabled", False) or not self.twin_replay_perturb_enabled:
-            return torch.empty(0, dtype=torch.long, device=self.device), None
-        if int(iteration) < self.twin_replay_perturb_start_iteration:
-            return torch.empty(0, dtype=torch.long, device=self.device), None
-        phase = self._get_current_ref_phase()
-        eligible = (
-            self.twin_replay_should_burst
-            & (~self.twin_replay_active_mask)
-            & (self.twin_replay_used_burst_count < self.twin_replay_max_bursts_per_episode)
-            & (phase >= self.twin_replay_phase_min)
-            & (phase <= self.twin_replay_phase_max)
-        )
-        if self.twin_replay_active_visual_envs_only:
-            eligible = eligible & self.twin_replay_visual_env_mask
-        candidate_env_ids = torch.nonzero(eligible, as_tuple=False).squeeze(-1)
-        if candidate_env_ids.numel() == 0:
-            return candidate_env_ids, phase
-
-        started_env_ids = []
-        for env_id in candidate_env_ids.detach().cpu().tolist():
-            env_id = int(env_id)
-            geometry_key = self.twin_replay_env_geometry_keys[env_id]
-            current_family_id = int(self.env_family_ids[env_id].detach().cpu().item())
-            twin_family_id = int(self.twin_replay_family_id_map[current_family_id].detach().cpu().item())
-            if twin_family_id < 0:
-                self.twin_replay_log_skipped_no_buffer += 1
-                continue
-            exact_key = (geometry_key, twin_family_id)
-            exact_sequences = list(self.twin_student_replay_buffer.get(exact_key, ()))
-            if self.twin_replay_strict_same_geometry and not exact_sequences:
-                self.twin_replay_log_skipped_no_same_geometry += 1
-                if self.twin_replay_skip_if_no_replay_available:
-                    continue
-                continue
-
-            candidate_sequences = self._get_twin_replay_sequences_for_key(geometry_key, twin_family_id)
-            if not candidate_sequences:
-                self.twin_replay_log_skipped_no_buffer += 1
-                if self.twin_replay_skip_if_no_replay_available:
-                    continue
-                continue
-
-            duration = self._sample_twin_replay_duration(candidate_sequences)
-            if duration is None:
-                self.twin_replay_log_skipped_sequence_too_short += 1
-                if self.twin_replay_skip_if_no_replay_available:
-                    continue
-                continue
-            replay_seq, start_idx = self._sample_twin_replay_sequence(candidate_sequences, duration)
-            if replay_seq is None:
-                self.twin_replay_log_skipped_sequence_too_short += 1
-                if self.twin_replay_skip_if_no_replay_available:
-                    continue
-                continue
-            window = replay_seq["actions"][start_idx : start_idx + duration].to(device="cpu", dtype=torch.float32).contiguous()
-            self.twin_replay_active_sequences[env_id] = {
-                "actions": window,
-                "cursor": 0,
-            }
-            self.twin_replay_active_mask[env_id] = True
-            self.twin_replay_remaining_steps[env_id] = int(duration)
-            self.twin_replay_used_burst_count[env_id] += 1
-            self.twin_replay_start_phase[env_id] = phase[env_id]
-            self.twin_replay_selected_family_id[env_id] = twin_family_id
-            self.twin_replay_duration_steps[env_id] = int(duration)
-            self.twin_replay_log_new_bursts += 1
-            self.twin_replay_log_duration_sum += float(duration)
-            self.twin_replay_log_start_phase_sum += float(phase[env_id].detach().cpu().item())
-            self.twin_replay_log_burst_count += 1
-            self.twin_replay_log_family_bursts[current_family_id] += 1
-            started_env_ids.append(env_id)
-            if self.rank == 0 and self.twin_replay_debug_print_count < self.twin_replay_debug_print_limit:
-                source_family_id = int(replay_seq["source_family_id"])
-                print(
-                    "[INFO] twin_student_action_replay burst start: "
-                    f"env_id={env_id}, current_family={DOOR_FAMILY_NAMES[current_family_id]}, "
-                    f"twin_family={DOOR_FAMILY_NAMES[twin_family_id]}, geometry_key={geometry_key}, "
-                    f"duration={duration}, phase={float(phase[env_id].detach().cpu().item()):.3f}, "
-                    f"source_env_id={int(replay_seq['source_env_id'])}, source_family={DOOR_FAMILY_NAMES[source_family_id]}"
-                )
-                self.twin_replay_debug_print_count += 1
-        if not started_env_ids:
-            return torch.empty(0, dtype=torch.long, device=self.device), phase
-        return torch.tensor(started_env_ids, device=self.device, dtype=torch.long), phase
-
-    def _record_twin_replay_action_metrics(self, env_ids, replay_actions, normal_step_actions):
-        if env_ids.numel() == 0:
-            return
-        normal_actions = normal_step_actions[env_ids]
-        diff = replay_actions - normal_actions
-        self.twin_replay_log_action_l2_sum += float(diff.norm(dim=-1).sum().detach().cpu().item())
-        self.twin_replay_log_action_l2_count += int(env_ids.numel())
-        base_cosine = self._cosine_mean_for_action_indices(
-            replay_actions,
-            normal_actions,
-            self.action_component_history_indices["base"],
-        )
-        if base_cosine is not None:
-            self.twin_replay_log_base_cosine_sum += base_cosine * int(env_ids.numel())
-            self.twin_replay_log_base_cosine_count += int(env_ids.numel())
-        arm_cosine = self._cosine_mean_for_action_indices(
-            replay_actions,
-            normal_actions,
-            self.action_component_history_indices["arm"],
-        )
-        if arm_cosine is not None:
-            self.twin_replay_log_arm_cosine_sum += arm_cosine * int(env_ids.numel())
-            self.twin_replay_log_arm_cosine_count += int(env_ids.numel())
-
-    def _apply_twin_student_action_replay(self, step_actions, iteration):
-        if not getattr(self, "twin_replay_enabled", False) or not self.twin_replay_perturb_enabled:
-            return step_actions
-        self._maybe_start_twin_replay_bursts(iteration)
-        active_env_ids = torch.nonzero(self.twin_replay_active_mask, as_tuple=False).squeeze(-1)
-        active_fraction = float(self.twin_replay_active_mask.float().mean().detach().cpu().item())
-        self.twin_replay_log_active_fraction_sum += active_fraction
-        self.twin_replay_log_step_count += 1
-        if active_env_ids.numel() == 0:
-            return step_actions
-
-        adjusted_step_actions = step_actions.clone()
-        replay_actions = []
-        applied_env_ids = []
-        for env_id in active_env_ids.detach().cpu().tolist():
-            env_id = int(env_id)
-            seq_state = self.twin_replay_active_sequences.get(env_id)
-            if seq_state is None:
-                self._deactivate_twin_replay_env(env_id)
-                continue
-            cursor = int(seq_state["cursor"])
-            if cursor >= int(seq_state["actions"].shape[0]):
-                self._deactivate_twin_replay_env(env_id)
-                continue
-            replay_action = seq_state["actions"][cursor].to(device=self.device, dtype=torch.float32)
-            adjusted_step_actions[env_id, self.twin_replay_replace_action_indices] = replay_action[
-                self.twin_replay_replace_action_indices
-            ]
-            replay_actions.append(replay_action)
-            applied_env_ids.append(env_id)
-            seq_state["cursor"] = cursor + 1
-            self.twin_replay_remaining_steps[env_id] -= 1
-            if (
-                int(self.twin_replay_remaining_steps[env_id].detach().cpu().item()) <= 0
-                or seq_state["cursor"] >= int(seq_state["actions"].shape[0])
-            ):
-                self._deactivate_twin_replay_env(env_id)
-        if replay_actions:
-            self._record_twin_replay_action_metrics(
-                torch.tensor(applied_env_ids, device=self.device, dtype=torch.long),
-                torch.stack(replay_actions, dim=0),
-                step_actions,
-            )
-        return adjusted_step_actions
-
-    def _get_twin_replay_log_metrics(self, reset: bool = True):
-        metrics = {"twin_replay/enabled": float(bool(getattr(self, "twin_replay_enabled", False)))}
-        if not getattr(self, "twin_replay_enabled", False) or not self.twin_replay_log_enabled:
-            return metrics
-        metrics["twin_replay/buffer_num_keys"] = float(len(self.twin_student_replay_buffer))
-        metrics["twin_replay/buffer_num_sequences"] = float(
-            sum(len(sequences) for sequences in self.twin_student_replay_buffer.values())
-        )
-        metrics["twin_replay/new_sequences"] = float(self.twin_replay_log_new_sequences)
-        metrics["twin_replay/new_bursts"] = float(self.twin_replay_log_new_bursts)
-        metrics["twin_replay/skipped_no_buffer"] = float(self.twin_replay_log_skipped_no_buffer)
-        metrics["twin_replay/skipped_no_same_geometry"] = float(self.twin_replay_log_skipped_no_same_geometry)
-        metrics["twin_replay/skipped_sequence_too_short"] = float(
-            self.twin_replay_log_skipped_sequence_too_short
-        )
-        if self.twin_replay_log_step_count > 0:
-            metrics["twin_replay/active_env_fraction"] = (
-                self.twin_replay_log_active_fraction_sum / float(self.twin_replay_log_step_count)
-            )
-        if self.twin_replay_log_burst_count > 0:
-            metrics["twin_replay/mean_duration"] = (
-                self.twin_replay_log_duration_sum / float(self.twin_replay_log_burst_count)
-            )
-            metrics["twin_replay/mean_start_phase"] = (
-                self.twin_replay_log_start_phase_sum / float(self.twin_replay_log_burst_count)
-            )
-        if self.twin_replay_log_action_l2_count > 0:
-            metrics["twin_replay/action_l2_replay_vs_normal"] = (
-                self.twin_replay_log_action_l2_sum / float(self.twin_replay_log_action_l2_count)
-            )
-        if self.twin_replay_log_base_cosine_count > 0:
-            metrics["twin_replay/base_cosine_replay_vs_normal"] = (
-                self.twin_replay_log_base_cosine_sum / float(self.twin_replay_log_base_cosine_count)
-            )
-        if self.twin_replay_log_arm_cosine_count > 0:
-            metrics["twin_replay/arm_cosine_replay_vs_normal"] = (
-                self.twin_replay_log_arm_cosine_sum / float(self.twin_replay_log_arm_cosine_count)
-            )
-        for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
-            metrics[f"twin_replay/family_{family_name}_bursts"] = float(
-                self.twin_replay_log_family_bursts[family_id].detach().cpu().item()
-            )
-        if reset:
-            self._reset_twin_replay_log_accumulators()
-        return metrics
 
     def _reset_wrong_pp_log_accumulators(self):
         self.wrong_pp_log_active_fraction_sum = 0.0
@@ -3949,7 +3607,6 @@ class Dagger:
         else:
             aux_input_vector = None
         aux_input_vector = self._maybe_drop_aux_feedback(aux_input_vector)
-        push_pull_cond = self._build_oracle_push_pull_condition() if self.oracle_push_pull_enabled else None
 
         obs = OrderedDict()
         for key in self.state_encoders_keys:
@@ -3973,20 +3630,12 @@ class Dagger:
                 if aux_input_vector is None:
                     raise RuntimeError(f"Aux state '{key}' is enabled but aux input vector is unavailable.")
                 obs[key] = aux_input_vector[:, self.aux_state_specs[key]["slice"]]
-            elif key == self.oracle_push_pull_obs_key:
-                if push_pull_cond is None:
-                    raise RuntimeError("push_pull_cond is required when oracle_push_pull_condition is enabled.")
-                # Oracle convention: push is [1, 0], pull is [0, 1].
-                obs[key] = push_pull_cond
             else:
                 raise KeyError(f"Unsupported student state key '{key}' in config.")
 
-        if self.oracle_push_pull_enabled and self.oracle_push_pull_obs_key not in obs:
-            raise RuntimeError("push_pull_cond is required when oracle_push_pull_condition is enabled.")
-
         if self.proprio_temporal_enabled:
             if self.proprio_temporal_obs_key is None:
-                raise RuntimeError("Shared proprio_temporal_encoder is enabled but no observation key is configured.")
+                raise RuntimeError("temporal_state_encoders are enabled but no observation key is configured.")
             obs[self.proprio_temporal_obs_key] = self._build_proprio_temporal_obs(temporal_sample_cache)
 
         for key in self.pcd_encoders_keys:
@@ -4014,12 +3663,58 @@ class Dagger:
         self.latest_aux_target_vector = None if aux_target_vector is None else aux_target_vector.detach().clone()
         return obs
 
-    def _student_forward(self, student_obs):
-        if self.oracle_push_pull_enabled:
-            if self.oracle_push_pull_obs_key not in student_obs:
-                raise RuntimeError("push_pull_cond is required when oracle_push_pull_condition is enabled.")
-            self._validate_oracle_push_pull_condition(student_obs[self.oracle_push_pull_obs_key])
-        return self.student_model_ddp(student_obs)
+    def _student_forward(self, student_obs, iteration=None):
+        base_obs = OrderedDict(student_obs)
+        predicted_mode_logits = None
+        self.latest_push_pull_condition_source = "disabled"
+        if self.push_pull_condition_enabled and self.push_pull_condition_obs_key in base_obs:
+            raise RuntimeError(
+                "Base student observations must not contain push_pull_cond; "
+                "the condition is selected after observation building."
+            )
+        if not self.push_pull_condition_enabled:
+            self.latest_push_pull_perturb_to_push_count = 0
+            self.latest_push_pull_perturb_to_pull_count = 0
+            student_output = self.student_model_ddp(base_obs)
+            if self.mode_prediction_enabled and "mode_logits" in student_output:
+                self._record_push_pull_prediction_metrics(student_output["mode_logits"])
+            return student_output
+
+        self.latest_push_pull_condition_source = self.push_pull_condition_source
+        if self.push_pull_condition_source == "predicted":
+            # Predicted source runs a first pass without the push/pull condition token.
+            prediction_output = self.student_model_ddp(
+                base_obs,
+                omit_state_keys=(self.push_pull_condition_obs_key,),
+            )
+            predicted_mode_logits = prediction_output.get("mode_logits")
+            if predicted_mode_logits is None:
+                raise RuntimeError(
+                    "push_pull_condition.source requires the student to produce mode_logits in the "
+                    "prediction-only pass."
+                )
+            self._record_push_pull_prediction_metrics(predicted_mode_logits)
+
+        # Oracle source uses GT one-hot; predicted source uses softmax logits converted into [p_push, p_pull].
+        push_pull_cond = self._build_push_pull_condition_from_source(
+            self.push_pull_condition_source,
+            mode_logits=predicted_mode_logits,
+        )
+        self._validate_push_pull_condition(push_pull_cond)
+
+        # Perturbation modifies only the condition input fed to the action policy, not labels or target actions.
+        push_pull_cond = self._apply_push_pull_condition_perturb(push_pull_cond, step_id=iteration)
+        action_obs = OrderedDict(base_obs)
+        action_obs[self.push_pull_condition_obs_key] = push_pull_cond
+        self._validate_push_pull_condition(action_obs[self.push_pull_condition_obs_key])
+        student_output = self.student_model_ddp(action_obs)
+        if predicted_mode_logits is not None:
+            student_output = dict(student_output)
+            # Keep the push/pull supervision on the first-pass logits that generated the condition.
+            student_output["mode_logits"] = predicted_mode_logits
+        elif self.mode_prediction_enabled and "mode_logits" in student_output:
+            self._record_push_pull_prediction_metrics(student_output["mode_logits"])
+        return student_output
 
     def _compute_student_loss(self, student_output, teacher_actions, aux_target=None):
         target = teacher_actions
@@ -4417,7 +4112,6 @@ class Dagger:
         teacher_env_fraction = self._get_teacher_forcing_env_fraction()
         student_env_fraction = 1.0 - teacher_env_fraction
         iteration_time_ms = self._consume_timing_means()
-        twin_replay_metrics = self._get_twin_replay_log_metrics(reset=True)
 
         if self.rank == 0:
             print("=" * 10)
@@ -4451,16 +4145,18 @@ class Dagger:
                 print("Obs Lag Mean (ms):", self.latest_obs_lag_mean_ms)
                 print("Obs Lag Min (ms):", self.latest_obs_lag_min_ms)
                 print("Obs Lag Max (ms):", self.latest_obs_lag_max_ms)
-            if self.oracle_push_pull_enabled:
+            if self.push_pull_condition_enabled:
+                print("Push/Pull Condition Source:", self.latest_push_pull_condition_source)
                 print("Fraction Push:", self.latest_fraction_push)
                 print("Fraction Pull:", self.latest_fraction_pull)
+                print("Push/Pull Pred Entropy:", self.latest_push_pull_pred_entropy)
+                if self.latest_push_pull_pred_acc is not None:
+                    print("Push/Pull Pred Acc:", self.latest_push_pull_pred_acc)
+                print("Push/Pull Perturbed To Push Count:", self.latest_push_pull_perturb_to_push_count)
+                print("Push/Pull Perturbed To Pull Count:", self.latest_push_pull_perturb_to_pull_count)
             print("Teacher Forcing Beta:", teacher_forcing_beta)
             print("Teacher Rollout Env Fraction:", teacher_env_fraction)
             print("Student Rollout Env Fraction:", student_env_fraction)
-            if getattr(self, "twin_replay_enabled", False):
-                print("Twin Replay Active Fraction:", twin_replay_metrics.get("twin_replay/active_env_fraction", 0.0))
-                print("Twin Replay New Bursts:", twin_replay_metrics.get("twin_replay/new_bursts", 0.0))
-                print("Twin Replay New Sequences:", twin_replay_metrics.get("twin_replay/new_sequences", 0.0))
             print("Student Update Steps:", self.student_update_steps)
             print("Last Local Update Batch Size:", self.last_local_update_batch_size)
             print("Last Global Update Batch Size:", self.last_global_update_batch_size)
@@ -4520,9 +4216,15 @@ class Dagger:
             metrics["stats/obs_lag_max_ms"] = self.latest_obs_lag_max_ms
             for timestamp_ms, mean_age_ms in self.latest_obs_lag_effective_age_ms_by_timestamp.items():
                 metrics[f"stats/obs_lag_effective_age_{timestamp_ms}ms"] = mean_age_ms
-        if self.oracle_push_pull_enabled:
+        if self.push_pull_condition_enabled:
+            metrics["stats/push_pull_condition_source"] = self.latest_push_pull_condition_source
             metrics["stats/fraction_push"] = self.latest_fraction_push
             metrics["stats/fraction_pull"] = self.latest_fraction_pull
+            metrics["stats/push_pull_pred_entropy"] = self.latest_push_pull_pred_entropy
+            if self.latest_push_pull_pred_acc is not None:
+                metrics["stats/push_pull_pred_acc"] = self.latest_push_pull_pred_acc
+            metrics["stats/push_pull_perturb_to_push_count"] = self.latest_push_pull_perturb_to_push_count
+            metrics["stats/push_pull_perturb_to_pull_count"] = self.latest_push_pull_perturb_to_pull_count
         if episode_reward is not None:
             metrics["stats/episode_reward"] = episode_reward
         if episode_length is not None:
@@ -4548,7 +4250,6 @@ class Dagger:
                 if key == "stats/success_rate" or key.startswith("stats/success_rate/"):
                     continue
                 metrics[key] = value
-        metrics.update(twin_replay_metrics)
         self._wandb_log(metrics, step=iteration)
 
     def distill(self):
@@ -4572,20 +4273,18 @@ class Dagger:
             self._seed_temporal_histories()
             self._seed_aux_buffer()
             self._resample_teacher_forcing_env_mask(self.resume_iteration)
-            self._reset_twin_student_action_replay_state(iteration=self.resume_iteration)
 
             for iteration in range(start_iteration, end_iteration):
                 self._sync_timing_device()
                 iteration_start_time = time.perf_counter()
 
                 student_obs = self._build_student_obs(iteration=iteration)
-                student_output = self._student_forward(student_obs)
+                student_output = self._student_forward(student_obs, iteration=iteration)
                 if self.mode_prediction_enabled and self.play_policy and iteration % 10 == 0:
                     mode_logits = student_output["mode_logits"].detach()
                     print("Iteration ", iteration, ": Direction Pred:", mode_logits.detach().cpu().tolist())
                 student_actions = student_output["action"][:, 0, :]
                 student_env_actions = self._student_actions_to_env_actions(student_actions)
-                self._record_twin_student_actions(student_env_actions, iteration=iteration)
                 aux_prediction_for_replay = None
                 if self.has_aux_prediction:
                     aux_prediction_for_replay = self._decode_aux_prediction(student_output["aux"].detach())
@@ -4638,7 +4337,6 @@ class Dagger:
                     teacher_actions,
                     iteration,
                 )
-                step_actions = self._apply_twin_student_action_replay(step_actions, iteration=iteration)
                 obs, rew, out_of_reach, timed_out, step_extras = self.env.step(step_actions)
                 self._update_logged_env_metrics(step_extras)
                 self.temporal_current_time_s = self._iteration_to_time_s(iteration + 1)
@@ -4665,7 +4363,6 @@ class Dagger:
                     self._seed_temporal_histories(done_mask)
                     self._seed_aux_buffer(done_mask)
                     self._resample_teacher_forcing_env_mask(iteration + 1, done_mask)
-                    self._reset_twin_student_action_replay_state(done_mask, iteration=iteration + 1)
 
                 if total_loss is not None:
                     self._sync_timing_device()
