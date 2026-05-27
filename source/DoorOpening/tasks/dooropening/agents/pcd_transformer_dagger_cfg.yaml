@@ -157,7 +157,6 @@ dagger:
   reset_progress_total: 50000
   adr_reset_progress_total: 10000
   pointcloud_source: "lidar"
-  use_sim_body_pose_door_pcd: true  # Fast source PCD path; still rendered through LiDAR visibility/binning.
   robot_num_points: 30000
   append_robot_gt_to_policy_cloud: true
   robot_gt_policy_points: 2000  # Policy robot input appended after the two door crops above.
