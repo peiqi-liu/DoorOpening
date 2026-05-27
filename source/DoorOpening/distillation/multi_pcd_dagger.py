@@ -3633,14 +3633,15 @@ class Dagger:
                 if aux_input_vector is None:
                     raise RuntimeError(f"Aux state '{key}' is enabled but aux input vector is unavailable.")
                 obs[key] = aux_input_vector[:, self.aux_state_specs[key]["slice"]]
-            elif key == self.push_pull_condition_obs_key:
-                if push_pull_cond is None:
-                    raise RuntimeError(
-                        f"Push/pull condition '{self.push_pull_condition_obs_key}' is enabled but unavailable."
-                    )
-                obs[key] = push_pull_cond
             else:
                 raise KeyError(f"Unsupported student state key '{key}' in config.")
+
+        if self.push_pull_condition_enabled:
+            if push_pull_cond is None:
+                raise RuntimeError(
+                    f"Push/pull condition '{self.push_pull_condition_obs_key}' is enabled but unavailable."
+                )
+            obs[self.push_pull_condition_obs_key] = push_pull_cond
 
         if self.proprio_temporal_enabled:
             if self.proprio_temporal_obs_key is None:
