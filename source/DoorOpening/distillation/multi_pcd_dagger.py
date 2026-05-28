@@ -225,6 +225,8 @@ class Dagger:
         self.temporal_q_history = None
         self.temporal_target_history = None
         self.temporal_base_vel_history = None
+        self.temporal_aux_handle_history = None
+        self.temporal_push_pull_belief_history = None
         self.proprio_temporal_enabled = False
         self.proprio_temporal_obs_key = None
         self.proprio_temporal_timestamps_ms = tuple()
@@ -233,6 +235,8 @@ class Dagger:
         self.proprio_temporal_field_state_keys = OrderedDict()
         self.proprio_temporal_field_dims = OrderedDict()
         self.proprio_temporal_covered_state_keys = frozenset()
+        self.temporal_aux_handle_enabled = False
+        self.temporal_push_pull_belief_enabled = False
         self.observation_lag_enabled = False
         self.observation_lag_apply_to_proprio = True
         self.observation_lag_apply_to_pointcloud = False
@@ -275,6 +279,10 @@ class Dagger:
         self.latest_push_pull_condition_source = "disabled"
         self.latest_push_pull_perturb_to_push_count = 0
         self.latest_push_pull_perturb_to_pull_count = 0
+        self.latest_push_pull_belief_input = None
+        self.latest_push_pull_belief_hist_entropy_now = 0.0
+        self.latest_push_pull_belief_hist_entropy_mean = 0.0
+        self.latest_push_pull_belief_hist_delta_1500ms = 0.0
         self._logged_temporal_state_input_keys = False
         self._timing_stats = {"sum_ms": 0.0, "count": 0}
         self.logged_env_metric_prefixes = ("dr/", "dr_limit/", "dr_sample/", "reset/")
@@ -520,10 +528,6 @@ class Dagger:
             for key, cfg in self.student_model.pcd_encoders_cfg.items()
             if cfg.get("use_pcd", False)
         )
-        has_q_hand_state = "q_hand" in self.state_encoders_keys
-        has_q_hand_temporal = "q_hand" in self.proprio_temporal_field_state_keys.values()
-        if not has_q_hand_state and not has_q_hand_temporal:
-            raise ValueError("PCDTransformer student config must include q_hand in state_encoders_cfg.")
 
         self.temporal_derived_state_specs = OrderedDict()
         for key in self.state_encoders_keys:
@@ -592,6 +596,21 @@ class Dagger:
         if self.has_aux_input:
             self.aux_buffer = torch.zeros((self.num_envs, self.aux_input_dim), dtype=torch.float32, device=self.device)
         self.latest_aux_pregrasp_dropout_fraction = 0.0
+        self.temporal_aux_handle_enabled = (
+            self.proprio_temporal_field_state_keys.get("aux_handle_pos") == "aux_handle_pos"
+        )
+        self.temporal_push_pull_belief_enabled = (
+            self.proprio_temporal_field_state_keys.get("push_pull_belief") == self.push_pull_condition_obs_key
+        )
+        if self.temporal_aux_handle_enabled and "aux_handle_pos" not in self.aux_state_specs:
+            raise RuntimeError(
+                "temporal_state_encoders field 'aux_handle_pos' requires the aux_handle_pos state encoder "
+                "to remain configured in state_encoders_cfg."
+            )
+        if self.temporal_push_pull_belief_enabled and not self.push_pull_condition_enabled:
+            raise RuntimeError(
+                "temporal_state_encoders field 'push_pull_belief' requires push_pull_condition.enabled=true."
+            )
         if student_ckpt is not None and self.has_aux_input and self.rank == 0:
             print(
                 "Warning: student checkpoint was loaded while aux_handle_* inputs are active. "
@@ -1375,6 +1394,93 @@ class Dagger:
             "dim": 3,
         }
 
+    def _validate_temporal_history_buffer_shape(self, name, value, expected_dim):
+        expected_shape = (self.num_envs, self.temporal_history_len, int(expected_dim))
+        if value is None:
+            raise RuntimeError(f"Temporal history buffer '{name}' is not initialized.")
+        if value.ndim != 3 or tuple(value.shape) != expected_shape:
+            raise RuntimeError(
+                f"Temporal history buffer '{name}' must have shape {expected_shape}, got {tuple(value.shape)}."
+            )
+
+    def _validate_temporal_current_value_shape(self, name, value, expected_dim):
+        expected_shape = (self.num_envs, int(expected_dim))
+        if value is None:
+            raise RuntimeError(f"Temporal current value '{name}' is unavailable.")
+        if value.ndim != 2 or tuple(value.shape) != expected_shape:
+            raise RuntimeError(
+                f"Temporal current value '{name}' must have shape {expected_shape}, got {tuple(value.shape)}."
+            )
+
+    def _build_zero_aux_handle_temporal_value(self, num_envs=None):
+        num_envs = self.num_envs if num_envs is None else int(num_envs)
+        return torch.zeros((num_envs, 3), dtype=torch.float32, device=self.device)
+
+    def _build_initial_temporal_push_pull_belief(self, env_ids=None):
+        if env_ids is None:
+            num_envs = self.num_envs
+        else:
+            env_ids = torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
+            num_envs = int(env_ids.numel())
+        if num_envs <= 0:
+            return torch.zeros((0, 2), dtype=torch.float32, device=self.device)
+        if self.push_pull_condition_enabled and self.push_pull_condition_source == "oracle":
+            gt_belief = self._build_gt_push_pull_condition()
+            return gt_belief if env_ids is None else gt_belief[env_ids]
+        return torch.full((num_envs, 2), 0.5, dtype=torch.float32, device=self.device)
+
+    def _get_temporal_aux_handle_from_policy_input(self, aux_input_vector):
+        if not self.temporal_aux_handle_enabled:
+            return None
+        if "aux_handle_pos" not in self.aux_state_specs:
+            raise RuntimeError(
+                "temporal_state_encoders field 'aux_handle_pos' could not find aux_handle_pos in aux_state_specs."
+            )
+        if aux_input_vector is None or not self.aux_feedback_to_policy:
+            return self._build_zero_aux_handle_temporal_value()
+        value = aux_input_vector[:, self.aux_state_specs["aux_handle_pos"]["slice"]]
+        self._validate_temporal_current_value_shape("aux_handle_pos", value, 3)
+        return value
+
+    def _get_temporal_aux_handle_for_history(self):
+        if not self.temporal_aux_handle_enabled:
+            return self._build_zero_aux_handle_temporal_value()
+        if "aux_handle_pos" not in self.aux_state_specs:
+            raise RuntimeError(
+                "temporal_state_encoders field 'aux_handle_pos' could not find aux_handle_pos in aux_state_specs."
+            )
+        if not self.aux_feedback_to_policy:
+            return self._build_zero_aux_handle_temporal_value()
+        if self.aux_buffer is None:
+            raise RuntimeError(
+                "temporal_state_encoders field 'aux_handle_pos' requires aux_buffer when aux_feedback_to_policy=true."
+            )
+        value = self.aux_buffer[:, self.aux_state_specs["aux_handle_pos"]["slice"]].detach().clone()
+        self._validate_temporal_current_value_shape("aux_handle_pos_history", value, 3)
+        return value
+
+    def _get_temporal_push_pull_belief_from_policy_input(self, push_pull_cond):
+        if not self.temporal_push_pull_belief_enabled:
+            return None
+        if not self.push_pull_condition_enabled:
+            raise RuntimeError(
+                "temporal_state_encoders field 'push_pull_belief' requires push_pull_condition.enabled=true."
+            )
+        self._validate_temporal_current_value_shape("push_pull_belief", push_pull_cond, 2)
+        return push_pull_cond.detach().clone()
+
+    def _get_temporal_push_pull_belief_for_history(self):
+        if self.latest_push_pull_belief_input is not None:
+            value = self.latest_push_pull_belief_input.detach().clone()
+            self._validate_temporal_current_value_shape("push_pull_belief_history", value, 2)
+            return value
+        return self._build_initial_temporal_push_pull_belief()
+
+    def _reset_push_pull_belief_history_metrics(self):
+        self.latest_push_pull_belief_hist_entropy_now = 0.0
+        self.latest_push_pull_belief_hist_entropy_mean = 0.0
+        self.latest_push_pull_belief_hist_delta_1500ms = 0.0
+
     def _init_history_buffers(self):
         self.temporal_dt_s = max(float(getattr(self.ov_env, "dt", 1.0 / 15.0)), 1e-6)
         self.temporal_history_len = max(
@@ -1403,6 +1509,22 @@ class Dagger:
             (self.num_envs, self.temporal_history_len, 3),
             dtype=torch.float32,
             device=self.device,
+        )
+        self.temporal_aux_handle_history = torch.zeros(
+            (self.num_envs, self.temporal_history_len, 3),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self.temporal_push_pull_belief_history = torch.zeros(
+            (self.num_envs, self.temporal_history_len, 2),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self._validate_temporal_history_buffer_shape("temporal_aux_handle_history", self.temporal_aux_handle_history, 3)
+        self._validate_temporal_history_buffer_shape(
+            "temporal_push_pull_belief_history",
+            self.temporal_push_pull_belief_history,
+            2,
         )
 
     def _iteration_to_time_s(self, iteration):
@@ -1495,22 +1617,61 @@ class Dagger:
             )
         return sample_cache[sample_key][:, offset_to_index[float(offset_s)], :]
 
-    def _build_temporal_sample_cache(self, q_pos, target_t, base_vel, offsets_s, apply_observation_lag=False):
+    def _build_temporal_sample_cache(
+        self,
+        q_pos,
+        target_t,
+        base_vel,
+        offsets_s,
+        apply_observation_lag=False,
+        aux_handle_pos=None,
+        push_pull_belief=None,
+    ):
         if not offsets_s:
             return None
 
         offsets_s = tuple(float(offset_s) for offset_s in offsets_s)
         offset_to_index = {offset_s: idx for idx, offset_s in enumerate(offsets_s)}
+        include_aux_handle = self.temporal_aux_handle_enabled
+        include_push_pull_belief = self.temporal_push_pull_belief_enabled
+        if include_aux_handle:
+            self._validate_temporal_history_buffer_shape("temporal_aux_handle_history", self.temporal_aux_handle_history, 3)
+        if include_push_pull_belief:
+            self._validate_temporal_history_buffer_shape(
+                "temporal_push_pull_belief_history",
+                self.temporal_push_pull_belief_history,
+                2,
+            )
         if apply_observation_lag:
             effective_steps, effective_age_ms = self._sample_observation_lag_steps(offsets_s)
             q_samples_full = self._gather_temporal_values(self.temporal_q_history, effective_steps)
             target_samples = self._gather_temporal_values(self.temporal_target_history, effective_steps)
             base_vel_samples = self._gather_temporal_values(self.temporal_base_vel_history, effective_steps)
+            aux_handle_samples = (
+                self._gather_temporal_values(self.temporal_aux_handle_history, effective_steps)
+                if include_aux_handle
+                else None
+            )
+            push_pull_belief_samples = (
+                self._gather_temporal_values(self.temporal_push_pull_belief_history, effective_steps)
+                if include_push_pull_belief
+                else None
+            )
         else:
             nonzero_offsets = [offset_s for offset_s in offsets_s if abs(offset_s) > 1.0e-9]
             q_history_by_offset = self._sample_temporal_history_offsets(self.temporal_q_history, nonzero_offsets)
             target_history_by_offset = self._sample_temporal_history_offsets(self.temporal_target_history, nonzero_offsets)
             base_vel_history_by_offset = self._sample_temporal_history_offsets(self.temporal_base_vel_history, nonzero_offsets)
+            aux_handle_history_by_offset = (
+                self._sample_temporal_history_offsets(self.temporal_aux_handle_history, nonzero_offsets)
+                if include_aux_handle
+                else {}
+            )
+            push_pull_belief_history_by_offset = (
+                self._sample_temporal_history_offsets(self.temporal_push_pull_belief_history, nonzero_offsets)
+                if include_push_pull_belief
+                else {}
+            )
             q_samples_full = torch.stack(
                 [q_pos if abs(offset_s) <= 1.0e-9 else q_history_by_offset[offset_s] for offset_s in offsets_s],
                 dim=1,
@@ -1523,6 +1684,30 @@ class Dagger:
                 [base_vel if abs(offset_s) <= 1.0e-9 else base_vel_history_by_offset[offset_s] for offset_s in offsets_s],
                 dim=1,
             )
+            aux_handle_samples = None
+            if include_aux_handle:
+                self._validate_temporal_current_value_shape("aux_handle_pos", aux_handle_pos, 3)
+                aux_handle_samples = torch.stack(
+                    [
+                        aux_handle_pos
+                        if abs(offset_s) <= 1.0e-9
+                        else aux_handle_history_by_offset[offset_s]
+                        for offset_s in offsets_s
+                    ],
+                    dim=1,
+                )
+            push_pull_belief_samples = None
+            if include_push_pull_belief:
+                self._validate_temporal_current_value_shape("push_pull_belief", push_pull_belief, 2)
+                push_pull_belief_samples = torch.stack(
+                    [
+                        push_pull_belief
+                        if abs(offset_s) <= 1.0e-9
+                        else push_pull_belief_history_by_offset[offset_s]
+                        for offset_s in offsets_s
+                    ],
+                    dim=1,
+                )
             effective_age_ms = (
                 torch.as_tensor(offsets_s, dtype=torch.float32, device=self.device).view(1, -1) * 1000.0
             ).expand(self.num_envs, -1)
@@ -1531,8 +1716,24 @@ class Dagger:
         target_err_samples = target_samples - q_samples_control
         if q_samples_full.ndim != 3 or target_samples.ndim != 3 or base_vel_samples.ndim != 3:
             raise RuntimeError("Temporal sample cache tensors must all be rank-3.")
+        if include_aux_handle:
+            if aux_handle_samples is None or aux_handle_samples.ndim != 3 or aux_handle_samples.shape[-1] != 3:
+                raise RuntimeError(
+                    "Temporal aux_handle_pos cache must have shape [N, T, 3], "
+                    f"got {None if aux_handle_samples is None else tuple(aux_handle_samples.shape)}."
+                )
+        if include_push_pull_belief:
+            if (
+                push_pull_belief_samples is None
+                or push_pull_belief_samples.ndim != 3
+                or push_pull_belief_samples.shape[-1] != 2
+            ):
+                raise RuntimeError(
+                    "Temporal push_pull_belief cache must have shape [N, T, 2], "
+                    f"got {None if push_pull_belief_samples is None else tuple(push_pull_belief_samples.shape)}."
+                )
 
-        return {
+        sample_cache = {
             "offsets_s": offsets_s,
             "offset_to_index": offset_to_index,
             "q_full": q_samples_full,
@@ -1542,6 +1743,11 @@ class Dagger:
             "base_vel": base_vel_samples,
             "effective_age_ms": effective_age_ms,
         }
+        if include_aux_handle:
+            sample_cache["aux_handle_pos"] = aux_handle_samples
+        if include_push_pull_belief:
+            sample_cache["push_pull_belief"] = push_pull_belief_samples
+        return sample_cache
 
     def _gather_temporal_values(self, value_history, indices):
         expanded_values = value_history.unsqueeze(1).expand(-1, indices.shape[1], -1, -1)
@@ -1593,14 +1799,26 @@ class Dagger:
         samples = torch.where(has_pair.unsqueeze(-1), interpolated, nearest_value)
         return {float(offset): samples[:, idx, :] for idx, offset in enumerate(offsets_s)}
 
-    def _push_temporal_history(self, timestamp, q, target, base_vel, env_ids=None):
+    def _push_temporal_history(self, timestamp, q, target, base_vel, aux_handle_pos=None, push_pull_belief=None, env_ids=None):
         if self.temporal_time_history is None:
             return
+        self._validate_temporal_history_buffer_shape("temporal_aux_handle_history", self.temporal_aux_handle_history, 3)
+        self._validate_temporal_history_buffer_shape(
+            "temporal_push_pull_belief_history",
+            self.temporal_push_pull_belief_history,
+            2,
+        )
         if q.ndim != 2 or target.ndim != 2 or base_vel.ndim != 2:
             raise RuntimeError(
                 "Expected q, target, and base_vel to be rank-2, got "
                 f"{tuple(q.shape)}, {tuple(target.shape)}, and {tuple(base_vel.shape)}."
             )
+        if aux_handle_pos is None:
+            aux_handle_pos = self._get_temporal_aux_handle_for_history()
+        if push_pull_belief is None:
+            push_pull_belief = self._get_temporal_push_pull_belief_for_history()
+        self._validate_temporal_current_value_shape("aux_handle_pos_history", aux_handle_pos, 3)
+        self._validate_temporal_current_value_shape("push_pull_belief_history", push_pull_belief, 2)
 
         if env_ids is None:
             if self.temporal_history_len > 1:
@@ -1608,10 +1826,16 @@ class Dagger:
                 self.temporal_q_history[:, 1:, :] = self.temporal_q_history[:, :-1, :].clone()
                 self.temporal_target_history[:, 1:, :] = self.temporal_target_history[:, :-1, :].clone()
                 self.temporal_base_vel_history[:, 1:, :] = self.temporal_base_vel_history[:, :-1, :].clone()
+                self.temporal_aux_handle_history[:, 1:, :] = self.temporal_aux_handle_history[:, :-1, :].clone()
+                self.temporal_push_pull_belief_history[:, 1:, :] = (
+                    self.temporal_push_pull_belief_history[:, :-1, :].clone()
+                )
             self.temporal_time_history[:, 0] = float(timestamp)
             self.temporal_q_history[:, 0, :] = q
             self.temporal_target_history[:, 0, :] = target
             self.temporal_base_vel_history[:, 0, :] = base_vel
+            self.temporal_aux_handle_history[:, 0, :] = aux_handle_pos
+            self.temporal_push_pull_belief_history[:, 0, :] = push_pull_belief
             return
 
         if env_ids.numel() == 0:
@@ -1623,22 +1847,42 @@ class Dagger:
             self.temporal_base_vel_history[env_ids, 1:, :] = self.temporal_base_vel_history[
                 env_ids, :-1, :
             ].clone()
+            self.temporal_aux_handle_history[env_ids, 1:, :] = self.temporal_aux_handle_history[
+                env_ids, :-1, :
+            ].clone()
+            self.temporal_push_pull_belief_history[env_ids, 1:, :] = self.temporal_push_pull_belief_history[
+                env_ids, :-1, :
+            ].clone()
         self.temporal_time_history[env_ids, 0] = float(timestamp)
         self.temporal_q_history[env_ids, 0, :] = q[env_ids]
         self.temporal_target_history[env_ids, 0, :] = target[env_ids]
         self.temporal_base_vel_history[env_ids, 0, :] = base_vel[env_ids]
+        self.temporal_aux_handle_history[env_ids, 0, :] = aux_handle_pos[env_ids]
+        self.temporal_push_pull_belief_history[env_ids, 0, :] = push_pull_belief[env_ids]
 
     def _seed_temporal_histories(self, env_ids=None):
         q = self._get_student_proprio_vector().detach()
         target = self._get_implemented_action_vector().detach()
         base_vel = self._get_student_base_velocity_vector().detach()
         timestamp = self._get_current_time_s()
+        aux_handle = self._build_zero_aux_handle_temporal_value()
+        push_pull_belief = self._build_initial_temporal_push_pull_belief()
+        self._validate_temporal_history_buffer_shape("temporal_aux_handle_history", self.temporal_aux_handle_history, 3)
+        self._validate_temporal_history_buffer_shape(
+            "temporal_push_pull_belief_history",
+            self.temporal_push_pull_belief_history,
+            2,
+        )
 
         if env_ids is None:
             self.temporal_time_history[:] = timestamp
             self.temporal_q_history[:] = q.unsqueeze(1).expand(-1, self.temporal_history_len, -1)
             self.temporal_target_history[:] = target.unsqueeze(1).expand(-1, self.temporal_history_len, -1)
             self.temporal_base_vel_history[:] = base_vel.unsqueeze(1).expand(-1, self.temporal_history_len, -1)
+            self.temporal_aux_handle_history[:] = aux_handle.unsqueeze(1).expand(-1, self.temporal_history_len, -1)
+            self.temporal_push_pull_belief_history[:] = push_pull_belief.unsqueeze(1).expand(
+                -1, self.temporal_history_len, -1
+            )
             return
 
         if env_ids.numel() == 0:
@@ -1649,6 +1893,12 @@ class Dagger:
         self.temporal_base_vel_history[env_ids] = base_vel[env_ids].unsqueeze(1).expand(
             -1, self.temporal_history_len, -1
         )
+        self.temporal_aux_handle_history[env_ids] = aux_handle[env_ids].unsqueeze(1).expand(
+            -1, self.temporal_history_len, -1
+        )
+        self.temporal_push_pull_belief_history[env_ids] = self._build_initial_temporal_push_pull_belief(
+            env_ids
+        ).unsqueeze(1).expand(-1, self.temporal_history_len, -1)
 
     def _get_student_proprio_vector(self):
         get_student_joint_pos_obs = getattr(self.ov_env, "get_student_joint_pos_obs", None)
@@ -1811,6 +2061,10 @@ class Dagger:
         elif actual_state_key in {"target_err_hand", "tracking_err_hand"}:
             full_value = self._get_temporal_sample_from_cache(sample_cache, "target_err", timestamp_s)
             value = full_value[:, self.action_component_history_indices["hand"]]
+        elif actual_state_key == "aux_handle_pos":
+            value = self._get_temporal_sample_from_cache(sample_cache, "aux_handle_pos", timestamp_s)
+        elif field_name == "push_pull_belief" or actual_state_key == self.push_pull_condition_obs_key:
+            value = self._get_temporal_sample_from_cache(sample_cache, "push_pull_belief", timestamp_s)
         else:
             raise RuntimeError(
                 f"Unsupported temporal_state_encoders field mapping '{field_name}' -> '{actual_state_key}'."
@@ -1822,6 +2076,36 @@ class Dagger:
                 f"got {tuple(value.shape)}."
             )
         return value
+
+    def _record_push_pull_belief_history_metrics(self, sample_cache):
+        self._reset_push_pull_belief_history_metrics()
+        if not self.temporal_push_pull_belief_enabled:
+            return
+        if sample_cache is None or "push_pull_belief" not in sample_cache:
+            raise RuntimeError(
+                "temporal_state_encoders field 'push_pull_belief' requires push_pull_belief entries in the temporal sample cache."
+            )
+        belief_samples = sample_cache["push_pull_belief"]
+        if belief_samples.ndim != 3 or belief_samples.shape[-1] != 2:
+            raise RuntimeError(
+                "push_pull_belief temporal samples must have shape [N, T, 2], "
+                f"got {tuple(belief_samples.shape)}."
+            )
+        belief_probs = belief_samples.clamp_min(1.0e-6)
+        entropy = -(belief_samples * torch.log(belief_probs)).sum(dim=-1)
+        offset_to_index = sample_cache["offset_to_index"]
+        idx_now = offset_to_index.get(0.0)
+        if idx_now is None:
+            raise RuntimeError("push_pull_belief temporal metrics require a 0.0s timestamp in the sample cache.")
+        self.latest_push_pull_belief_hist_entropy_now = float(entropy[:, idx_now].mean().detach().cpu().item())
+        self.latest_push_pull_belief_hist_entropy_mean = float(entropy.mean().detach().cpu().item())
+        idx_1500ms = offset_to_index.get(1.5)
+        if idx_1500ms is not None:
+            delta = torch.linalg.vector_norm(
+                belief_samples[:, idx_now, :] - belief_samples[:, idx_1500ms, :],
+                dim=-1,
+            )
+            self.latest_push_pull_belief_hist_delta_1500ms = float(delta.mean().detach().cpu().item())
 
     def _build_proprio_temporal_obs(self, sample_cache):
         if not self.proprio_temporal_enabled:
@@ -3515,42 +3799,6 @@ class Dagger:
         door_pcd_base = self._sample_door_pointcloud_base()
         robot_pcd_base = self._sample_robot_pointcloud_base_sampler() if self.append_robot_gt_to_policy_cloud else None
         target_t = self._get_implemented_action_vector()
-        lag_active = self._is_observation_lag_active()
-        required_temporal_offsets_s = self._merge_unique_offsets_s(
-            self.proprio_temporal_timestamps_s,
-            (
-                float(spec["offset_s"])
-                for spec in self.temporal_derived_state_specs.values()
-                if spec["offset_s"] is not None
-            ),
-            (0.0,) if (lag_active or self.proprio_temporal_enabled) else (),
-        )
-        temporal_sample_cache = self._build_temporal_sample_cache(
-            q_pos,
-            target_t,
-            base_vel,
-            required_temporal_offsets_s,
-            apply_observation_lag=lag_active,
-        ) if required_temporal_offsets_s else None
-        if lag_active and temporal_sample_cache is not None:
-            self._record_observation_lag_stats(
-                temporal_sample_cache["offsets_s"],
-                temporal_sample_cache["effective_age_ms"],
-            )
-        else:
-            self._reset_observation_lag_stats()
-            self.latest_obs_lag_enabled = 1.0 if lag_active else 0.0
-        temporal_state_values = self._build_temporal_derived_state_values(
-            q_pos,
-            target_t,
-            base_vel,
-            sample_cache=temporal_sample_cache,
-        )
-        lagged_q_full = None
-        lagged_base_vel = None
-        if temporal_sample_cache is not None and 0.0 in temporal_sample_cache["offset_to_index"]:
-            lagged_q_full = self._get_temporal_sample_from_cache(temporal_sample_cache, "q_full", 0.0)
-            lagged_base_vel = self._get_temporal_sample_from_cache(temporal_sample_cache, "base_vel", 0.0)
         need_aux_target_vector = self.has_aux_input and (not self.play_policy and self.has_aux_prediction)
         aux_target_vector = (
             self._stack_aux_state_values(self._get_aux_state_values()) if need_aux_target_vector else None
@@ -3571,6 +3819,50 @@ class Dagger:
             push_pull_cond = self._build_push_pull_condition_from_source(self.push_pull_condition_source)
             # Perturbation modifies only the condition input fed to the action policy, not labels or target actions.
             push_pull_cond = self._apply_push_pull_condition_perturb(push_pull_cond)
+        current_aux_handle_temporal = self._get_temporal_aux_handle_from_policy_input(aux_input_vector)
+        current_push_pull_belief_temporal = self._get_temporal_push_pull_belief_from_policy_input(push_pull_cond)
+        self.latest_push_pull_belief_input = (
+            None if current_push_pull_belief_temporal is None else current_push_pull_belief_temporal.detach().clone()
+        )
+        lag_active = self._is_observation_lag_active()
+        required_temporal_offsets_s = self._merge_unique_offsets_s(
+            self.proprio_temporal_timestamps_s,
+            (
+                float(spec["offset_s"])
+                for spec in self.temporal_derived_state_specs.values()
+                if spec["offset_s"] is not None
+            ),
+            (0.0,) if (lag_active or self.proprio_temporal_enabled) else (),
+        )
+        temporal_sample_cache = self._build_temporal_sample_cache(
+            q_pos,
+            target_t,
+            base_vel,
+            required_temporal_offsets_s,
+            apply_observation_lag=lag_active,
+            aux_handle_pos=current_aux_handle_temporal,
+            push_pull_belief=current_push_pull_belief_temporal,
+        ) if required_temporal_offsets_s else None
+        if lag_active and temporal_sample_cache is not None:
+            self._record_observation_lag_stats(
+                temporal_sample_cache["offsets_s"],
+                temporal_sample_cache["effective_age_ms"],
+            )
+        else:
+            self._reset_observation_lag_stats()
+            self.latest_obs_lag_enabled = 1.0 if lag_active else 0.0
+        self._record_push_pull_belief_history_metrics(temporal_sample_cache)
+        temporal_state_values = self._build_temporal_derived_state_values(
+            q_pos,
+            target_t,
+            base_vel,
+            sample_cache=temporal_sample_cache,
+        )
+        lagged_q_full = None
+        lagged_base_vel = None
+        if temporal_sample_cache is not None and 0.0 in temporal_sample_cache["offset_to_index"]:
+            lagged_q_full = self._get_temporal_sample_from_cache(temporal_sample_cache, "q_full", 0.0)
+            lagged_base_vel = self._get_temporal_sample_from_cache(temporal_sample_cache, "base_vel", 0.0)
 
         obs = OrderedDict()
         for key in self.state_encoders_keys:
@@ -4090,6 +4382,12 @@ class Dagger:
                     print("Push/Pull Pred Acc:", self.latest_push_pull_pred_acc)
                 print("Push/Pull Perturbed To Push Count:", self.latest_push_pull_perturb_to_push_count)
                 print("Push/Pull Perturbed To Pull Count:", self.latest_push_pull_perturb_to_pull_count)
+            print("Temporal Aux Handle Enabled:", bool(self.temporal_aux_handle_enabled))
+            print("Temporal Push/Pull Belief Enabled:", bool(self.temporal_push_pull_belief_enabled))
+            if self.temporal_push_pull_belief_enabled:
+                print("Push/Pull Belief Hist Entropy Now:", self.latest_push_pull_belief_hist_entropy_now)
+                print("Push/Pull Belief Hist Entropy Mean:", self.latest_push_pull_belief_hist_entropy_mean)
+                print("Push/Pull Belief Hist Delta 1500ms:", self.latest_push_pull_belief_hist_delta_1500ms)
             print("Teacher Forcing Beta:", teacher_forcing_beta)
             print("Teacher Rollout Env Fraction:", teacher_env_fraction)
             print("Student Rollout Env Fraction:", student_env_fraction)
@@ -4151,6 +4449,11 @@ class Dagger:
             metrics["timestamp/obs_lag_max_ms"] = self.latest_obs_lag_max_ms
             for timestamp_ms, mean_age_ms in self.latest_obs_lag_effective_age_ms_by_timestamp.items():
                 metrics[f"timestamp/obs_lag_effective_age_{timestamp_ms}ms"] = mean_age_ms
+        metrics["stats/temporal_aux_handle_enabled"] = float(self.temporal_aux_handle_enabled)
+        metrics["stats/temporal_push_pull_belief_enabled"] = float(self.temporal_push_pull_belief_enabled)
+        metrics["stats/push_pull_belief_hist_entropy_now"] = self.latest_push_pull_belief_hist_entropy_now
+        metrics["stats/push_pull_belief_hist_entropy_mean"] = self.latest_push_pull_belief_hist_entropy_mean
+        metrics["stats/push_pull_belief_hist_delta_1500ms"] = self.latest_push_pull_belief_hist_delta_1500ms
         if self.push_pull_condition_enabled:
             metrics["stats/push_pull_condition_source"] = self.latest_push_pull_condition_source
             metrics["stats/fraction_push"] = self.latest_fraction_push
