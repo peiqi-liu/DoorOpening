@@ -671,16 +671,19 @@ class PCDTransformer(BaseModel):
             "tracking_err_hand": ("tracking_err_hand", "target_err_hand"),
             "target_err_arm": ("target_err_arm", "tracking_err_arm"),
             "target_err_hand": ("target_err_hand", "tracking_err_hand"),
+            "push_pull_belief": ("push_pull_belief", "push_pull_cond"),
         }
         return alias_map.get(field_name, (field_name,))
 
-    def _resolve_proprio_temporal_state_key(self, field_name):
-        for candidate in self._get_proprio_temporal_field_alias_candidates(field_name):
+    def _resolve_proprio_temporal_state_key(self, field_name, field_cfg=None):
+        requested_state_key = None if field_cfg is None else field_cfg.get("state_key")
+        candidate_source = str(requested_state_key) if requested_state_key is not None else str(field_name)
+        for candidate in self._get_proprio_temporal_field_alias_candidates(candidate_source):
             if candidate in self.state_encoders_cfg:
                 return candidate
         raise RuntimeError(
             f"Could not resolve proprio_temporal field '{field_name}' in state_encoders_cfg. "
-            f"Tried aliases {list(self._get_proprio_temporal_field_alias_candidates(field_name))}."
+            f"Tried aliases {list(self._get_proprio_temporal_field_alias_candidates(candidate_source))}."
         )
 
     def _format_temporal_state_key(self, base_key, timestamp_ms):
@@ -688,6 +691,20 @@ class PCDTransformer(BaseModel):
         if timestamp_ms == 0:
             return str(base_key)
         return f"{base_key}_{timestamp_ms}ms"
+
+    def _should_preserve_raw_temporal_state(self, field_name, field_cfg):
+        if field_cfg is not None and "preserve_raw_state" in field_cfg:
+            return bool(field_cfg["preserve_raw_state"])
+        return str(field_name) in {"aux_handle_pos", "push_pull_belief"}
+
+    def _get_temporal_state_obs_key_root(self, field_name, state_key, field_cfg):
+        if field_cfg is not None and field_cfg.get("obs_key_root") is not None:
+            return str(field_cfg["obs_key_root"])
+        if self._should_preserve_raw_temporal_state(field_name, field_cfg):
+            if str(field_name) == str(state_key):
+                return f"{field_name}_temporal"
+            return str(field_name)
+        return str(state_key)
 
     def _parse_temporal_state_field_cfg(self):
         fields_cfg = self.temporal_state_cfg.get("fields", [])
@@ -720,14 +737,15 @@ class PCDTransformer(BaseModel):
         temporal_field_encoder_cfg = OrderedDict()
         covered_state_keys = []
         for field_name in fields:
-            state_key = self._resolve_proprio_temporal_state_key(field_name)
+            field_cfg = field_cfgs[field_name]
+            state_key = self._resolve_proprio_temporal_state_key(field_name, field_cfg=field_cfg)
             if state_key in field_state_keys.values():
                 raise ValueError(
                     f"Duplicate temporal field mapping for '{field_name}' -> '{state_key}'. "
                     "Each configured field must map to a distinct base state key."
                 )
             base_cfg = dict(self.state_encoders_cfg[state_key])
-            requested_input_dim = field_cfgs[field_name].get("input_dim", base_cfg.get("input_dim"))
+            requested_input_dim = field_cfg.get("input_dim", base_cfg.get("input_dim"))
             if requested_input_dim is None:
                 raise ValueError(
                     f"Temporal field '{field_name}' could not infer input_dim from state_encoders_cfg['{state_key}']."
@@ -743,31 +761,37 @@ class PCDTransformer(BaseModel):
             temporal_field_encoder_cfg[field_name] = {
                 "input_dim": requested_input_dim,
                 "hidden_dims": list(
-                    field_cfgs[field_name].get(
+                    field_cfg.get(
                         "hidden_dims",
                         self.temporal_state_cfg.get("hidden_dims", base_cfg.get("hidden_dims", [])),
                     )
                 ),
                 "dropout": float(
-                    field_cfgs[field_name].get(
+                    field_cfg.get(
                         "dropout",
                         self.temporal_state_cfg.get("dropout", base_cfg.get("dropout", 0.0)),
                     )
                 ),
-                "activation": field_cfgs[field_name].get(
+                "activation": field_cfg.get(
                     "activation",
                     self.temporal_state_cfg.get("activation", base_cfg.get("activation", "elu")),
                 ),
                 "use_layer_norm": bool(
-                    field_cfgs[field_name].get(
+                    field_cfg.get(
                         "use_layer_norm",
                         self.temporal_state_cfg.get("use_layer_norm", base_cfg.get("use_layer_norm", True)),
                     )
                 ),
             }
             obs_keys_for_field = []
+            obs_key_root = self._get_temporal_state_obs_key_root(field_name, state_key, field_cfg)
             for timestamp_ms in timestamps_ms:
-                obs_key = self._format_temporal_state_key(state_key, timestamp_ms)
+                obs_key = self._format_temporal_state_key(obs_key_root, timestamp_ms)
+                if obs_key in covered_state_keys:
+                    raise ValueError(
+                        f"Temporal observation key '{obs_key}' was produced more than once. "
+                        "Use distinct temporal field names or obs_key_root values."
+                    )
                 obs_keys_for_field.append(obs_key)
                 covered_state_keys.append(obs_key)
             field_obs_keys[field_name] = tuple(obs_keys_for_field)

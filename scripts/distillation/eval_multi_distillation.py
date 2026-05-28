@@ -560,6 +560,7 @@ def _reset_dagger_rollout_state(dagger):
     dagger.temporal_current_time_s = 0.0
     dagger._seed_temporal_histories()
     dagger._seed_aux_buffer()
+    dagger._seed_push_pull_condition_buffer()
 
 
 def _disable_observation_lag_for_eval(dagger):
