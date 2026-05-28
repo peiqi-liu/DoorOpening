@@ -492,9 +492,6 @@ class Dagger:
         self._init_mode_prediction_training_state()
         self._init_push_pull_condition_runtime_state(student_yaml_runtime_cfg)
 
-        # print(self.student_model)
-        # print("state_encoders_cfg", self.student_model.state_encoders_cfg)
-
         if self.use_ddp:
             self.student_model_ddp = DDP(
                 self.student_model,
@@ -591,11 +588,9 @@ class Dagger:
         self.aux_feedback_to_policy = self.has_aux_input and self.has_aux_prediction and bool(
             self.runtime_cfg.get("aux_feedback_to_policy", True)
         )
-        self.aux_pregrasp_dropout_prob = float(self.runtime_cfg.get("aux_pregrasp_dropout_prob", 0.0))
         self.aux_buffer = None
         if self.has_aux_input:
             self.aux_buffer = torch.zeros((self.num_envs, self.aux_input_dim), dtype=torch.float32, device=self.device)
-        self.latest_aux_pregrasp_dropout_fraction = 0.0
         self.temporal_aux_handle_enabled = (
             self.proprio_temporal_field_state_keys.get("aux_handle_pos") == "aux_handle_pos"
         )
@@ -1403,19 +1398,6 @@ class Dagger:
                 f"Temporal history buffer '{name}' must have shape {expected_shape}, got {tuple(value.shape)}."
             )
 
-    def _validate_temporal_current_value_shape(self, name, value, expected_dim):
-        expected_shape = (self.num_envs, int(expected_dim))
-        if value is None:
-            raise RuntimeError(f"Temporal current value '{name}' is unavailable.")
-        if value.ndim != 2 or tuple(value.shape) != expected_shape:
-            raise RuntimeError(
-                f"Temporal current value '{name}' must have shape {expected_shape}, got {tuple(value.shape)}."
-            )
-
-    def _build_zero_aux_handle_temporal_value(self, num_envs=None):
-        num_envs = self.num_envs if num_envs is None else int(num_envs)
-        return torch.zeros((num_envs, 3), dtype=torch.float32, device=self.device)
-
     def _build_initial_temporal_push_pull_belief(self, env_ids=None):
         if env_ids is None:
             num_envs = self.num_envs
@@ -1437,26 +1419,24 @@ class Dagger:
                 "temporal_state_encoders field 'aux_handle_pos' could not find aux_handle_pos in aux_state_specs."
             )
         if aux_input_vector is None or not self.aux_feedback_to_policy:
-            return self._build_zero_aux_handle_temporal_value()
+            return torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
         value = aux_input_vector[:, self.aux_state_specs["aux_handle_pos"]["slice"]]
-        self._validate_temporal_current_value_shape("aux_handle_pos", value, 3)
         return value
 
     def _get_temporal_aux_handle_for_history(self):
         if not self.temporal_aux_handle_enabled:
-            return self._build_zero_aux_handle_temporal_value()
+            return torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
         if "aux_handle_pos" not in self.aux_state_specs:
             raise RuntimeError(
                 "temporal_state_encoders field 'aux_handle_pos' could not find aux_handle_pos in aux_state_specs."
             )
         if not self.aux_feedback_to_policy:
-            return self._build_zero_aux_handle_temporal_value()
+            return torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
         if self.aux_buffer is None:
             raise RuntimeError(
                 "temporal_state_encoders field 'aux_handle_pos' requires aux_buffer when aux_feedback_to_policy=true."
             )
         value = self.aux_buffer[:, self.aux_state_specs["aux_handle_pos"]["slice"]].detach().clone()
-        self._validate_temporal_current_value_shape("aux_handle_pos_history", value, 3)
         return value
 
     def _get_temporal_push_pull_belief_from_policy_input(self, push_pull_cond):
@@ -1466,14 +1446,11 @@ class Dagger:
             raise RuntimeError(
                 "temporal_state_encoders field 'push_pull_belief' requires push_pull_condition.enabled=true."
             )
-        self._validate_temporal_current_value_shape("push_pull_belief", push_pull_cond, 2)
         return push_pull_cond.detach().clone()
 
     def _get_temporal_push_pull_belief_for_history(self):
         if self.latest_push_pull_belief_input is not None:
-            value = self.latest_push_pull_belief_input.detach().clone()
-            self._validate_temporal_current_value_shape("push_pull_belief_history", value, 2)
-            return value
+            return self.latest_push_pull_belief_input.detach().clone()
         return self._build_initial_temporal_push_pull_belief()
 
     def _reset_push_pull_belief_history_metrics(self):
@@ -1686,7 +1663,6 @@ class Dagger:
             )
             aux_handle_samples = None
             if include_aux_handle:
-                self._validate_temporal_current_value_shape("aux_handle_pos", aux_handle_pos, 3)
                 aux_handle_samples = torch.stack(
                     [
                         aux_handle_pos
@@ -1698,7 +1674,6 @@ class Dagger:
                 )
             push_pull_belief_samples = None
             if include_push_pull_belief:
-                self._validate_temporal_current_value_shape("push_pull_belief", push_pull_belief, 2)
                 push_pull_belief_samples = torch.stack(
                     [
                         push_pull_belief
@@ -1817,8 +1792,6 @@ class Dagger:
             aux_handle_pos = self._get_temporal_aux_handle_for_history()
         if push_pull_belief is None:
             push_pull_belief = self._get_temporal_push_pull_belief_for_history()
-        self._validate_temporal_current_value_shape("aux_handle_pos_history", aux_handle_pos, 3)
-        self._validate_temporal_current_value_shape("push_pull_belief_history", push_pull_belief, 2)
 
         if env_ids is None:
             if self.temporal_history_len > 1:
@@ -1865,7 +1838,7 @@ class Dagger:
         target = self._get_implemented_action_vector().detach()
         base_vel = self._get_student_base_velocity_vector().detach()
         timestamp = self._get_current_time_s()
-        aux_handle = self._build_zero_aux_handle_temporal_value()
+        aux_handle = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
         push_pull_belief = self._build_initial_temporal_push_pull_belief()
         self._validate_temporal_history_buffer_shape("temporal_aux_handle_history", self.temporal_aux_handle_history, 3)
         self._validate_temporal_history_buffer_shape(
@@ -2195,34 +2168,6 @@ class Dagger:
     def _get_aux_target(self, current_abs_aux):
         return current_abs_aux
 
-    def _maybe_drop_aux_feedback(self, aux_input_vector):
-        self.latest_aux_pregrasp_dropout_fraction = 0.0
-        if aux_input_vector is None or not self.aux_feedback_to_policy or self.aux_pregrasp_dropout_prob <= 0.0:
-            return aux_input_vector
-
-        ref_motion_lib = getattr(self.ov_env, "ref_motion_lib", None)
-        if ref_motion_lib is None:
-            return aux_input_vector
-
-        get_pregrasp_mask = getattr(ref_motion_lib, "get_before_first_keyframe_mask", None)
-        if not callable(get_pregrasp_mask):
-            return aux_input_vector
-
-        pregrasp_mask = get_pregrasp_mask().to(device=self.device, dtype=torch.bool)
-        if not torch.any(pregrasp_mask):
-            return aux_input_vector
-
-        drop_mask = pregrasp_mask & torch.rand(self.num_envs, device=self.device).lt(self.aux_pregrasp_dropout_prob)
-        num_pregrasp = int(pregrasp_mask.sum().detach().cpu().item())
-        num_dropped = int(drop_mask.sum().detach().cpu().item())
-        self.latest_aux_pregrasp_dropout_fraction = float(num_dropped / num_pregrasp) if num_pregrasp > 0 else 0.0
-        if not torch.any(drop_mask):
-            return aux_input_vector
-
-        dropped_aux_input = aux_input_vector.clone()
-        dropped_aux_input[drop_mask] = 0.0
-        return dropped_aux_input
-
     def _seed_aux_buffer(self, env_ids=None):
         if self.aux_buffer is None:
             return
@@ -2423,289 +2368,6 @@ class Dagger:
         self.pointcloud_camera = getattr(self.ov_env, "pointcloud_camera", None)
         if self.pointcloud_source == "depth" and self.pointcloud_camera is None:
             raise ValueError("pointcloud_source='depth' requires DooropeningEnv to enable the pointcloud camera.")
-
-    def _init_wrong_push_pull_rollout(self):
-        default_family_map = {
-            "PartNetv5_plus": "PartNetv8_plus",
-            "PartNetv8_plus": "PartNetv5_plus",
-            "PartNetv6_plus": "PartNetv7_plus",
-            "PartNetv7_plus": "PartNetv6_plus",
-        }
-        cfg = {
-            "enabled": False,
-            "prob_per_episode": 0.10,
-            "start_phase_range": [2.4, 3.1],
-            "duration_steps_range": [5, 8],
-            "max_bursts_per_episode": 1,
-            "preserve_handle_side": True,
-            "replace_components": ["base", "arm"],
-            "loss_target": "correct_teacher",
-            "use_wrong_trajectory": True,
-            "wrong_traj_filename": "traj_wrong.pkl",
-            "family_map": default_family_map,
-        }
-        user_cfg = dict(self.runtime_cfg.get("wrong_push_pull_rollout", {}) or {})
-        if "family_map" in user_cfg:
-            family_map = dict(user_cfg.pop("family_map") or {})
-        else:
-            family_map = dict(default_family_map)
-        cfg.update(user_cfg)
-        cfg["family_map"] = family_map
-
-        self.wrong_pp_cfg = cfg
-        self.wrong_pp_enabled = bool(cfg.get("enabled", False))
-        self.wrong_pp_prob_per_episode = float(cfg.get("prob_per_episode", 0.10))
-        self.wrong_pp_phase_min, self.wrong_pp_phase_max = map(float, cfg.get("start_phase_range", [2.4, 3.1]))
-        duration_min, duration_max = cfg.get("duration_steps_range", [5, 8])
-        self.wrong_pp_duration_min = int(duration_min)
-        self.wrong_pp_duration_max = int(duration_max)
-        self.wrong_pp_max_bursts_per_episode = int(cfg.get("max_bursts_per_episode", 1))
-        self.wrong_pp_preserve_handle_side = bool(cfg.get("preserve_handle_side", True))
-        self.wrong_pp_loss_target = str(cfg.get("loss_target", "correct_teacher"))
-        self.wrong_pp_use_wrong_trajectory = bool(cfg.get("use_wrong_trajectory", True))
-        self.wrong_pp_wrong_traj_filename = str(cfg.get("wrong_traj_filename", "traj_wrong.pkl"))
-        self.wrong_pp_debug_print_limit = int(cfg.get("debug_print_limit", 8))
-        self.wrong_pp_debug_print_count = 0
-
-        self.wrong_pp_active_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self.wrong_pp_remaining_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-        self.wrong_pp_used_burst_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-        self.wrong_pp_target_family_ids = torch.full((self.num_envs,), -1, dtype=torch.long, device=self.device)
-        self.wrong_pp_duration_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-        self.wrong_pp_start_phase = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
-        self.wrong_pp_should_burst = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self.wrong_pp_episode_had_burst = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self.wrong_pp_static_target_family_ids = torch.full(
-            (self.num_envs,), -1, dtype=torch.long, device=self.device
-        )
-        self.wrong_pp_target_motion_ids = torch.full((self.num_envs,), -1, dtype=torch.long, device=self.device)
-        self.wrong_pp_replace_action_indices = torch.empty(0, dtype=torch.long, device=self.device)
-        self.completed_successes_after_wrong_burst = deque(maxlen=self.games_to_track)
-        self._reset_wrong_pp_log_accumulators()
-
-        if not self.wrong_pp_enabled:
-            return
-        if not getattr(self, "multi_teacher_enabled", False):
-            raise RuntimeError("wrong_push_pull_rollout.enabled=true requires multi-teacher mode.")
-        if self.play_policy:
-            raise RuntimeError("wrong_push_pull_rollout is only supported during DAgger training, not play_policy.")
-        if self.wrong_pp_loss_target != "correct_teacher":
-            raise ValueError("wrong_push_pull_rollout.loss_target must be 'correct_teacher'.")
-        if not self.wrong_pp_use_wrong_trajectory:
-            raise ValueError("wrong_push_pull_rollout.use_wrong_trajectory must be true.")
-        if not 0.0 <= self.wrong_pp_prob_per_episode <= 1.0:
-            raise ValueError("wrong_push_pull_rollout.prob_per_episode must be in [0, 1].")
-        if self.wrong_pp_duration_min <= 0 or self.wrong_pp_duration_max < self.wrong_pp_duration_min:
-            raise ValueError("wrong_push_pull_rollout.duration_steps_range must be positive and ordered.")
-        if self.wrong_pp_max_bursts_per_episode <= 0:
-            raise ValueError("wrong_push_pull_rollout.max_bursts_per_episode must be positive when enabled.")
-
-        self.wrong_pp_replace_action_indices = self._build_wrong_pp_replace_action_indices(
-            cfg.get("replace_components", ["base", "arm"])
-        )
-        family_id_by_family_id = self._build_wrong_pp_family_id_map(family_map)
-        self.wrong_pp_static_target_family_ids = family_id_by_family_id[self.env_family_ids.long()]
-        self.wrong_pp_target_family_ids[:] = self.wrong_pp_static_target_family_ids
-        if torch.any(self.wrong_pp_static_target_family_ids < 0):
-            missing_family_ids = sorted(
-                set(self.env_family_ids[self.wrong_pp_static_target_family_ids < 0].detach().cpu().tolist())
-            )
-            missing_family_names = [DOOR_FAMILY_NAMES[int(family_id)] for family_id in missing_family_ids]
-            raise ValueError(f"wrong_push_pull_rollout.family_map is missing active families: {missing_family_names}.")
-
-        ref_motion_lib = getattr(self.ov_env, "ref_motion_lib", None)
-        if ref_motion_lib is None:
-            raise RuntimeError("wrong_push_pull_rollout requires reference motions.")
-        self.wrong_pp_motion_wrong_traj_paths = [
-            os.path.join(os.path.dirname(motion_path), self.wrong_pp_wrong_traj_filename)
-            for motion_path in motion_traj_paths
-        ]
-        ref_motion_lib.load_wrong_motions(
-            wrong_motion_traj_paths=self.wrong_pp_motion_wrong_traj_paths,
-            wrong_traj_filename=self.wrong_pp_wrong_traj_filename,
-            require_all=True,
-        )
-        wrong_asset_idx, wrong_motion_idx = self._build_wrong_pp_asset_motion_map(family_id_by_family_id)
-        self.wrong_pp_target_asset_idx = wrong_asset_idx
-        self.wrong_pp_target_motion_ids = wrong_motion_idx
-        ref_motion_lib.set_wrong_motion_map(self.wrong_pp_target_motion_ids)
-        self._print_wrong_pp_sanity_info(family_id_by_family_id)
-
-    def _reset_wrong_pp_log_accumulators(self):
-        self.wrong_pp_log_active_fraction_sum = 0.0
-        self.wrong_pp_log_step_count = 0
-        self.wrong_pp_log_new_bursts = 0
-        self.wrong_pp_log_duration_sum = 0.0
-        self.wrong_pp_log_start_phase_sum = 0.0
-        self.wrong_pp_log_burst_count = 0
-        self.wrong_pp_log_action_l2_sum = 0.0
-        self.wrong_pp_log_action_l2_count = 0
-        self.wrong_pp_log_base_cosine_sum = 0.0
-        self.wrong_pp_log_base_cosine_count = 0
-        self.wrong_pp_log_arm_cosine_sum = 0.0
-        self.wrong_pp_log_arm_cosine_count = 0
-        self.wrong_pp_log_family_bursts = torch.zeros(
-            len(DOOR_FAMILY_NAMES), dtype=torch.long, device=self.device
-        )
-
-    def _build_wrong_pp_replace_action_indices(self, replace_components):
-        if not isinstance(replace_components, (list, tuple)):
-            raise TypeError("wrong_push_pull_rollout.replace_components must be a list.")
-        indices = []
-        for component_name in replace_components:
-            canonical = self.action_component_aliases.get(str(component_name), str(component_name))
-            if canonical not in self.action_component_history_indices or canonical == "full":
-                raise ValueError(f"Unsupported wrong_push_pull_rollout action component '{component_name}'.")
-            indices.append(self.action_component_history_indices[canonical])
-        if not indices:
-            raise ValueError("wrong_push_pull_rollout.replace_components must not be empty.")
-        return torch.unique(torch.cat(indices).to(device=self.device, dtype=torch.long), sorted=True)
-
-    def _infer_wrong_pp_family_semantics(self, family_name):
-        if family_name in self.mode_family_semantics:
-            return self.mode_family_semantics[family_name]
-        semantics = {
-            "PartNetv5_plus": ("left", "pull"),
-            "PartNetv8_plus": ("left", "push"),
-            "PartNetv6_plus": ("right", "pull"),
-            "PartNetv7_plus": ("right", "push"),
-        }
-        return semantics.get(family_name)
-
-    def _build_wrong_pp_family_id_map(self, family_map):
-        family_name_to_id = {family_name: family_id for family_id, family_name in enumerate(DOOR_FAMILY_NAMES)}
-        unknown_names = sorted(
-            {
-                family_name
-                for pair in family_map.items()
-                for family_name in pair
-                if family_name not in family_name_to_id
-            }
-        )
-        if unknown_names:
-            raise ValueError(
-                "wrong_push_pull_rollout.family_map references families that are not active in DOOR_FAMILY_NAMES: "
-                f"{unknown_names}. Active families: {list(DOOR_FAMILY_NAMES)}."
-            )
-        missing_active = [family_name for family_name in DOOR_FAMILY_NAMES if family_name not in family_map]
-        if missing_active:
-            raise ValueError(
-                "wrong_push_pull_rollout.family_map must cover every active family. "
-                f"Missing: {missing_active}."
-            )
-
-        if self.wrong_pp_preserve_handle_side:
-            for family_name, wrong_family_name in family_map.items():
-                if family_map.get(wrong_family_name) != family_name:
-                    raise ValueError(
-                        "wrong_push_pull_rollout.family_map must be symmetric when preserve_handle_side=true: "
-                        f"{family_name} -> {wrong_family_name}, but reverse is {family_map.get(wrong_family_name)}."
-                    )
-                source_semantics = self._infer_wrong_pp_family_semantics(family_name)
-                target_semantics = self._infer_wrong_pp_family_semantics(wrong_family_name)
-                if source_semantics is None or target_semantics is None:
-                    raise ValueError(
-                        "Cannot validate preserve_handle_side for family_map names without known semantics: "
-                        f"{family_name}, {wrong_family_name}."
-                    )
-                source_side, source_direction = source_semantics
-                target_side, target_direction = target_semantics
-                if source_side != target_side or source_direction == target_direction:
-                    raise ValueError(
-                        "wrong_push_pull_rollout.family_map must preserve handle side and flip push/pull: "
-                        f"{family_name} ({source_side}, {source_direction}) -> "
-                        f"{wrong_family_name} ({target_side}, {target_direction})."
-                    )
-
-        family_id_by_family_id = torch.full(
-            (len(DOOR_FAMILY_NAMES),), -1, dtype=torch.long, device=self.device
-        )
-        for family_name, wrong_family_name in family_map.items():
-            family_id_by_family_id[family_name_to_id[family_name]] = family_name_to_id[wrong_family_name]
-        return family_id_by_family_id
-
-    def _build_wrong_pp_asset_motion_map(self, family_id_by_family_id):
-        if self.motion_to_asset_idx is None or self.env_motion_idx is None:
-            raise RuntimeError("wrong_push_pull_rollout requires one reference motion per door asset.")
-
-        asset_family_id_list = [int(value) for value in door_asset_family_ids.detach().cpu().tolist()]
-        family_asset_indices = {family_id: [] for family_id in range(len(DOOR_FAMILY_NAMES))}
-        for asset_idx, family_id in enumerate(asset_family_id_list):
-            family_asset_indices[int(family_id)].append(int(asset_idx))
-
-        family_counts = {family_id: len(indices) for family_id, indices in family_asset_indices.items()}
-        for family_id, wrong_family_id_tensor in enumerate(family_id_by_family_id.detach().cpu().tolist()):
-            wrong_family_id = int(wrong_family_id_tensor)
-            if wrong_family_id < 0:
-                continue
-            if family_counts[family_id] != family_counts[wrong_family_id]:
-                raise ValueError(
-                    "Wrong push/pull family pairs must contain the same number of aligned assets: "
-                    f"{DOOR_FAMILY_NAMES[family_id]} has {family_counts[family_id]}, "
-                    f"{DOOR_FAMILY_NAMES[wrong_family_id]} has {family_counts[wrong_family_id]}."
-                )
-
-        asset_variant_ordinal = [-1 for _ in range(len(asset_family_id_list))]
-        for family_id, asset_indices in family_asset_indices.items():
-            for ordinal, asset_idx in enumerate(asset_indices):
-                asset_variant_ordinal[asset_idx] = ordinal
-
-        asset_to_motion_idx = torch.full(
-            (len(door_asset_paths),), -1, dtype=torch.long, device=self.device
-        )
-        for motion_idx, asset_idx in enumerate(self.motion_to_asset_idx.detach().cpu().tolist()):
-            asset_to_motion_idx[int(asset_idx)] = int(motion_idx)
-        if torch.any(asset_to_motion_idx < 0):
-            raise RuntimeError("Could not map every door asset to a reference motion.")
-
-        wrong_asset_indices = torch.empty_like(self.env_asset_idx)
-        wrong_motion_indices = torch.empty_like(self.env_motion_idx)
-        for env_id, asset_idx_tensor in enumerate(self.env_asset_idx.detach().cpu().tolist()):
-            asset_idx = int(asset_idx_tensor)
-            family_id = int(asset_family_id_list[asset_idx])
-            wrong_family_id = int(family_id_by_family_id[family_id].detach().cpu().item())
-            ordinal = int(asset_variant_ordinal[asset_idx])
-            if wrong_family_id < 0 or ordinal < 0:
-                raise RuntimeError(
-                    f"Could not resolve wrong push/pull asset for env {env_id}, asset {asset_idx}."
-                )
-            wrong_asset_idx = int(family_asset_indices[wrong_family_id][ordinal])
-            wrong_motion_idx = int(asset_to_motion_idx[wrong_asset_idx].detach().cpu().item())
-            wrong_asset_indices[env_id] = wrong_asset_idx
-            wrong_motion_indices[env_id] = wrong_motion_idx
-
-        if wrong_motion_indices.shape != self.env_motion_idx.shape:
-            raise RuntimeError("Wrong motion index tensor shape does not match env motion index tensor shape.")
-        return wrong_asset_indices, wrong_motion_indices
-
-    def _print_wrong_pp_sanity_info(self, family_id_by_family_id):
-        if self.rank != 0:
-            return
-        mapped_pairs = []
-        for family_id, wrong_family_id in enumerate(family_id_by_family_id.detach().cpu().tolist()):
-            mapped_pairs.append(
-                f"{family_id}:{DOOR_FAMILY_NAMES[family_id]} -> {int(wrong_family_id)}:{DOOR_FAMILY_NAMES[int(wrong_family_id)]}"
-            )
-        print("[INFO] wrong_push_pull_rollout family map:", "; ".join(mapped_pairs))
-        ref_motion_lib = getattr(self.ov_env, "ref_motion_lib", None)
-        print("[INFO] wrong_push_pull_rollout wrong trajectories loaded:", bool(getattr(ref_motion_lib, "has_wrong_motions", False)))
-        sample_count = min(8, int(self.num_envs))
-        samples = []
-        for env_id in range(sample_count):
-            correct_family_id = int(self.env_family_ids[env_id].detach().cpu().item())
-            wrong_family_id = int(self.wrong_pp_static_target_family_ids[env_id].detach().cpu().item())
-            correct_motion_idx = int(self.env_motion_idx[env_id].detach().cpu().item())
-            wrong_motion_idx = int(self.wrong_pp_target_motion_ids[env_id].detach().cpu().item())
-            samples.append(
-                "env{}: {} -> {}, correct_traj={}, wrong_traj={}".format(
-                    env_id,
-                    DOOR_FAMILY_NAMES[correct_family_id],
-                    DOOR_FAMILY_NAMES[wrong_family_id],
-                    motion_traj_paths[correct_motion_idx],
-                    self.wrong_pp_motion_wrong_traj_paths[wrong_motion_idx],
-                )
-            )
-        print("[INFO] wrong_push_pull_rollout env sample:", " | ".join(samples))
 
     def _init_viser_debug_tools(self):
         """Initialize optional raw replay capture state used for point-cloud debugging."""
@@ -3094,70 +2756,6 @@ class Dagger:
         return {
             "mus": student_teacher_actions,
             "actions": teacher_actions,
-        }
-
-    def _get_teacher_actions_for_family_override(
-        self,
-        obs,
-        env_ids,
-        override_family_ids,
-        reference_source: str = "correct",
-    ):
-        if not getattr(self, "multi_teacher_enabled", False):
-            raise RuntimeError("Family override teacher actions require multi-teacher mode.")
-        env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
-        override_family_ids = torch.as_tensor(override_family_ids, device=self.device, dtype=torch.long)
-        if env_ids.ndim != 1 or override_family_ids.ndim != 1 or env_ids.numel() != override_family_ids.numel():
-            raise RuntimeError(
-                "Expected env_ids and override_family_ids to be rank-1 tensors with matching length: "
-                f"{tuple(env_ids.shape)} vs {tuple(override_family_ids.shape)}."
-            )
-        if env_ids.numel() == 0:
-            empty_actions = torch.zeros((0, self.num_actions), dtype=torch.float32, device=self.device)
-            return {"actions": empty_actions, "mus": empty_actions}
-
-        reference_source = str(reference_source).lower()
-        if reference_source == "wrong":
-            get_teacher_obs = getattr(self.ov_env, "get_teacher_obs", None)
-            if not callable(get_teacher_obs):
-                raise RuntimeError("DooropeningEnv must expose get_teacher_obs() for wrong-reference teacher queries.")
-            teacher_obs = get_teacher_obs(env_ids=env_ids, reference_source="wrong")
-        elif reference_source == "correct":
-            teacher_obs = {key: value[env_ids] for key, value in obs.items()}
-        else:
-            raise ValueError(f"Unsupported reference_source '{reference_source}'.")
-
-        latest_targets = self._get_implemented_action_vector()[env_ids]
-        teacher_actions = torch.zeros((env_ids.numel(), self.num_actions), dtype=torch.float32, device=self.device)
-        assigned_teacher_mask = torch.zeros(env_ids.numel(), dtype=torch.bool, device=self.device)
-        for family_id, family_model in self.teacher_models_by_family_id.items():
-            local_ids = torch.nonzero(override_family_ids == int(family_id), as_tuple=False).squeeze(-1)
-            if local_ids.numel() == 0:
-                continue
-            assigned_teacher_mask[local_ids] = True
-            batch_dict = {
-                "is_train": False,
-                "obs": clip_teacher_obs(teacher_obs[self.teacher_obs_type][local_ids], self.teacher_clip_obs),
-                "prev_actions": latest_targets[local_ids],
-            }
-            with torch.no_grad():
-                res_dict = family_model(batch_dict)
-            teacher_actions[local_ids] = torch.clamp(res_dict["mus"], -1.0, 1.0)
-
-        if not torch.all(assigned_teacher_mask):
-            missing_family_ids = sorted(
-                set(override_family_ids[~assigned_teacher_mask].detach().cpu().tolist())
-            )
-            missing_family_names = [DOOR_FAMILY_NAMES[int(family_id)] for family_id in missing_family_ids]
-            raise RuntimeError(f"Missing override teacher model for door families: {missing_family_names}.")
-
-        if not torch.isfinite(teacher_actions).all():
-            raise RuntimeError("Wrong push/pull teacher produced NaN or Inf actions.")
-        full_teacher_actions = torch.zeros((self.num_envs, self.num_actions), dtype=torch.float32, device=self.device)
-        full_teacher_actions[env_ids] = teacher_actions
-        return {
-            "actions": teacher_actions,
-            "mus": self._env_actions_to_student_actions(full_teacher_actions)[env_ids],
         }
 
     def _sync_timing_device(self):
@@ -3811,7 +3409,6 @@ class Dagger:
             aux_input_vector = torch.zeros((self.num_envs, self.aux_input_dim), dtype=torch.float32, device=self.device)
         else:
             aux_input_vector = None
-        aux_input_vector = self._maybe_drop_aux_feedback(aux_input_vector)
         push_pull_cond = None
         if self.push_pull_condition_enabled:
             self.latest_push_pull_condition_source = self.push_pull_condition_source
@@ -4026,232 +3623,6 @@ class Dagger:
             return 0.0
         return float(self.teacher_forcing_env_mask.float().mean().item())
 
-    def _reset_wrong_pp_state(self, env_ids=None):
-        if not getattr(self, "wrong_pp_enabled", False):
-            return
-        if env_ids is None:
-            env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
-        else:
-            env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
-        if env_ids.numel() == 0:
-            return
-        self.wrong_pp_active_mask[env_ids] = False
-        self.wrong_pp_remaining_steps[env_ids] = 0
-        self.wrong_pp_used_burst_count[env_ids] = 0
-        self.wrong_pp_target_family_ids[env_ids] = self.wrong_pp_static_target_family_ids[env_ids]
-        self.wrong_pp_duration_steps[env_ids] = 0
-        self.wrong_pp_episode_had_burst[env_ids] = False
-        should_burst = torch.rand(env_ids.numel(), device=self.device) < self.wrong_pp_prob_per_episode
-        if self.wrong_pp_max_bursts_per_episode <= 0:
-            should_burst.zero_()
-        self.wrong_pp_should_burst[env_ids] = should_burst
-        phase_width = max(float(self.wrong_pp_phase_max - self.wrong_pp_phase_min), 0.0)
-        self.wrong_pp_start_phase[env_ids] = (
-            self.wrong_pp_phase_min
-            + phase_width * torch.rand(env_ids.numel(), device=self.device, dtype=torch.float32)
-        )
-
-    def _maybe_start_wrong_pp_bursts(self):
-        if not getattr(self, "wrong_pp_enabled", False):
-            return torch.empty(0, dtype=torch.long, device=self.device), None
-        ref_motion_lib = getattr(self.ov_env, "ref_motion_lib", None)
-        if ref_motion_lib is None:
-            return torch.empty(0, dtype=torch.long, device=self.device), None
-
-        phase = ref_motion_lib.get_current_phase().to(device=self.device, dtype=torch.float32)
-        eligible = (
-            self.wrong_pp_should_burst
-            & (~self.wrong_pp_active_mask)
-            & (self.wrong_pp_used_burst_count < self.wrong_pp_max_bursts_per_episode)
-            & (phase >= self.wrong_pp_start_phase)
-            & (phase <= self.wrong_pp_phase_max)
-            & (self.wrong_pp_target_family_ids >= 0)
-            & (self.wrong_pp_target_motion_ids >= 0)
-        )
-
-        new_env_ids = torch.nonzero(eligible, as_tuple=False).squeeze(-1)
-        if new_env_ids.numel() == 0:
-            return new_env_ids, phase
-
-        durations = torch.randint(
-            low=self.wrong_pp_duration_min,
-            high=self.wrong_pp_duration_max + 1,
-            size=(new_env_ids.numel(),),
-            device=self.device,
-            dtype=torch.long,
-        )
-        self.wrong_pp_active_mask[new_env_ids] = True
-        self.wrong_pp_remaining_steps[new_env_ids] = durations
-        self.wrong_pp_duration_steps[new_env_ids] = durations
-        self.wrong_pp_used_burst_count[new_env_ids] += 1
-        self.wrong_pp_episode_had_burst[new_env_ids] = True
-        self.wrong_pp_log_new_bursts += int(new_env_ids.numel())
-        self.wrong_pp_log_duration_sum += float(durations.to(dtype=torch.float32).sum().detach().cpu().item())
-        self.wrong_pp_log_start_phase_sum += float(phase[new_env_ids].sum().detach().cpu().item())
-        self.wrong_pp_log_burst_count += int(new_env_ids.numel())
-        for family_id in self.env_family_ids[new_env_ids].detach().cpu().tolist():
-            self.wrong_pp_log_family_bursts[int(family_id)] += 1
-        return new_env_ids, phase
-
-    def _cosine_mean_for_action_indices(self, actions_a, actions_b, action_indices):
-        if action_indices.numel() == 0 or actions_a.numel() == 0:
-            return None
-        a = actions_a[:, action_indices]
-        b = actions_b[:, action_indices]
-        denom = a.norm(dim=-1) * b.norm(dim=-1)
-        cosine = (a * b).sum(dim=-1) / denom.clamp_min(1e-8)
-        return float(cosine.mean().detach().cpu().item())
-
-    def _record_wrong_pp_action_metrics(self, env_ids, wrong_actions, correct_teacher_actions):
-        if env_ids.numel() == 0:
-            return
-        correct_actions = correct_teacher_actions[env_ids]
-        diff = wrong_actions - correct_actions
-        self.wrong_pp_log_action_l2_sum += float(diff.norm(dim=-1).sum().detach().cpu().item())
-        self.wrong_pp_log_action_l2_count += int(env_ids.numel())
-
-        base_cosine = self._cosine_mean_for_action_indices(
-            wrong_actions,
-            correct_actions,
-            self.action_component_history_indices["base"],
-        )
-        if base_cosine is not None:
-            self.wrong_pp_log_base_cosine_sum += base_cosine * int(env_ids.numel())
-            self.wrong_pp_log_base_cosine_count += int(env_ids.numel())
-        arm_cosine = self._cosine_mean_for_action_indices(
-            wrong_actions,
-            correct_actions,
-            self.action_component_history_indices["arm"],
-        )
-        if arm_cosine is not None:
-            self.wrong_pp_log_arm_cosine_sum += arm_cosine * int(env_ids.numel())
-            self.wrong_pp_log_arm_cosine_count += int(env_ids.numel())
-
-    def _maybe_print_wrong_pp_burst_debug(self, new_env_ids, active_env_ids, wrong_actions, correct_teacher_actions, phase):
-        if self.rank != 0 or new_env_ids.numel() == 0 or self.wrong_pp_debug_print_count >= self.wrong_pp_debug_print_limit:
-            return
-        active_env_list = active_env_ids.detach().cpu().tolist()
-        for env_id_tensor in new_env_ids.detach().cpu().tolist():
-            if self.wrong_pp_debug_print_count >= self.wrong_pp_debug_print_limit:
-                break
-            env_id = int(env_id_tensor)
-            if env_id not in active_env_list:
-                continue
-            local_idx = active_env_list.index(env_id)
-            correct_family_id = int(self.env_family_ids[env_id].detach().cpu().item())
-            wrong_family_id = int(self.wrong_pp_target_family_ids[env_id].detach().cpu().item())
-            action_diff_norm = float(
-                (wrong_actions[local_idx] - correct_teacher_actions[env_id]).norm().detach().cpu().item()
-            )
-            print(
-                "[INFO] wrong_push_pull_rollout burst start: "
-                f"env={env_id}, phase={float(phase[env_id].detach().cpu().item()):.3f}, "
-                f"target_phase={float(self.wrong_pp_start_phase[env_id].detach().cpu().item()):.3f}, "
-                f"correct_family={DOOR_FAMILY_NAMES[correct_family_id]}, "
-                f"wrong_family={DOOR_FAMILY_NAMES[wrong_family_id]}, "
-                f"duration={int(self.wrong_pp_duration_steps[env_id].detach().cpu().item())}, "
-                f"action_diff_norm={action_diff_norm:.4f}"
-            )
-            self.wrong_pp_debug_print_count += 1
-
-    def _apply_wrong_push_pull_rollout(self, step_actions, correct_teacher_actions, obs, iteration):
-        if not getattr(self, "wrong_pp_enabled", False):
-            return step_actions
-        if correct_teacher_actions is None:
-            return step_actions
-        if correct_teacher_actions.shape != step_actions.shape:
-            raise RuntimeError(
-                "Wrong push/pull rollout expected correct teacher actions to match step action shape: "
-                f"{tuple(correct_teacher_actions.shape)} vs {tuple(step_actions.shape)}."
-            )
-
-        new_env_ids, phase = self._maybe_start_wrong_pp_bursts()
-        active_env_ids = torch.nonzero(self.wrong_pp_active_mask, as_tuple=False).squeeze(-1)
-        active_fraction = float(self.wrong_pp_active_mask.float().mean().detach().cpu().item())
-        self.wrong_pp_log_active_fraction_sum += active_fraction
-        self.wrong_pp_log_step_count += 1
-        if active_env_ids.numel() == 0:
-            return step_actions
-
-        override_family_ids = self.wrong_pp_target_family_ids[active_env_ids]
-        if override_family_ids.shape != active_env_ids.shape:
-            raise RuntimeError("Wrong family id tensor shape does not match active env ids.")
-        wrong_output = self._get_teacher_actions_for_family_override(
-            obs,
-            active_env_ids,
-            override_family_ids,
-            reference_source="wrong",
-        )
-        wrong_actions = wrong_output["actions"]
-        if wrong_actions.shape != correct_teacher_actions[active_env_ids].shape:
-            raise RuntimeError(
-                "Wrong teacher action shape does not match correct teacher action shape: "
-                f"{tuple(wrong_actions.shape)} vs {tuple(correct_teacher_actions[active_env_ids].shape)}."
-            )
-        if not torch.isfinite(wrong_actions).all():
-            raise RuntimeError("Wrong push/pull rollout produced NaN or Inf actions.")
-
-        adjusted_step_actions = step_actions.clone()
-        adjusted_step_actions[active_env_ids[:, None], self.wrong_pp_replace_action_indices[None, :]] = wrong_actions[
-            :, self.wrong_pp_replace_action_indices
-        ]
-        self._record_wrong_pp_action_metrics(active_env_ids, wrong_actions, correct_teacher_actions)
-        if phase is not None:
-            self._maybe_print_wrong_pp_burst_debug(
-                new_env_ids,
-                active_env_ids,
-                wrong_actions,
-                correct_teacher_actions,
-                phase,
-            )
-
-        self.wrong_pp_remaining_steps[active_env_ids] -= 1
-        finished_env_ids = active_env_ids[self.wrong_pp_remaining_steps[active_env_ids] <= 0]
-        if finished_env_ids.numel() > 0:
-            self.wrong_pp_active_mask[finished_env_ids] = False
-            self.wrong_pp_remaining_steps[finished_env_ids] = 0
-        return adjusted_step_actions
-
-    def _get_wrong_pp_log_metrics(self, reset: bool = True):
-        metrics = {"wrong_pp/enabled": float(bool(getattr(self, "wrong_pp_enabled", False)))}
-        if not getattr(self, "wrong_pp_enabled", False):
-            return metrics
-        if self.wrong_pp_log_step_count > 0:
-            metrics["wrong_pp/env_fraction_active"] = (
-                self.wrong_pp_log_active_fraction_sum / float(self.wrong_pp_log_step_count)
-            )
-        metrics["wrong_pp/new_bursts"] = float(self.wrong_pp_log_new_bursts)
-        metrics["wrong_pp/used_episode_fraction"] = float(
-            self.wrong_pp_episode_had_burst.float().mean().detach().cpu().item()
-        )
-        if self.wrong_pp_log_burst_count > 0:
-            metrics["wrong_pp/mean_duration"] = self.wrong_pp_log_duration_sum / float(self.wrong_pp_log_burst_count)
-            metrics["wrong_pp/mean_start_phase"] = (
-                self.wrong_pp_log_start_phase_sum / float(self.wrong_pp_log_burst_count)
-            )
-        if self.wrong_pp_log_action_l2_count > 0:
-            metrics["wrong_pp/action_l2_wrong_vs_correct"] = (
-                self.wrong_pp_log_action_l2_sum / float(self.wrong_pp_log_action_l2_count)
-            )
-        if self.wrong_pp_log_base_cosine_count > 0:
-            metrics["wrong_pp/base_cosine_wrong_vs_correct"] = (
-                self.wrong_pp_log_base_cosine_sum / float(self.wrong_pp_log_base_cosine_count)
-            )
-        if self.wrong_pp_log_arm_cosine_count > 0:
-            metrics["wrong_pp/arm_cosine_wrong_vs_correct"] = (
-                self.wrong_pp_log_arm_cosine_sum / float(self.wrong_pp_log_arm_cosine_count)
-            )
-        success_after_wrong = self._mean_completed_metric(self.completed_successes_after_wrong_burst)
-        if success_after_wrong is not None:
-            metrics["wrong_pp/success_after_wrong_burst"] = success_after_wrong
-        for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
-            metrics[f"wrong_pp/family_{family_id}_bursts"] = float(
-                self.wrong_pp_log_family_bursts[family_id].detach().cpu().item()
-            )
-        if reset:
-            self._reset_wrong_pp_log_accumulators()
-        return metrics
-
     def _mix_actions(self, student_actions, teacher_actions, iteration):
         if self.play_policy or teacher_actions is None:
             return student_actions, 0.0
@@ -4286,11 +3657,6 @@ class Dagger:
         for family_id, success_value in zip(episode_family_ids, episode_successes):
             family_name = DOOR_FAMILY_NAMES[int(family_id)]
             self.completed_successes_by_family[family_name].append(float(success_value))
-        if getattr(self, "wrong_pp_enabled", False):
-            wrong_episode_mask = self.wrong_pp_episode_had_burst[done_mask].detach().cpu().tolist()
-            for had_wrong_burst, success_value in zip(wrong_episode_mask, episode_successes):
-                if had_wrong_burst:
-                    self.completed_successes_after_wrong_burst.append(float(success_value))
 
     def _get_global_success_rates(self):
         num_families = len(DOOR_FAMILY_NAMES)
@@ -4394,8 +3760,6 @@ class Dagger:
             print("Student Update Steps:", self.student_update_steps)
             print("Last Local Update Batch Size:", self.last_local_update_batch_size)
             print("Last Global Update Batch Size:", self.last_global_update_batch_size)
-            if self.aux_pregrasp_dropout_prob > 0.0:
-                print("Aux Pregrasp Dropout Fraction:", self.latest_aux_pregrasp_dropout_fraction)
             if episode_reward is not None:
                 print("Episode Reward:", episode_reward)
             if episode_length is not None:

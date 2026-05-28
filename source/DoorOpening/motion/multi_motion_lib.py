@@ -1,8 +1,6 @@
-import os
 import torch
 import pickle as pkl
 from typing import Optional, Sequence
-from DoorOpening.utils.pose_utils import normalize_to_center_frame
 
 class ReferenceMotionManager:
     def __init__(
@@ -26,9 +24,6 @@ class ReferenceMotionManager:
 
         if env_to_file_map is None:
             raise ValueError("env_to_file_map must be provided; ReferenceMotionManager now always loads the motion list.")
-        self.has_wrong_motions = False
-        self.wrong_motion_traj_paths = []
-        self.wrong_env_to_file_map = None
         self._load_motion_pkl_from_list()
         self.env_to_file_map = torch.tensor(env_to_file_map, device=self.device, dtype=torch.long)
         if self.env_to_file_map.numel() != int(self.num_envs):
@@ -48,24 +43,6 @@ class ReferenceMotionManager:
         self._init_env_buffers()
         if self.twist_indices is not None:
             self._precompute_twist()
-
-    def _extract_first_keyframe(self, key_indices, num_frames: int) -> int:
-        if isinstance(key_indices, torch.Tensor):
-            key_values = key_indices.flatten().tolist()
-        elif key_indices is None:
-            key_values = []
-        else:
-            key_values = list(key_indices)
-
-        if len(key_values) >= 2:
-            first_keyframe = int(key_values[1])
-        elif len(key_values) == 1:
-            first_keyframe = int(key_values[0])
-        else:
-            first_keyframe = 0
-
-        max_idx = max(int(num_frames) - 1, 0)
-        return max(0, min(first_keyframe, max_idx))
 
     def _normalize_key_indices(self, key_indices, num_frames: int) -> torch.Tensor:
         if isinstance(key_indices, torch.Tensor):
@@ -108,7 +85,6 @@ class ReferenceMotionManager:
         robot_body_quat_trajs = []
         robot_joint_vel_trajs = []
         key_indices_list = []
-        first_keyframes = []
         hinge_contact_masks_list = []
         robot_body_pos_vel_list = []
         door_body_pos_trajs = []
@@ -159,7 +135,6 @@ class ReferenceMotionManager:
             if isinstance(key_indices, list):
                 key_indices = torch.tensor(key_indices, device=self.device)
             key_indices_list.append(key_indices)
-            first_keyframes.append(self._extract_first_keyframe(key_indices, robot_joint_pos_traj.shape[0]))
             hinge_contact_masks_list.append(hinge_contact_mask)
             robot_body_pos_vel_list.append(robot_body_pos_vel)
             door_body_pos_trajs.append(door_body_pos_traj)
@@ -178,7 +153,6 @@ class ReferenceMotionManager:
             .int(),
             "phase_key_indices": phase_key_indices,
             "phase_key_counts": phase_key_counts,
-            "first_keyframe_idx": torch.tensor(first_keyframes, device=self.device, dtype=torch.float32),
             "hinge_contact_mask": torch.stack(hinge_contact_masks_list, dim=0).to(self.device),
             "robot_body_pos_vel": torch.stack(robot_body_pos_vel_list, dim=0).to(self.device),
             "door_body_pos_traj": torch.stack(door_body_pos_trajs, dim=0).to(self.device),
@@ -203,68 +177,11 @@ class ReferenceMotionManager:
         self.key_indices = motion_bundle["reset_key_indices"]
         self.phase_key_indices = motion_bundle["phase_key_indices"]
         self.phase_key_counts = motion_bundle["phase_key_counts"]
-        self.first_keyframe_idx = motion_bundle["first_keyframe_idx"]
         self.hinge_contact_mask = motion_bundle["hinge_contact_mask"]
         self.num_motions = self.robot_joint_pos_traj.shape[0]
         self.num_frames = motion_bundle["num_frames"]
         self.robot_body_pos_vel = motion_bundle["robot_body_pos_vel"]
         self.door_body_pos_traj = motion_bundle["door_body_pos_traj"]
-
-    def load_wrong_motions(
-        self,
-        wrong_motion_traj_paths: Optional[Sequence[str]] = None,
-        wrong_traj_filename: str = "traj_wrong.pkl",
-        require_all: bool = True,
-    ) -> bool:
-        if self.has_wrong_motions:
-            return True
-        if wrong_motion_traj_paths is None:
-            from DoorOpening.assets.door.multi_door_cfg import motion_wrong_traj_paths
-
-            wrong_motion_traj_paths = motion_wrong_traj_paths
-
-        wrong_motion_traj_paths = list(wrong_motion_traj_paths)
-        if len(wrong_motion_traj_paths) != int(self.num_motions):
-            raise ValueError(
-                "Wrong motion path count must match correct motion count: "
-                f"{len(wrong_motion_traj_paths)} != {self.num_motions}."
-            )
-
-        missing_paths = [path for path in wrong_motion_traj_paths if not os.path.exists(path)]
-        if missing_paths:
-            preview = ", ".join(missing_paths[:5])
-            suffix = "" if len(missing_paths) <= 5 else f", ... ({len(missing_paths)} missing total)"
-            message = (
-                "wrong_push_pull_rollout is enabled, but wrong reference trajectories are missing. "
-                f"Expected '{wrong_traj_filename}' next to every active asset. Missing: {preview}{suffix}"
-            )
-            if require_all:
-                raise FileNotFoundError(message)
-            return False
-
-        wrong_bundle = self._load_motion_bundle(wrong_motion_traj_paths, label="wrong")
-        if int(wrong_bundle["num_frames"]) != int(self.num_frames):
-            raise ValueError(
-                "Wrong reference trajectories must have the same frame count as correct trajectories: "
-                f"{wrong_bundle['num_frames']} != {self.num_frames}."
-            )
-
-        self.wrong_motion_traj_paths = wrong_motion_traj_paths
-        self.wrong_robot_joint_pos_traj = wrong_bundle["robot_joint_pos_traj"]
-        self.wrong_robot_joint_vel_traj = wrong_bundle["robot_joint_vel_traj"]
-        self.wrong_robot_body_pos_traj = wrong_bundle["robot_body_pos_traj"]
-        self.wrong_robot_body_quat_traj = wrong_bundle["robot_body_quat_traj"]
-        self.wrong_door_traj = wrong_bundle["door_traj"]
-        self.wrong_phase_key_indices = wrong_bundle["phase_key_indices"]
-        self.wrong_phase_key_counts = wrong_bundle["phase_key_counts"]
-        self.wrong_first_keyframe_idx = wrong_bundle["first_keyframe_idx"]
-        self.wrong_hinge_contact_mask = wrong_bundle["hinge_contact_mask"]
-        self.wrong_robot_body_pos_vel = wrong_bundle["robot_body_pos_vel"]
-        self.wrong_door_body_pos_traj = wrong_bundle["door_body_pos_traj"]
-        if self.twist_indices is not None:
-            self._precompute_wrong_twist()
-        self.has_wrong_motions = True
-        return True
 
     def _load_motion_pkl(self, motion_file: str):
         with open(motion_file, "rb") as f:
@@ -443,21 +360,6 @@ class ReferenceMotionManager:
         # self.robot_body_pos_twist, self.robot_body_quat_twist = normalize_to_center_frame(self.robot_body_pos_traj, self.robot_body_quat_traj, self.robot_body_pos_twist, self.robot_body_quat_twist)
         self.door_body_pos_twist = twist_bundle["door_body_pos_twist"]
 
-    def _precompute_wrong_twist(self):
-        twist_bundle = self._precompute_twist_bundle(
-            self.wrong_robot_joint_pos_traj,
-            self.wrong_robot_joint_vel_traj,
-            self.wrong_door_traj,
-            self.wrong_robot_body_pos_traj,
-            self.wrong_robot_body_quat_traj,
-            self.wrong_door_body_pos_traj,
-        )
-        self.wrong_robot_joint_pos_twist = twist_bundle["robot_joint_pos_twist"]
-        self.wrong_robot_joint_vel_twist = twist_bundle["robot_joint_vel_twist"]
-        self.wrong_door_joint_pos_twist = twist_bundle["door_joint_pos_twist"]
-        self.wrong_robot_body_pos_twist = twist_bundle["robot_body_pos_twist"]
-        self.wrong_robot_body_quat_twist = twist_bundle["robot_body_quat_twist"]
-        self.wrong_door_body_pos_twist = twist_bundle["door_body_pos_twist"]
     # --------------------------------------------------
     # Reset logic
     # --------------------------------------------------
@@ -505,30 +407,6 @@ class ReferenceMotionManager:
         self.frame_idx.clamp_(max=self.num_frames - 1)
         self._update_current()
 
-    def set_wrong_motion_map(self, wrong_env_to_file_map: Sequence[int] | torch.Tensor):
-        wrong_env_to_file_map = torch.as_tensor(wrong_env_to_file_map, device=self.device, dtype=torch.long)
-        if wrong_env_to_file_map.numel() != int(self.num_envs):
-            raise ValueError(
-                "wrong_env_to_file_map must contain exactly one wrong motion index per env: "
-                f"got {wrong_env_to_file_map.numel()} for {self.num_envs} envs."
-            )
-        if wrong_env_to_file_map.numel() > 0:
-            min_motion_idx = int(wrong_env_to_file_map.min().detach().cpu().item())
-            max_motion_idx = int(wrong_env_to_file_map.max().detach().cpu().item())
-            if min_motion_idx < 0 or max_motion_idx >= int(self.num_motions):
-                raise ValueError(
-                    "wrong_env_to_file_map contains an out-of-range motion index: "
-                    f"min={min_motion_idx}, max={max_motion_idx}, num_motions={self.num_motions}."
-                )
-        self.wrong_env_to_file_map = wrong_env_to_file_map
-
-    def get_wrong_motion_indices(self, env_ids: Optional[Sequence[int]] = None) -> torch.Tensor:
-        if self.wrong_env_to_file_map is None:
-            raise RuntimeError("Wrong motion map has not been configured.")
-        if env_ids is None:
-            return self.wrong_env_to_file_map
-        return self.wrong_env_to_file_map[env_ids]
-
     def get_current_phase(self, env_ids: Optional[Sequence[int]] = None) -> torch.Tensor:
         if env_ids is None:
             frame_idx = self.frame_idx
@@ -556,13 +434,6 @@ class ReferenceMotionManager:
         phase = torch.where(frame_idx >= last_key_frame, last_phase, phase)
         return phase
 
-    def get_before_first_keyframe_mask(self, env_ids: Optional[Sequence[int]] = None):
-        first_keyframes = self.first_keyframe_idx[self.env_to_file_map]
-        mask = self.frame_idx < first_keyframes.to(self.frame_idx)
-        if env_ids is None:
-            return mask
-        return mask[env_ids]
-
     def _lerp(self, a, b, w):
         while w.dim() < a.dim():
             w = w.unsqueeze(-1)
@@ -581,17 +452,11 @@ class ReferenceMotionManager:
 
     def _get_reference_motion_indices(
         self,
-        reference_source: str = "correct",
         env_ids: Optional[Sequence[int]] = None,
         motion_indices: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if motion_indices is None:
-            if reference_source == "wrong":
-                if self.wrong_env_to_file_map is None:
-                    raise RuntimeError("Wrong reference requested before wrong motion map was configured.")
-                motion_indices = self.wrong_env_to_file_map
-            else:
-                motion_indices = self.env_to_file_map
+            motion_indices = self.env_to_file_map
             if env_ids is not None:
                 motion_indices = motion_indices[env_ids]
             return motion_indices.to(device=self.device, dtype=torch.long)
@@ -614,27 +479,15 @@ class ReferenceMotionManager:
             f"got {motion_indices.numel()} indices for {len(env_ids)} requested envs."
         )
 
-    def _select_reference_traj(self, attr_name: str, reference_source: str = "correct") -> torch.Tensor:
-        reference_source = str(reference_source).lower()
-        if reference_source == "correct":
-            return getattr(self, attr_name)
-        if reference_source != "wrong":
-            raise ValueError(f"Unsupported reference_source '{reference_source}'.")
-        if not self.has_wrong_motions:
-            raise RuntimeError("Wrong reference requested before wrong trajectories were loaded.")
-        return getattr(self, f"wrong_{attr_name}")
-
     def _sample_reference_traj(
         self,
         attr_name: str,
         env_ids: Optional[Sequence[int]] = None,
-        reference_source: str = "correct",
         motion_indices: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        traj = self._select_reference_traj(attr_name, reference_source=reference_source)
+        traj = getattr(self, attr_name)
         frame_idx = self.frame_idx if env_ids is None else self.frame_idx[env_ids]
         motion_indices = self._get_reference_motion_indices(
-            reference_source=reference_source,
             env_ids=env_ids,
             motion_indices=motion_indices,
         )
@@ -650,13 +503,11 @@ class ReferenceMotionManager:
         self,
         attr_name: str,
         env_ids: Optional[Sequence[int]] = None,
-        reference_source: str = "correct",
         motion_indices: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        traj = self._select_reference_traj(attr_name, reference_source=reference_source)
+        traj = getattr(self, attr_name)
         frame_idx = self.frame_idx if env_ids is None else self.frame_idx[env_ids]
         motion_indices = self._get_reference_motion_indices(
-            reference_source=reference_source,
             env_ids=env_ids,
             motion_indices=motion_indices,
         )
@@ -675,12 +526,10 @@ class ReferenceMotionManager:
         attr_name: str,
         frame_idx: torch.Tensor,
         env_ids: Optional[Sequence[int]] = None,
-        reference_source: str = "correct",
         motion_indices: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        traj = self._select_reference_traj(attr_name, reference_source=reference_source)
+        traj = getattr(self, attr_name)
         motion_indices = self._get_reference_motion_indices(
-            reference_source=reference_source,
             env_ids=env_ids,
             motion_indices=motion_indices,
         )
@@ -728,281 +577,114 @@ class ReferenceMotionManager:
     # --------------------------------------------------
     # Getters (explicit, readable)
     # --------------------------------------------------
-    def get_robot_joint_pos(
-        self,
-        env_ids: Optional[Sequence[int]] = None,
-        reference_source: str = "correct",
-        motion_indices: Optional[torch.Tensor] = None,
-    ):
-        if reference_source != "correct" or motion_indices is not None:
-            return self._sample_reference_traj(
-                "robot_joint_pos_traj",
-                env_ids=env_ids,
-                reference_source=reference_source,
-                motion_indices=motion_indices,
-            )
+    def get_robot_joint_pos(self, env_ids: Optional[Sequence[int]] = None, motion_indices: Optional[torch.Tensor] = None):
+        if motion_indices is not None:
+            return self._sample_reference_traj("robot_joint_pos_traj", env_ids=env_ids, motion_indices=motion_indices)
         if env_ids is None:
             return self.ref_robot_joint_pos
-        else:
-            return self.ref_robot_joint_pos[env_ids]
+        return self.ref_robot_joint_pos[env_ids]
 
-    def get_door_joint_pos(
-        self,
-        env_ids: Optional[Sequence[int]] = None,
-        reference_source: str = "correct",
-        motion_indices: Optional[torch.Tensor] = None,
-    ):
-        if reference_source != "correct" or motion_indices is not None:
-            return self._sample_reference_traj(
-                "door_traj",
-                env_ids=env_ids,
-                reference_source=reference_source,
-                motion_indices=motion_indices,
-            )
+    def get_door_joint_pos(self, env_ids: Optional[Sequence[int]] = None, motion_indices: Optional[torch.Tensor] = None):
+        if motion_indices is not None:
+            return self._sample_reference_traj("door_traj", env_ids=env_ids, motion_indices=motion_indices)
         if env_ids is None:
             return self.ref_door_joint_pos
-        else:
-            return self.ref_door_joint_pos[env_ids]
+        return self.ref_door_joint_pos[env_ids]
 
-    def get_robot_body_pos(
-        self,
-        env_ids: Optional[Sequence[int]] = None,
-        reference_source: str = "correct",
-        motion_indices: Optional[torch.Tensor] = None,
-    ):
-        if reference_source != "correct" or motion_indices is not None:
-            return self._sample_reference_traj(
-                "robot_body_pos_traj",
-                env_ids=env_ids,
-                reference_source=reference_source,
-                motion_indices=motion_indices,
-            )
+    def get_robot_body_pos(self, env_ids: Optional[Sequence[int]] = None, motion_indices: Optional[torch.Tensor] = None):
+        if motion_indices is not None:
+            return self._sample_reference_traj("robot_body_pos_traj", env_ids=env_ids, motion_indices=motion_indices)
         if env_ids is None:
             return self.ref_robot_body_pos
-        else:
-            return self.ref_robot_body_pos[env_ids]
+        return self.ref_robot_body_pos[env_ids]
 
-    def get_robot_body_quat(
-        self,
-        env_ids: Optional[Sequence[int]] = None,
-        reference_source: str = "correct",
-        motion_indices: Optional[torch.Tensor] = None,
-    ):
-        if reference_source != "correct" or motion_indices is not None:
-            return self._sample_reference_quat_traj(
-                "robot_body_quat_traj",
-                env_ids=env_ids,
-                reference_source=reference_source,
-                motion_indices=motion_indices,
-            )
+    def get_robot_body_quat(self, env_ids: Optional[Sequence[int]] = None, motion_indices: Optional[torch.Tensor] = None):
+        if motion_indices is not None:
+            return self._sample_reference_quat_traj("robot_body_quat_traj", env_ids=env_ids, motion_indices=motion_indices)
         if env_ids is None:
             return self.ref_robot_body_quat
-        else:
-            return self.ref_robot_body_quat[env_ids]
+        return self.ref_robot_body_quat[env_ids]
 
-    def get_robot_joint_vel(
-        self,
-        env_ids: Optional[Sequence[int]] = None,
-        reference_source: str = "correct",
-        motion_indices: Optional[torch.Tensor] = None,
-    ):
-        if reference_source != "correct" or motion_indices is not None:
-            return self._sample_reference_traj(
-                "robot_joint_vel_traj",
-                env_ids=env_ids,
-                reference_source=reference_source,
-                motion_indices=motion_indices,
-            )
+    def get_robot_joint_vel(self, env_ids: Optional[Sequence[int]] = None, motion_indices: Optional[torch.Tensor] = None):
+        if motion_indices is not None:
+            return self._sample_reference_traj("robot_joint_vel_traj", env_ids=env_ids, motion_indices=motion_indices)
         if env_ids is None:
             return self.ref_robot_joint_vel
-        else:
-            return self.ref_robot_joint_vel[env_ids]
+        return self.ref_robot_joint_vel[env_ids]
 
-    def get_robot_body_lin_vel(
-        self,
-        env_ids: Optional[Sequence[int]] = None,
-        reference_source: str = "correct",
-        motion_indices: Optional[torch.Tensor] = None,
-    ):
-        if reference_source != "correct" or motion_indices is not None:
-            return self._sample_reference_traj(
-                "robot_body_pos_vel",
-                env_ids=env_ids,
-                reference_source=reference_source,
-                motion_indices=motion_indices,
-            )[:, :, :3]
+    def get_robot_body_lin_vel(self, env_ids: Optional[Sequence[int]] = None, motion_indices: Optional[torch.Tensor] = None):
+        if motion_indices is not None:
+            return self._sample_reference_traj("robot_body_pos_vel", env_ids=env_ids, motion_indices=motion_indices)[:, :, :3]
         if env_ids is None:
             return self.ref_robot_body_pos_vel[:, :, :3]
-        else:
-            return self.ref_robot_body_pos_vel[env_ids, :, :3]
+        return self.ref_robot_body_pos_vel[env_ids, :, :3]
 
-    def get_robot_body_ang_vel(
-        self,
-        env_ids: Optional[Sequence[int]] = None,
-        reference_source: str = "correct",
-        motion_indices: Optional[torch.Tensor] = None,
-    ):
-        if reference_source != "correct" or motion_indices is not None:
-            return self._sample_reference_traj(
-                "robot_body_pos_vel",
-                env_ids=env_ids,
-                reference_source=reference_source,
-                motion_indices=motion_indices,
-            )[:, :, 3:]
+    def get_robot_body_ang_vel(self, env_ids: Optional[Sequence[int]] = None, motion_indices: Optional[torch.Tensor] = None):
+        if motion_indices is not None:
+            return self._sample_reference_traj("robot_body_pos_vel", env_ids=env_ids, motion_indices=motion_indices)[:, :, 3:]
         if env_ids is None:
             return self.ref_robot_body_pos_vel[:, :, 3:]
-        else:
-            return self.ref_robot_body_pos_vel[env_ids, :, 3:]
-        
-    def get_door_body_pos(
-        self,
-        env_ids: Optional[Sequence[int]] = None,
-        reference_source: str = "correct",
-        motion_indices: Optional[torch.Tensor] = None,
-    ):
-        if reference_source != "correct" or motion_indices is not None:
-            return self._sample_reference_traj(
-                "door_body_pos_traj",
-                env_ids=env_ids,
-                reference_source=reference_source,
-                motion_indices=motion_indices,
-            )
+        return self.ref_robot_body_pos_vel[env_ids, :, 3:]
+
+    def get_door_body_pos(self, env_ids: Optional[Sequence[int]] = None, motion_indices: Optional[torch.Tensor] = None):
+        if motion_indices is not None:
+            return self._sample_reference_traj("door_body_pos_traj", env_ids=env_ids, motion_indices=motion_indices)
         if env_ids is None:
             return self.ref_door_body_pos
-        else:
-            return self.ref_door_body_pos[env_ids]
+        return self.ref_door_body_pos[env_ids]
 
-
-    def get_robot_joint_pos_twist(
-        self,
-        env_ids: Optional[Sequence[int]] = None,
-        reference_source: str = "correct",
-        motion_indices: Optional[torch.Tensor] = None,
-    ):
-        if reference_source != "correct" or motion_indices is not None:
-            return self._sample_reference_traj(
-                "robot_joint_pos_twist",
-                env_ids=env_ids,
-                reference_source=reference_source,
-                motion_indices=motion_indices,
-            )
+    def get_robot_joint_pos_twist(self, env_ids: Optional[Sequence[int]] = None, motion_indices: Optional[torch.Tensor] = None):
+        if motion_indices is not None:
+            return self._sample_reference_traj("robot_joint_pos_twist", env_ids=env_ids, motion_indices=motion_indices)
         assert self.ref_robot_joint_pos_twist.shape[-1] == 32 and self.ref_robot_joint_pos_twist.ndim == 3
         if env_ids is None:
             return self.ref_robot_joint_pos_twist
-        else:
-            return self.ref_robot_joint_pos_twist[env_ids]
+        return self.ref_robot_joint_pos_twist[env_ids]
 
-    def get_door_joint_pos_twist(
-        self,
-        env_ids: Optional[Sequence[int]] = None,
-        reference_source: str = "correct",
-        motion_indices: Optional[torch.Tensor] = None,
-    ):
-        if reference_source != "correct" or motion_indices is not None:
-            return self._sample_reference_traj(
-                "door_joint_pos_twist",
-                env_ids=env_ids,
-                reference_source=reference_source,
-                motion_indices=motion_indices,
-            )
+    def get_door_joint_pos_twist(self, env_ids: Optional[Sequence[int]] = None, motion_indices: Optional[torch.Tensor] = None):
+        if motion_indices is not None:
+            return self._sample_reference_traj("door_joint_pos_twist", env_ids=env_ids, motion_indices=motion_indices)
         assert self.ref_door_joint_pos_twist.shape[-1] == 2 and self.ref_door_joint_pos_twist.ndim == 3
         if env_ids is None:
             return self.ref_door_joint_pos_twist
-        else:
-            return self.ref_door_joint_pos_twist[env_ids]
+        return self.ref_door_joint_pos_twist[env_ids]
 
-    def get_robot_body_pos_twist(
-        self,
-        env_ids: Optional[Sequence[int]] = None,
-        reference_source: str = "correct",
-        motion_indices: Optional[torch.Tensor] = None,
-    ):
-        if reference_source != "correct" or motion_indices is not None:
-            return self._sample_reference_traj(
-                "robot_body_pos_twist",
-                env_ids=env_ids,
-                reference_source=reference_source,
-                motion_indices=motion_indices,
-            )
+    def get_robot_body_pos_twist(self, env_ids: Optional[Sequence[int]] = None, motion_indices: Optional[torch.Tensor] = None):
+        if motion_indices is not None:
+            return self._sample_reference_traj("robot_body_pos_twist", env_ids=env_ids, motion_indices=motion_indices)
         if env_ids is None:
             return self.ref_robot_body_pos_twist
-        else:
-            return self.ref_robot_body_pos_twist[env_ids]
+        return self.ref_robot_body_pos_twist[env_ids]
 
-    def get_robot_body_quat_twist(
-        self,
-        env_ids: Optional[Sequence[int]] = None,
-        reference_source: str = "correct",
-        motion_indices: Optional[torch.Tensor] = None,
-    ):
-        if reference_source != "correct" or motion_indices is not None:
-            return self._sample_reference_quat_traj(
-                "robot_body_quat_twist",
-                env_ids=env_ids,
-                reference_source=reference_source,
-                motion_indices=motion_indices,
-            )
+    def get_robot_body_quat_twist(self, env_ids: Optional[Sequence[int]] = None, motion_indices: Optional[torch.Tensor] = None):
+        if motion_indices is not None:
+            return self._sample_reference_quat_traj("robot_body_quat_twist", env_ids=env_ids, motion_indices=motion_indices)
         if env_ids is None:
             return self.ref_robot_body_quat_twist
-        else:
-            return self.ref_robot_body_quat_twist[env_ids]
+        return self.ref_robot_body_quat_twist[env_ids]
 
-    def get_robot_joint_vel_twist(
-        self,
-        env_ids: Optional[Sequence[int]] = None,
-        reference_source: str = "correct",
-        motion_indices: Optional[torch.Tensor] = None,
-    ):
-        if reference_source != "correct" or motion_indices is not None:
-            return self._sample_reference_traj(
-                "robot_joint_vel_twist",
-                env_ids=env_ids,
-                reference_source=reference_source,
-                motion_indices=motion_indices,
-            )
+    def get_robot_joint_vel_twist(self, env_ids: Optional[Sequence[int]] = None, motion_indices: Optional[torch.Tensor] = None):
+        if motion_indices is not None:
+            return self._sample_reference_traj("robot_joint_vel_twist", env_ids=env_ids, motion_indices=motion_indices)
         if env_ids is None:
             return self.ref_robot_joint_vel_twist
-        else:
-            return self.ref_robot_joint_vel_twist[env_ids]
+        return self.ref_robot_joint_vel_twist[env_ids]
 
-    def get_hinge_contact_mask(
-        self,
-        env_ids: Optional[Sequence[int]] = None,
-        reference_source: str = "correct",
-        motion_indices: Optional[torch.Tensor] = None,
-    ):
-        if reference_source != "correct" or motion_indices is not None:
+    def get_hinge_contact_mask(self, env_ids: Optional[Sequence[int]] = None, motion_indices: Optional[torch.Tensor] = None):
+        if motion_indices is not None:
             frame_idx = self.frame_idx if env_ids is None else self.frame_idx[env_ids]
             floor_idx = torch.floor(frame_idx).long().clamp(min=0, max=self.num_frames - 1)
-            return self._gather_reference_traj(
-                "hinge_contact_mask",
-                floor_idx,
-                env_ids=env_ids,
-                reference_source=reference_source,
-                motion_indices=motion_indices,
-            )
+            return self._gather_reference_traj("hinge_contact_mask", floor_idx, env_ids=env_ids, motion_indices=motion_indices)
         if env_ids is None:
             return self.ref_hinge_contact_mask
-        else:
-            return self.ref_hinge_contact_mask[env_ids]
+        return self.ref_hinge_contact_mask[env_ids]
 
-    def get_door_body_pos_twist(
-        self,
-        env_ids: Optional[Sequence[int]] = None,
-        reference_source: str = "correct",
-        motion_indices: Optional[torch.Tensor] = None,
-    ):
-        if reference_source != "correct" or motion_indices is not None:
-            return self._sample_reference_traj(
-                "door_body_pos_twist",
-                env_ids=env_ids,
-                reference_source=reference_source,
-                motion_indices=motion_indices,
-            )
+    def get_door_body_pos_twist(self, env_ids: Optional[Sequence[int]] = None, motion_indices: Optional[torch.Tensor] = None):
+        if motion_indices is not None:
+            return self._sample_reference_traj("door_body_pos_twist", env_ids=env_ids, motion_indices=motion_indices)
         if env_ids is None:
             return self.ref_door_body_pos_twist
-        else:
-            return self.ref_door_body_pos_twist[env_ids]
+        return self.ref_door_body_pos_twist[env_ids]
 
 
 if __name__ == "__main__":
