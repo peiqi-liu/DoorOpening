@@ -465,6 +465,9 @@ class PCDTransformer(BaseModel):
         self.push_pull_condition_source = str(
             self.push_pull_condition_cfg.get("source", "oracle")
         ).lower()
+        self.push_pull_condition_feed_format = str(
+            self.push_pull_condition_cfg.get("feed_format", "soft")
+        ).lower()
         self.push_pull_detach_predicted_condition = bool(
             self.push_pull_condition_cfg.get("detach_predicted_condition", True)
         )
@@ -604,6 +607,10 @@ class PCDTransformer(BaseModel):
         input_dim = int(self.push_pull_condition_cfg.get("input_dim", 2))
         if input_dim != 2:
             raise ValueError("push_pull_condition.input_dim must be 2.")
+        if self.push_pull_condition_feed_format not in {"soft", "one_hot"}:
+            raise ValueError(
+                "push_pull_condition.feed_format must be one of ['soft', 'one_hot']."
+            )
 
         encoder_cfg = self.state_encoders_cfg.get(self.push_pull_condition_obs_key)
         if encoder_cfg is None:

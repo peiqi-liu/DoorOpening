@@ -8,6 +8,7 @@ from pathlib import Path
 
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 import yaml
 from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -47,6 +48,15 @@ from DoorOpening.utils.viser_pt import (
     prepare_pointcloud,
     prepare_world_points_from_local,
 )
+
+
+PUSH_PULL_CONDITION_FEED_FORMAT_TO_CODE = {"soft": 0.0, "one_hot": 1.0}
+PUSH_PULL_CONDITION_PERTURB_MODE_TO_CODE = {
+    "none": 0.0,
+    "random_prob": 1.0,
+    "random_one_hot": 2.0,
+    "wrong_confident": 3.0,
+}
 
 
 def adjust_state_dict_keys(checkpoint_state_dict, model_state_dict):
@@ -263,16 +273,37 @@ class Dagger:
         self.latest_aux_input_vector = None
         self.latest_aux_target_vector = None
         self.push_pull_condition_enabled = False
+        self.push_pull_condition_cfg = {}
         self.push_pull_condition_obs_key = "push_pull_cond"
         self.push_pull_condition_source = "oracle"
+        self.push_pull_condition_feed_format = "soft"
+        self.push_pull_condition_feed_format_code = PUSH_PULL_CONDITION_FEED_FORMAT_TO_CODE["soft"]
         self.push_pull_detach_predicted_condition = True
         self.push_pull_family_one_hot = None
         self.push_pull_condition_buffer = None
+        self.push_pull_condition_perturb_enabled = False
+        self.push_pull_condition_perturb_probability = 0.0
+        self.push_pull_condition_perturb_mode = "none"
+        self.push_pull_condition_perturb_mode_code = PUSH_PULL_CONDITION_PERTURB_MODE_TO_CODE["none"]
+        self.push_pull_condition_perturb_apply_to = "input_only"
+        self.push_pull_condition_perturb_random_prob_min = 0.0
+        self.push_pull_condition_perturb_random_prob_max = 1.0
+        self.push_pull_condition_perturb_step_gate_enabled = False
+        self.push_pull_condition_perturb_step_gate_start = 40
+        self.push_pull_condition_perturb_step_gate_end = 100
+        self.push_pull_condition_perturb_wrong_confidence_min = 0.85
+        self.push_pull_condition_perturb_wrong_confidence_max = 0.95
         self.latest_fraction_push = 0.0
         self.latest_fraction_pull = 0.0
+        self.latest_push_pull_condition_entropy = 0.0
         self.latest_push_pull_pred_entropy = 0.0
         self.latest_push_pull_pred_acc = None
         self.latest_push_pull_condition_source = "disabled"
+        self.latest_push_pull_perturb_enabled = 0.0
+        self.latest_push_pull_perturb_count = 0
+        self.latest_push_pull_perturb_fraction = 0.0
+        self.latest_push_pull_phase_mean = 0.0
+        self.latest_push_pull_perturb_step_gate_fraction = 0.0
         self.latest_push_pull_perturb_to_push_count = 0
         self.latest_push_pull_perturb_to_pull_count = 0
         self._logged_temporal_state_input_keys = False
@@ -398,10 +429,17 @@ class Dagger:
         self.push_pull_condition_source = str(
             getattr(self.student_model, "push_pull_condition_source", "oracle")
         ).lower()
+        self.push_pull_condition_cfg = dict(getattr(self.student_model, "push_pull_condition_cfg", {}) or {})
+        self.push_pull_condition_feed_format = str(
+            getattr(
+                self.student_model,
+                "push_pull_condition_feed_format",
+                self.push_pull_condition_cfg.get("feed_format", "soft"),
+            )
+        ).lower()
         self.push_pull_detach_predicted_condition = bool(
             getattr(self.student_model, "push_pull_detach_predicted_condition", True)
         )
-        self.push_pull_condition_cfg = dict(getattr(self.student_model, "push_pull_condition_cfg", {}) or {})
         self.proprio_temporal_enabled = bool(
             getattr(
                 self.student_model,
@@ -612,6 +650,7 @@ class Dagger:
         self.mode_prediction_loss_enabled = self.mode_prediction_enabled and self.mode_weight > 0.0
         self.mode_family_semantics = {}
         self.mode_family_direction_ids = None
+        self.direction_phase_num_buckets = 0
         self.latest_mode_direction_acc = None
         self.latest_dir_window_acc = 0.0
         self.latest_dir_window_balanced_acc = 0.0
@@ -621,6 +660,12 @@ class Dagger:
         self.latest_dir_window_num_pull_labels = 0
         self.latest_dir_window_num_push_preds = 0
         self.latest_dir_window_num_pull_preds = 0
+        self.latest_dir_phase_mean = 0.0
+        self.latest_dir_phase_min = 0.0
+        self.latest_dir_phase_max = 0.0
+        self.latest_dir_phase_loss_by_bucket = OrderedDict()
+        self.latest_dir_phase_acc_by_bucket = OrderedDict()
+        self.latest_dir_phase_count_by_bucket = OrderedDict()
 
     def _init_prediction_training_state(self):
         cfg = dict(self.runtime_cfg.get("prediction_training", {}) or {})
@@ -682,10 +727,17 @@ class Dagger:
 
     def _init_push_pull_condition_runtime_state(self, student_yaml_runtime_cfg):
         allowed_sources = {"oracle", "predicted"}
+        allowed_feed_formats = set(PUSH_PULL_CONDITION_FEED_FORMAT_TO_CODE)
+        allowed_perturb_modes = set(PUSH_PULL_CONDITION_PERTURB_MODE_TO_CODE)
         if self.push_pull_condition_enabled and self.push_pull_condition_source not in allowed_sources:
             raise ValueError(
                 f"push_pull_condition.source must be one of {sorted(allowed_sources)}, "
                 f"got '{self.push_pull_condition_source}'."
+            )
+        if self.push_pull_condition_enabled and self.push_pull_condition_feed_format not in allowed_feed_formats:
+            raise ValueError(
+                "push_pull_condition.feed_format must be one of "
+                f"{sorted(allowed_feed_formats)}, got '{self.push_pull_condition_feed_format}'."
             )
         if self.push_pull_condition_enabled and self.push_pull_condition_source == "predicted":
             if not self.mode_prediction_enabled:
@@ -702,30 +754,87 @@ class Dagger:
         default_perturb_cfg = {
             "enabled": False,
             "probability": 0.1,
+            "mode": "none",
+            "apply_to": "input_only",
+            "random_prob_min": 0.0,
+            "random_prob_max": 1.0,
+            "step_gate": {
+                "enabled": False,
+                "start": 40,
+                "end": 100,
+            },
             "wrong_class_confidence_range": [0.85, 0.95],
         }
+        student_runtime_push_pull_cfg = dict(student_yaml_runtime_cfg.get("push_pull_condition", {}) or {})
+        dagger_runtime_push_pull_cfg = dict(self.runtime_cfg.get("push_pull_condition", {}) or {})
         merged_perturb_cfg = dict(default_perturb_cfg)
         merged_perturb_cfg.update(dict(student_yaml_runtime_cfg.get("push_pull_condition_perturb", {}) or {}))
+        merged_perturb_cfg.update(dict(student_runtime_push_pull_cfg.get("perturb", {}) or {}))
         merged_perturb_cfg.update(dict(self.runtime_cfg.get("push_pull_condition_perturb", {}) or {}))
+        merged_perturb_cfg.update(dict(dagger_runtime_push_pull_cfg.get("perturb", {}) or {}))
         merged_perturb_cfg.update(dict(self.push_pull_condition_perturb_cfg or {}))
+        merged_perturb_cfg.update(dict(self.push_pull_condition_cfg.get("perturb", {}) or {}))
         self.push_pull_condition_perturb_cfg = merged_perturb_cfg
         self.push_pull_condition_perturb_enabled = bool(merged_perturb_cfg.get("enabled", False))
         self.push_pull_condition_perturb_probability = float(merged_perturb_cfg.get("probability", 0.1))
+        self.push_pull_condition_perturb_mode = str(merged_perturb_cfg.get("mode", "none")).lower()
+        self.push_pull_condition_perturb_apply_to = str(
+            merged_perturb_cfg.get("apply_to", "input_only")
+        ).lower()
+        self.push_pull_condition_perturb_random_prob_min = float(
+            merged_perturb_cfg.get("random_prob_min", 0.0)
+        )
+        self.push_pull_condition_perturb_random_prob_max = float(
+            merged_perturb_cfg.get("random_prob_max", 1.0)
+        )
+        step_gate_cfg = dict(merged_perturb_cfg.get("step_gate", {}) or {})
+        self.push_pull_condition_perturb_step_gate_enabled = bool(step_gate_cfg.get("enabled", False))
+        self.push_pull_condition_perturb_step_gate_start = int(step_gate_cfg.get("start", 40))
+        self.push_pull_condition_perturb_step_gate_end = int(step_gate_cfg.get("end", 100))
         wrong_confidence_min, wrong_confidence_max = merged_perturb_cfg.get(
             "wrong_class_confidence_range",
             [0.85, 0.95],
         )
         self.push_pull_condition_perturb_wrong_confidence_min = float(wrong_confidence_min)
         self.push_pull_condition_perturb_wrong_confidence_max = float(wrong_confidence_max)
+        self.push_pull_condition_feed_format_code = PUSH_PULL_CONDITION_FEED_FORMAT_TO_CODE.get(
+            self.push_pull_condition_feed_format,
+            PUSH_PULL_CONDITION_FEED_FORMAT_TO_CODE["soft"],
+        )
+        self.push_pull_condition_perturb_mode_code = PUSH_PULL_CONDITION_PERTURB_MODE_TO_CODE.get(
+            self.push_pull_condition_perturb_mode,
+            PUSH_PULL_CONDITION_PERTURB_MODE_TO_CODE["none"],
+        )
         if not 0.0 <= self.push_pull_condition_perturb_probability <= 1.0:
-            raise ValueError("push_pull_condition_perturb.probability must be in [0, 1].")
+            raise ValueError("push_pull_condition.perturb.probability must be in [0, 1].")
         if self.push_pull_condition_perturb_enabled and not self.push_pull_condition_enabled:
             raise RuntimeError(
-                "push_pull_condition_perturb.enabled=true requires push_pull_condition.enabled=true."
+                "push_pull_condition.perturb.enabled=true requires push_pull_condition.enabled=true."
+            )
+        if self.push_pull_condition_perturb_mode not in allowed_perturb_modes:
+            raise ValueError(
+                "push_pull_condition.perturb.mode must be one of "
+                f"{sorted(allowed_perturb_modes)}, got '{self.push_pull_condition_perturb_mode}'."
+            )
+        if self.push_pull_condition_perturb_apply_to != "input_only":
+            raise NotImplementedError(
+                "push_pull_condition.perturb.apply_to currently only supports 'input_only'."
+            )
+        if not 0.0 <= self.push_pull_condition_perturb_random_prob_min <= self.push_pull_condition_perturb_random_prob_max <= 1.0:
+            raise ValueError(
+                "push_pull_condition.perturb.random_prob_min/random_prob_max must satisfy "
+                "0.0 <= min <= max <= 1.0."
+            )
+        if self.push_pull_condition_perturb_step_gate_start < 0:
+            raise ValueError("push_pull_condition.perturb.step_gate.start must be non-negative.")
+        if self.push_pull_condition_perturb_step_gate_end < self.push_pull_condition_perturb_step_gate_start:
+            raise ValueError(
+                "push_pull_condition.perturb.step_gate.end must be greater than or equal to "
+                "push_pull_condition.perturb.step_gate.start."
             )
         if not 0.5 <= self.push_pull_condition_perturb_wrong_confidence_min <= self.push_pull_condition_perturb_wrong_confidence_max <= 1.0:
             raise ValueError(
-                "push_pull_condition_perturb.wrong_class_confidence_range must satisfy "
+                "push_pull_condition.perturb.wrong_class_confidence_range must satisfy "
                 "0.5 <= min <= max <= 1.0."
             )
 
@@ -840,6 +949,13 @@ class Dagger:
             )
         self.push_pull_family_one_hot = family_one_hot
 
+        ref_motion_lib = getattr(self.ov_env, "ref_motion_lib", None)
+        phase_key_counts = None if ref_motion_lib is None else getattr(ref_motion_lib, "phase_key_counts", None)
+        if phase_key_counts is not None and phase_key_counts.numel() > 0:
+            self.direction_phase_num_buckets = int(phase_key_counts.max().detach().cpu().item())
+        else:
+            self.direction_phase_num_buckets = 0
+
     def _build_gt_push_pull_condition(self):
         if self.push_pull_family_one_hot is None:
             raise RuntimeError("Push/pull condition targets are not initialized.")
@@ -850,6 +966,11 @@ class Dagger:
 
         push_pull_cond = self.push_pull_family_one_hot[self.env_family_ids.long()]
         push_pull_cond = push_pull_cond.to(device=self.device, dtype=torch.float32)
+        self._validate_push_pull_condition(
+            push_pull_cond,
+            context="ground-truth push/pull condition",
+            expect_one_hot=True,
+        )
         return push_pull_cond
 
     def _build_initial_predicted_push_pull_condition(self, num_envs):
@@ -860,11 +981,110 @@ class Dagger:
             dtype=torch.float32,
             device=self.device,
         )
-        if initial_condition.ndim != 2 or initial_condition.shape != (num_envs, 2):
-            raise RuntimeError(
-                f"initial_push_pull_cond must have shape [{num_envs}, 2], got {tuple(initial_condition.shape)}."
-            )
+        self._validate_push_pull_condition(
+            initial_condition,
+            context="initial predicted push/pull condition",
+            expected_num_envs=num_envs,
+        )
         return initial_condition
+
+    def _validate_push_pull_condition(
+        self,
+        push_pull_cond,
+        context,
+        expected_num_envs=None,
+        expect_one_hot=False,
+        allow_initial_uniform=False,
+    ):
+        if not isinstance(push_pull_cond, torch.Tensor):
+            raise RuntimeError(f"{context} must be a torch.Tensor, got {type(push_pull_cond).__name__}.")
+        expected_num_envs = self.num_envs if expected_num_envs is None else int(expected_num_envs)
+        if push_pull_cond.ndim != 2 or push_pull_cond.shape != (expected_num_envs, 2):
+            raise RuntimeError(
+                f"{context} must have shape [{expected_num_envs}, 2], got {tuple(push_pull_cond.shape)}."
+            )
+        if not torch.isfinite(push_pull_cond).all():
+            raise RuntimeError(f"{context} contains NaN or Inf values.")
+        if torch.any(push_pull_cond < -1.0e-6) or torch.any(push_pull_cond > 1.0 + 1.0e-6):
+            min_value = float(push_pull_cond.min().detach().cpu().item())
+            max_value = float(push_pull_cond.max().detach().cpu().item())
+            raise RuntimeError(
+                f"{context} values must stay in [0, 1], got min={min_value:.6f}, max={max_value:.6f}."
+            )
+        row_sums = push_pull_cond.sum(dim=-1)
+        if not torch.allclose(row_sums, torch.ones_like(row_sums), atol=1.0e-4, rtol=1.0e-4):
+            max_row_sum_error = float((row_sums - 1.0).abs().max().detach().cpu().item())
+            raise RuntimeError(
+                f"{context} rows must sum to 1 within tolerance, max error={max_row_sum_error:.6f}."
+            )
+        if expect_one_hot:
+            is_binary = (push_pull_cond == 0.0) | (push_pull_cond == 1.0)
+            is_one_hot = is_binary.all(dim=-1) & (push_pull_cond.sum(dim=-1) == 1.0)
+            if allow_initial_uniform:
+                is_initial_uniform = torch.isclose(
+                    push_pull_cond,
+                    torch.full_like(push_pull_cond, 0.5),
+                    atol=1.0e-6,
+                    rtol=0.0,
+                ).all(dim=-1)
+                valid_rows = is_one_hot | is_initial_uniform
+            else:
+                valid_rows = is_one_hot
+            if not torch.all(valid_rows):
+                raise RuntimeError(
+                    f"{context} must be exact one-hot in [push, pull] order."
+                )
+        return push_pull_cond
+
+    def _push_pull_condition_to_one_hot(self, push_pull_cond, allow_initial_uniform=False):
+        self._validate_push_pull_condition(
+            push_pull_cond,
+            context="push/pull condition before one-hot formatting",
+        )
+        class_ids = push_pull_cond.argmax(dim=-1)
+        one_hot = F.one_hot(class_ids, num_classes=2).to(device=self.device, dtype=torch.float32)
+        if allow_initial_uniform:
+            initial_uniform_mask = torch.isclose(
+                push_pull_cond,
+                torch.full_like(push_pull_cond, 0.5),
+                atol=1.0e-6,
+                rtol=0.0,
+            ).all(dim=-1)
+            if torch.any(initial_uniform_mask):
+                # Preserve the explicit "unknown yet" recurrent initialization instead of tie-breaking to push.
+                one_hot[initial_uniform_mask] = push_pull_cond[initial_uniform_mask]
+        self._validate_push_pull_condition(
+            one_hot,
+            context="one-hot formatted push/pull condition",
+            expect_one_hot=True,
+            allow_initial_uniform=allow_initial_uniform,
+        )
+        return one_hot
+
+    def _format_push_pull_condition(self, push_pull_cond, source=None):
+        source = self.push_pull_condition_source if source is None else str(source).lower()
+        self._validate_push_pull_condition(
+            push_pull_cond,
+            context=f"raw push/pull condition from source '{source}'",
+        )
+        if self.push_pull_condition_feed_format == "soft":
+            formatted = push_pull_cond.clone()
+        elif self.push_pull_condition_feed_format == "one_hot":
+            formatted = self._push_pull_condition_to_one_hot(
+                push_pull_cond,
+                allow_initial_uniform=(source == "predicted"),
+            )
+        else:
+            raise ValueError(
+                f"Unsupported push_pull_condition.feed_format '{self.push_pull_condition_feed_format}'."
+            )
+        self._validate_push_pull_condition(
+            formatted,
+            context=f"formatted push/pull condition for source '{source}'",
+            expect_one_hot=(self.push_pull_condition_feed_format == "one_hot"),
+            allow_initial_uniform=(self.push_pull_condition_feed_format == "one_hot" and source == "predicted"),
+        )
+        return formatted
 
     def _seed_push_pull_condition_buffer(self, env_ids=None):
         if not self.push_pull_condition_enabled or self.push_pull_condition_source != "predicted":
@@ -891,7 +1111,14 @@ class Dagger:
                 raise RuntimeError(
                     "Predicted push/pull conditioning requires push_pull_condition_buffer to be initialized."
                 )
-            return self.push_pull_condition_buffer.clone()
+            push_pull_cond = self.push_pull_condition_buffer.clone()
+            if self.push_pull_detach_predicted_condition:
+                push_pull_cond = push_pull_cond.detach()
+            self._validate_push_pull_condition(
+                push_pull_cond,
+                context="recurrent predicted push/pull condition buffer",
+            )
+            return push_pull_cond
         raise ValueError(f"Unsupported push_pull_condition.source '{self.push_pull_condition_source}'.")
 
     def _update_push_pull_condition_buffer(self, mode_logits):
@@ -901,6 +1128,10 @@ class Dagger:
         # The next-step condition must be a fixed value from the previous step.
         next_push_pull_cond = self._mode_logits_to_push_pull_condition(mode_logits)
         self.push_pull_condition_buffer = next_push_pull_cond.detach()
+        self._validate_push_pull_condition(
+            self.push_pull_condition_buffer,
+            context="updated recurrent push/pull condition buffer",
+        )
 
     def _sample_soft_wrong_push_pull_condition(self):
         gt_condition = self._build_gt_push_pull_condition()
@@ -914,7 +1145,37 @@ class Dagger:
         wrong_condition[gt_is_push, 1] = wrong_confidence[gt_is_push]
         wrong_condition[~gt_is_push, 0] = wrong_confidence[~gt_is_push]
         wrong_condition[~gt_is_push, 1] = 1.0 - wrong_confidence[~gt_is_push]
+        self._validate_push_pull_condition(
+            wrong_condition,
+            context="wrong-confident push/pull perturbation sample",
+        )
         return wrong_condition
+
+    def _sample_random_prob_push_pull_condition(self, num_envs):
+        num_envs = int(num_envs)
+        push_prob = torch.empty(num_envs, dtype=torch.float32, device=self.device).uniform_(
+            self.push_pull_condition_perturb_random_prob_min,
+            self.push_pull_condition_perturb_random_prob_max,
+        )
+        random_condition = torch.stack([push_prob, 1.0 - push_prob], dim=-1)
+        self._validate_push_pull_condition(
+            random_condition,
+            context="random-prob push/pull perturbation sample",
+            expected_num_envs=num_envs,
+        )
+        return random_condition
+
+    def _sample_random_one_hot_push_pull_condition(self, num_envs):
+        num_envs = int(num_envs)
+        class_ids = torch.randint(0, 2, (num_envs,), device=self.device, dtype=torch.long)
+        random_condition = F.one_hot(class_ids, num_classes=2).to(device=self.device, dtype=torch.float32)
+        self._validate_push_pull_condition(
+            random_condition,
+            context="random-one-hot push/pull perturbation sample",
+            expected_num_envs=num_envs,
+            expect_one_hot=True,
+        )
+        return random_condition
 
     def _build_gt_push_pull_class_ids(self):
         gt_condition = self._build_gt_push_pull_condition()
@@ -929,8 +1190,20 @@ class Dagger:
                 f"got {tuple(mode_logits.shape)}."
             )
         mode_probs = torch.softmax(mode_logits, dim=-1)
+        # Mode head class order is [pull, push], but the policy input stays in [push, pull] order.
         push_pull_cond = torch.stack([mode_probs[:, 1], mode_probs[:, 0]], dim=-1)
+        self._validate_push_pull_condition(
+            push_pull_cond,
+            context="push/pull condition converted from mode logits",
+        )
         return push_pull_cond
+
+    def _push_pull_condition_entropy(self, push_pull_cond):
+        self._validate_push_pull_condition(
+            push_pull_cond,
+            context="push/pull condition entropy input",
+        )
+        return -(push_pull_cond * torch.log(push_pull_cond.clamp_min(1.0e-6))).sum(dim=-1)
 
     def _record_push_pull_prediction_metrics(self, mode_logits):
         if mode_logits is None:
@@ -938,13 +1211,63 @@ class Dagger:
             self.latest_push_pull_pred_acc = None
             return
         push_pull_cond = self._mode_logits_to_push_pull_condition(mode_logits.detach())
-        entropy = -(push_pull_cond * torch.log(push_pull_cond.clamp_min(1.0e-6))).sum(dim=-1)
+        entropy = self._push_pull_condition_entropy(push_pull_cond)
         self.latest_push_pull_pred_entropy = float(entropy.mean().detach().cpu().item())
         gt_class_ids = self._build_gt_push_pull_class_ids()
         pred_class_ids = mode_logits.detach().argmax(dim=-1)
         self.latest_push_pull_pred_acc = float(
             (pred_class_ids == gt_class_ids).float().mean().detach().cpu().item()
         )
+
+    def _record_push_pull_condition_input_metrics(self, push_pull_cond, perturb_mask=None):
+        self._validate_push_pull_condition(
+            push_pull_cond,
+            context="policy input push/pull condition",
+        )
+        self.latest_fraction_push = float(push_pull_cond[:, 0].mean().detach().cpu().item())
+        self.latest_fraction_pull = float(push_pull_cond[:, 1].mean().detach().cpu().item())
+        self.latest_push_pull_condition_entropy = float(
+            self._push_pull_condition_entropy(push_pull_cond).mean().detach().cpu().item()
+        )
+        self.latest_push_pull_perturb_enabled = 1.0 if self._is_push_pull_condition_perturb_active() else 0.0
+        self.latest_push_pull_perturb_count = 0
+        self.latest_push_pull_perturb_fraction = 0.0
+        self.latest_push_pull_perturb_to_push_count = 0
+        self.latest_push_pull_perturb_to_pull_count = 0
+        if perturb_mask is None:
+            return
+        if perturb_mask.ndim != 1 or perturb_mask.shape[0] != self.num_envs:
+            raise RuntimeError(
+                f"push/pull perturb mask must have shape [{self.num_envs}], got {tuple(perturb_mask.shape)}."
+            )
+        perturb_count = int(perturb_mask.sum().detach().cpu().item())
+        self.latest_push_pull_perturb_count = perturb_count
+        self.latest_push_pull_perturb_fraction = float(perturb_count) / float(max(self.num_envs, 1))
+        if perturb_count <= 0:
+            return
+        perturbed_class_ids = push_pull_cond[perturb_mask].argmax(dim=-1)
+        self.latest_push_pull_perturb_to_push_count = int(
+            (perturbed_class_ids == 0).sum().detach().cpu().item()
+        )
+        self.latest_push_pull_perturb_to_pull_count = int(
+            (perturbed_class_ids == 1).sum().detach().cpu().item()
+        )
+
+    def _get_push_pull_perturb_step_mask(self):
+        rollout_step_ids = self._get_rollout_step_ids()
+        if rollout_step_ids.ndim != 1 or rollout_step_ids.shape[0] != self.num_envs:
+            raise RuntimeError(
+                f"Expected rollout_step_ids shape [{self.num_envs}], got {tuple(rollout_step_ids.shape)}."
+            )
+        if not self.push_pull_condition_perturb_step_gate_enabled:
+            step_mask = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+        else:
+            step_mask = (
+                (rollout_step_ids >= self.push_pull_condition_perturb_step_gate_start)
+                & (rollout_step_ids <= self.push_pull_condition_perturb_step_gate_end)
+            )
+        self.latest_push_pull_perturb_step_gate_fraction = float(step_mask.float().mean().detach().cpu().item())
+        return step_mask
 
     def _build_push_pull_condition_from_source(self, source):
         source = str(source).lower()
@@ -962,32 +1285,46 @@ class Dagger:
 
     def _apply_push_pull_condition_perturb(self, push_pull_cond):
         perturb_active = self._is_push_pull_condition_perturb_active()
-        self.latest_push_pull_perturb_to_push_count = 0
-        self.latest_push_pull_perturb_to_pull_count = 0
-        if not perturb_active:
-            self.latest_fraction_push = float(push_pull_cond[:, 0].mean().detach().cpu().item())
-            self.latest_fraction_pull = float(push_pull_cond[:, 1].mean().detach().cpu().item())
+        self._validate_push_pull_condition(
+            push_pull_cond,
+            context="push/pull condition before perturbation",
+        )
+        if getattr(self.ov_env, "ref_motion_lib", None) is None:
+            self.latest_push_pull_phase_mean = 0.0
+        else:
+            self.latest_push_pull_phase_mean = float(self._get_current_motion_phase().mean().detach().cpu().item())
+        self.latest_push_pull_perturb_step_gate_fraction = 1.0
+        if not perturb_active or self.push_pull_condition_perturb_mode == "none":
+            _ = self._get_push_pull_perturb_step_mask()
+            self._record_push_pull_condition_input_metrics(push_pull_cond)
             return push_pull_cond
 
         # Fresh per-step, per-env Bernoulli sampling. No duration window or persistent mask is kept.
         perturb_mask = torch.rand(self.num_envs, device=self.device) < self.push_pull_condition_perturb_probability
+        perturb_mask &= self._get_push_pull_perturb_step_mask()
         perturbed = push_pull_cond.clone()
         if torch.any(perturb_mask):
-            replacement = self._sample_soft_wrong_push_pull_condition()
+            if self.push_pull_condition_perturb_mode == "random_prob":
+                replacement = self._sample_random_prob_push_pull_condition(self.num_envs)
+            elif self.push_pull_condition_perturb_mode == "random_one_hot":
+                replacement = self._sample_random_one_hot_push_pull_condition(self.num_envs)
+            elif self.push_pull_condition_perturb_mode == "wrong_confident":
+                replacement = self._sample_soft_wrong_push_pull_condition()
+            else:
+                raise ValueError(
+                    f"Unsupported push_pull_condition.perturb.mode '{self.push_pull_condition_perturb_mode}'."
+                )
             perturbed[perturb_mask] = replacement[perturb_mask]
-            gt_argmax = self._build_gt_push_pull_condition().argmax(dim=-1)
-            perturbed_argmax = perturbed.argmax(dim=-1)
-            if not torch.all(perturbed_argmax[perturb_mask] != gt_argmax[perturb_mask]):
-                raise RuntimeError("push_pull_condition perturbation did not flip GT labels.")
-            self.latest_push_pull_perturb_to_push_count = int(
-                (perturbed_argmax[perturb_mask] == 0).sum().detach().cpu().item()
-            )
-            self.latest_push_pull_perturb_to_pull_count = int(
-                (perturbed_argmax[perturb_mask] == 1).sum().detach().cpu().item()
-            )
-
-        self.latest_fraction_push = float(perturbed[:, 0].mean().detach().cpu().item())
-        self.latest_fraction_pull = float(perturbed[:, 1].mean().detach().cpu().item())
+            if self.push_pull_condition_perturb_mode == "wrong_confident":
+                gt_argmax = self._build_gt_push_pull_condition().argmax(dim=-1)
+                perturbed_argmax = perturbed.argmax(dim=-1)
+                if not torch.all(perturbed_argmax[perturb_mask] != gt_argmax[perturb_mask]):
+                    raise RuntimeError("wrong_confident push/pull perturbation did not flip GT labels.")
+        self._validate_push_pull_condition(
+            perturbed,
+            context="push/pull condition after perturbation",
+        )
+        self._record_push_pull_condition_input_metrics(perturbed, perturb_mask=perturb_mask)
         return perturbed
 
     def _get_contact_sensor_force_tensor_world(self, sensor_name):
@@ -1033,6 +1370,17 @@ class Dagger:
 
         return torch.ones_like(rollout_step_ids, dtype=torch.bool, device=rollout_step_ids.device)
 
+    def _get_current_motion_phase(self):
+        ref_motion_lib = getattr(self.ov_env, "ref_motion_lib", None)
+        if ref_motion_lib is None:
+            raise RuntimeError("Motion phase metrics require the env to expose ref_motion_lib.")
+        phase = ref_motion_lib.get_current_phase().to(device=self.device, dtype=torch.float32)
+        if phase.ndim != 1 or phase.shape[0] != self.num_envs:
+            raise RuntimeError(f"Expected current motion phase shape [{self.num_envs}], got {tuple(phase.shape)}.")
+        if not torch.isfinite(phase).all():
+            raise RuntimeError("Current motion phase contains NaN or Inf values.")
+        return phase
+
     def _align_env_tensor_to_prediction(self, tensor, prediction_leading_shape, name):
         prediction_leading_shape = torch.Size(prediction_leading_shape)
         if tensor.shape == prediction_leading_shape:
@@ -1063,12 +1411,17 @@ class Dagger:
         direction_valid = direction_target >= 0
         rollout_step_ids = self._get_rollout_step_ids()
         active_mask = self._get_active_rollout_mask(rollout_step_ids)
+        if getattr(self.ov_env, "ref_motion_lib", None) is None:
+            current_phase = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        else:
+            current_phase = self._get_current_motion_phase()
 
         tensors = {
             "direction_target": direction_target,
             "direction_valid": direction_valid,
             "rollout_step_ids": rollout_step_ids,
             "active_mask": active_mask,
+            "current_phase": current_phase,
         }
         aligned = {
             name: self._align_env_tensor_to_prediction(tensor, prediction_leading_shape, name)
@@ -1080,6 +1433,7 @@ class Dagger:
             aligned["direction_valid"].reshape(-1).bool(),
             aligned["active_mask"].reshape(-1).bool(),
             aligned["rollout_step_ids"].reshape(-1),
+            aligned["current_phase"].reshape(-1),
             prediction_leading_shape,
         )
 
@@ -1142,13 +1496,61 @@ class Dagger:
         self.latest_dir_window_num_pull_preds = num_pull_preds
         return window_mask
 
+    def _update_direction_phase_metrics(
+        self,
+        mode_logits,
+        direction_target,
+        valid_mask,
+        current_phase,
+        per_sample_loss,
+    ):
+        self.latest_dir_phase_loss_by_bucket = OrderedDict()
+        self.latest_dir_phase_acc_by_bucket = OrderedDict()
+        self.latest_dir_phase_count_by_bucket = OrderedDict()
+        if not torch.any(valid_mask):
+            self.latest_dir_phase_mean = 0.0
+            self.latest_dir_phase_min = 0.0
+            self.latest_dir_phase_max = 0.0
+            for bucket_idx in range(int(self.direction_phase_num_buckets)):
+                self.latest_dir_phase_loss_by_bucket[bucket_idx] = 0.0
+                self.latest_dir_phase_acc_by_bucket[bucket_idx] = 0.0
+                self.latest_dir_phase_count_by_bucket[bucket_idx] = 0
+            return
+
+        valid_phase = current_phase[valid_mask]
+        self.latest_dir_phase_mean = float(valid_phase.mean().detach().cpu().item())
+        self.latest_dir_phase_min = float(valid_phase.min().detach().cpu().item())
+        self.latest_dir_phase_max = float(valid_phase.max().detach().cpu().item())
+
+        direction_pred = mode_logits[valid_mask].argmax(dim=-1)
+        direction_correct = direction_pred == direction_target[valid_mask]
+        phase_bucket_ids = torch.floor(valid_phase).to(dtype=torch.long).clamp_min(0)
+        if self.direction_phase_num_buckets > 0:
+            phase_bucket_ids = phase_bucket_ids.clamp_max(self.direction_phase_num_buckets - 1)
+
+        num_buckets = int(self.direction_phase_num_buckets)
+        if num_buckets <= 0 and phase_bucket_ids.numel() > 0:
+            num_buckets = int(phase_bucket_ids.max().detach().cpu().item()) + 1
+        for bucket_idx in range(num_buckets):
+            bucket_mask = phase_bucket_ids == bucket_idx
+            bucket_count = int(bucket_mask.sum().detach().cpu().item())
+            self.latest_dir_phase_count_by_bucket[bucket_idx] = bucket_count
+            if bucket_count <= 0:
+                self.latest_dir_phase_loss_by_bucket[bucket_idx] = 0.0
+                self.latest_dir_phase_acc_by_bucket[bucket_idx] = 0.0
+                continue
+            bucket_loss = float(per_sample_loss[bucket_mask].mean().detach().cpu().item())
+            bucket_acc = float(direction_correct[bucket_mask].float().mean().detach().cpu().item())
+            self.latest_dir_phase_loss_by_bucket[bucket_idx] = bucket_loss
+            self.latest_dir_phase_acc_by_bucket[bucket_idx] = bucket_acc
+
     def _compute_mode_prediction_loss(self, mode_logits):
         if not self.mode_prediction_loss_enabled:
             return None
         if self.mode_family_direction_ids is None:
             raise RuntimeError("Mode prediction targets are not initialized.")
 
-        mode_logits, direction_target, direction_valid, active_mask, rollout_step_ids, _ = (
+        mode_logits, direction_target, direction_valid, active_mask, rollout_step_ids, current_phase, _ = (
             self._prepare_direction_prediction_tensors(mode_logits)
         )
         if not torch.any(direction_valid):
@@ -1169,6 +1571,13 @@ class Dagger:
                 direction_target[valid_mask],
                 reduction="none",
             )
+            self._update_direction_phase_metrics(
+                mode_logits,
+                direction_target,
+                valid_mask,
+                current_phase,
+                per_sample_loss,
+            )
             step_weights = self._get_direction_step_weights(rollout_step_ids[valid_mask])
             direction_loss = (per_sample_loss * step_weights).sum() / step_weights.sum().clamp_min(1.0e-6)
             direction_pred = mode_logits[valid_mask].argmax(dim=-1)
@@ -1177,6 +1586,13 @@ class Dagger:
         else:
             direction_loss = mode_logits.mean() * 0.0
             self.latest_mode_direction_acc = None
+            self._update_direction_phase_metrics(
+                mode_logits,
+                direction_target,
+                valid_mask,
+                current_phase,
+                mode_logits.new_zeros((0,), dtype=torch.float32),
+            )
         return direction_loss
 
     def _get_force_prediction_target_raw(self):
@@ -3567,8 +3983,13 @@ class Dagger:
         push_pull_cond = None
         if self.push_pull_condition_enabled:
             self.latest_push_pull_condition_source = self.push_pull_condition_source
-            # Oracle source uses GT one-hot. Predicted source uses the recurrent condition carried from the previous step.
+            # Source construction keeps the recurrent state intact. Formatting and perturbation only affect
+            # the current policy input and never overwrite the step-to-step predicted-condition buffer.
             push_pull_cond = self._build_push_pull_condition_from_source(self.push_pull_condition_source)
+            push_pull_cond = self._format_push_pull_condition(
+                push_pull_cond,
+                source=self.push_pull_condition_source,
+            )
             # Perturbation modifies only the condition input fed to the action policy, not labels or target actions.
             push_pull_cond = self._apply_push_pull_condition_perturb(push_pull_cond)
 
@@ -3638,11 +4059,19 @@ class Dagger:
         base_obs = OrderedDict(student_obs)
         if not self.push_pull_condition_enabled:
             self.latest_push_pull_condition_source = "disabled"
+            self.latest_push_pull_condition_entropy = 0.0
+            self.latest_push_pull_perturb_enabled = 0.0
+            self.latest_push_pull_perturb_count = 0
+            self.latest_push_pull_perturb_fraction = 0.0
+            self.latest_push_pull_phase_mean = 0.0
+            self.latest_push_pull_perturb_step_gate_fraction = 0.0
             self.latest_push_pull_perturb_to_push_count = 0
             self.latest_push_pull_perturb_to_pull_count = 0
             student_output = self.student_model_ddp(base_obs)
             if self.mode_prediction_enabled and "mode_logits" in student_output:
                 self._record_push_pull_prediction_metrics(student_output["mode_logits"])
+            else:
+                self._record_push_pull_prediction_metrics(None)
             return student_output
 
         student_output = self.student_model_ddp(base_obs)
@@ -3650,6 +4079,8 @@ class Dagger:
             self._record_push_pull_prediction_metrics(student_output["mode_logits"])
             # Recurrent predicted conditioning: timestep t consumes the current condition and writes the next one.
             self._update_push_pull_condition_buffer(student_output["mode_logits"])
+        else:
+            self._record_push_pull_prediction_metrics(None)
         return student_output
 
     def _compute_student_loss(self, student_output, teacher_actions, aux_target=None):
@@ -4073,6 +4504,13 @@ class Dagger:
                 print("Direction Window Num Pull Labels:", self.latest_dir_window_num_pull_labels)
                 print("Direction Window Num Push Preds:", self.latest_dir_window_num_push_preds)
                 print("Direction Window Num Pull Preds:", self.latest_dir_window_num_pull_preds)
+                print("Direction Phase Mean:", self.latest_dir_phase_mean)
+                print("Direction Phase Min:", self.latest_dir_phase_min)
+                print("Direction Phase Max:", self.latest_dir_phase_max)
+                for bucket_idx in self.latest_dir_phase_loss_by_bucket:
+                    print(f"Direction Phase {bucket_idx} Loss:", self.latest_dir_phase_loss_by_bucket[bucket_idx])
+                    print(f"Direction Phase {bucket_idx} Acc:", self.latest_dir_phase_acc_by_bucket[bucket_idx])
+                    print(f"Direction Phase {bucket_idx} Count:", self.latest_dir_phase_count_by_bucket[bucket_idx])
             if self.force_prediction_enabled:
                 print("Filtered Handle Force Norm Mean:", self.latest_filtered_handle_force_norm_mean)
                 print("Filtered Handle Force Norm Max:", self.latest_filtered_handle_force_norm_max)
@@ -4083,11 +4521,23 @@ class Dagger:
                 print("Obs Lag Max (ms):", self.latest_obs_lag_max_ms)
             if self.push_pull_condition_enabled:
                 print("Push/Pull Condition Source:", self.latest_push_pull_condition_source)
+                print("Push/Pull Condition Feed Format Code:", self.push_pull_condition_feed_format_code)
                 print("Fraction Push:", self.latest_fraction_push)
                 print("Fraction Pull:", self.latest_fraction_pull)
+                print("Push/Pull Condition Entropy:", self.latest_push_pull_condition_entropy)
                 print("Push/Pull Pred Entropy:", self.latest_push_pull_pred_entropy)
                 if self.latest_push_pull_pred_acc is not None:
                     print("Push/Pull Pred Acc:", self.latest_push_pull_pred_acc)
+                print("Push/Pull Perturb Enabled:", bool(self.latest_push_pull_perturb_enabled))
+                print("Push/Pull Perturb Probability:", self.push_pull_condition_perturb_probability)
+                print("Push/Pull Perturb Mode Code:", self.push_pull_condition_perturb_mode_code)
+                print("Push/Pull Phase Mean:", self.latest_push_pull_phase_mean)
+                print("Push/Pull Perturb Step Gate Enabled:", self.push_pull_condition_perturb_step_gate_enabled)
+                print("Push/Pull Perturb Step Gate Start:", self.push_pull_condition_perturb_step_gate_start)
+                print("Push/Pull Perturb Step Gate End:", self.push_pull_condition_perturb_step_gate_end)
+                print("Push/Pull Perturb Step Gate Fraction:", self.latest_push_pull_perturb_step_gate_fraction)
+                print("Push/Pull Perturb Count:", self.latest_push_pull_perturb_count)
+                print("Push/Pull Perturb Fraction:", self.latest_push_pull_perturb_fraction)
                 print("Push/Pull Perturbed To Push Count:", self.latest_push_pull_perturb_to_push_count)
                 print("Push/Pull Perturbed To Pull Count:", self.latest_push_pull_perturb_to_pull_count)
             print("Teacher Forcing Beta:", teacher_forcing_beta)
@@ -4141,6 +4591,13 @@ class Dagger:
             metrics["stats/dir_window_num_pull_labels"] = self.latest_dir_window_num_pull_labels
             metrics["stats/dir_window_num_push_preds"] = self.latest_dir_window_num_push_preds
             metrics["stats/dir_window_num_pull_preds"] = self.latest_dir_window_num_pull_preds
+            metrics["stats/dir_phase_mean"] = self.latest_dir_phase_mean
+            metrics["stats/dir_phase_min"] = self.latest_dir_phase_min
+            metrics["stats/dir_phase_max"] = self.latest_dir_phase_max
+            for bucket_idx in self.latest_dir_phase_loss_by_bucket:
+                metrics[f"stats/dir_phase_{bucket_idx}_loss"] = self.latest_dir_phase_loss_by_bucket[bucket_idx]
+                metrics[f"stats/dir_phase_{bucket_idx}_acc"] = self.latest_dir_phase_acc_by_bucket[bucket_idx]
+                metrics[f"stats/dir_phase_{bucket_idx}_count"] = self.latest_dir_phase_count_by_bucket[bucket_idx]
         if self.force_prediction_enabled:
             metrics["stats/filtered_handle_force_norm_mean"] = self.latest_filtered_handle_force_norm_mean
             metrics["stats/filtered_handle_force_norm_max"] = self.latest_filtered_handle_force_norm_max
@@ -4153,8 +4610,22 @@ class Dagger:
                 metrics[f"timestamp/obs_lag_effective_age_{timestamp_ms}ms"] = mean_age_ms
         if self.push_pull_condition_enabled:
             metrics["stats/push_pull_condition_source"] = self.latest_push_pull_condition_source
+            metrics["stats/push_pull_condition_feed_format"] = self.push_pull_condition_feed_format_code
             metrics["stats/fraction_push"] = self.latest_fraction_push
             metrics["stats/fraction_pull"] = self.latest_fraction_pull
+            metrics["stats/push_pull_condition_entropy"] = self.latest_push_pull_condition_entropy
+            metrics["stats/push_pull_perturb_enabled"] = self.latest_push_pull_perturb_enabled
+            metrics["stats/push_pull_perturb_probability"] = self.push_pull_condition_perturb_probability
+            metrics["stats/push_pull_perturb_mode"] = self.push_pull_condition_perturb_mode_code
+            metrics["stats/push_pull_phase_mean"] = self.latest_push_pull_phase_mean
+            metrics["stats/push_pull_perturb_step_gate_enabled"] = float(
+                self.push_pull_condition_perturb_step_gate_enabled
+            )
+            metrics["stats/push_pull_perturb_step_gate_start"] = self.push_pull_condition_perturb_step_gate_start
+            metrics["stats/push_pull_perturb_step_gate_end"] = self.push_pull_condition_perturb_step_gate_end
+            metrics["stats/push_pull_perturb_step_gate_fraction"] = self.latest_push_pull_perturb_step_gate_fraction
+            metrics["stats/push_pull_perturb_count"] = self.latest_push_pull_perturb_count
+            metrics["stats/push_pull_perturb_fraction"] = self.latest_push_pull_perturb_fraction
             metrics["stats/push_pull_pred_entropy"] = self.latest_push_pull_pred_entropy
             if self.latest_push_pull_pred_acc is not None:
                 metrics["stats/push_pull_pred_acc"] = self.latest_push_pull_pred_acc
