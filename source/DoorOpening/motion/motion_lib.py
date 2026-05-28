@@ -32,24 +32,6 @@ class ReferenceMotionManager:
         if self.twist_indices is not None:
             self._precompute_twist()
 
-    def _extract_first_keyframe(self, key_indices, num_frames: int) -> int:
-        if isinstance(key_indices, torch.Tensor):
-            key_values = key_indices.flatten().tolist()
-        elif key_indices is None:
-            key_values = []
-        else:
-            key_values = list(key_indices)
-
-        if len(key_values) >= 2:
-            first_keyframe = int(key_values[1])
-        elif len(key_values) == 1:
-            first_keyframe = int(key_values[0])
-        else:
-            first_keyframe = 0
-
-        max_idx = max(int(num_frames) - 1, 0)
-        return max(0, min(first_keyframe, max_idx))
-
     # --------------------------------------------------
     # Load motion data (moved from Env)
     # --------------------------------------------------
@@ -65,7 +47,6 @@ class ReferenceMotionManager:
         robot_body_quat_trajs = []
         robot_joint_vel_trajs = []
         key_indices_list = []
-        first_keyframes = []
         hinge_contact_masks_list = []
         robot_body_pos_vel_list = []
         door_body_pos_trajs = []
@@ -106,7 +87,6 @@ class ReferenceMotionManager:
             if isinstance(key_indices, list):
                 key_indices = torch.tensor(key_indices, device=self.device)
             key_indices_list.append(key_indices)
-            first_keyframes.append(self._extract_first_keyframe(key_indices, robot_joint_pos_traj.shape[0]))
             hinge_contact_masks_list.append(hinge_contact_mask)
             robot_body_pos_vel_list.append(robot_body_pos_vel)
             door_body_pos_trajs.append(door_body_pos_traj)
@@ -120,7 +100,6 @@ class ReferenceMotionManager:
         # self.key_indices = torch.stack(key_indices_list, dim=0).to(self.device)
         # self.key_indices = self.key_indices[..., :-1] # remove the last key index
         self.key_indices = torch.arange(0, self.num_frames, 1).repeat(len(key_indices_list), 1).to(self.device).int()
-        self.first_keyframe_idx = torch.tensor(first_keyframes, device=self.device, dtype=torch.float32)
         self.hinge_contact_mask = torch.stack(hinge_contact_masks_list, dim=0).to(self.device)
         self.num_motions = self.robot_joint_pos_traj.shape[0]
         self.robot_body_pos_vel = torch.stack(robot_body_pos_vel_list, dim=0).to(self.device)
@@ -322,13 +301,6 @@ class ReferenceMotionManager:
         self.frame_idx += self.frame_step
         self.frame_idx.clamp_(max=self.num_frames - 1)
         self._update_current()
-
-    def get_before_first_keyframe_mask(self, env_ids: Optional[Sequence[int]] = None):
-        first_keyframes = self.first_keyframe_idx[self.env_to_file_map]
-        mask = self.frame_idx < first_keyframes.to(self.frame_idx)
-        if env_ids is None:
-            return mask
-        return mask[env_ids]
 
     def _lerp(self, a, b, w):
         while w.dim() < a.dim():

@@ -989,14 +989,9 @@ class DooropeningEnv(DirectRLEnv):
 
     def _build_observations(
         self,
-        reference_source: str = "correct",
-        motion_indices: torch.Tensor | None = None,
         record_viser: bool = True,
     ) -> dict:
-        self._get_intermediate_values(
-            reference_source=reference_source,
-            motion_indices=motion_indices,
-        )
+        self._get_intermediate_values()
         self.joint_pos = self.robot.data.joint_pos
         self.joint_vel = self.robot.data.joint_vel
 
@@ -1128,29 +1123,6 @@ class DooropeningEnv(DirectRLEnv):
 
     def _get_observations(self) -> dict:
         return self._build_observations()
-
-    def get_teacher_obs(
-        self,
-        env_ids: torch.Tensor | None = None,
-        reference_source: str = "correct",
-        motion_indices: torch.Tensor | None = None,
-    ) -> dict:
-        reference_source = str(reference_source).lower()
-        if reference_source not in {"correct", "wrong"}:
-            raise ValueError(f"Unsupported reference_source '{reference_source}'.")
-        try:
-            observations = self._build_observations(
-                reference_source=reference_source,
-                motion_indices=motion_indices,
-                record_viser=False,
-            )
-        finally:
-            if reference_source != "correct" and self.ref_motion_lib is not None:
-                self._get_intermediate_values(reference_source="correct")
-
-        if env_ids is None:
-            return observations
-        return {key: value[env_ids] for key, value in observations.items()}
 
 
     def normalize_to_base_frame(
@@ -1397,11 +1369,7 @@ class DooropeningEnv(DirectRLEnv):
             dtype=self.door_link_pos.dtype,
         )
 
-    def _get_intermediate_values(
-        self,
-        reference_source: str = "correct",
-        motion_indices: torch.Tensor | None = None,
-    ):
+    def _get_intermediate_values(self):
         self.robot_key_body_pos = self.robot.data.body_pos_w[:, self._robot_key_body_idx]\
              - self.scene.env_origins.repeat((1, 1)).reshape(self.num_envs, 1, 3)
         self.robot_key_body_quat = self.robot.data.body_quat_w[:, self._robot_key_body_idx]
@@ -1437,14 +1405,9 @@ class DooropeningEnv(DirectRLEnv):
             self._set_current_state_as_reference()
             return
 
-        ref_kwargs = {
-            "reference_source": reference_source,
-            "motion_indices": motion_indices,
-        }
-
-        self.ref_robot_key_body_pos_twist = self.ref_motion_lib.get_robot_body_pos_twist(**ref_kwargs)[:, :, self.ref_key_body_idx]
+        self.ref_robot_key_body_pos_twist = self.ref_motion_lib.get_robot_body_pos_twist()[:, :, self.ref_key_body_idx]
         # It is a misnomer, we are actually sending euler angles as it might be more friendly to MLP
-        self.ref_robot_key_body_quat_twist = self.ref_motion_lib.get_robot_body_quat_twist(**ref_kwargs)[:, :, self.ref_key_body_idx]
+        self.ref_robot_key_body_quat_twist = self.ref_motion_lib.get_robot_body_quat_twist()[:, :, self.ref_key_body_idx]
         self.ref_robot_key_body_pos_twist, self.ref_robot_key_body_quat_twist = self.normalize_to_base_frame(
             self.robot_base_body_pos.squeeze(),
             self.robot_base_body_quat.squeeze(),
@@ -1455,32 +1418,32 @@ class DooropeningEnv(DirectRLEnv):
         )
         # self.ref_robot_key_body_pos_twist, self.ref_robot_key_body_quat_twist = self.normalize_to_base_frame(self.robot_base_body_pos, self.robot_base_body_quat, self.ref_robot_key_body_pos_twist, self.ref_robot_key_body_quat_twist)
         self.ref_robot_key_body_quat_twist = quat_to_6d(self.ref_robot_key_body_quat_twist)
-        self.ref_robot_joint_pos_twist = self.ref_motion_lib.get_robot_joint_pos_twist(**ref_kwargs)
+        self.ref_robot_joint_pos_twist = self.ref_motion_lib.get_robot_joint_pos_twist()
         self.ref_robot_base_joint_pos_twist = self.ref_robot_joint_pos_twist[:, :, self.ref_base_joint_idx]
         self.ref_robot_arm_joint_pos_twist = self.ref_robot_joint_pos_twist[:, :, self.ref_arm_joint_idx]
-        self.ref_door_joint_pos_twist = self.ref_motion_lib.get_door_joint_pos_twist(**ref_kwargs)
+        self.ref_door_joint_pos_twist = self.ref_motion_lib.get_door_joint_pos_twist()
 
         # self.ref_robot_key_body_pos = self.ref_motion_lib.get_robot_body_pos()[:, self._robot_key_body_idx]
         # self.ref_robot_key_body_quat = self.ref_motion_lib.get_robot_body_quat()[:, self._robot_key_body_idx]
         # self.ref_robot_reset_key_body_pos = self.ref_motion_lib.get_robot_body_pos()[:, self._robot_reset_key_body_idx]
-        ref_robot_body_pos = self.ref_motion_lib.get_robot_body_pos(**ref_kwargs)
+        ref_robot_body_pos = self.ref_motion_lib.get_robot_body_pos()
         self.ref_robot_key_body_pos = ref_robot_body_pos[:, self.ref_key_body_idx]
-        self.ref_robot_key_body_quat = self.ref_motion_lib.get_robot_body_quat(**ref_kwargs)[:, self.ref_key_body_idx]
+        self.ref_robot_key_body_quat = self.ref_motion_lib.get_robot_body_quat()[:, self.ref_key_body_idx]
         self.ref_robot_reset_key_body_pos = ref_robot_body_pos[:, self.ref_reset_key_body_idx]
-        self.ref_robot_joint_pos = self.ref_motion_lib.get_robot_joint_pos(**ref_kwargs)
+        self.ref_robot_joint_pos = self.ref_motion_lib.get_robot_joint_pos()
         self.ref_robot_base_joint_pos = self.ref_robot_joint_pos[:, self.ref_base_joint_idx]
         self.ref_robot_arm_joint_pos = self.ref_robot_joint_pos[:, self.ref_arm_joint_idx]
         self.ref_robot_finger_joint_pos = self.ref_robot_joint_pos[:, self.ref_finger_joint_idx]
-        self.ref_joint_vel = self.ref_motion_lib.get_robot_joint_vel(**ref_kwargs)
+        self.ref_joint_vel = self.ref_motion_lib.get_robot_joint_vel()
         self.ref_robot_base_joint_vel = self.ref_joint_vel[:, self.ref_base_joint_idx]
         self.ref_robot_arm_joint_vel = self.ref_joint_vel[:, self.ref_arm_joint_idx]
         self.ref_robot_finger_joint_vel = self.ref_joint_vel[:, self.ref_finger_joint_idx]
-        self.ref_door_joint_pos = self.ref_motion_lib.get_door_joint_pos(**ref_kwargs)
-        self.ref_hinge_contact_mask = self.ref_motion_lib.get_hinge_contact_mask(**ref_kwargs)
-        self.ref_door_body_pos_twist = self.ref_motion_lib.get_door_body_pos_twist(**ref_kwargs)
+        self.ref_door_joint_pos = self.ref_motion_lib.get_door_joint_pos()
+        self.ref_hinge_contact_mask = self.ref_motion_lib.get_hinge_contact_mask()
+        self.ref_door_body_pos_twist = self.ref_motion_lib.get_door_body_pos_twist()
         ref_motion_dt = max(float(self.ref_motion_lib.frame_dt), 1e-6)
-        self.ref_robot_body_lin_vel = self.ref_motion_lib.get_robot_body_lin_vel(**ref_kwargs)[:, self.ref_key_body_idx] / ref_motion_dt
-        self.ref_robot_body_ang_vel = self.ref_motion_lib.get_robot_body_ang_vel(**ref_kwargs)[:, self.ref_key_body_idx] / ref_motion_dt
+        self.ref_robot_body_lin_vel = self.ref_motion_lib.get_robot_body_lin_vel()[:, self.ref_key_body_idx] / ref_motion_dt
+        self.ref_robot_body_ang_vel = self.ref_motion_lib.get_robot_body_ang_vel()[:, self.ref_key_body_idx] / ref_motion_dt
 
     def _get_rewards(self) -> torch.Tensor:
         self._get_intermediate_values()
