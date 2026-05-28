@@ -282,7 +282,6 @@ class Dagger:
         self.latest_push_pull_belief_input = None
         self.latest_push_pull_belief_hist_entropy_now = 0.0
         self.latest_push_pull_belief_hist_entropy_mean = 0.0
-        self.latest_push_pull_belief_hist_delta_1500ms = 0.0
         self._logged_temporal_state_input_keys = False
         self._timing_stats = {"sum_ms": 0.0, "count": 0}
         self.logged_env_metric_prefixes = ("dr/", "dr_limit/", "dr_sample/", "reset/")
@@ -1456,7 +1455,6 @@ class Dagger:
     def _reset_push_pull_belief_history_metrics(self):
         self.latest_push_pull_belief_hist_entropy_now = 0.0
         self.latest_push_pull_belief_hist_entropy_mean = 0.0
-        self.latest_push_pull_belief_hist_delta_1500ms = 0.0
 
     def _init_history_buffers(self):
         self.temporal_dt_s = max(float(getattr(self.ov_env, "dt", 1.0 / 15.0)), 1e-6)
@@ -2072,13 +2070,6 @@ class Dagger:
             raise RuntimeError("push_pull_belief temporal metrics require a 0.0s timestamp in the sample cache.")
         self.latest_push_pull_belief_hist_entropy_now = float(entropy[:, idx_now].mean().detach().cpu().item())
         self.latest_push_pull_belief_hist_entropy_mean = float(entropy.mean().detach().cpu().item())
-        idx_1500ms = offset_to_index.get(1.5)
-        if idx_1500ms is not None:
-            delta = torch.linalg.vector_norm(
-                belief_samples[:, idx_now, :] - belief_samples[:, idx_1500ms, :],
-                dim=-1,
-            )
-            self.latest_push_pull_belief_hist_delta_1500ms = float(delta.mean().detach().cpu().item())
 
     def _build_proprio_temporal_obs(self, sample_cache):
         if not self.proprio_temporal_enabled:
@@ -3753,7 +3744,6 @@ class Dagger:
             if self.temporal_push_pull_belief_enabled:
                 print("Push/Pull Belief Hist Entropy Now:", self.latest_push_pull_belief_hist_entropy_now)
                 print("Push/Pull Belief Hist Entropy Mean:", self.latest_push_pull_belief_hist_entropy_mean)
-                print("Push/Pull Belief Hist Delta 1500ms:", self.latest_push_pull_belief_hist_delta_1500ms)
             print("Teacher Forcing Beta:", teacher_forcing_beta)
             print("Teacher Rollout Env Fraction:", teacher_env_fraction)
             print("Student Rollout Env Fraction:", student_env_fraction)
@@ -3817,7 +3807,6 @@ class Dagger:
         metrics["stats/temporal_push_pull_belief_enabled"] = float(self.temporal_push_pull_belief_enabled)
         metrics["stats/push_pull_belief_hist_entropy_now"] = self.latest_push_pull_belief_hist_entropy_now
         metrics["stats/push_pull_belief_hist_entropy_mean"] = self.latest_push_pull_belief_hist_entropy_mean
-        metrics["stats/push_pull_belief_hist_delta_1500ms"] = self.latest_push_pull_belief_hist_delta_1500ms
         if self.push_pull_condition_enabled:
             metrics["stats/push_pull_condition_source"] = self.latest_push_pull_condition_source
             metrics["stats/fraction_push"] = self.latest_fraction_push
