@@ -357,7 +357,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "damping_distribution_params": (0.7, 1.3),
         },
         "door_board_joint_stiffness_and_damping": {
-            "stiffness_distribution_params": (1.0, 75.0),
+            "stiffness_distribution_params": (1.0, 50.0),
             "damping_distribution_params": (1.0, 10.0),
         },
         "door_hinge_joint_stiffness_and_damping": {
