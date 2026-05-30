@@ -749,12 +749,6 @@ class Dagger:
             "left": "left",
             "right": "right",
         }
-        legacy_semantics = {
-            "PartNetv5_plus": ("left", "pull"),
-            "PartNetv8_plus": ("left", "push"),
-            "PartNetv6_plus": ("right", "pull"),
-            "PartNetv7_plus": ("right", "push"),
-        }
         semantics_by_family_name = {}
         for asset_path, family_id in zip(door_asset_paths, door_asset_family_ids.detach().cpu().tolist()):
             family_name = DOOR_FAMILY_NAMES[int(family_id)]
@@ -785,13 +779,9 @@ class Dagger:
                     opening_direction = str(opening_direction_raw).lower()
 
             if handle_side is None or opening_direction is None:
-                fallback = legacy_semantics.get(family_name)
-                if fallback is not None:
-                    fallback_side, fallback_direction = fallback
-                    if handle_side is None:
-                        handle_side = fallback_side
-                    if opening_direction is None:
-                        opening_direction = fallback_direction
+                raise RuntimeError(
+                    f"Missing handle_side/opening_direction metadata for family '{family_name}' in {meta_path}."
+                )
 
             semantics_by_family_name[family_name] = (handle_side, opening_direction)
         return semantics_by_family_name
