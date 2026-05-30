@@ -8,7 +8,7 @@ action_space: "absolute"
 action_dim: 19
 aux_weight: 0.1
 mode_prediction:
-  enabled: true
+  enabled: false
   num_modes: 2  # Push/pull discriminator only.
   weight: 0.01
   return_latent: true
@@ -18,7 +18,7 @@ force_prediction:
   weight: 0.01
 
 push_pull_condition:
-  enabled: true
+  enabled: false
   source: predicted
   obs_key: push_pull_cond
   detach_predicted_condition: true
@@ -46,7 +46,6 @@ temporal_state_encoders:
     - target_err_hand
     - base_vel
     - aux_handle_pos
-    - push_pull_belief
   hidden_dims: [128, 256]
   output_dim: 256
   activation: elu
@@ -56,7 +55,7 @@ temporal_state_encoders:
   add_time_embedding: true
 
 push_pull_condition_perturb:
-  enabled: true
+  enabled: false
   probability: 0.1
   wrong_class_confidence_range: [0.85, 0.95]
 
@@ -198,8 +197,8 @@ dagger:
     raw:
       enabled: false  # Save raw `.pt` replay chunks for offline debugging.
       path: "viser_replay.pt"
-      save_interval: 6000  # Write one raw `.pt` file every N iterations.
+      save_interval: 10000  # Write one raw `.pt` file every N iterations.
       max_points: 6000  # Raw replay is for debugging, not training; smaller clouds replay much better on laptops.
-      max_frames: 3000  # Keep at most this many frames in each raw `.pt` file; set 0 to disable the cap.
+      max_frames: 2000  # Keep at most this many frames in each raw `.pt` file; set 0 to disable the cap.
   wandb:
     enabled: false
