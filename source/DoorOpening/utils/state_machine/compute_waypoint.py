@@ -78,12 +78,19 @@ def resolve_start_base_pair_key(door_urdf_path):
     if metadata is None:
         return os.path.basename(os.path.dirname(door_urdf_path))
 
-    key_payload = {
-        "source_asset": metadata.get("source_asset"),
-        "variant_name": metadata.get("variant_name"),
-        "actual_properties": metadata.get("actual_properties"),
-    }
-    return json.dumps(key_payload, sort_keys=True, separators=(",", ":"))
+    copied_from_pull_asset = metadata.get("copied_from_pull_asset")
+    if copied_from_pull_asset:
+        return os.path.basename(os.path.normpath(str(copied_from_pull_asset)))
+
+    direction_pair_key = metadata.get("direction_pair_key")
+    if direction_pair_key:
+        return str(direction_pair_key)
+
+    variant_name = metadata.get("variant_name")
+    if variant_name:
+        return str(variant_name)
+
+    return os.path.basename(os.path.dirname(door_urdf_path))
 
 
 def _stable_unit_interval(key):

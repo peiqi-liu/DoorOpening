@@ -563,6 +563,44 @@ def _reset_dagger_rollout_state(dagger):
     dagger._seed_push_pull_condition_buffer()
 
 
+def _print_eval_curriculum_state(tag, dagger, base_env):
+    common_step_counter = getattr(base_env, "common_step_counter", None)
+    env_frames = getattr(base_env, "_rlgames_env_frames", None)
+    adr_increment = None
+    if hasattr(base_env, "dooropening_adr") and hasattr(base_env.dooropening_adr, "increment_counter"):
+        adr_increment = int(base_env.dooropening_adr.increment_counter)
+    adr_progress = None
+    adr_reset_progress_total = getattr(base_env, "adr_reset_progress_total", None)
+    if common_step_counter is not None and adr_reset_progress_total is not None:
+        denom = max(float(adr_reset_progress_total), 1.0)
+        adr_progress = min(float(common_step_counter) / denom, 1.0)
+    print(
+        "[INFO] "
+        f"{tag}: dagger.resume_iteration={int(getattr(dagger, 'resume_iteration', 0))}, "
+        f"dagger.frame={int(getattr(dagger, 'frame', 0))}, "
+        f"env.common_step_counter={common_step_counter}, "
+        f"env._rlgames_env_frames={env_frames}, "
+        f"adr_increment={adr_increment}, "
+        f"adr_progress={adr_progress}"
+    )
+
+
+def _force_max_adr_for_eval(base_env):
+    adr_reset_progress_total = getattr(base_env, "adr_reset_progress_total", None)
+    if adr_reset_progress_total is not None and hasattr(base_env, "common_step_counter"):
+        target_step = max(float(adr_reset_progress_total), 1.0)
+        target_step_int = int(target_step)
+        if target_step_int < target_step:
+            target_step_int += 1
+        base_env.common_step_counter = target_step_int
+    if hasattr(base_env, "dooropening_adr") and hasattr(base_env, "cfg"):
+        num_adr_increments = getattr(base_env.cfg, "num_adr_increments", None)
+        if num_adr_increments is not None:
+            base_env.dooropening_adr.set_num_increments(int(num_adr_increments))
+    if hasattr(base_env, "_rlgames_env_frames"):
+        base_env._rlgames_env_frames = int(getattr(base_env, "common_step_counter", 0))
+
+
 def _disable_observation_lag_for_eval(dagger):
     dagger.observation_lag_enabled = False
     dagger.observation_lag_apply_during_eval = False
@@ -699,6 +737,7 @@ def main(env_cfg, agent_cfg: dict):
     dagger.student_model_ddp.eval()
     _disable_observation_lag_for_eval(dagger)
     print("[INFO] Observation lag disabled for eval.")
+    _print_eval_curriculum_state("Checkpoint-restored curriculum state", dagger, base_env)
     mode_direction_target = None
     if dagger.mode_prediction_enabled:
         if getattr(dagger, "mode_family_direction_ids", None) is None:
@@ -714,13 +753,12 @@ def main(env_cfg, agent_cfg: dict):
                 f"{invalid_family_ids} map to invalid direction targets."
             )
 
-    if hasattr(base_env, "common_step_counter"):
-        base_env.common_step_counter = 0
-    if hasattr(base_env, "_rlgames_env_frames"):
-        base_env._rlgames_env_frames = 0
+    _force_max_adr_for_eval(base_env)
+    _print_eval_curriculum_state("Eval curriculum state after forcing max ADR", dagger, base_env)
 
     frozen_state = FrozenEnvState(base_env)
     obs, _ = env.reset()
+    _print_eval_curriculum_state("Eval curriculum state after first env.reset()", dagger, base_env)
     frozen_state.reset_from_env()
     _reset_dagger_rollout_state(dagger)
     _install_freeze_patch(base_env, frozen_state)
