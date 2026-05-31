@@ -348,15 +348,19 @@ def main(env_cfg, agent_cfg: dict):
             "PartNetv5": args_cli.teacher_partnetv5,
             "PartNetv5_plus": args_cli.teacher_partnetv5,
             "PartNetv5_plusplus": args_cli.teacher_partnetv5,
+            "PartNetv5_pro": args_cli.teacher_partnetv5,
             "PartNetv6": args_cli.teacher_partnetv6,
             "PartNetv6_plus": args_cli.teacher_partnetv6,
             "PartNetv6_plusplus": args_cli.teacher_partnetv6,
+            "PartNetv6_pro": args_cli.teacher_partnetv6,
             "PartNetv7": args_cli.teacher_partnetv7,
             "PartNetv7_plus": args_cli.teacher_partnetv7,
             "PartNetv7_plusplus": args_cli.teacher_partnetv7,
+            "PartNetv7_pro": args_cli.teacher_partnetv7,
             "PartNetv8": args_cli.teacher_partnetv8,
             "PartNetv8_plus": args_cli.teacher_partnetv8,
             "PartNetv8_plusplus": args_cli.teacher_partnetv8,
+            "PartNetv8_pro": args_cli.teacher_partnetv8,
         }
         any_family_cli = any(value is not None for value in cli_values.values())
         discovered_values = {}
