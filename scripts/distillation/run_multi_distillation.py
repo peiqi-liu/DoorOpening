@@ -494,11 +494,12 @@ def main(env_cfg, agent_cfg: dict):
     nn_dir = os.path.join(experiment_dir, "nn")
     summaries_dir = os.path.join(experiment_dir, "summaries")
 
-    os.makedirs(train_dir, exist_ok=True)
-    os.makedirs(experiment_dir, exist_ok=True)
-    os.makedirs(nn_dir, exist_ok=True)
-    os.makedirs(summaries_dir, exist_ok=True)
-    print(f"[INFO][rank {rank}] Distillation output directory: {experiment_dir}")
+    if rank == 0:
+        os.makedirs(train_dir, exist_ok=True)
+        os.makedirs(experiment_dir, exist_ok=True)
+        os.makedirs(nn_dir, exist_ok=True)
+        os.makedirs(summaries_dir, exist_ok=True)
+        print(f"[INFO][rank {rank}] Distillation output directory: {experiment_dir}")
 
     wandb_enabled = bool(wandb_cfg.get("enabled", False)) if args_cli.track is None else args_cli.track
     wandb_project = (
