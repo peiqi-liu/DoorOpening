@@ -255,13 +255,10 @@ class Dagger:
         self.teacher_forcing_env_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.current_rewards = torch.zeros((self.num_envs, 1), dtype=torch.float32, device=self.device)
         self.current_lengths = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self.latest_rollout_success = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self.latest_rollout_success_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.completed_rewards = deque(maxlen=self.games_to_track)
         self.completed_lengths = deque(maxlen=self.games_to_track)
-        self.completed_successes = deque(maxlen=self.games_to_track)
-        self.completed_successes_by_family = {
-            family_name: deque(maxlen=self.games_to_track)
-            for family_name in DOOR_FAMILY_NAMES
-        }
         self.student_update_steps = 0
         self.last_local_update_batch_size = 0
         self.last_global_update_batch_size = 0
@@ -3666,25 +3663,23 @@ class Dagger:
         episode_rewards = self.current_rewards[done_mask, 0].detach().cpu().tolist()
         episode_lengths = self.current_lengths[done_mask].detach().cpu().tolist()
         episode_success_tensor = timed_out[done_mask].to(dtype=torch.float32)
-        episode_successes = episode_success_tensor.detach().cpu().tolist()
-        episode_family_ids = self.env_family_ids[done_mask].detach().cpu().tolist()
 
         self.completed_rewards.extend(float(value) for value in episode_rewards)
         self.completed_lengths.extend(float(value) for value in episode_lengths)
-        self.completed_successes.extend(float(value) for value in episode_successes)
-        for family_id, success_value in zip(episode_family_ids, episode_successes):
-            family_name = DOOR_FAMILY_NAMES[int(family_id)]
-            self.completed_successes_by_family[family_name].append(float(success_value))
+        self.latest_rollout_success[done_mask] = episode_success_tensor.to(device=self.device)
+        self.latest_rollout_success_valid[done_mask] = True
 
     def _get_global_success_rates(self):
         num_families = len(DOOR_FAMILY_NAMES)
         stats = torch.zeros((1 + num_families, 2), dtype=torch.float64, device=self.device)
-        stats[0, 0] = float(sum(self.completed_successes))
-        stats[0, 1] = float(len(self.completed_successes))
+
+        valid_mask = self.latest_rollout_success_valid
+        stats[0, 0] = float(self.latest_rollout_success[valid_mask].sum().detach().cpu().item())
+        stats[0, 1] = float(valid_mask.sum().detach().cpu().item())
         for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
-            values = self.completed_successes_by_family[family_name]
-            stats[family_id + 1, 0] = float(sum(values))
-            stats[family_id + 1, 1] = float(len(values))
+            family_mask = valid_mask & (self.env_family_ids == int(family_id))
+            stats[family_id + 1, 0] = float(self.latest_rollout_success[family_mask].sum().detach().cpu().item())
+            stats[family_id + 1, 1] = float(family_mask.sum().detach().cpu().item())
 
         if self.use_ddp:
             dist.all_reduce(stats, op=dist.ReduceOp.SUM)

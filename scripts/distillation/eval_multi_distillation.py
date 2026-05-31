@@ -56,6 +56,19 @@ def _resolve_checkpoint(path_value):
     return str(repo_path)
 
 
+def _resolve_teacher_cfg_path(path_value):
+    default_path = (
+        SCRIPT_ROOT
+        / "source"
+        / "DoorOpening"
+        / "tasks"
+        / "dooropening"
+        / "agents"
+        / "rl_games_ppo_cfg.yaml"
+    )
+    return _resolve_repo_path(path_value, default_path)
+
+
 def _load_student_dagger_defaults(student_cfg_path):
     if not student_cfg_path or not os.path.exists(student_cfg_path):
         return {}
@@ -79,6 +92,50 @@ def _normalize_family_selection(family_spec):
     return family_names or None
 
 
+def _resolve_multi_teacher_checkpoints():
+    cli_values = {
+        "PartNetv5": args_cli.teacher_partnetv5,
+        "PartNetv5_plus": args_cli.teacher_partnetv5,
+        "PartNetv5_plusplus": args_cli.teacher_partnetv5,
+        "PartNetv9": args_cli.teacher_partnetv5,
+        "PartNetv6": args_cli.teacher_partnetv6,
+        "PartNetv6_plus": args_cli.teacher_partnetv6,
+        "PartNetv6_plusplus": args_cli.teacher_partnetv6,
+        "PartNetv10": args_cli.teacher_partnetv6,
+        "PartNetv7": args_cli.teacher_partnetv7,
+        "PartNetv7_plus": args_cli.teacher_partnetv7,
+        "PartNetv7_plusplus": args_cli.teacher_partnetv7,
+        "PartNetv11": args_cli.teacher_partnetv7,
+        "PartNetv8": args_cli.teacher_partnetv8,
+        "PartNetv8_plus": args_cli.teacher_partnetv8,
+        "PartNetv8_plusplus": args_cli.teacher_partnetv8,
+        "PartNetv12": args_cli.teacher_partnetv8,
+    }
+    any_family_cli = any(value is not None for value in cli_values.values())
+    discovered_values = {}
+    for family_name in DOOR_FAMILY_NAMES:
+        default_family_ckpt = SCRIPT_ROOT / "source" / "DoorOpening" / "assets" / "door" / family_name / "door_opening.pth"
+        configured_value = cli_values.get(family_name)
+        if configured_value is not None:
+            discovered_values[family_name] = _resolve_checkpoint(configured_value)
+        elif default_family_ckpt.exists():
+            discovered_values[family_name] = str(default_family_ckpt)
+
+    if any_family_cli:
+        missing = [family_name for family_name in DOOR_FAMILY_NAMES if family_name not in discovered_values]
+        if missing:
+            raise ValueError(
+                "Multi-teacher evaluation needs a checkpoint for every PartNet family. "
+                f"Missing: {missing}."
+            )
+        return discovered_values, None
+
+    if len(discovered_values) == len(DOOR_FAMILY_NAMES):
+        return discovered_values, None
+
+    return None, _resolve_checkpoint(args_cli.teacher)
+
+
 parser = argparse.ArgumentParser(description="Evaluate a distilled DooropeningMulti point-cloud policy.")
 parser.add_argument("--video", action="store_true", default=False, help="Record a video during evaluation.")
 parser.add_argument("--video_length", type=int, default=600, help="Length of the recorded video in env steps.")
@@ -87,7 +144,14 @@ parser.add_argument("--num_envs", type=int, default=64, help="Number of environm
 parser.add_argument("--task", type=str, default="DooropeningMulti", help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment.")
 parser.add_argument("--student_cfg", type=str, default=None, help="Student config YAML to use.")
-parser.add_argument("--student_ckpt", type=str, required=True, help="Student checkpoint to evaluate.")
+parser.add_argument("--student_ckpt", type=str, default=None, help="Student checkpoint to evaluate.")
+parser.add_argument("--use_teacher", action="store_true", default=False, help="Roll out teacher actions instead of student actions.")
+parser.add_argument("--teacher", type=str, default=None, help="Single teacher checkpoint to evaluate.")
+parser.add_argument("--teacher-partnetv5", "--teacher_partnetv5", dest="teacher_partnetv5", type=str, default=None, help="Teacher checkpoint for PartNetv5.")
+parser.add_argument("--teacher-partnetv6", "--teacher_partnetv6", dest="teacher_partnetv6", type=str, default=None, help="Teacher checkpoint for PartNetv6.")
+parser.add_argument("--teacher-partnetv7", "--teacher_partnetv7", dest="teacher_partnetv7", type=str, default=None, help="Teacher checkpoint for PartNetv7.")
+parser.add_argument("--teacher-partnetv8", "--teacher_partnetv8", dest="teacher_partnetv8", type=str, default=None, help="Teacher checkpoint for PartNetv8.")
+parser.add_argument("--teacher_cfg", type=str, default=None, help="Teacher RL-Games config YAML to use.")
 parser.add_argument(
     "--door-families",
     "--door_families",
@@ -177,6 +241,7 @@ from DoorOpening.assets.cache_utils import preconvert_shared_urdf_assets
 from DoorOpening.assets.door.multi_door_cfg import ALL_DOOR_CONFIGS as MULTI_DOOR_CONFIGS
 from DoorOpening.assets.door.multi_door_cfg import DOOR_FAMILY_NAMES, asset_family_ids, asset_paths
 from DoorOpening.distillation.multi_pcd_dagger import Dagger
+from DoorOpening.tasks.dooropening.multi_dooropening_env import compute_tracking_error
 from DoorOpening.utils.quat_utils import quat_diff_angle
 
 
@@ -335,18 +400,34 @@ def _resolve_drift_thresholds(base_env):
 def _compute_drift(base_env, thresholds):
     base_env._get_intermediate_values()
 
-    key_body_pos_err = torch.linalg.vector_norm(
-        base_env.ref_robot_reset_key_body_pos - base_env.robot_reset_key_body_pos,
-        dim=-1,
-    ).amax(dim=-1)
-    key_body_quat_err = quat_diff_angle(
-        base_env.robot_key_body_quat,
-        base_env.ref_robot_key_body_quat,
-    ).amax(dim=-1)
-    door_joint_pos_err = torch.abs(
-        base_env.ref_door_joint_pos[:, base_env._door_joint_idx].to(base_env.door_joint_pos)
-        - base_env.door_joint_pos[:, base_env._door_joint_idx]
-    ).amax(dim=-1)
+    key_body_pos_err_sq, key_body_quat_err_sq, door_joint_pos_err_sq, *_ = compute_tracking_error(
+        robot_key_body_pos=base_env.robot_reset_key_body_pos,
+        robot_key_body_quat=base_env.robot_key_body_quat,
+        door_joint_pos=base_env.door_joint_pos,
+        robot_base_joint_pos=base_env.robot_base_joint_pos,
+        robot_arm_joint_pos=base_env.robot_arm_joint_pos,
+        robot_finger_joint_pos=base_env.robot_finger_joint_pos,
+        robot_base_joint_vel=base_env.robot_base_joint_vel,
+        robot_arm_joint_vel=base_env.robot_arm_joint_vel,
+        robot_finger_joint_vel=base_env.robot_finger_joint_vel,
+        ref_robot_key_body_pos=base_env.ref_robot_reset_key_body_pos,
+        ref_robot_key_body_quat=base_env.ref_robot_key_body_quat,
+        ref_door_joint_pos=base_env.ref_door_joint_pos,
+        ref_robot_base_joint_pos=base_env.ref_robot_base_joint_pos,
+        ref_robot_arm_joint_pos=base_env.ref_robot_arm_joint_pos,
+        ref_robot_finger_joint_pos=base_env.ref_robot_finger_joint_pos,
+        ref_robot_base_joint_vel=base_env.ref_robot_base_joint_vel,
+        ref_robot_arm_joint_vel=base_env.ref_robot_arm_joint_vel,
+        ref_robot_finger_joint_vel=base_env.ref_robot_finger_joint_vel,
+    )
+
+    threshold_sq = {name: float(value) * float(value) for name, value in thresholds.items()}
+
+    # Keep printed diagnostics in human-readable units while matching the env's
+    # squared-error termination criterion exactly.
+    key_body_pos_err = torch.sqrt(torch.clamp_min(key_body_pos_err_sq, 0.0))
+    key_body_quat_err = torch.sqrt(torch.clamp_min(key_body_quat_err_sq, 0.0))
+    door_joint_pos_err = torch.sqrt(torch.clamp_min(door_joint_pos_err_sq, 0.0))
 
     metrics = {
         "key_body_pos": key_body_pos_err,
@@ -354,9 +435,9 @@ def _compute_drift(base_env, thresholds):
         "door_joint_pos": door_joint_pos_err,
     }
     drifted = (
-        (metrics["key_body_pos"] > thresholds["key_body_pos"])
-        | (metrics["key_body_quat"] > thresholds["key_body_quat"])
-        | (metrics["door_joint_pos"] > thresholds["door_joint_pos"])
+        (key_body_pos_err_sq > threshold_sq["key_body_pos"])
+        | (key_body_quat_err_sq > threshold_sq["key_body_quat"])
+        | (door_joint_pos_err_sq > threshold_sq["door_joint_pos"])
     )
     return drifted, metrics
 
@@ -645,6 +726,11 @@ def _build_student_actions(dagger, iteration):
     return env_actions, student_output
 
 
+def _build_teacher_actions(dagger, obs):
+    teacher_output = dagger._get_teacher_actions(obs)
+    return teacher_output["actions"], None
+
+
 def _print_progress(run_index, step, active, timed_out, drifted, metrics):
     active_count = int(active.sum().detach().cpu().item())
     timeout_count = int(timed_out.sum().detach().cpu().item())
@@ -749,23 +835,49 @@ def main(env_cfg, agent_cfg: dict):
         base_env = _get_base_env(env)
 
     student_ckpt = _resolve_checkpoint(args_cli.student_ckpt)
+    if args_cli.use_teacher:
+        multi_teacher_ckpts, teacher_ckpt = _resolve_multi_teacher_checkpoints()
+        if multi_teacher_ckpts is None and teacher_ckpt is None:
+            raise ValueError("--use_teacher requires --teacher or per-family teacher checkpoints.")
+        teacher_cfg_path = _resolve_teacher_cfg_path(args_cli.teacher_cfg)
+        teacher_config = {
+            "cfg": teacher_cfg_path,
+            "obs_type": "policy",
+        }
+        if multi_teacher_ckpts is not None:
+            teacher_config["teachers"] = {
+                family_name: {"ckpt": ckpt}
+                for family_name, ckpt in multi_teacher_ckpts.items()
+            }
+        else:
+            teacher_config["ckpt"] = teacher_ckpt
+        print("[INFO] Eval action source: teacher")
+    else:
+        if student_ckpt is None:
+            raise ValueError("Student evaluation requires --student_ckpt, or use --use_teacher.")
+        teacher_config = {}
+        print("[INFO] Eval action source: student")
+
     dagger_config = {
         "student": {
             "cfg": student_cfg_path,
             "ckpt": student_ckpt,
         },
-        "teacher": {},
+        "teacher": teacher_config,
         "play_policy": True,
         "dagger": dagger_runtime_cfg,
         "wandb": {"enabled": False},
     }
     dagger = Dagger(env, dagger_config, summaries_dir=summaries_dir, nn_dir=nn_dir)
     dagger.student_model_ddp.eval()
+    if args_cli.use_teacher:
+        for teacher_model in dagger._iter_teacher_models():
+            teacher_model.eval()
     _disable_observation_lag_for_eval(dagger)
     print("[INFO] Observation lag disabled for eval.")
     _print_eval_curriculum_state("Checkpoint-restored curriculum state", dagger, base_env)
     mode_direction_target = None
-    if dagger.mode_prediction_enabled:
+    if dagger.mode_prediction_enabled and not args_cli.use_teacher:
         if getattr(dagger, "mode_family_direction_ids", None) is None:
             raise RuntimeError("Mode prediction is enabled, but direction targets are not initialized.")
         mode_direction_target = dagger.mode_family_direction_ids[dagger.env_family_ids.long()]
@@ -792,7 +904,7 @@ def main(env_cfg, agent_cfg: dict):
     thresholds = _resolve_drift_thresholds(base_env)
     print("[INFO] Drift thresholds:", thresholds)
     mode_tracker = None
-    if dagger.mode_prediction_enabled:
+    if dagger.mode_prediction_enabled and not args_cli.use_teacher:
         mode_tracker = ModePredictionTracker(base_env.device, base_env.num_envs, dagger.num_modes)
         mode_tracker.print_legend()
         print(
@@ -838,7 +950,10 @@ def main(env_cfg, agent_cfg: dict):
             # simulator updates fail outside inference mode.
             with torch.no_grad():
                 frozen_state.restore()
-                actions, student_output = _build_student_actions(dagger, iteration=step)
+                if args_cli.use_teacher:
+                    actions, student_output = _build_teacher_actions(dagger, obs)
+                else:
+                    actions, student_output = _build_student_actions(dagger, iteration=step)
                 mode_step_summary = None
                 mode_logits = None
                 current_contact = None
