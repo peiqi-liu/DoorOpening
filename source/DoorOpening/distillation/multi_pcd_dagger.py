@@ -255,8 +255,12 @@ class Dagger:
         self.teacher_forcing_env_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.current_rewards = torch.zeros((self.num_envs, 1), dtype=torch.float32, device=self.device)
         self.current_lengths = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
-        self.latest_rollout_success = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
-        self.latest_rollout_success_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.interval_success_count = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self.interval_completed_count = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        global_num_envs_tensor = torch.tensor([float(self.num_envs)], dtype=torch.float64, device=self.device)
+        if self.use_ddp:
+            dist.all_reduce(global_num_envs_tensor, op=dist.ReduceOp.SUM)
+        self.global_num_envs = max(1, int(global_num_envs_tensor.item()))
         self.completed_rewards = deque(maxlen=self.games_to_track)
         self.completed_lengths = deque(maxlen=self.games_to_track)
         self.student_update_steps = 0
@@ -3666,38 +3670,47 @@ class Dagger:
 
         self.completed_rewards.extend(float(value) for value in episode_rewards)
         self.completed_lengths.extend(float(value) for value in episode_lengths)
-        self.latest_rollout_success[done_mask] = episode_success_tensor.to(device=self.device)
-        self.latest_rollout_success_valid[done_mask] = True
+        self.interval_success_count[done_mask] += episode_success_tensor.to(device=self.device)
+        self.interval_completed_count[done_mask] += 1.0
+
+    def _clear_interval_success_rates(self):
+        self.interval_success_count.zero_()
+        self.interval_completed_count.zero_()
 
     def _get_global_success_rates(self):
         num_families = len(DOOR_FAMILY_NAMES)
         stats = torch.zeros((1 + num_families, 2), dtype=torch.float64, device=self.device)
 
-        valid_mask = self.latest_rollout_success_valid
-        stats[0, 0] = float(self.latest_rollout_success[valid_mask].sum().detach().cpu().item())
+        valid_mask = self.interval_completed_count > 0
+        per_env_success_rate = torch.zeros_like(self.interval_success_count)
+        per_env_success_rate[valid_mask] = (
+            self.interval_success_count[valid_mask] / self.interval_completed_count[valid_mask]
+        )
+        stats[0, 0] = float(per_env_success_rate[valid_mask].sum().detach().cpu().item())
         stats[0, 1] = float(valid_mask.sum().detach().cpu().item())
         for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
             family_mask = valid_mask & (self.env_family_ids == int(family_id))
-            stats[family_id + 1, 0] = float(self.latest_rollout_success[family_mask].sum().detach().cpu().item())
+            stats[family_id + 1, 0] = float(per_env_success_rate[family_mask].sum().detach().cpu().item())
             stats[family_id + 1, 1] = float(family_mask.sum().detach().cpu().item())
 
         if self.use_ddp:
             dist.all_reduce(stats, op=dist.ReduceOp.SUM)
 
+        is_ready = bool(stats[0, 1].detach().cpu().item() >= self.global_num_envs)
         success_rate = None
-        if stats[0, 1] > 0:
+        if is_ready and stats[0, 1] > 0:
             success_rate = float((stats[0, 0] / stats[0, 1]).detach().cpu().item())
 
         family_success_rates = {}
         for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
             count = stats[family_id + 1, 1]
-            if count > 0:
+            if is_ready and count > 0:
                 family_success_rates[family_name] = float(
                     (stats[family_id + 1, 0] / count).detach().cpu().item()
                 )
             else:
                 family_success_rates[family_name] = None
-        return success_rate, family_success_rates
+        return success_rate, family_success_rates, is_ready
 
     def _log(
         self,
@@ -3715,7 +3728,11 @@ class Dagger:
         episode_length = self._mean_completed_metric(self.completed_lengths)
         env_step_dt = max(float(getattr(self.ov_env, "dt", 0.0)), 1e-6)
         episode_length_seconds = episode_length * env_step_dt if episode_length is not None else None
-        success_rate, family_success_rates = self._get_global_success_rates()
+        success_rate = None
+        family_success_rates = {}
+        success_rate_ready = False
+        if iteration > 0:
+            success_rate, family_success_rates, success_rate_ready = self._get_global_success_rates()
         teacher_env_fraction = self._get_teacher_forcing_env_fraction()
         student_env_fraction = 1.0 - teacher_env_fraction
         iteration_time_ms = self._consume_timing_means()
@@ -3861,6 +3878,8 @@ class Dagger:
                     continue
                 metrics[key] = value
         self._wandb_log(metrics, step=iteration)
+        if success_rate_ready:
+            self._clear_interval_success_rates()
 
     def distill(self):
         if not self.play_policy and not self._has_teacher():
@@ -3994,11 +4013,11 @@ class Dagger:
 
                 if (
                     not self.play_policy
-                    and self.rank == 0
                     and iteration % self.save_interval == 0
                 ):
-                    ckpt_path = os.path.join(self.nn_dir, f"pcd_student_{iteration}.pt")
-                    self.save(ckpt_path, iteration=iteration)
+                    if self.rank == 0:
+                        ckpt_path = os.path.join(self.nn_dir, f"pcd_student_{iteration}.pt")
+                        self.save(ckpt_path, iteration=iteration)
         finally:
             self._viser_pending_debug_frame = None
             self._close_viser_debug_tools()
