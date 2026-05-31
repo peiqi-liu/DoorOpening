@@ -472,6 +472,12 @@ def build_variant_name(source_asset_name, variant_idx):
     return f"{source_asset_name}__rnd_{variant_idx:02d}"
 
 
+def build_direction_pair_key(variant_name):
+    # Pair only the push/pull counterparts of the same variant. Handle-pose
+    # changes across different variants should not force shared start poses.
+    return str(variant_name)
+
+
 def generate_variants(args):
     rng = random.Random(args.seed)
     asset_root = args.asset_root.resolve()
@@ -525,6 +531,7 @@ def generate_variants(args):
             metadata = {
                 "source_asset": source_asset_name,
                 "variant_name": variant_name,
+                "direction_pair_key": build_direction_pair_key(variant_name),
                 "target_properties": target_props,
                 "actual_properties": actual_props,
                 "source_properties": source_props,
