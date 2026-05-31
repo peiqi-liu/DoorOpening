@@ -282,6 +282,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 from DoorOpening.distillation.multi_pcd_dagger import Dagger
 from DoorOpening.assets.door.multi_door_cfg import ALL_DOOR_CONFIGS as MULTI_DOOR_CONFIGS
 from DoorOpening.assets.door.multi_door_cfg import DOOR_FAMILY_NAMES as MULTI_TEACHER_FAMILY_NAMES
+from DoorOpening.assets.door.multi_door_cfg import asset_paths as MULTI_DOOR_ASSET_PATHS
 from DoorOpening.assets.cache_utils import preconvert_shared_urdf_assets
 
 import DoorOpening.tasks # noqa: F401
@@ -542,6 +543,14 @@ def main(env_cfg, agent_cfg: dict):
         render_mode="rgb_array" if args_cli.video and (args_cli.video_ranks == "all" or rank == 0) else None,
     )
     ov_env = _configure_rollout_env_mode(env, args_cli.play_policy)
+    env_asset_indices = getattr(ov_env, "env_asset_indices", None)
+    if env_asset_indices is not None and len(env_asset_indices) > 0:
+        first_asset_idx = int(env_asset_indices[0].detach().cpu().item())
+        first_asset_dir = pathlib.Path(MULTI_DOOR_ASSET_PATHS[first_asset_idx]).resolve().parent
+        print(
+            f"[INFO][rank {rank}] First assigned door asset idx={first_asset_idx} dir={first_asset_dir}",
+            flush=True,
+        )
     if rank == 0:
         ref_motion_lib = getattr(ov_env, "ref_motion_lib", None)
         reset_from_start = getattr(ref_motion_lib, "reset_from_start", None)
