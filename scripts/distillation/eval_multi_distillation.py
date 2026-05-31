@@ -12,6 +12,7 @@ import pathlib
 import sys
 import time
 import types
+from collections import OrderedDict
 
 import yaml
 from isaaclab.app import AppLauncher
@@ -138,6 +139,7 @@ def _resolve_multi_teacher_checkpoints():
 
 parser = argparse.ArgumentParser(description="Evaluate a distilled DooropeningMulti point-cloud policy.")
 parser.add_argument("--video", action="store_true", default=False, help="Record a video during evaluation.")
+parser.add_argument("--viser", action="store_true", default=False, help="Save raw Viser `.pt` replays for 8 random eval envs.")
 parser.add_argument("--video_length", type=int, default=600, help="Length of the recorded video in env steps.")
 parser.add_argument("--video_folder", type=str, default=None, help="Optional folder for recorded videos.")
 parser.add_argument("--num_envs", type=int, default=64, help="Number of environments to evaluate.")
@@ -731,6 +733,56 @@ def _build_teacher_actions(dagger, obs):
     return teacher_output["actions"], None
 
 
+def _configure_eval_viser_raw_streams(dagger, run_index, num_streams=8):
+    if not getattr(dagger, "viser_raw_enabled", False):
+        return
+
+    num_streams = max(1, min(int(num_streams), int(dagger.num_envs)))
+    selected_env_ids = torch.randperm(dagger.num_envs, device=dagger.device)[:num_streams].detach().cpu().tolist()
+    streams = OrderedDict()
+    selected_labels = []
+    for env_id in selected_env_ids:
+        family_id = int(dagger.env_family_ids[env_id].detach().cpu().item())
+        family_name = DOOR_FAMILY_NAMES[family_id]
+        asset_idx = int(dagger.env_asset_idx[env_id].detach().cpu().item())
+        asset_name = pathlib.Path(asset_paths[asset_idx]).resolve().parent.name
+        stream_name = f"run{int(run_index):02d}_{family_name}_env{env_id:03d}_{asset_name}"
+        streams[stream_name] = {
+            "family_id": family_id,
+            "family_name": stream_name,
+            "env_id": int(env_id),
+            "frames": [],
+            "frame_count": 0,
+            "chunk_index": 0,
+            "latest_iteration": None,
+        }
+        selected_labels.append(f"{env_id}:{asset_name}")
+    dagger._viser_raw_streams = streams
+    print("[INFO] Eval viser_raw envs:", ", ".join(selected_labels))
+
+
+def _flush_finished_eval_viser_raw_streams(dagger, newly_finished):
+    if not getattr(dagger, "viser_raw_enabled", False):
+        return
+    if newly_finished is None or newly_finished.numel() == 0:
+        return
+    if not getattr(dagger, "_viser_raw_streams", None):
+        return
+    finished_env_ids = set(int(env_id) for env_id in newly_finished.detach().cpu().tolist())
+    completed_stream_keys = []
+    for stream_name, stream in dagger._viser_raw_streams.items():
+        if int(stream["env_id"]) not in finished_env_ids:
+            continue
+        dagger._flush_viser_raw_stream(
+            stream,
+            chunk_complete=True,
+            reason=f"eval env {int(stream['env_id'])} finished",
+        )
+        completed_stream_keys.append(stream_name)
+    for stream_name in completed_stream_keys:
+        del dagger._viser_raw_streams[stream_name]
+
+
 def _print_progress(run_index, step, active, timed_out, drifted, metrics):
     active_count = int(active.sum().detach().cpu().item())
     timeout_count = int(timed_out.sum().detach().cpu().item())
@@ -804,6 +856,17 @@ def main(env_cfg, agent_cfg: dict):
     print(f"[INFO] Eval output directory: {experiment_dir}")
     print(f"[INFO] pointcloud_source={pointcloud_source}, render_mode={env_cfg.pointcloud_render_mode}")
 
+    viser_cfg = dagger_runtime_cfg.get("viser", {})
+    if not isinstance(viser_cfg, dict):
+        viser_cfg = {}
+    raw_cfg = viser_cfg.get("raw", {})
+    if not isinstance(raw_cfg, dict):
+        raw_cfg = {}
+    raw_cfg["enabled"] = bool(args_cli.viser)
+    raw_cfg.setdefault("path", "eval_viser_replay.pt")
+    viser_cfg["raw"] = raw_cfg
+    dagger_runtime_cfg["viser"] = viser_cfg
+
     preconvert_shared_urdf_assets(
         door_configs=MULTI_DOOR_CONFIGS,
         timeout_s=float(args_cli.asset_preconvert_timeout_s),
@@ -873,8 +936,7 @@ def main(env_cfg, agent_cfg: dict):
     if args_cli.use_teacher:
         for teacher_model in dagger._iter_teacher_models():
             teacher_model.eval()
-    _disable_observation_lag_for_eval(dagger)
-    print("[INFO] Observation lag disabled for eval.")
+    print(f"[INFO] Observation lag for eval follows student YAML: enabled={bool(dagger.observation_lag_enabled)}")
     _print_eval_curriculum_state("Checkpoint-restored curriculum state", dagger, base_env)
     mode_direction_target = None
     if dagger.mode_prediction_enabled and not args_cli.use_teacher:
@@ -922,6 +984,13 @@ def main(env_cfg, agent_cfg: dict):
     for run_index in range(1, num_eval_runs + 1):
         if not simulation_app.is_running():
             break
+        if args_cli.viser:
+            if run_index > 1:
+                dagger._flush_viser_raw_recording(
+                    chunk_complete=False,
+                    reason=f"eval run {run_index - 1} ended before selected envs finished",
+                )
+            _configure_eval_viser_raw_streams(dagger, run_index=run_index, num_streams=8)
         if run_index > 1:
             obs, _ = env.reset()
             frozen_state.reset_from_env()
@@ -951,6 +1020,8 @@ def main(env_cfg, agent_cfg: dict):
             with torch.no_grad():
                 frozen_state.restore()
                 if args_cli.use_teacher:
+                    if dagger.viser_raw_enabled:
+                        dagger._build_student_obs(iteration=step)
                     actions, student_output = _build_teacher_actions(dagger, obs)
                 else:
                     actions, student_output = _build_student_actions(dagger, iteration=step)
@@ -980,6 +1051,26 @@ def main(env_cfg, agent_cfg: dict):
                     base_vel=base_vel_after_step,
                 )
 
+                if dagger.viser_raw_enabled and dagger._viser_pending_debug_frame is not None:
+                    aux_prediction_for_replay = None
+                    if (
+                        student_output is not None
+                        and dagger.has_aux_prediction
+                        and isinstance(student_output, dict)
+                        and "aux" in student_output
+                    ):
+                        aux_prediction_for_replay = dagger._decode_aux_prediction(student_output["aux"].detach())
+                    dagger._maybe_update_viser_debug(
+                        iteration=dagger._viser_pending_debug_frame["iteration"],
+                        robot_base_pos_w=dagger._viser_pending_debug_frame["robot_base_pos_w"],
+                        robot_base_quat_w=dagger._viser_pending_debug_frame["robot_base_quat_w"],
+                        ground_truth_pcd_world=dagger._viser_pending_debug_frame["ground_truth_pcd_world"],
+                        robot_obs_pcd_base=dagger._viser_pending_debug_frame["robot_obs_pcd_base"],
+                        policy_input_pcd_base=dagger._viser_pending_debug_frame["policy_input_pcd_base"],
+                        aux_prediction=aux_prediction_for_replay,
+                    )
+                    dagger._viser_pending_debug_frame = None
+
                 reached_last_frame = base_env._get_reached_last_frame_mask()
                 trial_timed_out = base_env.episode_length_buf >= (base_env.max_trial_steps - 1)
                 drift_mask, last_metrics = _compute_drift(base_env, thresholds)
@@ -991,6 +1082,10 @@ def main(env_cfg, agent_cfg: dict):
                     drifted |= new_drifts
                     active &= ~newly_finished
                     frozen_state.capture(torch.nonzero(newly_finished, as_tuple=False).squeeze(-1))
+                    _flush_finished_eval_viser_raw_streams(
+                        dagger,
+                        torch.nonzero(newly_finished, as_tuple=False).squeeze(-1),
+                    )
 
                 if mode_tracker is not None:
                     mode_step_summary = mode_tracker.update(
@@ -1044,6 +1139,7 @@ def main(env_cfg, agent_cfg: dict):
             f"runs={completed_runs} {mode_tracker.format_stats(mode_tracker.total_stats)} "
             f"preds={mode_tracker.format_pred_counts(mode_tracker.total_pred_counts)}"
         )
+    dagger._close_viser_debug_tools()
     env.close()
 
 
