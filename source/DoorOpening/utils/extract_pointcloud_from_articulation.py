@@ -1034,32 +1034,76 @@ class FrankaLeapSampler:
         # Load meshes for all links with visuals
         self.links = [l for l in self.robot.links if len(l.visuals) and (l.visuals[0].geometry.mesh is not None)]
         self.hand_links = [l for l in self.links if ("panda" not in l.name) and l.visuals[0].geometry.mesh is not None]
+        self.points = self._build_link_point_samples(num_points)
 
-        # meshes = [
-        #     trimesh.load(resolve_mesh_path(urdf_path, l.visuals[0].geometry.mesh.filename), force="mesh")
-        #     for l in self.links
-        # ]
+    def _mesh_scale_to_xyz(self, scale):
+        if scale is None:
+            return np.ones(3, dtype=np.float32)
+        scale = np.asarray(scale, dtype=np.float32).reshape(-1)
+        if scale.size == 1:
+            return np.repeat(scale, 3)
+        if scale.size != 3:
+            raise ValueError(f"Expected mesh scale to have 1 or 3 values, got shape {scale.shape}.")
+        return scale
 
-        meshes = []
-        for l in self.links:
-            mesh = None
-            for v in l.visuals:
+    def _allocate_point_counts(self, weights, total_points):
+        total_points = int(total_points)
+        if total_points <= 0:
+            return np.zeros(len(weights), dtype=int)
+        weights = np.asarray(weights, dtype=np.float64)
+        if weights.size == 0:
+            return np.zeros(0, dtype=int)
+        if not np.isfinite(weights).all() or weights.sum() <= 0.0:
+            weights = np.ones_like(weights, dtype=np.float64)
+        counts = np.round(total_points * weights / weights.sum()).astype(int)
+        counts[0] += total_points - counts.sum()
+        return counts
+
+    def _load_visual_mesh_in_link_frame(self, visual):
+        mesh_spec = getattr(visual.geometry, "mesh", None)
+        if mesh_spec is None:
+            return None
+        mesh = trimesh.load(resolve_mesh_path(self.urdf_path, mesh_spec.filename), force="mesh")
+        mesh = mesh.copy()
+        mesh.apply_scale(self._mesh_scale_to_xyz(getattr(mesh_spec, "scale", None)))
+        origin = visual.origin.detach().cpu().numpy() if isinstance(visual.origin, torch.Tensor) else np.asarray(visual.origin)
+        mesh.apply_transform(origin)
+        return mesh
+
+    def _build_link_point_samples(self, num_points):
+        link_meshes = []
+        link_areas = []
+        for link in self.links:
+            visual_meshes = []
+            visual_areas = []
+            for visual in link.visuals:
+                mesh = self._load_visual_mesh_in_link_frame(visual)
                 if mesh is None:
-                    mesh = trimesh.load(resolve_mesh_path(urdf_path, v.geometry.mesh.filename), force="mesh")
-                else:
-                    mesh += trimesh.load(resolve_mesh_path(urdf_path, v.geometry.mesh.filename), force="mesh")
-            meshes.append(mesh)
+                    continue
+                visual_meshes.append(mesh)
+                visual_areas.append(float(mesh.bounding_box_oriented.area))
+            link_meshes.append(visual_meshes)
+            link_areas.append(sum(visual_areas))
 
-        areas = np.array([m.bounding_box_oriented.area for m in meshes])
-        n_pts = np.round(num_points * areas / areas.sum()).astype(int)
-        n_pts[0] += num_points - n_pts.sum()  # fix rounding
-        self.points = {
-            l.name: torch.as_tensor(
-                trimesh.sample.sample_surface(meshes[i], n_pts[i])[0],
-                device=device, dtype=torch.float32
-            ).unsqueeze(0)  # (1,Ni,3)
-            for i, l in enumerate(self.links)
-        }
+        link_counts = self._allocate_point_counts(link_areas, num_points)
+        points = {}
+        for link, visual_meshes, link_count in zip(self.links, link_meshes, link_counts):
+            if not visual_meshes or int(link_count) <= 0:
+                points[link.name] = torch.zeros((1, 0, 3), device=self.device, dtype=torch.float32)
+                continue
+            visual_areas = [float(mesh.bounding_box_oriented.area) for mesh in visual_meshes]
+            visual_counts = self._allocate_point_counts(visual_areas, int(link_count))
+            link_points = []
+            for mesh, visual_count in zip(visual_meshes, visual_counts):
+                if int(visual_count) <= 0:
+                    continue
+                sampled_points, _ = trimesh.sample.sample_surface(mesh, int(visual_count))
+                link_points.append(torch.as_tensor(sampled_points, device=self.device, dtype=torch.float32))
+            if link_points:
+                points[link.name] = torch.cat(link_points, dim=0).unsqueeze(0)
+            else:
+                points[link.name] = torch.zeros((1, 0, 3), device=self.device, dtype=torch.float32)
+        return points
 
     def configure_door_geometry_aug(self, cfg: dict | None, device=None):
         cfg = {} if cfg is None else dict(cfg)
@@ -1203,7 +1247,7 @@ class FrankaLeapSampler:
         if joint_mapping_list is not None:
             joint_angles = joint_angles[:, joint_mapping_list]
 
-        fk = self.robot.visual_geometry_fk_batch(joint_angles)  # dict[geom] -> (B,4,4)
+        fk = self.robot.link_fk_batch(joint_angles, use_names=True)  # dict[link_name] -> (B,4,4)
         pcs = []
         batch_size = joint_angles.shape[0]
         aug_params = None
@@ -1212,7 +1256,7 @@ class FrankaLeapSampler:
 
         link_set = self.hand_links if hand_only else self.links
         for l in link_set:
-            T = fk[l.visuals[0].geometry]  # (B,4,4)
+            T = fk[l.name]  # (B,4,4)
             pc = self.points[l.name].repeat(batch_size, 1, 1)  # (B,Ni,3)
             if aug_params is not None and l.name == "link_1":
                 scale = aug_params["panel_width_scale"]
@@ -1261,11 +1305,11 @@ class FrankaLeapSampler:
         if joint_mapping_list is not None:
             joint_angles = joint_angles[:, joint_mapping_list]
 
-        fk = self.robot.visual_geometry_fk_batch(joint_angles)  # dict[geom] -> (B,4,4)
+        fk = self.robot.link_fk_batch(joint_angles, use_names=True)  # dict[link_name] -> (B,4,4)
         pcs = []
 
         for l in link_set:
-            T = fk[l.visuals[0].geometry]  # (B,4,4)
+            T = fk[l.name]  # (B,4,4)
             pc = self.points[l.name].repeat(joint_angles.shape[0], 1, 1)  # (B,Ni,3)
             pcs.append(transform_pointcloud(pc, T))
 
@@ -1278,53 +1322,18 @@ class FrankaLeapSampler:
 
 def build_first_visual_link_pointcloud_cache(sampler, link_names=None, device=None):
     """
-    Precompute each link's sampled point cloud in the link frame at zero joint state.
-
-    This matches the sampler's existing first-visual transform assumption so callers can
-    reuse the same semantics while avoiding repeated FK-based point transforms at runtime.
+    Precompute each link's sampled point cloud in the link frame.
     """
     device = sampler.device if device is None else device
     if link_names is None:
         link_names = [link.name for link in sampler.links]
 
-    zero_joint = torch.zeros(
-        (1, len(sampler.robot.actuated_joints)),
-        dtype=torch.float32,
-        device=device,
-    )
-    link_fk = sampler.robot.link_fk_batch(zero_joint, use_names=True)
-    visual_fk = sampler.robot.visual_geometry_fk_batch(zero_joint)
-
     link_points = {}
     for link_name in link_names:
-        link = next((candidate for candidate in sampler.links if candidate.name == link_name), None)
-        if link is None:
+        if link_name not in sampler.points:
             link_points[link_name] = torch.zeros((0, 3), dtype=torch.float32, device=device)
             continue
-        if link_name not in sampler.points or link_name not in link_fk:
-            link_points[link_name] = torch.zeros((0, 3), dtype=torch.float32, device=device)
-            continue
-        if not link.visuals:
-            link_points[link_name] = torch.zeros((0, 3), dtype=torch.float32, device=device)
-            continue
-
-        link_to_base = link_fk[link_name]
-        base_to_link = torch.linalg.inv(link_to_base)
-        first_visual_geometry = link.visuals[0].geometry
-        if first_visual_geometry not in visual_fk:
-            link_points[link_name] = torch.zeros((0, 3), dtype=torch.float32, device=device)
-            continue
-
-        points = sampler.points[link_name].to(device=device, dtype=torch.float32)
-        visual_to_base = visual_fk[first_visual_geometry]
-        visual_to_link = torch.matmul(base_to_link, visual_to_base)
-        hom_points = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
-        link_points[link_name] = (
-            torch.matmul(visual_to_link, hom_points.transpose(1, 2))[:, :3]
-            .transpose(1, 2)
-            .squeeze(0)
-            .contiguous()
-        )
+        link_points[link_name] = sampler.points[link_name].to(device=device, dtype=torch.float32).squeeze(0).contiguous()
     return link_points
 
 
