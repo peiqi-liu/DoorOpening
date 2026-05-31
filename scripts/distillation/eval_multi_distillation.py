@@ -67,6 +67,18 @@ def _load_student_dagger_defaults(student_cfg_path):
     return dict(dagger_cfg) if isinstance(dagger_cfg, dict) else {}
 
 
+def _normalize_family_selection(family_spec):
+    if family_spec is None:
+        return None
+    if isinstance(family_spec, str):
+        family_names = [name.strip() for name in family_spec.split(",") if name.strip()]
+    elif isinstance(family_spec, (list, tuple)):
+        family_names = [str(name).strip() for name in family_spec if str(name).strip()]
+    else:
+        raise TypeError(f"Unsupported door family selection type: {type(family_spec)!r}")
+    return family_names or None
+
+
 parser = argparse.ArgumentParser(description="Evaluate a distilled DooropeningMulti point-cloud policy.")
 parser.add_argument("--video", action="store_true", default=False, help="Record a video during evaluation.")
 parser.add_argument("--video_length", type=int, default=600, help="Length of the recorded video in env steps.")
@@ -76,6 +88,14 @@ parser.add_argument("--task", type=str, default="DooropeningMulti", help="Name o
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment.")
 parser.add_argument("--student_cfg", type=str, default=None, help="Student config YAML to use.")
 parser.add_argument("--student_ckpt", type=str, required=True, help="Student checkpoint to evaluate.")
+parser.add_argument(
+    "--door-families",
+    "--door_families",
+    dest="door_families",
+    type=str,
+    default=None,
+    help="Comma-separated multi-door family list to evaluate, e.g. PartNetv9,PartNetv10.",
+)
 parser.add_argument("--num_eval_runs", type=int, default=3, help="Number of repeated eval rollouts to run.")
 parser.add_argument(
     "--pointcloud_source",
@@ -126,6 +146,12 @@ args_cli, hydra_args = parser.parse_known_args()
 
 student_cfg_path = _resolve_repo_path(args_cli.student_cfg, DEFAULT_STUDENT_CFG)
 student_dagger_defaults = _load_student_dagger_defaults(student_cfg_path)
+selected_door_families = _normalize_family_selection(
+    args_cli.door_families if args_cli.door_families is not None else student_dagger_defaults.get("door_families")
+)
+if selected_door_families is not None:
+    os.environ["DOOROPENING_MULTI_DOOR_FAMILIES"] = ",".join(selected_door_families)
+    print(f"[INFO] Using multi-door families: {selected_door_families}")
 pointcloud_source = str(student_dagger_defaults.get("pointcloud_source", "sampler")).lower()
 if args_cli.pointcloud_source is not None:
     pointcloud_source = args_cli.pointcloud_source

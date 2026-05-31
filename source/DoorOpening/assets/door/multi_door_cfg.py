@@ -166,9 +166,22 @@ def create_door_cfg(
 
 root_path = os.path.dirname(os.path.dirname(__file__))
 asset_base_folder = os.path.join(root_path, "door")
-# DOOR_FAMILY_NAMES = ["PartNetv9", "PartNetv10", "PartNetv11", "PartNetv12"]
-# DOOR_FAMILY_NAMES = ["PartNetv5_plusplus"]
-DOOR_FAMILY_NAMES = ["PartNetv5_plusplus", "PartNetv6_plusplus", "PartNetv7_plusplus", "PartNetv8_plusplus"]
+DEFAULT_MULTI_DOOR_FAMILY_NAMES = ["PartNetv5_plusplus", "PartNetv6_plusplus", "PartNetv7_plusplus", "PartNetv8_plusplus"]
+
+
+def _resolve_multi_door_family_names():
+    family_spec = os.environ.get("DOOROPENING_MULTI_DOOR_FAMILIES")
+    if family_spec is None or family_spec.strip() == "":
+        return list(DEFAULT_MULTI_DOOR_FAMILY_NAMES)
+
+    family_names = [name.strip() for name in family_spec.split(",") if name.strip()]
+    if not family_names:
+        raise ValueError("DOOROPENING_MULTI_DOOR_FAMILIES did not contain any valid family names.")
+
+    return family_names
+
+
+DOOR_FAMILY_NAMES = _resolve_multi_door_family_names()
 door_family_base_folders = OrderedDict(
     (family_name, os.path.join(asset_base_folder, family_name))
     for family_name in DOOR_FAMILY_NAMES

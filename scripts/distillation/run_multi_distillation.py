@@ -13,11 +13,14 @@ from isaaclab.app import AppLauncher
 
 SCRIPT_ROOT = pathlib.Path(__file__).resolve().parents[2]
 DEFAULT_STUDENT_CFG = SCRIPT_ROOT / "source" / "DoorOpening" / "tasks" / "dooropening" / "agents" / "pcd_transformer_dagger_cfg.yaml"
+DEFAULT_FINETUNE_STUDENT_CFG = (
+    SCRIPT_ROOT / "source" / "DoorOpening" / "tasks" / "dooropening" / "agents" / "pcd_transformer_dagger_finetune_cfg.yaml"
+)
 
 
-def _resolve_student_cfg_path(path_value):
+def _resolve_student_cfg_path(path_value, default_path):
     if path_value is None:
-        return str(DEFAULT_STUDENT_CFG)
+        return str(default_path)
     path = pathlib.Path(path_value)
     if path.is_absolute():
         return str(path)
@@ -92,6 +95,18 @@ def _patch_play_mode_done_tensor(base_env):
     base_env._play_mode_done_tensor_patch = True
 
 
+def _normalize_family_selection(family_spec):
+    if family_spec is None:
+        return None
+    if isinstance(family_spec, str):
+        family_names = [name.strip() for name in family_spec.split(",") if name.strip()]
+    elif isinstance(family_spec, (list, tuple)):
+        family_names = [str(name).strip() for name in family_spec if str(name).strip()]
+    else:
+        raise TypeError(f"Unsupported door family selection type: {type(family_spec)!r}")
+    return family_names or None
+
+
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Train an RL agent with RL-Games.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
@@ -129,6 +144,12 @@ parser.add_argument("--teacher-partnetv6", "--teacher_partnetv6", dest="teacher_
 parser.add_argument("--teacher-partnetv7", "--teacher_partnetv7", dest="teacher_partnetv7", type=str, default=None, help="Teacher checkpoint for PartNetv7.")
 parser.add_argument("--teacher-partnetv8", "--teacher_partnetv8", dest="teacher_partnetv8", type=str, default=None, help="Teacher checkpoint for PartNetv8.")
 parser.add_argument("--play_policy", action="store_true", default=False, help="Play a distilled policy.")
+parser.add_argument(
+    "--finetune",
+    action="store_true",
+    default=False,
+    help="Resume supervised distillation from a student checkpoint with finetune-oriented defaults.",
+)
 # parser.add_argument("--data_aug", action="store_true", default=False, help="Whether to use data augmentation for student")
 parser.add_argument("--student_cfg", type=str, default=None, help="Student config YAML to use.")
 parser.add_argument("--student_ckpt", type=str, default=None, help="Student checkpoint to resume or evaluate.")
@@ -199,12 +220,27 @@ parser.add_argument(
     default=None,
     help="Iteration interval for periodic raw `.pt` replay snapshots. Defaults to dagger.viser.raw_interval.",
 )
+parser.add_argument(
+    "--door-families",
+    "--door_families",
+    dest="door_families",
+    type=str,
+    default=None,
+    help="Comma-separated multi-door family list to train on, e.g. PartNetv9,PartNetv10.",
+)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
-student_cfg_path = _resolve_student_cfg_path(args_cli.student_cfg)
+default_student_cfg_path = DEFAULT_FINETUNE_STUDENT_CFG if args_cli.finetune else DEFAULT_STUDENT_CFG
+student_cfg_path = _resolve_student_cfg_path(args_cli.student_cfg, default_student_cfg_path)
 student_dagger_defaults = _load_student_dagger_defaults(student_cfg_path)
+selected_door_families = _normalize_family_selection(
+    args_cli.door_families if args_cli.door_families is not None else student_dagger_defaults.get("door_families")
+)
+if selected_door_families is not None:
+    os.environ["DOOROPENING_MULTI_DOOR_FAMILIES"] = ",".join(selected_door_families)
+    print(f"[INFO] Using multi-door families: {selected_door_families}")
 pointcloud_source = str(student_dagger_defaults.get("pointcloud_source", "sampler")).lower()
 if args_cli.pointcloud_source is not None:
     pointcloud_source = args_cli.pointcloud_source
@@ -439,9 +475,13 @@ def main(env_cfg, agent_cfg: dict):
     # but keeps single-teacher fallback for smoke tests and old checkpoints.
     multi_teacher_ckpts, teacher_ckpt = resolve_multi_teacher_checkpoints()
     student_ckpt = resolve_checkpoint(args_cli.student_ckpt)
+    if args_cli.finetune and student_ckpt is None:
+        raise ValueError("--finetune requires --student_ckpt so the student can resume from a trained checkpoint.")
+    if args_cli.finetune and args_cli.play_policy:
+        raise ValueError("--finetune cannot be combined with --play_policy.")
 
     train_dir = "runs"
-    default_wandb_project = "DoorOpening-Distillation"
+    default_wandb_project = "DoorOpening-Distillation-Finetune" if args_cli.finetune else "DoorOpening-Distillation"
     base_experiment_name = default_wandb_project + datetime.now().strftime("_%Y-%m-%d-%H-%M-%S")
     rank_tag = f"rank{rank:03d}_local{local_rank:03d}"
     experiment_name = f"{base_experiment_name}_{rank_tag}" if use_distributed else base_experiment_name
