@@ -2210,20 +2210,19 @@ class Dagger:
         if self.use_ddp:
             dist.all_reduce(global_family_counts_tensor, op=dist.ReduceOp.SUM)
 
-        if self.rank == 0:
-            family_counts = {
-                family_name: int(global_family_counts_tensor[family_id].detach().cpu().item())
-                for family_id, family_name in enumerate(DOOR_FAMILY_NAMES)
-            }
-            print(f"[INFO] Global door family env counts: {family_counts}")
-            sample = []
-            sample_count = min(12, int(self.num_envs))
-            for env_id in range(sample_count):
-                asset_idx = int(self.env_asset_idx[env_id].detach().cpu().item())
-                family_id = int(self.env_family_ids[env_id].detach().cpu().item())
-                asset_name = Path(door_asset_paths[asset_idx]).parent.name
-                sample.append(f"env{env_id}:{DOOR_FAMILY_NAMES[family_id]}/{asset_name}")
-            print("[INFO] Rank 0 door family sample:", ", ".join(sample))
+        family_counts = {
+            family_name: int(global_family_counts_tensor[family_id].detach().cpu().item())
+            for family_id, family_name in enumerate(DOOR_FAMILY_NAMES)
+        }
+        print(f"[INFO] Global door family env counts: {family_counts}")
+        sample = []
+        sample_count = min(12, int(self.num_envs))
+        for env_id in range(sample_count):
+            asset_idx = int(self.env_asset_idx[env_id].detach().cpu().item())
+            family_id = int(self.env_family_ids[env_id].detach().cpu().item())
+            asset_name = Path(door_asset_paths[asset_idx]).parent.name
+            sample.append(f"env{env_id}:{DOOR_FAMILY_NAMES[family_id]}/{asset_name}")
+        print("[INFO] Rank door family sample:", ", ".join(sample))
         self.env_board_bboxes = door_board_bboxes.to(device=self.device, dtype=torch.float32)[self.env_asset_idx]
         bbox_min = self.env_board_bboxes[:, 0]
         bbox_max = self.env_board_bboxes[:, 1]
