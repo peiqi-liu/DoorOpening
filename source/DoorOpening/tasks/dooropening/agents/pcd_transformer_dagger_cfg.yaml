@@ -126,7 +126,7 @@ transformer_cfg:
 
 dagger:
   learning_rate: 1.0e-4
-  lr_schedule: linear
+  lr_schedule: cosine
   min_learning_rate: 1.0e-5
   weight_decay: 1.0e-4
   grad_clip: 1.0

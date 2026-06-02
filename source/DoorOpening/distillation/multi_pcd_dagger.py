@@ -134,7 +134,7 @@ class Dagger:
         self.wall_distractor_cfg = dict(self.runtime_cfg.get("wall_distractors", {}))
 
         self.lr = float(self.runtime_cfg.get("learning_rate", 1e-4))
-        self.lr_schedule = str(self.runtime_cfg.get("lr_schedule", "linear")).lower()
+        self.lr_schedule = str(self.runtime_cfg.get("lr_schedule", "cosine")).lower()
         self.min_lr = float(self.runtime_cfg.get("min_learning_rate", 1e-5))
         self.weight_decay = float(self.runtime_cfg.get("weight_decay", 1e-4))
         self.grad_clip = float(self.runtime_cfg.get("grad_clip", 1.0))
@@ -200,8 +200,8 @@ class Dagger:
             raise ValueError("teacher_forcing_transition_iters must be non-negative.")
         if not 0.0 <= self.teacher_forcing_min_beta <= 1.0:
             raise ValueError("teacher_forcing_min_beta must be in [0, 1].")
-        if self.lr_schedule != "linear":
-            raise ValueError("lr_schedule must be 'linear'.")
+        if self.lr_schedule not in {"linear", "cosine"}:
+            raise ValueError("lr_schedule must be one of {'linear', 'cosine'}.")
         if self.lr_decay_iters < 0:
             raise ValueError("lr_decay_iters must be non-negative.")
         if self.min_lr < 0.0:
@@ -2783,7 +2783,12 @@ class Dagger:
         decay_iters = max(1, int(self.lr_decay_iters))
         min_factor = 0.0 if self.lr <= 0.0 else float(self.min_lr / self.lr)
         progress = min(max(int(scheduler_step) + 1, 0), decay_iters) / decay_iters
-        return float(1.0 + (min_factor - 1.0) * progress)
+        if self.lr_schedule == "linear":
+            return float(1.0 + (min_factor - 1.0) * progress)
+        if self.lr_schedule == "cosine":
+            cosine_factor = 0.5 * (1.0 + math.cos(math.pi * progress))
+            return float(min_factor + (1.0 - min_factor) * cosine_factor)
+        raise ValueError(f"Unsupported lr_schedule '{self.lr_schedule}'.")
 
     def _restore_lr_scheduler_state(self, checkpoint):
         if self.lr_scheduler is None:
@@ -4013,9 +4018,9 @@ class Dagger:
             if self.latest_force_angle_deg is not None:
                 metrics["stats/force_angle_deg"] = self.latest_force_angle_deg
         if validation_total_loss is not None:
-            metrics["val/loss_total"] = float(validation_total_loss.detach().cpu())
+            metrics["loss/val_total"] = float(validation_total_loss.detach().cpu())
         if validation_action_loss is not None:
-            metrics["val/loss_action"] = float(validation_action_loss.detach().cpu())
+            metrics["loss/val_action"] = float(validation_action_loss.detach().cpu())
         if self.latest_mode_direction_acc is not None:
             metrics["stats/dir_acc"] = self.latest_mode_direction_acc
         if self.mode_prediction_loss_enabled:
