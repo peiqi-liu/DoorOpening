@@ -38,7 +38,8 @@ temporal_obs:
 
 temporal_state_encoders:
   enabled: true
-  timestamps_ms: [0, 300, 600, 900, 1200, 1500]
+  # timestamps_ms: [0, 300, 600, 900, 1200, 1500]
+  timestamps_ms: [0, 400, 800, 1200, 1600, 2000, 2400, 2800]
   fields:
     - q_arm
     - q_hand
@@ -125,9 +126,12 @@ transformer_cfg:
 
 dagger:
   learning_rate: 1.0e-4
+  lr_schedule: linear
+  min_learning_rate: 1.0e-5
   weight_decay: 1.0e-4
   grad_clip: 1.0
   num_iters: 250000
+  lr_decay_iters: 250000
   teacher_forcing_warmup_iters: 5000
   teacher_forcing_transition_iters: 20000
   teacher_forcing_min_beta: 0.0

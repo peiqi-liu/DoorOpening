@@ -2,6 +2,7 @@ import json
 import os
 import math
 import pathlib
+import re
 import time
 from collections import OrderedDict, deque
 from pathlib import Path
@@ -133,9 +134,12 @@ class Dagger:
         self.wall_distractor_cfg = dict(self.runtime_cfg.get("wall_distractors", {}))
 
         self.lr = float(self.runtime_cfg.get("learning_rate", 1e-4))
+        self.lr_schedule = str(self.runtime_cfg.get("lr_schedule", "linear")).lower()
+        self.min_lr = float(self.runtime_cfg.get("min_learning_rate", 1e-5))
         self.weight_decay = float(self.runtime_cfg.get("weight_decay", 1e-4))
         self.grad_clip = float(self.runtime_cfg.get("grad_clip", 1.0))
         self.num_iters = int(self.runtime_cfg.get("num_iters", 1_000_000))
+        self.lr_decay_iters = int(self.runtime_cfg.get("lr_decay_iters", 100_000))
         self.resume_optimizer_state = bool(self.runtime_cfg.get("resume_optimizer_state", True))
         self.force_full_curriculum = bool(self.runtime_cfg.get("force_full_curriculum", False))
         self.teacher_forcing_warmup_iters = int(self.runtime_cfg.get("teacher_forcing_warmup_iters", 0))
@@ -196,6 +200,14 @@ class Dagger:
             raise ValueError("teacher_forcing_transition_iters must be non-negative.")
         if not 0.0 <= self.teacher_forcing_min_beta <= 1.0:
             raise ValueError("teacher_forcing_min_beta must be in [0, 1].")
+        if self.lr_schedule != "linear":
+            raise ValueError("lr_schedule must be 'linear'.")
+        if self.lr_decay_iters < 0:
+            raise ValueError("lr_decay_iters must be non-negative.")
+        if self.min_lr < 0.0:
+            raise ValueError("min_learning_rate must be non-negative.")
+        if self.min_lr > self.lr:
+            raise ValueError("min_learning_rate must be less than or equal to learning_rate.")
 
         self.games_to_track = 100
         self.frame = 0
@@ -266,6 +278,10 @@ class Dagger:
         self.student_update_steps = 0
         self.last_local_update_batch_size = 0
         self.last_global_update_batch_size = 0
+        self.train_env_mask = None
+        self.validation_env_mask = None
+        self.global_train_num_envs = 0
+        self.global_validation_num_envs = 0
         self.latest_student_proprio_vector = None
         self.latest_aux_input_vector = None
         self.latest_aux_target_vector = None
@@ -507,6 +523,7 @@ class Dagger:
             lr=self.lr,
             weight_decay=self.weight_decay,
         )
+        self.lr_scheduler = self._build_lr_scheduler()
 
         student_ckpt = self.student_cfg.get("ckpt")
         if student_ckpt is not None:
@@ -999,7 +1016,7 @@ class Dagger:
         self.latest_fraction_pull = float(perturbed[:, 1].mean().detach().cpu().item())
         return perturbed
 
-    def _get_contact_sensor_force_tensor_world(self, sensor_name):
+    def _get_contact_sensor_force_tensor_world(self, sensor_name, env_mask=None, update_metrics=True):
         scene = getattr(self.ov_env, "scene", None)
         sensors = None if scene is None else getattr(scene, "sensors", None)
         if sensors is None or sensor_name not in sensors:
@@ -1014,9 +1031,13 @@ class Dagger:
             raise RuntimeError(
                 f"Expected filtered contact force shape [N, 3], got {tuple(force_world.shape)}"
             )
+        if env_mask is not None:
+            env_mask = env_mask.to(device=force_world.device, dtype=torch.bool)
+            force_world = force_world[env_mask]
         force_norm = torch.linalg.vector_norm(force_world, dim=-1)
-        self.latest_filtered_handle_force_norm_mean = float(force_norm.mean().detach().cpu().item())
-        self.latest_filtered_handle_force_norm_max = float(force_norm.max().detach().cpu().item())
+        if update_metrics:
+            self.latest_filtered_handle_force_norm_mean = float(force_norm.mean().detach().cpu().item())
+            self.latest_filtered_handle_force_norm_max = float(force_norm.max().detach().cpu().item())
         return force_world.to(device=self.device, dtype=torch.float32)
 
     def _aggregate_contact_force_tensor(self, contact_forces):
@@ -1059,7 +1080,7 @@ class Dagger:
             f"{tuple(tensor.shape)} vs leading shape {tuple(prediction_leading_shape)}."
         )
 
-    def _prepare_direction_prediction_tensors(self, mode_logits):
+    def _prepare_direction_prediction_tensors(self, mode_logits, env_mask=None):
         if mode_logits.ndim < 2:
             raise RuntimeError(f"Expected direction logits to have a class dimension, got {tuple(mode_logits.shape)}.")
         if mode_logits.shape[-1] != self.num_modes:
@@ -1068,10 +1089,16 @@ class Dagger:
             )
 
         prediction_leading_shape = mode_logits.shape[:-1]
-        direction_target = self.mode_family_direction_ids[self.env_family_ids.long()]
-        direction_valid = direction_target >= 0
+        env_family_ids = self.env_family_ids.long()
         rollout_step_ids = self._get_rollout_step_ids()
         active_mask = self._get_active_rollout_mask(rollout_step_ids)
+        if env_mask is not None:
+            env_mask = env_mask.to(device=self.device, dtype=torch.bool)
+            env_family_ids = env_family_ids[env_mask]
+            rollout_step_ids = rollout_step_ids[env_mask]
+            active_mask = active_mask[env_mask]
+        direction_target = self.mode_family_direction_ids[env_family_ids]
+        direction_valid = direction_target >= 0
 
         tensors = {
             "direction_target": direction_target,
@@ -1151,25 +1178,26 @@ class Dagger:
         self.latest_dir_window_num_pull_preds = num_pull_preds
         return window_mask
 
-    def _compute_mode_prediction_loss(self, mode_logits):
+    def _compute_mode_prediction_loss(self, mode_logits, env_mask=None, update_metrics=True):
         if not self.mode_prediction_loss_enabled:
             return None
         if self.mode_family_direction_ids is None:
             raise RuntimeError("Mode prediction targets are not initialized.")
 
         mode_logits, direction_target, direction_valid, active_mask, rollout_step_ids, _ = (
-            self._prepare_direction_prediction_tensors(mode_logits)
+            self._prepare_direction_prediction_tensors(mode_logits, env_mask=env_mask)
         )
         if not torch.any(direction_valid):
             raise RuntimeError("No valid direction targets are available for mode prediction.")
 
-        self._update_direction_window_metrics(
-            mode_logits,
-            direction_target,
-            direction_valid,
-            active_mask,
-            rollout_step_ids,
-        )
+        if update_metrics:
+            self._update_direction_window_metrics(
+                mode_logits,
+                direction_target,
+                direction_valid,
+                active_mask,
+                rollout_step_ids,
+            )
 
         valid_mask = direction_valid & active_mask
         if torch.any(valid_mask):
@@ -1180,16 +1208,22 @@ class Dagger:
             )
             step_weights = self._get_direction_step_weights(rollout_step_ids[valid_mask])
             direction_loss = (per_sample_loss * step_weights).sum() / step_weights.sum().clamp_min(1.0e-6)
-            direction_pred = mode_logits[valid_mask].argmax(dim=-1)
-            direction_correct = (direction_pred == direction_target[valid_mask]).float()
-            self.latest_mode_direction_acc = float(direction_correct.mean().detach().cpu().item())
+            if update_metrics:
+                direction_pred = mode_logits[valid_mask].argmax(dim=-1)
+                direction_correct = (direction_pred == direction_target[valid_mask]).float()
+                self.latest_mode_direction_acc = float(direction_correct.mean().detach().cpu().item())
         else:
             direction_loss = mode_logits.mean() * 0.0
-            self.latest_mode_direction_acc = None
+            if update_metrics:
+                self.latest_mode_direction_acc = None
         return direction_loss
 
-    def _get_force_prediction_target_raw(self):
-        contact_forces = self._get_contact_sensor_force_tensor_world(self.force_prediction_sensor_name)
+    def _get_force_prediction_target_raw(self, env_mask=None, update_metrics=True):
+        contact_forces = self._get_contact_sensor_force_tensor_world(
+            self.force_prediction_sensor_name,
+            env_mask=env_mask,
+            update_metrics=update_metrics,
+        )
         force_world = self._aggregate_contact_force_tensor(contact_forces)
         if force_world.ndim != 2 or force_world.shape[-1] != 3:
             raise RuntimeError(
@@ -1198,17 +1232,22 @@ class Dagger:
         if self.force_prediction_target_frame == "world":
             return force_world
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
+        if env_mask is not None:
+            robot_base_quat_w = robot_base_quat_w[env_mask]
         return world_to_local(force_world.unsqueeze(1), None, robot_base_quat_w).squeeze(1)
 
     def _normalize_force_direction(self, force_tensor):
         force_mag = torch.linalg.vector_norm(force_tensor, dim=-1, keepdim=True)
         return force_tensor / force_mag.clamp_min(1.0e-6)
 
-    def _compute_force_prediction_loss(self, force_pred):
+    def _compute_force_prediction_loss(self, force_pred, env_mask=None, update_metrics=True):
         if not self.force_prediction_enabled:
             return None
 
-        force_target_raw = self._get_force_prediction_target_raw()
+        if env_mask is not None and force_pred.shape[0] == self.num_envs:
+            env_mask = env_mask.to(device=self.device, dtype=torch.bool)
+            force_pred = force_pred[env_mask]
+        force_target_raw = self._get_force_prediction_target_raw(env_mask=env_mask, update_metrics=update_metrics)
         if force_pred.ndim == 3:
             force_pred = force_pred[:, 0, :]
         if force_pred.shape[-1] != force_target_raw.shape[-1]:
@@ -1217,11 +1256,14 @@ class Dagger:
             )
 
         rollout_step_ids = self._get_rollout_step_ids()
+        if env_mask is not None:
+            rollout_step_ids = rollout_step_ids[env_mask]
         active_mask = self._get_active_rollout_mask(rollout_step_ids)
         valid_mask = active_mask
         if not torch.any(valid_mask):
             loss = force_pred.mean() * 0.0
-            self.latest_force_angle_deg = None
+            if update_metrics:
+                self.latest_force_angle_deg = None
             return loss
         step_weights = self._get_direction_step_weights(rollout_step_ids[valid_mask])
 
@@ -1246,7 +1288,8 @@ class Dagger:
                 loss = ((1.0 - cosine_valid) * step_weights).sum() / step_weights.sum().clamp_min(1.0e-6)
 
             angle_deg = torch.rad2deg(torch.acos(cosine_valid.clamp(-1.0 + 1.0e-6, 1.0 - 1.0e-6)))
-            self.latest_force_angle_deg = float(angle_deg.mean().detach().cpu().item())
+            if update_metrics:
+                self.latest_force_angle_deg = float(angle_deg.mean().detach().cpu().item())
         else:
             if self.force_prediction_loss_type == "smooth_l1":
                 per_env_loss = torch.nn.functional.smooth_l1_loss(
@@ -1258,7 +1301,8 @@ class Dagger:
 
             cosine_all = torch.nn.functional.cosine_similarity(pred_dir, target_dir, dim=-1, eps=1.0e-8)
             angle_deg = torch.rad2deg(torch.acos(cosine_all.clamp(-1.0 + 1.0e-6, 1.0 - 1.0e-6)))
-            self.latest_force_angle_deg = float(angle_deg[valid_mask].mean().detach().cpu().item())
+            if update_metrics:
+                self.latest_force_angle_deg = float(angle_deg[valid_mask].mean().detach().cpu().item())
 
         return loss
 
@@ -2200,6 +2244,7 @@ class Dagger:
         expected_asset_family_ids = door_asset_family_ids.to(device=self.device, dtype=torch.long)[self.env_asset_idx]
         if not torch.equal(expected_asset_family_ids, self.env_family_ids):
             raise RuntimeError("Door asset family ids and motion family ids are inconsistent.")
+        self._init_train_validation_split()
         self._init_push_pull_semantics_and_targets()
         self.family_env_ids = {
             int(family_id): torch.nonzero(self.env_family_ids == int(family_id), as_tuple=False).squeeze(-1)
@@ -2255,6 +2300,7 @@ class Dagger:
         }
         if self.robot_pcd_num_points is None:
             self.robot_pcd_num_points = self.door_pcd_num_points
+
         self.robot_pcd_num_points = int(self.robot_pcd_num_points)
         self.robot_sampler = FrankaLeapSampler(glorbot_urdf_path, device=self.device, num_points=self.robot_pcd_num_points)
         robot_sampler_joint_names = list(self.robot_sampler.robot.actuated_joint_names)
@@ -2354,6 +2400,39 @@ class Dagger:
         self.pointcloud_camera = getattr(self.ov_env, "pointcloud_camera", None)
         if self.pointcloud_source == "depth" and self.pointcloud_camera is None:
             raise ValueError("pointcloud_source='depth' requires DooropeningEnv to enable the pointcloud camera.")
+
+    @staticmethod
+    def _is_validation_asset_name(asset_name):
+        return str(asset_name).endswith("00")
+
+    def _init_train_validation_split(self):
+        validation_flags = []
+        for asset_idx in self.env_asset_idx.detach().cpu().tolist():
+            asset_name = Path(door_asset_paths[int(asset_idx)]).parent.name
+            validation_flags.append(self._is_validation_asset_name(asset_name))
+
+        self.validation_env_mask = torch.tensor(validation_flags, dtype=torch.bool, device=self.device)
+        self.train_env_mask = ~self.validation_env_mask
+        if not torch.any(self.train_env_mask):
+            raise RuntimeError("Training split is empty. Validation asset-name rule selected every env.")
+
+        train_count_tensor = torch.tensor([int(self.train_env_mask.sum().item())], dtype=torch.float64, device=self.device)
+        validation_count_tensor = torch.tensor(
+            [int(self.validation_env_mask.sum().item())],
+            dtype=torch.float64,
+            device=self.device,
+        )
+        if self.use_ddp:
+            dist.all_reduce(train_count_tensor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(validation_count_tensor, op=dist.ReduceOp.SUM)
+        self.global_train_num_envs = int(train_count_tensor.item())
+        self.global_validation_num_envs = int(validation_count_tensor.item())
+
+        if self.rank == 0:
+            print(
+                "[INFO] Train/validation env split from asset suffix rule: "
+                f"train={self.global_train_num_envs}, validation={self.global_validation_num_envs}"
+            )
 
     def _init_viser_debug_tools(self):
         """Initialize optional raw replay capture state used for point-cloud debugging."""
@@ -2680,6 +2759,7 @@ class Dagger:
                 self.ov_env.set_train_info(int(self.frame))
             elif hasattr(self.ov_env, "_rlgames_env_frames"):
                 self.ov_env._rlgames_env_frames = int(self.frame)
+            self._restore_lr_scheduler_state(weights)
 
         print(f"Loaded student checkpoint: {ckpt}")
         if self.rank == 0 and self._resumed_from_student_ckpt:
@@ -2691,8 +2771,50 @@ class Dagger:
 
     def _apply_optimizer_runtime_overrides(self):
         for param_group in self.optimizer.param_groups:
-            param_group["lr"] = float(self.lr)
             param_group["weight_decay"] = float(self.weight_decay)
+
+    def _build_lr_scheduler(self):
+        return torch.optim.lr_scheduler.LambdaLR(
+            self.optimizer,
+            lr_lambda=self._get_lr_schedule_factor,
+        )
+
+    def _get_lr_schedule_factor(self, scheduler_step):
+        decay_iters = max(1, int(self.lr_decay_iters))
+        min_factor = 0.0 if self.lr <= 0.0 else float(self.min_lr / self.lr)
+        progress = min(max(int(scheduler_step) + 1, 0), decay_iters) / decay_iters
+        return float(1.0 + (min_factor - 1.0) * progress)
+
+    def _restore_lr_scheduler_state(self, checkpoint):
+        if self.lr_scheduler is None:
+            return
+        scheduler_state = checkpoint.get("lr_scheduler_state_dict") if isinstance(checkpoint, dict) else None
+        if scheduler_state is not None:
+            try:
+                self.lr_scheduler.load_state_dict(scheduler_state)
+                restored_lrs = list(getattr(self.lr_scheduler, "_last_lr", []))
+                if restored_lrs:
+                    for param_group, restored_lr in zip(self.optimizer.param_groups, restored_lrs):
+                        param_group["lr"] = float(restored_lr)
+                return
+            except Exception as exc:
+                if self.rank == 0:
+                    print(f"Warning: failed to load LR scheduler state from checkpoint: {exc}")
+
+        # Older checkpoints may not include scheduler state. Reconstruct the
+        # scheduler position from the number of completed optimizer updates.
+        resume_updates = max(0, int(self.student_update_steps))
+        self.lr_scheduler.last_epoch = resume_updates - 1
+        self.lr_scheduler._step_count = max(1, resume_updates)
+        current_lr = float(self.lr) * float(self._get_lr_schedule_factor(self.lr_scheduler.last_epoch))
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = current_lr
+        self.lr_scheduler._last_lr = [float(param_group["lr"]) for param_group in self.optimizer.param_groups]
+
+    def _get_current_learning_rate(self):
+        if getattr(self, "optimizer", None) is None or not self.optimizer.param_groups:
+            return float(self.lr)
+        return float(self.optimizer.param_groups[0]["lr"])
 
     def _force_full_curriculum_state(self):
         target_step = max(
@@ -3560,7 +3682,25 @@ class Dagger:
             self._update_push_pull_condition_buffer(student_output["mode_logits"])
         return student_output
 
-    def _compute_student_loss(self, student_output, teacher_actions, aux_target=None):
+    def _slice_batch_dict(self, batch_dict, env_mask):
+        env_mask = env_mask.to(device=self.device, dtype=torch.bool)
+        sliced = {}
+        for key, value in batch_dict.items():
+            if isinstance(value, torch.Tensor) and value.shape[0] == self.num_envs:
+                sliced[key] = value[env_mask]
+            else:
+                sliced[key] = value
+        return sliced
+
+    def _compute_student_loss(self, student_output, teacher_actions, aux_target=None, env_mask=None, update_metrics=True):
+        if env_mask is not None:
+            env_mask = env_mask.to(device=self.device, dtype=torch.bool)
+            if not torch.any(env_mask):
+                return None, None, None, None, None
+            student_output = self._slice_batch_dict(student_output, env_mask)
+            teacher_actions = teacher_actions[env_mask]
+            if aux_target is not None:
+                aux_target = aux_target[env_mask]
         target = teacher_actions
         if aux_target is not None:
             target = torch.cat([teacher_actions, aux_target], dim=-1)
@@ -3573,12 +3713,20 @@ class Dagger:
         if self.mode_prediction_enabled:
             if "mode_logits" not in student_output:
                 raise RuntimeError("Mode prediction is enabled, but student output does not contain 'mode_logits'.")
-            mode_loss = self._compute_mode_prediction_loss(student_output["mode_logits"])
+            mode_loss = self._compute_mode_prediction_loss(
+                student_output["mode_logits"],
+                env_mask=env_mask,
+                update_metrics=update_metrics,
+            )
             total_loss = total_loss + self.mode_weight * mode_loss
         if self.force_prediction_enabled:
             if "force" not in student_output:
                 raise RuntimeError("Force prediction is enabled, but student output does not contain 'force'.")
-            force_loss = self._compute_force_prediction_loss(student_output["force"])
+            force_loss = self._compute_force_prediction_loss(
+                student_output["force"],
+                env_mask=env_mask,
+                update_metrics=update_metrics,
+            )
             total_loss = total_loss + self.force_prediction_weight * force_loss
         return total_loss, action_loss, aux_loss, mode_loss, force_loss
 
@@ -3677,11 +3825,32 @@ class Dagger:
         self.interval_success_count.zero_()
         self.interval_completed_count.zero_()
 
+    def _get_global_success_rate_for_mask(self, split_mask, global_target):
+        split_mask = split_mask.to(device=self.device, dtype=torch.bool)
+        valid_mask = (self.interval_completed_count > 0) & split_mask
+        per_env_success_rate = torch.zeros_like(self.interval_success_count)
+        per_env_success_rate[valid_mask] = (
+            self.interval_success_count[valid_mask] / self.interval_completed_count[valid_mask]
+        )
+
+        stats = torch.zeros(2, dtype=torch.float64, device=self.device)
+        stats[0] = float(per_env_success_rate[valid_mask].sum().detach().cpu().item())
+        stats[1] = float(valid_mask.sum().detach().cpu().item())
+        if self.use_ddp:
+            dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+        if stats[1] <= 0:
+            return None, False
+
+        is_ready = bool(stats[1].detach().cpu().item() >= global_target)
+        if not is_ready:
+            return None, False
+        return float((stats[0] / stats[1]).detach().cpu().item()), True
+
     def _get_global_success_rates(self):
         num_families = len(DOOR_FAMILY_NAMES)
         stats = torch.zeros((1 + num_families, 2), dtype=torch.float64, device=self.device)
 
-        valid_mask = self.interval_completed_count > 0
+        valid_mask = (self.interval_completed_count > 0) & self.train_env_mask
         per_env_success_rate = torch.zeros_like(self.interval_success_count)
         per_env_success_rate[valid_mask] = (
             self.interval_success_count[valid_mask] / self.interval_completed_count[valid_mask]
@@ -3696,7 +3865,7 @@ class Dagger:
         if self.use_ddp:
             dist.all_reduce(stats, op=dist.ReduceOp.SUM)
 
-        is_ready = bool(stats[0, 1].detach().cpu().item() >= self.global_num_envs)
+        is_ready = bool(stats[0, 1].detach().cpu().item() >= self.global_train_num_envs)
         success_rate = None
         if is_ready and stats[0, 1] > 0:
             success_rate = float((stats[0, 0] / stats[0, 1]).detach().cpu().item())
@@ -3710,16 +3879,22 @@ class Dagger:
                 )
             else:
                 family_success_rates[family_name] = None
-        return success_rate, family_success_rates, is_ready
+        validation_success_rate, validation_ready = self._get_global_success_rate_for_mask(
+            self.validation_env_mask,
+            self.global_validation_num_envs,
+        )
+        return success_rate, family_success_rates, validation_success_rate, is_ready, validation_ready
 
     def _log(
         self,
         iteration,
-        total_loss,
-        action_loss,
-        aux_loss,
-        mode_loss,
-        force_loss,
+        train_total_loss,
+        train_action_loss,
+        train_aux_loss,
+        train_mode_loss,
+        train_force_loss,
+        validation_total_loss,
+        validation_action_loss,
         teacher_forcing_beta,
     ):
         if iteration % self.log_interval != 0:
@@ -3730,9 +3905,17 @@ class Dagger:
         episode_length_seconds = episode_length * env_step_dt if episode_length is not None else None
         success_rate = None
         family_success_rates = {}
+        validation_success_rate = None
         success_rate_ready = False
+        validation_success_rate_ready = False
         if iteration > 0:
-            success_rate, family_success_rates, success_rate_ready = self._get_global_success_rates()
+            (
+                success_rate,
+                family_success_rates,
+                validation_success_rate,
+                success_rate_ready,
+                validation_success_rate_ready,
+            ) = self._get_global_success_rates()
         teacher_env_fraction = self._get_teacher_forcing_env_fraction()
         student_env_fraction = 1.0 - teacher_env_fraction
         iteration_time_ms = self._consume_timing_means()
@@ -3740,16 +3923,20 @@ class Dagger:
         if self.rank == 0:
             print("=" * 10)
             print("ITERATION:", iteration)
-            print("Total Loss:", float(total_loss.detach().cpu()))
-            print("Action Loss:", float(action_loss.detach().cpu()))
-            if aux_loss is not None:
-                print("Aux Loss:", float(aux_loss.detach().cpu()))
-            if mode_loss is not None:
-                print("Direction Loss:", float(mode_loss.detach().cpu()))
-            if force_loss is not None:
-                print("Force Loss:", float(force_loss.detach().cpu()))
+            print("Train Total Loss:", float(train_total_loss.detach().cpu()))
+            print("Train Action Loss:", float(train_action_loss.detach().cpu()))
+            if train_aux_loss is not None:
+                print("Train Aux Loss:", float(train_aux_loss.detach().cpu()))
+            if train_mode_loss is not None:
+                print("Train Direction Loss:", float(train_mode_loss.detach().cpu()))
+            if train_force_loss is not None:
+                print("Train Force Loss:", float(train_force_loss.detach().cpu()))
                 if self.latest_force_angle_deg is not None:
                     print("Force Angle Deg:", self.latest_force_angle_deg)
+            if validation_total_loss is not None:
+                print("Validation Total Loss:", float(validation_total_loss.detach().cpu()))
+            if validation_action_loss is not None:
+                print("Validation Action Loss:", float(validation_action_loss.detach().cpu()))
             if self.latest_mode_direction_acc is not None:
                 print("Direction Acc:", self.latest_mode_direction_acc)
             if self.mode_prediction_loss_enabled:
@@ -3787,6 +3974,7 @@ class Dagger:
             print("Teacher Rollout Env Fraction:", teacher_env_fraction)
             print("Student Rollout Env Fraction:", student_env_fraction)
             print("Student Update Steps:", self.student_update_steps)
+            print("Learning Rate:", self._get_current_learning_rate())
             print("Last Local Update Batch Size:", self.last_local_update_batch_size)
             print("Last Global Update Batch Size:", self.last_global_update_batch_size)
             if episode_reward is not None:
@@ -3796,31 +3984,38 @@ class Dagger:
             if episode_length_seconds is not None:
                 print("Episode Length (s):", episode_length_seconds)
             if success_rate is not None:
-                print("Global Success Rate:", success_rate)
+                print("Train Success Rate:", success_rate)
+            if validation_success_rate is not None:
+                print("Validation Success Rate:", validation_success_rate)
             for family_name, family_success_rate in family_success_rates.items():
                 if family_success_rate is not None:
-                    print(f"Global Success Rate/{family_name}:", family_success_rate)
+                    print(f"Train Success Rate/{family_name}:", family_success_rate)
             if iteration_time_ms is not None:
                 print("Iteration Time (ms):", iteration_time_ms)
             # for key, value in sorted(self.latest_env_log_metrics.items()):
             #     print(f"{key}:", value)
 
         metrics = {
-            "loss/total": float(total_loss.detach().cpu()),
-            "loss/action": float(action_loss.detach().cpu()),
+            "loss/total": float(train_total_loss.detach().cpu()),
+            "loss/action": float(train_action_loss.detach().cpu()),
             "dist/world_size": self.world_size,
             "dist/update_steps": self.student_update_steps,
             "dist/last_local_update_batch_size": self.last_local_update_batch_size,
             "dist/last_global_update_batch_size": self.last_global_update_batch_size,
+            "schedule/learning_rate": self._get_current_learning_rate(),
         }
-        if aux_loss is not None:
-            metrics["loss/aux"] = float(aux_loss.detach().cpu())
-        if mode_loss is not None:
-            metrics["loss/direction"] = float(mode_loss.detach().cpu())
-        if force_loss is not None:
-            metrics["loss/force"] = float(force_loss.detach().cpu())
+        if train_aux_loss is not None:
+            metrics["loss/aux"] = float(train_aux_loss.detach().cpu())
+        if train_mode_loss is not None:
+            metrics["loss/direction"] = float(train_mode_loss.detach().cpu())
+        if train_force_loss is not None:
+            metrics["loss/force"] = float(train_force_loss.detach().cpu())
             if self.latest_force_angle_deg is not None:
                 metrics["stats/force_angle_deg"] = self.latest_force_angle_deg
+        if validation_total_loss is not None:
+            metrics["val/loss_total"] = float(validation_total_loss.detach().cpu())
+        if validation_action_loss is not None:
+            metrics["val/loss_action"] = float(validation_action_loss.detach().cpu())
         if self.latest_mode_direction_acc is not None:
             metrics["stats/dir_acc"] = self.latest_mode_direction_acc
         if self.mode_prediction_loss_enabled:
@@ -3863,6 +4058,8 @@ class Dagger:
             metrics["stats/episode_length_seconds"] = episode_length_seconds
         if success_rate is not None:
             metrics["success/success_rate"] = success_rate
+        if validation_success_rate is not None:
+            metrics["success/validation_success_rate"] = validation_success_rate
         for family_name, family_success_rate in family_success_rates.items():
             if family_success_rate is not None:
                 metrics[f"success/success_rate/{family_name}"] = family_success_rate
@@ -3878,7 +4075,10 @@ class Dagger:
                     continue
                 metrics[key] = value
         self._wandb_log(metrics, step=iteration)
-        if success_rate_ready:
+        should_clear_success_rates = success_rate_ready and (
+            self.global_validation_num_envs <= 0 or validation_success_rate_ready
+        )
+        if should_clear_success_rates:
             self._clear_interval_success_rates()
 
     def distill(self):
@@ -3933,11 +4133,13 @@ class Dagger:
                     self._viser_pending_debug_frame = None
 
                 teacher_actions = None
-                total_loss = None
-                action_loss = None
-                aux_loss = None
-                mode_loss = None
-                force_loss = None
+                train_total_loss = None
+                train_action_loss = None
+                train_aux_loss = None
+                train_mode_loss = None
+                train_force_loss = None
+                validation_total_loss = None
+                validation_action_loss = None
 
                 if not self.play_policy:
                     teacher_output = self._get_teacher_actions(obs)
@@ -3947,18 +4149,31 @@ class Dagger:
                         if self.latest_aux_target_vector is None:
                             raise RuntimeError("Expected the latest auxiliary target vector while aux prediction is enabled.")
                         aux_target = self._get_aux_target(self.latest_aux_target_vector)
-                    total_loss, action_loss, aux_loss, mode_loss, force_loss = self._compute_student_loss(
+                    train_total_loss, train_action_loss, train_aux_loss, train_mode_loss, train_force_loss = self._compute_student_loss(
                         student_output,
                         teacher_output["mus"],
                         aux_target=aux_target,
+                        env_mask=self.train_env_mask,
+                        update_metrics=True,
                     )
-                    local_batch_size = int(student_actions.shape[0])
+                    if train_total_loss is None:
+                        raise RuntimeError("Training loss could not be computed because the training split is empty.")
+                    validation_total_loss, validation_action_loss, _, _, _ = self._compute_student_loss(
+                        student_output,
+                        teacher_output["mus"],
+                        aux_target=aux_target,
+                        env_mask=self.validation_env_mask,
+                        update_metrics=False,
+                    )
+                    local_batch_size = int(self.train_env_mask.sum().detach().cpu().item())
                     global_batch_size = self._get_global_batch_size(local_batch_size)
                     self.optimizer.zero_grad()
-                    total_loss.backward()
+                    train_total_loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.student_model_ddp.parameters(), self.grad_clip)
                     self.optimizer.step()
+                    self.lr_scheduler.step()
                     self.student_update_steps += 1
+                    self._apply_optimizer_runtime_overrides()
                     self.last_local_update_batch_size = local_batch_size
                     self.last_global_update_batch_size = global_batch_size
 
@@ -3995,16 +4210,18 @@ class Dagger:
                     self._seed_push_pull_condition_buffer(done_mask)
                     self._resample_teacher_forcing_env_mask(iteration + 1, done_mask)
 
-                if total_loss is not None:
+                if train_total_loss is not None:
                     self._sync_timing_device()
                     self._record_timing(time.perf_counter() - iteration_start_time)
                     self._log(
                         iteration,
-                        total_loss,
-                        action_loss,
-                        aux_loss,
-                        mode_loss,
-                        force_loss,
+                        train_total_loss,
+                        train_action_loss,
+                        train_aux_loss,
+                        train_mode_loss,
+                        train_force_loss,
+                        validation_total_loss,
+                        validation_action_loss,
                         teacher_forcing_beta,
                     )
                 else:
@@ -4034,6 +4251,7 @@ class Dagger:
         checkpoint = {
             "model_state_dict": self.student_model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
+            "lr_scheduler_state_dict": self.lr_scheduler.state_dict(),
             "frame": self.frame,
             "epoch": self.epoch_num,
             "iteration": int(iteration),
