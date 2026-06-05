@@ -125,15 +125,15 @@ transformer_cfg:
   decoder_dim_feedforward: 1024
 
 dagger:
-  learning_rate: 1.0e-4
+  learning_rate: 2.0e-4
   lr_schedule: cosine
-  min_learning_rate: 1.0e-5
+  min_learning_rate: 2.0e-5
   weight_decay: 1.0e-4
   grad_clip: 1.0
   num_iters: 250000
-  lr_decay_iters: 100000
-  teacher_forcing_warmup_iters: 5000
-  teacher_forcing_transition_iters: 20000
+  lr_decay_iters: 80000
+  teacher_forcing_warmup_iters: 2000
+  teacher_forcing_transition_iters: 18000
   teacher_forcing_min_beta: 0.0
   aux_feedback_to_policy: true  # When false, aux input stays zero instead of feeding back predictions.
   prediction_training:
