@@ -38,8 +38,8 @@ temporal_obs:
 
 temporal_state_encoders:
   enabled: true
-  # timestamps_ms: [0, 300, 600, 900, 1200, 1500]
-  timestamps_ms: [0, 400, 800, 1200, 1600, 2000, 2400, 2800]
+  timestamps_ms: [0, 300, 600, 900, 1200, 1500]
+  # timestamps_ms: [0, 400, 800, 1200, 1600, 2000, 2400, 2800]
   fields:
     - q_arm
     - q_hand

@@ -140,7 +140,6 @@ parser.add_argument("--teacher-partnetv5", "--teacher_partnetv5", dest="teacher_
 parser.add_argument("--teacher-partnetv6", "--teacher_partnetv6", dest="teacher_partnetv6", type=str, default=None, help="Teacher checkpoint for PartNetv6.")
 parser.add_argument("--teacher-partnetv7", "--teacher_partnetv7", dest="teacher_partnetv7", type=str, default=None, help="Teacher checkpoint for PartNetv7.")
 parser.add_argument("--teacher-partnetv8", "--teacher_partnetv8", dest="teacher_partnetv8", type=str, default=None, help="Teacher checkpoint for PartNetv8.")
-parser.add_argument("--play_policy", action="store_true", default=False, help="Play a distilled policy.")
 parser.add_argument(
     "--finetune",
     action="store_true",
@@ -477,8 +476,6 @@ def main(env_cfg, agent_cfg: dict):
     student_ckpt = resolve_checkpoint(args_cli.student_ckpt)
     if args_cli.finetune and student_ckpt is None:
         raise ValueError("--finetune requires --student_ckpt so the student can resume from a trained checkpoint.")
-    if args_cli.finetune and args_cli.play_policy:
-        raise ValueError("--finetune cannot be combined with --play_policy.")
 
     train_dir = "runs"
     default_wandb_project = "DoorOpening-Distillation-Finetune" if args_cli.finetune else "DoorOpening-Distillation"
@@ -538,7 +535,7 @@ def main(env_cfg, agent_cfg: dict):
         cfg=env_cfg,
         render_mode="rgb_array" if args_cli.video and (args_cli.video_ranks == "all" or rank == 0) else None,
     )
-    ov_env = _configure_rollout_env_mode(env, args_cli.play_policy)
+    ov_env = _configure_rollout_env_mode(env)
     env_asset_indices = getattr(ov_env, "env_asset_indices", None)
     if env_asset_indices is not None and len(env_asset_indices) > 0:
         first_asset_idx = int(env_asset_indices[0].detach().cpu().item())
