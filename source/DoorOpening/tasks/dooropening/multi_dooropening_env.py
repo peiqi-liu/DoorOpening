@@ -985,7 +985,7 @@ class DooropeningEnv(DirectRLEnv):
             scaled_actions[:, self._target_finger_slice] * self.cfg.finger_action_scale
         )
         scaled_actions[:, self._target_arx_slice] = (
-            scaled_actions[:, self._target_arx_slice] * self.cfg.arm_action_scale
+            scaled_actions[:, self._target_arx_slice] * self.cfg.arx_action_scale
         )
         return scaled_actions
 
