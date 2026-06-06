@@ -325,6 +325,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     base_action_scale = 1.0
     arm_action_scale = 0.6
     finger_action_scale = 0.5
+    arx_action_scale = 0.6
 
     # Deep Mimic Reward Parameters
     robot_body_quat_w = 1.0
