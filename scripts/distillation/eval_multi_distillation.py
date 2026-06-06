@@ -180,7 +180,7 @@ parser.add_argument("--print_interval", type=int, default=15, help="Print rollou
 parser.add_argument(
     "--key_body_pos_threshold",
     type=float,
-    default=None,
+    default=1.2,
     help="Max robot key-body position drift limit in meters. Defaults to env reset_key_body_pos_delta_max.",
 )
 parser.add_argument(
@@ -192,7 +192,7 @@ parser.add_argument(
 parser.add_argument(
     "--door_joint_pos_threshold",
     type=float,
-    default=None,
+    default=1.2,
     help="Max door joint drift limit in radians/meters. Defaults to env reset_door_joint_pos_delta_max.",
 )
 parser.add_argument(
@@ -783,7 +783,19 @@ def _flush_finished_eval_viser_raw_streams(dagger, newly_finished):
         del dagger._viser_raw_streams[stream_name]
 
 
-def _print_progress(run_index, step, active, timed_out, drifted, metrics):
+def _compute_eval_action_loss(dagger, obs, student_output, active_mask):
+    if student_output is None or "action" not in student_output or not dagger._has_teacher():
+        return None
+    active_mask = active_mask.to(device=dagger.device, dtype=torch.bool)
+    if not torch.any(active_mask):
+        return None
+    teacher_output = dagger._get_teacher_actions(obs)
+    pred_actions = student_output["action"][active_mask]
+    target_actions = teacher_output["mus"][active_mask].unsqueeze(1)
+    return torch.nn.functional.mse_loss(pred_actions, target_actions)
+
+
+def _print_progress(run_index, step, active, timed_out, drifted, metrics, action_loss=None):
     active_count = int(active.sum().detach().cpu().item())
     timeout_count = int(timed_out.sum().detach().cpu().item())
     drift_count = int(drifted.sum().detach().cpu().item())
@@ -794,13 +806,15 @@ def _print_progress(run_index, step, active, timed_out, drifted, metrics):
         }
     else:
         active_metrics = {name: 0.0 for name in metrics}
+    action_loss_text = "n/a" if action_loss is None else f"{float(action_loss.detach().cpu().item()):.6f}"
     print(
         "[EVAL] "
-        f"run={run_index} step={step} active={active_count} "
+        f"run={run_index} step={step} active={active_count} activate_rate{active_count / (active_count + drift_count)}"
         f"timed_out={timeout_count} drifted={drift_count} "
         f"max_key_pos={active_metrics['key_body_pos']:.4f} "
         f"max_key_quat={active_metrics['key_body_quat']:.4f} "
-        f"max_door={active_metrics['door_joint_pos']:.4f}"
+        f"max_door={active_metrics['door_joint_pos']:.4f} "
+        f"action_loss={action_loss_text}"
     )
 
 
@@ -898,15 +912,13 @@ def main(env_cfg, agent_cfg: dict):
         base_env = _get_base_env(env)
 
     student_ckpt = _resolve_checkpoint(args_cli.student_ckpt)
+    teacher_config = {}
     if args_cli.use_teacher:
         multi_teacher_ckpts, teacher_ckpt = _resolve_multi_teacher_checkpoints()
         if multi_teacher_ckpts is None and teacher_ckpt is None:
             raise ValueError("--use_teacher requires --teacher or per-family teacher checkpoints.")
         teacher_cfg_path = _resolve_teacher_cfg_path(args_cli.teacher_cfg)
-        teacher_config = {
-            "cfg": teacher_cfg_path,
-            "obs_type": "policy",
-        }
+        teacher_config = {"cfg": teacher_cfg_path, "obs_type": "policy"}
         if multi_teacher_ckpts is not None:
             teacher_config["teachers"] = {
                 family_name: {"ckpt": ckpt}
@@ -918,8 +930,21 @@ def main(env_cfg, agent_cfg: dict):
     else:
         if student_ckpt is None:
             raise ValueError("Student evaluation requires --student_ckpt, or use --use_teacher.")
-        teacher_config = {}
         print("[INFO] Eval action source: student")
+        multi_teacher_ckpts, teacher_ckpt = _resolve_multi_teacher_checkpoints()
+        if multi_teacher_ckpts is not None or teacher_ckpt is not None:
+            teacher_cfg_path = _resolve_teacher_cfg_path(args_cli.teacher_cfg)
+            teacher_config = {"cfg": teacher_cfg_path, "obs_type": "policy"}
+            if multi_teacher_ckpts is not None:
+                teacher_config["teachers"] = {
+                    family_name: {"ckpt": ckpt}
+                    for family_name, ckpt in multi_teacher_ckpts.items()
+                }
+            else:
+                teacher_config["ckpt"] = teacher_ckpt
+            print("[INFO] Eval action-loss target source: teacher")
+        else:
+            print("[INFO] Eval action-loss target source: unavailable (teacher not configured)")
 
     dagger_config = {
         "student": {
@@ -933,7 +958,7 @@ def main(env_cfg, agent_cfg: dict):
     }
     dagger = Dagger(env, dagger_config, summaries_dir=summaries_dir, nn_dir=nn_dir)
     dagger.student_model_ddp.eval()
-    if args_cli.use_teacher:
+    if dagger._has_teacher():
         for teacher_model in dagger._iter_teacher_models():
             teacher_model.eval()
     print(f"[INFO] Observation lag for eval follows student YAML: enabled={bool(dagger.observation_lag_enabled)}")
@@ -1006,6 +1031,7 @@ def main(env_cfg, agent_cfg: dict):
             "key_body_quat": torch.zeros(base_env.num_envs, dtype=torch.float32, device=base_env.device),
             "door_joint_pos": torch.zeros(base_env.num_envs, dtype=torch.float32, device=base_env.device),
         }
+        last_action_loss = None
 
         step = 0
         while simulation_app.is_running():
@@ -1034,6 +1060,8 @@ def main(env_cfg, agent_cfg: dict):
                         raise RuntimeError(
                             "Mode prediction is enabled, but eval student output does not contain mode_logits."
                         )
+                acting_mask = active.clone()
+                last_action_loss = _compute_eval_action_loss(dagger, obs, student_output, acting_mask)
                 actions[~active.to(device=actions.device)] = 0.0
                 obs, _, _, _, _ = env.step(actions)
                 frozen_state.restore()
@@ -1100,7 +1128,7 @@ def main(env_cfg, agent_cfg: dict):
                 args_cli.print_interval > 0
                 and (step == 1 or step % args_cli.print_interval == 0 or not torch.any(active))
             ):
-                _print_progress(run_index, step, active, timed_out, drifted, last_metrics)
+                _print_progress(run_index, step, active, timed_out, drifted, last_metrics, action_loss=last_action_loss)
                 _print_mode_progress(run_index, step, mode_tracker, mode_step_summary)
 
         active_count = int(active.sum().detach().cpu().item())
