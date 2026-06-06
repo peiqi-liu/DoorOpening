@@ -25,7 +25,6 @@ import pickle as pkl
 import argparse
 
 from isaaclab.app import AppLauncher
-import numpy as np
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Tutorial on adding sensors on a robot.")
@@ -49,14 +48,13 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
+import numpy as np
 import torch
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
 from isaaclab.utils import configclass
-
-from isaaclab.assets import ArticulationCfg
 
 from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, DEFAULT_JOINT_POS
 from DoorOpening.assets.door.door_cfg import DOOR_CONFIG, edit_door_articulation
@@ -70,9 +68,13 @@ from isaaclab.markers import VisualizationMarkers
 from isaaclab.markers.config import FRAME_MARKER_CFG
 from isaaclab.utils.math import quat_from_euler_xyz
 
-from isaaclab.sensors import ContactSensorCfg
+from isaaclab.sensors import CameraCfg, ContactSensorCfg
 
 torch.set_printoptions(precision=3, sci_mode=False)
+
+CAMERA_EULER_ANGLES = torch.tensor([-np.pi / 4, 0.0, 0.0])
+CAMERA_QUAT = quat_from_euler_xyz(*CAMERA_EULER_ANGLES)
+
 
 @configclass
 class SensorsSceneCfg(InteractiveSceneCfg):
@@ -100,6 +102,17 @@ class SensorsSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Door",
     )
 
+    camera = CameraCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/x5_camera_link/cam",
+        update_period=0.0,
+        update_latest_camera_pose=True,
+        height=480,
+        width=640,
+        data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(focal_length=8.0, clipping_range=(0.1, 20.0)),
+        offset=CameraCfg.OffsetCfg(pos=(0.0, 0.0, 0.0), rot=CAMERA_QUAT, convention="world"),
+    )
+
     contact_forces_door1 = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Door/link_1",
         update_period=0.0,
@@ -117,12 +130,78 @@ class SensorsSceneCfg(InteractiveSceneCfg):
     )
 
 
+class IsaacCameraViewer:
+    """Render RGB camera frames inside an Isaac Kit UI window."""
+
+    def __init__(self, title: str, width: int = 640, height: int = 480):
+        import omni.ui as ui
+
+        self._ui = ui
+        self._provider = ui.ByteImageProvider()
+        self._window = ui.Window(
+            title,
+            width=width + 24,
+            height=height + 48,
+            visible=True,
+            dock_preference=ui.DockPreference.RIGHT_TOP,
+        )
+
+        blank_frame = np.zeros((height, width, 4), dtype=np.uint8)
+        blank_frame[..., 3] = 255
+
+        with self._window.frame:
+            with self._ui.VStack(spacing=4):
+                self._ui.Label("RGB stream", height=20)
+                with self._ui.Frame(width=width, height=height):
+                    self._ui.ImageWithProvider(self._provider)
+
+        self.update_image(blank_frame)
+
+    @staticmethod
+    def _to_rgba(image: np.ndarray) -> np.ndarray:
+        if image.dtype != np.uint8:
+            image = np.clip(image, 0, 255).astype(np.uint8)
+
+        if image.ndim == 2:
+            image = np.repeat(image[..., None], 3, axis=-1)
+        elif image.ndim == 3 and image.shape[2] == 1:
+            image = np.repeat(image, 3, axis=-1)
+
+        if image.ndim != 3 or image.shape[2] not in (3, 4):
+            raise ValueError(f"Expected image shape (H, W), (H, W, 1), (H, W, 3), or (H, W, 4), got {image.shape}")
+
+        if image.shape[2] == 3:
+            alpha = np.full((*image.shape[:2], 1), 255, dtype=np.uint8)
+            image = np.concatenate((image, alpha), axis=-1)
+
+        return np.ascontiguousarray(image)
+
+    def update_image(self, image: np.ndarray):
+        rgba = self._to_rgba(np.asarray(image))
+        height, width = rgba.shape[:2]
+        self._provider.set_bytes_data(rgba.reshape(-1).data, [width, height])
+
+    def update_from_camera(self, camera, camera_index: int = 0):
+        rgb_frame = camera.data.output.get("rgb")
+        if rgb_frame is None or not self._window.visible:
+            return
+
+        frame = rgb_frame[camera_index].detach().cpu().numpy()
+        self.update_image(frame)
+
+    def close(self):
+        if self._window is not None:
+            self._window.visible = False
+
+
 def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     """Run the simulator."""
     # Define simulation stepping
     sim_dt = sim.get_physics_dt()
     sim_time = 0.0
     count = 0
+    camera = scene["camera"]
+    camera_viewer = IsaacCameraViewer("Glorbot RGB Camera")
     # Simulate physics
 
 
@@ -182,82 +261,89 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     # handle_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)
     # board_cfg = FRAME_MARKER_CFG.replace(prim_path="/World/BoardFrame")
     # board_cfg.markers["frame"].scale = (0.3, 0.3, 0.3)
-    while simulation_app.is_running():
-        count += 1
-        slider_pos = controller.q_slider.clone()
-        joint_pos = scene["robot"].data.default_joint_pos.clone()
-        joint_pos[..., :] = slider_pos
-
-        door_pos = controller.door_q_slider.clone()
-        door_joint_pos = scene["door"].data.default_joint_pos.clone()
-        door_joint_pos[..., :] = door_pos
-        
-        edit_door_articulation(scene["door"], door_closed_range=0.02, hinge_range=0.4)
-        # scene["door"].write_joint_position_to_sim(door_joint_pos)
-        if not args_cli.force:
-            scene["robot"].set_joint_position_target(joint_pos)
-            scene["door"].set_joint_position_target(door_joint_pos)
-        else:
-            scene["robot"].write_joint_position_to_sim(joint_pos)
-            scene["door"].write_joint_position_to_sim(door_joint_pos)
-
-        # print("-------------------------------")
-        if count % 10 == 0 and args_cli.debug:
-            # Keep net_forces_w in this debug script because it is intended to show
-            # total contact load on each door link, not filtered handle-hand contact.
-            # print(scene["contact_forces_door1"])
-            # print("Received force matrix of: ", scene["contact_forces_door1"].data.force_matrix_w)
-            print("Received contact force of link 1: ", scene["contact_forces_door1"].data.net_forces_w)
-            print("-------------------------------")
-            # print(scene["contact_forces_door2"])
-            # print("Received force matrix of: ", scene["contact_forces_door2"].data.force_matrix_w)
-            print("Received contact force of link 2: ", scene["contact_forces_door2"].data.net_forces_w)
-            print("-------------------------------")
-        # -- write data to sim
-        if controller.playback:
-            q = controller.traj[controller.play_idx]
+    try:
+        while simulation_app.is_running():
+            count += 1
+            slider_pos = controller.q_slider.clone()
             joint_pos = scene["robot"].data.default_joint_pos.clone()
-            joint_pos[..., :] = q
+            joint_pos[..., :] = slider_pos
 
-            qd = controller.qd[controller.play_idx]
-            joint_vel = scene["robot"].data.default_joint_vel.clone()
-            joint_vel[..., :] = qd
-            # if controller.play_idx == 0:
-            #     scene["robot"].write_joint_state_to_sim(joint_pos, joint_vel)
-            # else:
-            #     scene["robot"].set_joint_velocity_target(joint_vel)
-            #     scene["robot"].set_joint_position_target(joint_pos)
-            scene["robot"].write_joint_state_to_sim(joint_pos, joint_vel)
-
-            door_q = controller.door_traj[controller.play_idx]
+            door_pos = controller.door_q_slider.clone()
             door_joint_pos = scene["door"].data.default_joint_pos.clone()
-            door_joint_pos[..., :] = door_q
+            door_joint_pos[..., :] = door_pos
+            
+            edit_door_articulation(scene["door"], door_closed_range=0.02, hinge_range=0.4)
             # scene["door"].write_joint_position_to_sim(door_joint_pos)
-            # scene["door"].set_joint_position_target(door_joint_pos)
-            scene["door"].write_joint_position_to_sim(door_joint_pos)
+            if not args_cli.force:
+                scene["robot"].set_joint_position_target(joint_pos)
+                scene["door"].set_joint_position_target(door_joint_pos)
+            else:
+                scene["robot"].write_joint_position_to_sim(joint_pos)
+                scene["door"].write_joint_position_to_sim(door_joint_pos)
 
-            # Write these poses data to the controller so it can be saved to pickle later
-            controller.robot_body_pos_traj.append(scene["robot"].data.body_pos_w.squeeze().cpu().clone())
-            controller.robot_body_quat_traj.append(scene["robot"].data.body_quat_w.squeeze().cpu().clone())
-            controller.door_pos_traj.append(scene["door"].data.body_pos_w.squeeze().cpu().clone())
+            # print("-------------------------------")
+            if count % 10 == 0 and args_cli.debug:
+                # Keep net_forces_w in this debug script because it is intended to show
+                # total contact load on each door link, not filtered handle-hand contact.
+                # print(scene["contact_forces_door1"])
+                # print("Received force matrix of: ", scene["contact_forces_door1"].data.force_matrix_w)
+                print("Received contact force of link 1: ", scene["contact_forces_door1"].data.net_forces_w)
+                print("-------------------------------")
+                # print(scene["contact_forces_door2"])
+                # print("Received force matrix of: ", scene["contact_forces_door2"].data.force_matrix_w)
+                print("Received contact force of link 2: ", scene["contact_forces_door2"].data.net_forces_w)
+                print("-------------------------------")
+            # -- write data to sim
+            if controller.playback:
+                q = controller.traj[controller.play_idx]
+                joint_pos = scene["robot"].data.default_joint_pos.clone()
+                joint_pos[..., :] = q
 
-            controller.play_idx += 1
-            if controller.play_idx >= len(controller.traj):
-                controller.playback = False
-                print("[PLAYBACK] Finished")
-        
-        scene.write_data_to_sim()
-        # perform step
-        sim.step()
-        # update sim-time
-        sim_time += sim_dt
-        count += 1
-        # update buffers
-        scene.update(sim_dt)
+                qd = controller.qd[controller.play_idx]
+                joint_vel = scene["robot"].data.default_joint_vel.clone()
+                joint_vel[..., :] = qd
+                # if controller.play_idx == 0:
+                #     scene["robot"].write_joint_state_to_sim(joint_pos, joint_vel)
+                # else:
+                #     scene["robot"].set_joint_velocity_target(joint_vel)
+                #     scene["robot"].set_joint_position_target(joint_pos)
+                scene["robot"].write_joint_state_to_sim(joint_pos, joint_vel)
+
+                door_q = controller.door_traj[controller.play_idx]
+                door_joint_pos = scene["door"].data.default_joint_pos.clone()
+                door_joint_pos[..., :] = door_q
+                # scene["door"].write_joint_position_to_sim(door_joint_pos)
+                # scene["door"].set_joint_position_target(door_joint_pos)
+                scene["door"].write_joint_position_to_sim(door_joint_pos)
+
+                # Write these poses data to the controller so it can be saved to pickle later
+                controller.robot_body_pos_traj.append(scene["robot"].data.body_pos_w.squeeze().cpu().clone())
+                controller.robot_body_quat_traj.append(scene["robot"].data.body_quat_w.squeeze().cpu().clone())
+                controller.door_pos_traj.append(scene["door"].data.body_pos_w.squeeze().cpu().clone())
+
+                controller.play_idx += 1
+                if controller.play_idx >= len(controller.traj):
+                    controller.playback = False
+                    print("[PLAYBACK] Finished")
+            
+            scene.write_data_to_sim()
+            # perform step
+            sim.step()
+            # update sim-time
+            sim_time += sim_dt
+            count += 1
+            # update buffers
+            scene.update(sim_dt)
+
+            camera_viewer.update_from_camera(camera)
+    finally:
+        camera_viewer.close()
 
 
 def main():
     """Main function."""
+    if not getattr(args_cli, "enable_cameras", False):
+        raise ValueError("--enable_cameras is required to stream the robot RGB camera in the Isaac UI.")
 
     # Initialize the simulation context
     sim_cfg = sim_utils.SimulationCfg(dt=1 / 60, device=args_cli.device)
