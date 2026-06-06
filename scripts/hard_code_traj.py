@@ -59,7 +59,7 @@ from isaaclab.utils import configclass
 from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, DEFAULT_JOINT_POS
 from DoorOpening.assets.door.door_cfg import DOOR_CONFIG, edit_door_articulation
 
-from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES, CAMERA_JOINT_DEFAULT_VALUES
+from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
 
 from DoorOpening.motion.slider_controller import OmniJointController
@@ -231,7 +231,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     scene.reset()
     print("[INFO]: Resetting robot state...")
 
-    controller = OmniJointController(scene, FULL_JOINT_NAMES + list(CAMERA_JOINT_DEFAULT_VALUES.keys()))
+    controller = OmniJointController(scene, FULL_JOINT_NAMES)
 
     cfg = FRAME_MARKER_CFG.replace(prim_path="/World/GoalFrame")
     cfg.markers["frame"].scale = (0.03, 0.03, 0.03)

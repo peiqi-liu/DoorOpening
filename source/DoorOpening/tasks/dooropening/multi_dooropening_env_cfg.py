@@ -8,6 +8,7 @@ from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
 from DoorOpening.constants.door_constants import DOOR_BODY_NAMES, DOOR_JOINT_NAMES
 from DoorOpening.constants.robot_constants import (
+    CAMERA_JOINT_NAMES,
     DEFAULT_JOINT_POS,
     ROBOT_KEY_BODY_NAMES,
     ROBOT_RESET_KEY_BODY_NAMES,
@@ -185,6 +186,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         'finger_joint_11',
     ]
 
+    arx_joints = CAMERA_JOINT_NAMES[:4]
+
     contact_forces_door2 = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Door/link_2",
         update_period=0.0,
@@ -261,28 +264,60 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # door(s)
     door_cfg: ArticulationCfg = ALL_DOOR_CONFIGS.replace(prim_path="/World/envs/env_.*/Door")
 
-    actuated_joints_num = len(arm_joints) + len(base_joints) + len(finger_joints)
+    actuated_joints_num = len(arm_joints) + len(base_joints) + len(finger_joints) + len(arx_joints)
     action_space = actuated_joints_num * 1
     # action_space = len(arm_joints) + len(base_joints) + 4
+    # Per twist index we concatenate:
+    # - future robot key-body positions: `len(robot_key_bodies) * 3`
+    # - future robot key-body 6D rotations: `len(robot_key_bodies) * 6`
+    # - future door body position in the robot base frame: `3`
+    # - future door joint positions: `len(door_joint_names)`
+    # - future Panda arm joint deltas: `len(arm_joints)`
+    # - future ARX joint deltas: `len(arx_joints)`
+    # - future base joint deltas: `len(base_joints)`
     twist_observation_space = len(twist_indices) * (
         len(robot_key_bodies) * 3 +
         len(robot_key_bodies) * 6 +
         3 +
         len(door_joint_names) +
         len(arm_joints) +
+        len(arx_joints) +
         len(base_joints)
     )
 
-    observation_space = \
-        actuated_joints_num * 3 +\
-        len(robot_key_bodies) * 3 +\
-        (len(robot_key_bodies) - 1) * (3 + 6) + 6 +\
-        len(door_body_names) * 3 +\
-        len(door_joint_names) * 2
+    # Observation layout:
+    # - proprioception: current actuated joint positions + joint velocities + PD targets
+    #   => `actuated_joints_num * 3`
+    #   Adding the 4 ARX joints increases this block by `4 * 3 = 12` dims.
+    # - key-body position tracking error in the base frame
+    #   => `len(robot_key_bodies) * 3`
+    # - non-base key-body poses in the base frame:
+    #   local position (3) + 6D rotation (6) for each key body except the base body itself
+    #   => `(len(robot_key_bodies) - 1) * (3 + 6)`
+    # - base linear/angular velocity in the base frame
+    #   => `6`
+    # - door body positions in the base frame
+    #   => `len(door_body_names) * 3`
+    # - current and reference door joint positions
+    #   => `len(door_joint_names) * 2`
+    proprioception_observation_space = actuated_joints_num * 3
+    key_body_error_observation_space = len(robot_key_bodies) * 3
+    robot_pose_observation_space = (len(robot_key_bodies) - 1) * (3 + 6)
+    base_velocity_observation_space = 6
+    door_body_observation_space = len(door_body_names) * 3
+    door_joint_observation_space = len(door_joint_names) * 2
+
+    observation_space = (
+        proprioception_observation_space
+        + key_body_error_observation_space
+        + robot_pose_observation_space
+        + base_velocity_observation_space
+        + door_body_observation_space
+        + door_joint_observation_space
+    )
     state_space = observation_space
     num_observations = observation_space
     num_states = state_space
-    #  5 * 3 +\
     
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=False)
@@ -297,6 +332,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_base_joint_pos_w = 3.0
     robot_arm_joint_pos_w = 3.0
     robot_finger_joint_pos_w = 1.0
+    robot_arx_joint_pos_w = 3.0
     robot_base_joint_vel_w = 1.0
     robot_arm_joint_vel_w = 2.0
     robot_finger_joint_vel_w = 0.5

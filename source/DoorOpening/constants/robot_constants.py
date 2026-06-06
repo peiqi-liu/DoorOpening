@@ -83,6 +83,15 @@ FRANKA_JOINT_NAMES = [
     'panda_joint7',
 ]
 
+CAMERA_JOINT_NAMES = [
+    "x5_joint1", 
+    "x5_joint2", 
+    "x5_joint3", 
+    "x5_joint4", 
+    "x5_joint5", 
+    "x5_joint6",
+]
+
 BASE_JOINT_NAMES = [
     'base_x_joint',
     'base_y_joint',
@@ -111,7 +120,7 @@ FINGER_JOINT_NAMES = [
     'finger_joint_15',
 ]
 
-FULL_JOINT_NAMES = BASE_JOINT_NAMES + FRANKA_JOINT_NAMES + FINGER_JOINT_NAMES
+FULL_JOINT_NAMES = BASE_JOINT_NAMES + FRANKA_JOINT_NAMES + FINGER_JOINT_NAMES + CAMERA_JOINT_NAMES
 
 ROBOT_KEY_BODY_NAMES = [
     "tidybot2_base_link",
