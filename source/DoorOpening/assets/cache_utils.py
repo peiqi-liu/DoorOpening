@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import os
 import time
+import xml.etree.ElementTree as ET
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
@@ -261,7 +262,9 @@ def _deduplicate_urdf_cfgs(cfgs: Iterable[object]) -> list[object]:
 
 def _convert_and_validate_urdf(converter_cls: type, cfg: object) -> None:
     """Run Isaac Lab's converter and reject stale/corrupt USD cache outputs."""
+    _log_asset_event("convert-start", cfg)
     converter_cls(cfg)
+    _log_asset_event("convert-finish", cfg)
     if not _is_cached_usd_missing_default_prim(
         getattr(cfg, "asset_path", ""),
         getattr(cfg, "usd_dir", ""),
@@ -272,16 +275,20 @@ def _convert_and_validate_urdf(converter_cls: type, cfg: object) -> None:
     # The converter may have skipped a stale cache because the config hash matched.
     # Force one repair attempt before failing the distributed launch.
     if not bool(getattr(cfg, "force_usd_conversion", False)):
+        _log_asset_event("convert-repair", cfg)
         setattr(cfg, "force_usd_conversion", True)
         with contextlib.suppress(FileNotFoundError):
             (Path(str(getattr(cfg, "usd_dir", ""))) / ".asset_hash").unlink()
         converter_cls(cfg)
+        _log_asset_event("convert-repair-finish", cfg)
 
     if _is_cached_usd_missing_default_prim(
         getattr(cfg, "asset_path", ""),
         getattr(cfg, "usd_dir", ""),
         getattr(cfg, "usd_file_name", None),
     ):
+        with contextlib.suppress(Exception):
+            _validate_generated_usd_outputs(cfg)
         usd_path = _expected_usd_path(
             getattr(cfg, "asset_path", ""),
             getattr(cfg, "usd_dir", ""),
@@ -290,9 +297,10 @@ def _convert_and_validate_urdf(converter_cls: type, cfg: object) -> None:
         with contextlib.suppress(FileNotFoundError):
             (Path(str(getattr(cfg, "usd_dir", ""))) / ".asset_hash").unlink()
         raise RuntimeError(
-            "URDF conversion produced an invalid USD cache with no default prim: "
+            "URDF conversion produced an invalid USD cache: "
             f"asset_path={getattr(cfg, 'asset_path', None)} usd_path={usd_path}"
         )
+    _validate_generated_usd_outputs(cfg)
 
 
 def _is_cached_usd_missing_default_prim(
@@ -311,13 +319,16 @@ def _is_cached_usd_missing_default_prim(
         return b"defaultPrim" not in usd_path.read_bytes()
 
     try:
-        stage = Usd.Stage.Open(str(usd_path))
+        stage = _safe_open_usd_stage(
+            usd_path,
+            context=f"cached-usd-validation asset_path={Path(str(asset_path)).expanduser().resolve()}",
+        )
     except Exception:
         return True
-    if stage is None:
-        return True
     default_prim = stage.GetDefaultPrim()
-    return not bool(default_prim and default_prim.IsValid())
+    if not bool(default_prim and default_prim.IsValid()):
+        return True
+    return _generated_usd_has_tmp_references(usd_dir_obj=Path(str(usd_dir)).expanduser().resolve())
 
 
 def _expected_usd_path(
@@ -368,3 +379,123 @@ def _release_lock(lock_fd: int, lock_path: Path) -> None:
     os.close(lock_fd)
     with contextlib.suppress(FileNotFoundError):
         lock_path.unlink()
+
+
+def _safe_open_usd_stage(path: str | Path, *, context: str) -> object:
+    from pxr import Usd
+
+    usd_path = Path(path).expanduser().resolve()
+    try:
+        stage = Usd.Stage.Open(str(usd_path))
+    except Exception as exc:
+        raise RuntimeError(f"Usd.Stage.Open failed for path={usd_path} context={context}") from exc
+    if stage is None:
+        raise RuntimeError(f"Usd.Stage.Open returned None for path={usd_path} context={context}")
+    return stage
+
+
+def _validate_generated_usd_outputs(cfg: object) -> None:
+    asset_path = Path(str(getattr(cfg, "asset_path", ""))).expanduser().resolve()
+    usd_dir = Path(str(getattr(cfg, "usd_dir", ""))).expanduser().resolve()
+    final_usd_path = _expected_usd_path(
+        asset_path,
+        usd_dir,
+        getattr(cfg, "usd_file_name", None),
+    )
+    if not final_usd_path.is_file():
+        raise RuntimeError(
+            f"Expected converted USD is missing: asset_path={asset_path} final_usd_path={final_usd_path}"
+        )
+
+    stage = _safe_open_usd_stage(
+        final_usd_path,
+        context=f"post-convert-final-usd asset_path={asset_path}",
+    )
+    default_prim = stage.GetDefaultPrim()
+    if not bool(default_prim and default_prim.IsValid()):
+        raise RuntimeError(
+            f"Converted USD has no valid default prim: asset_path={asset_path} final_usd_path={final_usd_path}"
+        )
+
+    tmp_reference_files = _generated_usd_tmp_reference_files(usd_dir)
+    if tmp_reference_files:
+        raise RuntimeError(
+            "Generated USD cache still references intermediate .tmp.usd files: "
+            f"asset_path={asset_path} final_usd_path={final_usd_path} "
+            f"referencing_files={[str(path) for path in tmp_reference_files]}"
+        )
+
+
+def _generated_usd_has_tmp_references(*, usd_dir_obj: Path) -> bool:
+    return bool(_generated_usd_tmp_reference_files(usd_dir_obj))
+
+
+def _generated_usd_tmp_reference_files(usd_dir_obj: Path) -> list[Path]:
+    tmp_reference_files: list[Path] = []
+    if not usd_dir_obj.exists():
+        return tmp_reference_files
+    for usd_file in sorted(usd_dir_obj.rglob("*.usd")):
+        try:
+            usd_bytes = usd_file.read_bytes()
+        except OSError:
+            continue
+        if b".tmp.usd" in usd_bytes:
+            tmp_reference_files.append(usd_file)
+    return tmp_reference_files
+
+
+def _log_asset_event(event: str, cfg: object) -> None:
+    asset_path = Path(str(getattr(cfg, "asset_path", ""))).expanduser().resolve()
+    usd_dir = Path(str(getattr(cfg, "usd_dir", ""))).expanduser().resolve()
+    final_usd_path = _expected_usd_path(
+        asset_path,
+        usd_dir,
+        getattr(cfg, "usd_file_name", None),
+    )
+    tmp_usd_paths = _candidate_tmp_usd_paths(asset_path, usd_dir)
+    message = (
+        f"[asset-prewarm] event={event} {_rank_context_str()} pid={os.getpid()} "
+        f"asset_id={asset_path.parent.name} source_path={asset_path} "
+        f"tmp_usd_paths={','.join(str(path) for path in tmp_usd_paths) or '-'} "
+        f"final_usd_path={final_usd_path}"
+    )
+    print(message)
+
+
+def _rank_context_str() -> str:
+    return (
+        f"rank={_read_env_int('RANK', 0)} "
+        f"local_rank={_read_env_int('LOCAL_RANK', 0)} "
+        f"world_size={_read_env_int('WORLD_SIZE', 1)}"
+    )
+
+
+def _candidate_tmp_usd_paths(asset_path: Path, usd_dir: Path) -> list[Path]:
+    configuration_dir = usd_dir / "configuration"
+    return [
+        configuration_dir / f"{mesh_path.stem}.tmp.usd"
+        for mesh_path in _iter_asset_mesh_paths(asset_path)
+    ]
+
+
+def _iter_asset_mesh_paths(asset_path: Path) -> list[Path]:
+    if asset_path.suffix.lower() != ".urdf":
+        return []
+
+    try:
+        root = ET.parse(asset_path).getroot()
+    except ET.ParseError:
+        return []
+
+    mesh_paths: list[Path] = []
+    seen_paths: set[Path] = set()
+    for mesh_element in root.findall(".//mesh"):
+        mesh_file = mesh_element.attrib.get("filename")
+        if not mesh_file:
+            continue
+        mesh_path = (asset_path.parent / mesh_file).resolve()
+        if mesh_path in seen_paths:
+            continue
+        seen_paths.add(mesh_path)
+        mesh_paths.append(mesh_path)
+    return mesh_paths

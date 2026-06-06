@@ -156,6 +156,17 @@ logger = logging.getLogger(__name__)
 # PLACEHOLDER: Extension template (do not remove this comment)
 
 
+def _resolve_prewarm_door_configs(task_name: str):
+    if task_name == "DooropeningMulti":
+        from DoorOpening.assets.door.multi_door_cfg import ALL_DOOR_CONFIGS as door_configs
+
+        return door_configs
+
+    from DoorOpening.assets.door.door_cfg import ALL_DOOR_CONFIGS as door_configs
+
+    return door_configs
+
+
 def _install_train_info_bridge():
     """Forward RL-Games frame/epoch counters into the unwrapped IsaacLab env."""
 
@@ -383,7 +394,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _install_train_info_bridge()
 
     # Serialize URDF-to-USD conversion across ranks before all workers build the same shared assets.
-    preconvert_shared_urdf_assets()
+    preconvert_shared_urdf_assets(
+        door_configs=_resolve_prewarm_door_configs(args_cli.task),
+        verbose=True,
+    )
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
