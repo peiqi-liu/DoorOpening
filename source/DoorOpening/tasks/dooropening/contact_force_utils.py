@@ -22,13 +22,23 @@ HANDLE_CONTACT_FILTER_PRIM_PATHS = (
     "/World/envs/env_.*/Robot/fingertip_3",
 )
 
+X5_BODY_CONTACT_FILTER_PRIM_PATHS = (
+    "/World/envs/env_.*/Robot/x5_base_link",
+    "/World/envs/env_.*/Robot/link1",
+    "/World/envs/env_.*/Robot/link2",
+    "/World/envs/env_.*/Robot/link3",
+    "/World/envs/env_.*/Robot/link4",
+    "/World/envs/env_.*/Robot/link5",
+    "/World/envs/env_.*/Robot/x5_camera_link",
+)
+
 
 def get_filtered_contact_force_w(sensor, expected_num_envs=None) -> torch.Tensor:
     force_matrix = sensor.data.force_matrix_w
     if force_matrix is None:
         raise RuntimeError(
             "Expected sensor.data.force_matrix_w but got None. "
-            "Filtered contact force requires filter_prim_paths_expr and a single sensor body."
+            "Filtered contact force requires filter_prim_paths_expr on the contact sensor."
         )
     if force_matrix.ndim != 4 or force_matrix.shape[-1] != 3:
         raise RuntimeError(

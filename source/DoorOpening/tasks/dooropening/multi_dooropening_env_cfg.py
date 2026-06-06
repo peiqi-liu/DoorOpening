@@ -15,7 +15,10 @@ from DoorOpening.constants.robot_constants import (
     ROBOT_PALM_LINK_NAME,
     ROBOT_BASE_BODY_LINK_NAME,
 )
-from DoorOpening.tasks.dooropening.contact_force_utils import HANDLE_CONTACT_FILTER_PRIM_PATHS
+from DoorOpening.tasks.dooropening.contact_force_utils import (
+    HANDLE_CONTACT_FILTER_PRIM_PATHS,
+    X5_BODY_CONTACT_FILTER_PRIM_PATHS,
+)
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.envs.mdp.events import randomize_actuator_gains, randomize_rigid_body_material
@@ -195,7 +198,15 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         debug_vis=False,
         filter_prim_paths_expr=list(HANDLE_CONTACT_FILTER_PRIM_PATHS),
     )
+    contact_forces_door_x5 = ContactSensorCfg(
+        prim_path="/World/envs/env_.*/Door/link_.*",
+        update_period=0.0,
+        history_length=1,
+        debug_vis=False,
+        filter_prim_paths_expr=list(X5_BODY_CONTACT_FILTER_PRIM_PATHS),
+    )
     handle_contact_force_threshold = 1.0
+    x5_body_contact_force_threshold = 1.5
 
     # Pointcloud render mode:
     # - "none": no on-robot pointcloud camera sensor (default).
@@ -300,12 +311,15 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     #   => `len(door_body_names) * 3`
     # - current and reference door joint positions
     #   => `len(door_joint_names) * 2`
+    # - reference ARX/x5 joint positions
+    #   => `len(arx_joints)`
     proprioception_observation_space = actuated_joints_num * 3
     key_body_error_observation_space = len(robot_key_bodies) * 3
     robot_pose_observation_space = (len(robot_key_bodies) - 1) * (3 + 6)
     base_velocity_observation_space = 6
     door_body_observation_space = len(door_body_names) * 3
     door_joint_observation_space = len(door_joint_names) * 2
+    arx_joint_reference_observation_space = len(arx_joints)
 
     observation_space = (
         proprioception_observation_space
@@ -314,6 +328,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         + base_velocity_observation_space
         + door_body_observation_space
         + door_joint_observation_space
+        + arx_joint_reference_observation_space
     )
     state_space = observation_space
     num_observations = observation_space
@@ -362,6 +377,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     reset_key_body_quat_delta_max = 3.0
     reset_door_joint_pos_delta_min = 0.5
     reset_door_joint_pos_delta_max = 0.8
+    reset_arx_joint_pos_delta_min = 0.15
+    reset_arx_joint_pos_delta_max = 0.25
     # We are slowly increasing our tolerance on base position drift and slowly only resettting the env from the first key frame
     # This variable is used to indicate when we stop increasing the tolerance and reset the env from the first key frame for the greatest probability
     reset_progress_total = 7.5e5
