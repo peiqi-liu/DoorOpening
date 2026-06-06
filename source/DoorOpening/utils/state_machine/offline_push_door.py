@@ -684,7 +684,7 @@ def state_machine_offline_push_right_door(
 
         base_target_pos = handle_pos.clone()
         base_target_pos[:, 0] += 0.55
-        base_target_pos[:, 1] = 0.2
+        base_target_pos[:, 1] = 0.15
         base_target_pose = _make_pose(base_target_pos, base_target_rot)
 
         # The door handle position does not indicate the door handle's actual tip, we want an offset to make the palm is grasping the door handle
@@ -762,8 +762,8 @@ def state_machine_offline_push_right_door(
     # In this stage, the robot is moving forward while holding the door open
     board_push_base_start_pos = base_target_pos.clone()
     board_push_base_end_pos = door_center_pos.clone()
-    traverse_mid_base_x = -1.0
-    traverse_mid_base_y = 0.2
+    traverse_mid_base_x = -0.8
+    traverse_mid_base_y = 0.15
     board_push_base_end_pos[:, 0] += traverse_mid_base_x
     board_push_base_end_pos[:, 1] += traverse_mid_base_y
 
@@ -788,7 +788,7 @@ def state_machine_offline_push_right_door(
         ).to(device)
         board_push_contact_x_offset = 0.0
         board_push_contact_y_offset = -0.03
-        board_push_contact_z_offset = 0.1
+        board_push_contact_z_offset = 0.15
         palm_target_pos = board_contact_pos.clone()
         palm_target_pos[:, 0] += board_push_contact_x_offset
         palm_target_pos[:, 1] += board_push_contact_y_offset

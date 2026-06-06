@@ -5,8 +5,7 @@ import math
 from DoorOpening.utils.state_machine.api import compute_base_joint, solve_ik, get_hinge_pos, open_hand
 import torch
 from isaaclab.utils.math import quat_from_euler_xyz, quat_from_matrix, combine_frame_transforms, quat_mul, quat_inv
-from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES, CAMERA_JOINT_DEFAULT_VALUES, DEFAULT_JOINT_POS, OPEN_FINGER_JOINT_VALUES, ROBOT_KEY_BODY_NAMES, DM_JOINT_NAMES
-from DoorOpening.constants.door_constants import DOOR_BODY_NAMES, DOOR_JOINT_NAMES
+from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES, DEFAULT_JOINT_POS, OPEN_FINGER_JOINT_VALUES, ROBOT_KEY_BODY_NAMES, DM_JOINT_NAMES
 import numpy as np
 import time
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT, DOOR_INITIAL_POS, DOOR_INITIAL_ROT
@@ -105,7 +104,8 @@ def paired_start_angle(pair_key, seed, angle_range_deg):
 
 
 def get_robot_constants():
-    all_joint_names = FULL_JOINT_NAMES + list(CAMERA_JOINT_DEFAULT_VALUES.keys())
+    # FULL_JOINT_NAMES already contains base, arm, finger, and camera joints.
+    all_joint_names = FULL_JOINT_NAMES
     default_joint_pos_dict = {}
     joint_vector = torch.zeros(len(all_joint_names))
     for i, name in enumerate(all_joint_names):

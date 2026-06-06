@@ -96,7 +96,7 @@ def solve_ik(robot_urdf_path, q, palm_pose, base_pose, robot_initial_pose):
         q = joint_pos_des
     # lower_joint_limits = robot.data.soft_joint_pos_limits.clone().detach().cpu()[:, :10, 0]
     # upper_joint_limits = robot.data.soft_joint_pos_limits.clone().detach().cpu()[:, :10, 1]
-    q = torch.tensor(q).unsqueeze(0)
+    q = torch.as_tensor(q).clone().unsqueeze(0)
     # q = q.clamp(lower_joint_limits, upper_joint_limits)
     # q[:, 3:] = wrap_to_pi(q[:, 3:])
     # print("success: ", success)
@@ -313,7 +313,7 @@ def solve_ik_iter(robot, palm_pose, base_pose, iters=15):
     q[:3] = base_joint_pos
     # lower_joint_limits = robot.data.soft_joint_pos_limits.clone().detach().cpu()[:, :10, 0]
     # upper_joint_limits = robot.data.soft_joint_pos_limits.clone().detach().cpu()[:, :10, 1]
-    q = torch.tensor(q).unsqueeze(0)
+    q = torch.as_tensor(q).clone().unsqueeze(0)
     # q = q.clamp(lower_joint_limits, upper_joint_limits)
     q[3:] = wrap_to_pi(q[3:])
     print("success: ", success)
