@@ -433,6 +433,15 @@ def collocate_and_playback(robot_traj, door_traj, key_idx_in_key_indices, length
     N = len(key_idx_in_key_indices)
 
     # ---- Compute geometric length of each keyframe segment ----
+    def weighted_dist(x1, x2, base_weight=10.0):
+        diff = x1 - x2
+        diff = diff.copy()
+
+        # first 3 joints / base dofs are weighted more heavily
+        diff[..., :3] *= base_weight
+
+        return np.linalg.norm(diff, axis=-1)
+    
     seg_lengths = []
     for i in range(N - 1):
         start = key_idx_in_key_indices[i]
@@ -443,7 +452,8 @@ def collocate_and_playback(robot_traj, door_traj, key_idx_in_key_indices, length
             seg_lengths.append(1e-6)
             continue
 
-        dists = np.linalg.norm(seg[1:] - seg[:-1], axis=1)
+        # dists = np.linalg.norm(seg[1:] - seg[:-1], axis=1)
+        dists = weighted_dist(seg[1:], seg[:-1])
         seg_lengths.append(max(dists.sum(), 1e-6))
 
     seg_lengths = np.array(seg_lengths)
@@ -521,7 +531,7 @@ def play_trajectories_in_viser(
     robot_world_quat: torch.Tensor,                  # (T, 4)
     door_world_quat: torch.Tensor,                   # (T, 4)
     hz: float = 60.0,
-    playback_speed: float = 4.0,
+    playback_speed: float = 10.0,
     port: int | None = None,
 ):
     """
@@ -573,7 +583,6 @@ def play_trajectories_in_viser(
     # GUI controls
     # -------------------------
     playing = True
-    initial_speed = min(max(float(playback_speed), 0.5), 20.0)
 
     with server.gui.add_folder("Playback"):
         play_btn = server.gui.add_button("Play")
@@ -582,9 +591,9 @@ def play_trajectories_in_viser(
         speed_slider = server.gui.add_slider(
             "Speed",
             min=0.5,
-            max=20.0,
+            max=playback_speed,
             step=0.1,
-            initial_value=initial_speed,
+            initial_value=playback_speed,
         )
 
     @play_btn.on_click
@@ -607,7 +616,6 @@ def play_trajectories_in_viser(
     # -------------------------
     t_idx = 0
 
-    print(f"Viser running at {initial_speed:.1f}x. Open the URL in your browser.")
 
     # timestamp = time.time()
 
@@ -929,7 +937,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--playback-speed",
         type=float,
-        default=8.0,
+        default=10.0,
         help="Initial viser playback speed multiplier when --visualize is set.",
     )
     parser.add_argument(

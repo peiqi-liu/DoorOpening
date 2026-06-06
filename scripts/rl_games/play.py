@@ -8,9 +8,23 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import os
 import sys
 
 from isaaclab.app import AppLauncher
+
+
+def _normalize_family_selection(family_spec):
+    if family_spec is None:
+        return None
+    if isinstance(family_spec, str):
+        family_names = [name.strip() for name in family_spec.split(",") if name.strip()]
+    elif isinstance(family_spec, (list, tuple)):
+        family_names = [str(name).strip() for name in family_spec if str(name).strip()]
+    else:
+        raise TypeError(f"Unsupported door family selection type: {type(family_spec)!r}")
+    return family_names or None
+
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Play a checkpoint of an RL agent from RL-Games.")
@@ -20,7 +34,7 @@ parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
-parser.add_argument("--task", type=str, default=None, help="Name of the task.")
+parser.add_argument("--task", type=str, default="DooropeningMulti", help="Name of the task.")
 parser.add_argument(
     "--agent", type=str, default="rl_games_cfg_entry_point", help="Name of the RL agent configuration entry point."
 )
@@ -36,11 +50,25 @@ parser.add_argument(
     action="store_true",
     help="When no checkpoint provided, use the last saved model. Otherwise use the best saved model.",
 )
+parser.add_argument(
+    "--door-families",
+    "--door_families",
+    "--asset-folders",
+    "--asset_folders",
+    dest="door_families",
+    type=str,
+    default=None,
+    help="Comma-separated multi-door asset family folders, e.g. PartNetv5_plusplus,PartNetv6_plusplus.",
+)
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
+selected_door_families = _normalize_family_selection(args_cli.door_families)
+if selected_door_families is not None:
+    os.environ["DOOROPENING_MULTI_DOOR_FAMILIES"] = ",".join(selected_door_families)
+    print(f"[INFO] Using multi-door families: {selected_door_families}")
 # always enable cameras to record video
 if args_cli.video:
     args_cli.enable_cameras = True
@@ -56,7 +84,6 @@ simulation_app = app_launcher.app
 
 import gymnasium as gym
 import math
-import os
 import random
 import time
 import torch
