@@ -2743,7 +2743,7 @@ class Dagger:
                 if saved_num_envs <= 0:
                     saved_num_envs = int(self.num_envs)
                 resume_iteration = self.frame // max(1, saved_num_envs)
-            if resume_iteration is None and not self.play_policy and "student_update_steps" in weights:
+            if resume_iteration is None and "student_update_steps" in weights:
                 resume_iteration = int(weights["student_update_steps"])
             self.resume_iteration = int(resume_iteration)
             self._resumed_from_student_ckpt = True
@@ -2768,6 +2768,8 @@ class Dagger:
                 f"iteration={self.resume_iteration}, curriculum_step_count={int(curriculum_step_count)}, frame={self.frame}, "
                 f"student_update_steps={self.student_update_steps}"
             )
+        elif self.rank == 0 and self.play_policy:
+            print("Loaded student weights for policy evaluation; optimizer and curriculum state were ignored.")
 
     def _apply_optimizer_runtime_overrides(self):
         for param_group in self.optimizer.param_groups:

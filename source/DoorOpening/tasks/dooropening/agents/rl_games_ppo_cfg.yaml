@@ -76,3 +76,17 @@ params:
     clip_value: True
     seq_length: 8
     bounds_loss_coef: 0.0001
+
+    central_value_config:
+      network:
+        name: actor_critic
+        central_value: True
+        mlp:
+          units: [512, 256, 128, 64]
+          activation: elu
+          d2rl: False
+
+          initializer:
+            name: default
+          regularizer:
+            name: None
