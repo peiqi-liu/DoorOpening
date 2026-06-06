@@ -4,7 +4,7 @@ from typing import Literal
 import torch
 from isaaclab.utils.math import euler_xyz_from_quat, quat_from_euler_xyz
 
-from DoorOpening.constants.robot_constants import FRANKA_DEFAULT_JOINT_POS, FRANKA_JOINT_NAMES
+from DoorOpening.constants.robot_constants import FRANKA_DEFAULT_JOINT_POS, FRANKA_JOINT_NAMES, CAMERA_JOINT_DEFAULT_VALUES, CAMERA_JOINT_VALUES_WHEN_SEARCHING_HINGE, CAMERA_JOINT_VALUES_WHEN_OBSERVING_LEFT
 from DoorOpening.utils.state_machine.api import get_board_edge, get_hinge_pos, open_hand, solve_ik
 
 HandleSide = Literal["right", "left"]
@@ -106,6 +106,28 @@ def state_machine_offline_right_pull_door(
         mark_keyframe=True,
     )
 
+    franka_default_q = torch.tensor(
+        [FRANKA_DEFAULT_JOINT_POS[name] for name in FRANKA_JOINT_NAMES],
+        device=device,
+    )
+    # -------------------------
+    # Step 0: Observe
+    # -------------------------
+
+    q_robot[3: 10] = franka_default_q
+    q_robot[:3] = torch.tensor([0.15, 0.2, 0])
+
+    q_robot[-6:] = torch.tensor(list(CAMERA_JOINT_VALUES_WHEN_SEARCHING_HINGE.values()))
+
+    _append_state(
+        robot_traj,
+        door_traj,
+        key_idx_in_key_indices,
+        q_robot,
+        q_door,
+        mark_keyframe=True,
+    )
+
     # -------------------------
     # Step 1: Pregrasp
     # -------------------------
@@ -139,6 +161,8 @@ def state_machine_offline_right_pull_door(
         base_pose=base_target_pose,
         robot_initial_pose=robot_initial_pose,
     )[0]
+    
+    q_robot[-6:] = torch.tensor(list(CAMERA_JOINT_DEFAULT_VALUES.values()))
 
     _append_state(
         robot_traj,
@@ -329,11 +353,6 @@ def state_machine_offline_right_pull_door(
     contact_virtual_door_angle = 1.1
     push_door_open_angle = 1.5
 
-    franka_default_q = torch.tensor(
-        [FRANKA_DEFAULT_JOINT_POS[name] for name in FRANKA_JOINT_NAMES],
-        device=device,
-        dtype=q_robot.dtype,
-    )
     traverse_mid_x = 0.55
     traverse_mid_y = 0.05
     traverse_far_x = -0.5
@@ -553,13 +572,35 @@ def state_machine_offline_left_pull_door(
     This is intentionally separate from the right-door function so all left-door
     tuning stays local and obvious.
     """
-
     q_robot, q_door, robot_traj, door_traj, key_idx_in_key_indices = _init_planner_state(
         robot_initial_q, door_initial_q
     )
 
+    franka_default_q = torch.tensor(
+        [FRANKA_DEFAULT_JOINT_POS[name] for name in FRANKA_JOINT_NAMES],
+        device=device,
+    )
+
     base_target_rot = robot_initial_pose[:, 3:].to(device).clone()
     default_palm_rot = get_rotation_quat(math.pi, math.pi, math.pi, device)
+
+    _append_state(
+        robot_traj,
+        door_traj,
+        key_idx_in_key_indices,
+        q_robot,
+        q_door,
+        mark_keyframe=True,
+    )
+    
+    # -------------------------
+    # Step 0: Observe
+    # -------------------------
+
+    q_robot[3: 10] = franka_default_q
+    q_robot[:3] = torch.tensor([0.15, 0.2, 0])
+
+    q_robot[-6:] = torch.tensor(list(CAMERA_JOINT_VALUES_WHEN_SEARCHING_HINGE.values()))
 
     _append_state(
         robot_traj,
@@ -603,6 +644,8 @@ def state_machine_offline_left_pull_door(
         base_pose=base_target_pose,
         robot_initial_pose=robot_initial_pose,
     )[0]
+    
+    q_robot[-6:] = torch.tensor(list(CAMERA_JOINT_VALUES_WHEN_OBSERVING_LEFT.values()))
 
     _append_state(
         robot_traj,
@@ -709,6 +752,9 @@ def state_machine_offline_left_pull_door(
         pull_theta_step,
         device=device,
     )
+    
+    # Retract active perception arms to safe range
+    q_robot[-6:] = torch.tensor(list(CAMERA_JOINT_DEFAULT_VALUES.values()))
 
     for theta in theta_values:
         q_door = torch.tensor([theta.item(), 0.0], device=device)
@@ -793,11 +839,6 @@ def state_machine_offline_left_pull_door(
     contact_virtual_door_angle = 1.0
     push_door_open_angle = 1.5
 
-    franka_default_q = torch.tensor(
-        [FRANKA_DEFAULT_JOINT_POS[name] for name in FRANKA_JOINT_NAMES],
-        device=device,
-        dtype=q_robot.dtype,
-    )
     traverse_mid_x = 0.45
     traverse_mid_y = -0.05
     traverse_far_x = -0.5
