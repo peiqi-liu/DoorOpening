@@ -918,7 +918,7 @@ def main(env_cfg, agent_cfg: dict):
         if multi_teacher_ckpts is None and teacher_ckpt is None:
             raise ValueError("--use_teacher requires --teacher or per-family teacher checkpoints.")
         teacher_cfg_path = _resolve_teacher_cfg_path(args_cli.teacher_cfg)
-        teacher_config = {"cfg": teacher_cfg_path, "obs_type": "policy"}
+        teacher_config = {"cfg": teacher_cfg_path, "obs_type": "critic"}
         if multi_teacher_ckpts is not None:
             teacher_config["teachers"] = {
                 family_name: {"ckpt": ckpt}
@@ -934,7 +934,7 @@ def main(env_cfg, agent_cfg: dict):
         multi_teacher_ckpts, teacher_ckpt = _resolve_multi_teacher_checkpoints()
         if multi_teacher_ckpts is not None or teacher_ckpt is not None:
             teacher_cfg_path = _resolve_teacher_cfg_path(args_cli.teacher_cfg)
-            teacher_config = {"cfg": teacher_cfg_path, "obs_type": "policy"}
+            teacher_config = {"cfg": teacher_cfg_path, "obs_type": "critic"}
             if multi_teacher_ckpts is not None:
                 teacher_config["teachers"] = {
                     family_name: {"ckpt": ckpt}

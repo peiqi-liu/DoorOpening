@@ -113,7 +113,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # - spaces definition
     state_space = 0
     num_states = 0
-    # Actor gets noisy deployment-style observations while the critic keeps the full clean state.
+    # Actor gets noisy deployment-style observations while the critic keeps the clean privileged state.
     asymmetric_obs = True
 
     viewer: ViewerCfg = ViewerCfg(eye=(1.5, -2.0, 1.0), lookat=(0.4, 0.0, 0.7), origin_type="env")
@@ -311,7 +311,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     #   => `len(door_body_names) * 3`
     # - current and reference door joint positions
     #   => `len(door_joint_names) * 2`
-    # - relative ARX/x5 joint reference angles
+    # - reference ARX/x5 joint positions
     #   => `len(arx_joints)`
     proprioception_observation_space = actuated_joints_num * 3
     key_body_error_observation_space = len(robot_key_bodies) * 3
@@ -435,6 +435,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "arm_joint_pos_bias": (0.0, 0.006),
             "finger_joint_pos_noise": (0.0, 0.02),
             "finger_joint_pos_bias": (0.0, 0.01),
+            "key_body_pos_noise": (0.0, 0.01),
+            "key_body_pos_bias": (0.0, 0.005),
+            "key_body_quat_noise": (0.0, 0.01),
+            "key_body_quat_bias": (0.0, 0.005),
             "base_xy_joint_vel_noise": (0.0, 0.03),
             "base_xy_joint_vel_bias": (0.0, 0.015),
             "base_rot_joint_vel_noise": (0.0, 0.08),
@@ -443,6 +447,16 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "arm_joint_vel_bias": (0.0, 0.05),
             "finger_joint_vel_noise": (0.0, 0.15),
             "finger_joint_vel_bias": (0.0, 0.08),
+            "body_lin_vel_noise": (0.0, 0.05),
+            "body_lin_vel_bias": (0.0, 0.03),
+            "body_ang_vel_noise": (0.0, 0.1),
+            "body_ang_vel_bias": (0.0, 0.05),
+        },
+        "door_state_noise": {
+            "door_pos_noise": (0.0, 0.01),
+            "door_pos_bias": (0.0, 0.005),
+            "door_joint_pos_noise": (0.0, 0.01),
+            "door_joint_pos_bias": (0.0, 0.005),
         },
         "pd_targets": {
             "base_xy_target_noise": (0.0, 0.0015),
