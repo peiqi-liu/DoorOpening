@@ -107,7 +107,7 @@ class EventCfg:
 @configclass
 class DooropeningEnvCfg(DirectRLEnvCfg):
     sim_dt = 1/60
-    decimation = 4
+    decimation = 2
     episode_length_s = 25.
     num_sim_steps_to_render=2
     # - spaces definition
@@ -238,13 +238,13 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     viser_pointcloud = {
         "enabled": False,
         "path": "teacher_viser_replay.pt",
-        "env_id": 0,
+        "env_id": 32,
         "capture_interval": 1,
         "save_interval": 5000,
-        "max_points": 6000,
-        "robot_num_points": 4096,
-        "door_num_points": 4096,
-        "max_frames": 2000,
+        "max_points": 18_000,
+        "robot_num_points": 15_000,
+        "door_num_points": 3_000,
+        "max_frames": 1000,
     }
 
     door_body_names = DOOR_BODY_NAMES
@@ -381,10 +381,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     reset_arx_joint_pos_delta_max = 0.25
     # We are slowly increasing our tolerance on base position drift and slowly only resettting the env from the first key frame
     # This variable is used to indicate when we stop increasing the tolerance and reset the env from the first key frame for the greatest probability
-    reset_progress_total = 7.5e5
+    reset_progress_total = 4e5
     use_motion_ref = True
     # ADR should ramp faster than the reference-motion reset curriculum so physics randomization is not lagging behind.
-    adr_reset_progress_total = 2e5
+    adr_reset_progress_total = 1.5e5
 
     alive_base = 10.0
     alive_bonus = 20.0
