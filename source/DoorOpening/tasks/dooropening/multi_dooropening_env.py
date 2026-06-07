@@ -1155,6 +1155,20 @@ class DooropeningEnv(DirectRLEnv):
         policy_joint_vel[:, self._target_arx_slice] = self._uniform_noise_like(
             policy_joint_vel[:, self._target_arx_slice], "arm_joint_vel_noise", "arm_joint_vel_bias"
         )
+        clean_base_joint_ref_err = (
+            self.ref_robot_base_joint_pos
+            - clean_joint_pos[:, self._target_base_rot_slice.start : self._target_base_xy_slice.stop]
+        ).unsqueeze(dim=1)
+        clean_arm_joint_ref_err = (self.ref_robot_arm_joint_pos - clean_joint_pos[:, self._target_arm_slice]).unsqueeze(
+            dim=1
+        )
+        policy_base_joint_ref_err = (
+            self.ref_robot_base_joint_pos
+            - policy_joint_pos[:, self._target_base_rot_slice.start : self._target_base_xy_slice.stop]
+        ).unsqueeze(dim=1)
+        policy_arm_joint_ref_err = (
+            self.ref_robot_arm_joint_pos - policy_joint_pos[:, self._target_arm_slice]
+        ).unsqueeze(dim=1)
         policy_robot_key_body_pos_local, policy_robot_key_body_euler, policy_base_lin_vel_local, policy_base_ang_vel_local = self.transform_key_bodies_to_base_frame(
             policy_robot_key_body_pos,
             policy_robot_key_body_quat,
@@ -1208,6 +1222,8 @@ class DooropeningEnv(DirectRLEnv):
                 policy_joint_pos.unsqueeze(dim=1),
                 policy_joint_vel.unsqueeze(dim=1),
                 self.robot_dof_targets.unsqueeze(dim = 1),
+                policy_base_joint_ref_err,
+                policy_arm_joint_ref_err,
                 policy_key_pos_err,
                 policy_robot_key_body_pos_local.reshape(self.num_envs, 1, -1),
                 policy_robot_key_body_euler.reshape(self.num_envs, 1, -1),
@@ -1217,6 +1233,7 @@ class DooropeningEnv(DirectRLEnv):
                 policy_door_joint_pos,
                 self.ref_door_joint_pos[:, self._door_joint_idx].to(self.door_joint_pos).unsqueeze(dim = 1),
                 self.ref_robot_arx_joint_pos.to(self.robot_arx_joint_pos).unsqueeze(dim=1),
+                twist_obs,
             ),
             dim=-1,
         )
@@ -1226,6 +1243,8 @@ class DooropeningEnv(DirectRLEnv):
                 clean_joint_pos.unsqueeze(dim=1),
                 clean_joint_vel.unsqueeze(dim=1),
                 self.robot_dof_targets.unsqueeze(dim=1),
+                clean_base_joint_ref_err,
+                clean_arm_joint_ref_err,
                 key_pos_err,
                 robot_key_body_pos.reshape(self.num_envs, 1, -1),
                 robot_key_body_euler.reshape(self.num_envs, 1, -1),
@@ -1235,6 +1254,7 @@ class DooropeningEnv(DirectRLEnv):
                 self.door_joint_pos[:, self._door_joint_idx].unsqueeze(dim = 1),
                 self.ref_door_joint_pos[:, self._door_joint_idx].to(self.door_joint_pos).unsqueeze(dim = 1),
                 self.ref_robot_arx_joint_pos.to(self.robot_arx_joint_pos).unsqueeze(dim=1),
+                twist_obs,
             ),
             dim=-1,
         )

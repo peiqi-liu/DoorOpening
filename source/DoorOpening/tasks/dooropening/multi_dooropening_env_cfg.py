@@ -300,6 +300,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # - proprioception: current actuated joint positions + joint velocities + PD targets
     #   => `actuated_joints_num * 3`
     #   Adding the 4 ARX joints increases this block by `4 * 3 = 12` dims.
+    # - current base and arm joint diffs to the reference motion
+    #   => `len(base_joints) + len(arm_joints)`
     # - key-body position tracking error in the base frame
     #   => `len(robot_key_bodies) * 3`
     # - non-base key-body poses in the base frame:
@@ -313,7 +315,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     #   => `len(door_joint_names) * 2`
     # - reference ARX/x5 joint positions
     #   => `len(arx_joints)`
+    # - future reference motion summary at twist indices
+    #   => `twist_observation_space`
     proprioception_observation_space = actuated_joints_num * 3
+    joint_reference_error_observation_space = len(base_joints) + len(arm_joints)
     key_body_error_observation_space = len(robot_key_bodies) * 3
     robot_pose_observation_space = (len(robot_key_bodies) - 1) * (3 + 6)
     base_velocity_observation_space = 6
@@ -323,12 +328,14 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     observation_space = (
         proprioception_observation_space
+        + joint_reference_error_observation_space
         + key_body_error_observation_space
         + robot_pose_observation_space
         + base_velocity_observation_space
         + door_body_observation_space
         + door_joint_observation_space
         + arx_joint_reference_observation_space
+        + twist_observation_space
     )
     state_space = observation_space
     num_observations = observation_space
