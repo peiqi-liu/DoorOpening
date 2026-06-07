@@ -311,7 +311,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     #   => `len(door_body_names) * 3`
     # - current and reference door joint positions
     #   => `len(door_joint_names) * 2`
-    # - reference ARX/x5 joint positions
+    # - relative ARX/x5 joint reference angles
     #   => `len(arx_joints)`
     proprioception_observation_space = actuated_joints_num * 3
     key_body_error_observation_space = len(robot_key_bodies) * 3

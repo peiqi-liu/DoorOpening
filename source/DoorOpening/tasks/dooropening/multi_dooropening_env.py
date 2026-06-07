@@ -1111,6 +1111,14 @@ class DooropeningEnv(DirectRLEnv):
         policy_arm_joint_ref_err = (self.ref_robot_arm_joint_pos - policy_joint_pos[:, self._target_arm_slice]).unsqueeze(
             dim=1
         )
+        clean_arx_joint_ref_err = hinge_angle_diff(
+            self.ref_robot_arx_joint_pos,
+            clean_joint_pos[:, self._target_arx_slice],
+        ).unsqueeze(dim=1)
+        policy_arx_joint_ref_err = hinge_angle_diff(
+            self.ref_robot_arx_joint_pos,
+            policy_joint_pos[:, self._target_arx_slice],
+        ).unsqueeze(dim=1)
 
         twist_obs = torch.cat(
             (
@@ -1144,7 +1152,7 @@ class DooropeningEnv(DirectRLEnv):
                 door_to_base_link_pos,
                 self.door_joint_pos[:, self._door_joint_idx].unsqueeze(dim = 1),
                 self.ref_door_joint_pos[:, self._door_joint_idx].to(self.door_joint_pos).unsqueeze(dim = 1),
-                self.ref_robot_arx_joint_pos.to(self.robot_arx_joint_pos).unsqueeze(dim=1),
+                policy_arx_joint_ref_err,
             ),
             dim=-1,
         )
@@ -1162,7 +1170,7 @@ class DooropeningEnv(DirectRLEnv):
                 door_to_base_link_pos,
                 self.door_joint_pos[:, self._door_joint_idx].unsqueeze(dim = 1),
                 self.ref_door_joint_pos[:, self._door_joint_idx].to(self.door_joint_pos).unsqueeze(dim = 1),
-                self.ref_robot_arx_joint_pos.to(self.robot_arx_joint_pos).unsqueeze(dim=1),
+                clean_arx_joint_ref_err,
             ),
             dim=-1,
         )
