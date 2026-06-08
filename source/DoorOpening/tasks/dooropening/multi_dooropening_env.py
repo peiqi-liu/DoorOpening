@@ -1572,14 +1572,30 @@ class DooropeningEnv(DirectRLEnv):
             self._set_current_state_as_reference()
             return
 
-        ref_key_body_idx = self.ref_key_body_idx.to(self.device)
-        ref_reset_key_body_idx = self.ref_reset_key_body_idx.to(self.device)
-        self.ref_robot_key_body_pos_twist = self.ref_motion_lib.get_robot_body_pos_twist().index_select(2, ref_key_body_idx)
+        ref_robot_body_pos_twist = self.ref_motion_lib.get_robot_body_pos_twist()
+        ref_key_body_idx = self.ref_key_body_idx.to(device=ref_robot_body_pos_twist.device, dtype=torch.long)
+        ref_reset_key_body_idx = self.ref_reset_key_body_idx.to(device=ref_robot_body_pos_twist.device, dtype=torch.long)
+        if ref_robot_body_pos_twist.shape[-1] != 3 and ref_robot_body_pos_twist.shape[-2] == 3:
+            ref_robot_body_pos_twist = ref_robot_body_pos_twist.transpose(-1, -2)
+        if ref_key_body_idx.numel() > 0:
+            if int(ref_key_body_idx.min().item()) < 0 or int(ref_key_body_idx.max().item()) >= ref_robot_body_pos_twist.shape[2]:
+                raise ValueError(
+                    f"ref_key_body_idx out of range for robot_body_pos_twist: "
+                    f"max_idx={int(ref_key_body_idx.max().item())}, num_bodies={ref_robot_body_pos_twist.shape[2]}."
+                )
+        self.ref_robot_key_body_pos_twist = ref_robot_body_pos_twist.index_select(2, ref_key_body_idx)
         # It is a misnomer, we are actually sending euler angles as it might be more friendly to MLP
         ref_robot_body_quat_twist = self.ref_motion_lib.get_robot_body_quat_twist()
         if ref_robot_body_quat_twist.shape[-1] != 4 and ref_robot_body_quat_twist.shape[-2] == 4:
             ref_robot_body_quat_twist = ref_robot_body_quat_twist.transpose(-1, -2)
+        ref_key_body_idx = ref_key_body_idx.to(device=ref_robot_body_quat_twist.device)
         self.ref_robot_key_body_quat_twist = ref_robot_body_quat_twist.index_select(2, ref_key_body_idx)
+        if self.ref_robot_key_body_pos_twist.shape[:3] != self.ref_robot_key_body_quat_twist.shape[:3]:
+            raise ValueError(
+                "Reference body twist tensors disagree on (env, twist, body) dimensions: "
+                f"pos={tuple(self.ref_robot_key_body_pos_twist.shape)}, "
+                f"quat={tuple(self.ref_robot_key_body_quat_twist.shape)}."
+            )
         self.ref_robot_key_body_pos_twist, self.ref_robot_key_body_quat_twist = self.normalize_to_base_frame(
             self.robot_base_body_pos.squeeze(),
             self.robot_base_body_quat.squeeze(),
@@ -1600,10 +1616,15 @@ class DooropeningEnv(DirectRLEnv):
         # self.ref_robot_key_body_quat = self.ref_motion_lib.get_robot_body_quat()[:, self._robot_key_body_idx]
         # self.ref_robot_reset_key_body_pos = self.ref_motion_lib.get_robot_body_pos()[:, self._robot_reset_key_body_idx]
         ref_robot_body_pos = self.ref_motion_lib.get_robot_body_pos()
+        if ref_robot_body_pos.shape[-1] != 3 and ref_robot_body_pos.shape[-2] == 3:
+            ref_robot_body_pos = ref_robot_body_pos.transpose(-1, -2)
+        ref_key_body_idx = ref_key_body_idx.to(device=ref_robot_body_pos.device)
+        ref_reset_key_body_idx = ref_reset_key_body_idx.to(device=ref_robot_body_pos.device)
         self.ref_robot_key_body_pos = ref_robot_body_pos.index_select(1, ref_key_body_idx)
         ref_robot_body_quat = self.ref_motion_lib.get_robot_body_quat()
         if ref_robot_body_quat.shape[-1] != 4 and ref_robot_body_quat.shape[-2] == 4:
             ref_robot_body_quat = ref_robot_body_quat.transpose(-1, -2)
+        ref_key_body_idx = ref_key_body_idx.to(device=ref_robot_body_quat.device)
         self.ref_robot_key_body_quat = ref_robot_body_quat.index_select(1, ref_key_body_idx)
         self.ref_robot_reset_key_body_pos = ref_robot_body_pos.index_select(1, ref_reset_key_body_idx)
         self.ref_robot_joint_pos = self.ref_motion_lib.get_robot_joint_pos()
@@ -1620,8 +1641,16 @@ class DooropeningEnv(DirectRLEnv):
         self.ref_hinge_contact_mask = self.ref_motion_lib.get_hinge_contact_mask()
         self.ref_door_body_pos_twist = self.ref_motion_lib.get_door_body_pos_twist()
         ref_motion_dt = max(float(self.ref_motion_lib.frame_dt), 1e-6)
-        self.ref_robot_body_lin_vel = self.ref_motion_lib.get_robot_body_lin_vel()[:, self.ref_key_body_idx] / ref_motion_dt
-        self.ref_robot_body_ang_vel = self.ref_motion_lib.get_robot_body_ang_vel()[:, self.ref_key_body_idx] / ref_motion_dt
+        ref_robot_body_lin_vel = self.ref_motion_lib.get_robot_body_lin_vel()
+        if ref_robot_body_lin_vel.shape[-1] != 3 and ref_robot_body_lin_vel.shape[-2] == 3:
+            ref_robot_body_lin_vel = ref_robot_body_lin_vel.transpose(-1, -2)
+        ref_robot_body_ang_vel = self.ref_motion_lib.get_robot_body_ang_vel()
+        if ref_robot_body_ang_vel.shape[-1] != 3 and ref_robot_body_ang_vel.shape[-2] == 3:
+            ref_robot_body_ang_vel = ref_robot_body_ang_vel.transpose(-1, -2)
+        ref_key_body_idx = ref_key_body_idx.to(device=ref_robot_body_lin_vel.device)
+        self.ref_robot_body_lin_vel = ref_robot_body_lin_vel.index_select(1, ref_key_body_idx) / ref_motion_dt
+        ref_key_body_idx = ref_key_body_idx.to(device=ref_robot_body_ang_vel.device)
+        self.ref_robot_body_ang_vel = ref_robot_body_ang_vel.index_select(1, ref_key_body_idx) / ref_motion_dt
 
     def _get_rewards(self) -> torch.Tensor:
         self._get_intermediate_values()
