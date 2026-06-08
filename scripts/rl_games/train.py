@@ -360,12 +360,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
     # specify directory for logging runs
     log_dir = agent_cfg["params"]["config"].get("full_experiment_name", datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
+    base_experiment_name = log_dir
+    if args_cli.distributed:
+        rank_tag = f"rank{global_rank:03d}_local{local_rank:03d}"
+        log_dir = f"{base_experiment_name}_{rank_tag}"
     # set directory into agent config
     # logging directory path: <train_dir>/<full_experiment_name>
     agent_cfg["params"]["config"]["train_dir"] = log_root_path
     agent_cfg["params"]["config"]["full_experiment_name"] = log_dir
     wandb_project = config_name if args_cli.wandb_project_name is None else args_cli.wandb_project_name
-    experiment_name = log_dir if args_cli.wandb_name is None else args_cli.wandb_name
+    experiment_name = base_experiment_name if args_cli.wandb_name is None else args_cli.wandb_name
     env_cfg.log_dir = os.path.join(log_root_path, log_dir)
     _configure_viser_pt_recording(env_cfg, env_cfg.log_dir)
     _inherit_central_value_config(agent_cfg)
