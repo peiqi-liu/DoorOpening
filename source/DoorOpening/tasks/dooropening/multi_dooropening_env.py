@@ -27,7 +27,7 @@ from DoorOpening.tasks.dooropening.dooropening_adr import DoorOpeningADR
 from DoorOpening.tasks.dooropening.multi_dooropening_env_cfg import DooropeningEnvCfg
 from DoorOpening.assets.glorbot.glorbot_cfg import glorbot_urdf_path
 from isaaclab.sensors import Camera, ContactSensor
-from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES, ROBOT_KEY_BODY_NAMES
+from DoorOpening.constants.robot_constants import CAMERA_JOINT_DEFAULT_VALUES, FULL_JOINT_NAMES, ROBOT_KEY_BODY_NAMES
 from DoorOpening.tasks.dooropening.contact_force_utils import get_filtered_contact_force_w
 from DoorOpening.utils.pose_utils import world_to_local
 from isaaclab.utils.math import quat_conjugate, quat_apply, quat_mul
@@ -146,6 +146,7 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_arm_joint_pos_w = self.cfg.robot_arm_joint_pos_w
         self.robot_finger_joint_pos_w = self.cfg.robot_finger_joint_pos_w
         self.robot_arx_joint_pos_w = self.cfg.robot_arx_joint_pos_w
+        self.robot_arx_tuck_joint_pos_w = self.cfg.robot_arx_tuck_joint_pos_w
         self.robot_base_joint_vel_w = self.cfg.robot_base_joint_vel_w
         self.robot_arm_joint_vel_w = self.cfg.robot_arm_joint_vel_w
         self.robot_finger_joint_vel_w = self.cfg.robot_finger_joint_vel_w
@@ -161,8 +162,6 @@ class DooropeningEnv(DirectRLEnv):
         self.reset_key_body_quat_delta_max = self.cfg.reset_key_body_quat_delta_max
         self.reset_door_joint_pos_delta_min = self.cfg.reset_door_joint_pos_delta_min
         self.reset_door_joint_pos_delta_max = self.cfg.reset_door_joint_pos_delta_max
-        self.reset_arx_joint_pos_delta_min = self.cfg.reset_arx_joint_pos_delta_min
-        self.reset_arx_joint_pos_delta_max = self.cfg.reset_arx_joint_pos_delta_max
 
         # self.last_actions = torch.zeros(
         #     (self.num_envs, len(self._robot_dof_idx)),
@@ -170,6 +169,12 @@ class DooropeningEnv(DirectRLEnv):
         # )
 
         self.twist_indices = self.cfg.twist_indices
+        self.robot_arx_tuck_joint_pos_scale = self.cfg.robot_arx_tuck_joint_pos_scale
+        self._robot_arx_tuck_joint_pos_target = torch.tensor(
+            [float(CAMERA_JOINT_DEFAULT_VALUES[joint_name]) for joint_name in self.cfg.arx_joints],
+            device=self.device,
+            dtype=self.robot.data.joint_pos.dtype,
+        )
 
         self.num_door_assets = len(handle_offsets)
         self.env_asset_start_index = get_multi_door_asset_start_index(self.num_envs)
@@ -1155,20 +1160,20 @@ class DooropeningEnv(DirectRLEnv):
         policy_joint_vel[:, self._target_arx_slice] = self._uniform_noise_like(
             policy_joint_vel[:, self._target_arx_slice], "arm_joint_vel_noise", "arm_joint_vel_bias"
         )
-        clean_base_joint_ref_err = (
-            self.ref_robot_base_joint_pos
-            - clean_joint_pos[:, self._target_base_rot_slice.start : self._target_base_xy_slice.stop]
-        ).unsqueeze(dim=1)
-        clean_arm_joint_ref_err = (self.ref_robot_arm_joint_pos - clean_joint_pos[:, self._target_arm_slice]).unsqueeze(
-            dim=1
-        )
-        policy_base_joint_ref_err = (
-            self.ref_robot_base_joint_pos
-            - policy_joint_pos[:, self._target_base_rot_slice.start : self._target_base_xy_slice.stop]
-        ).unsqueeze(dim=1)
-        policy_arm_joint_ref_err = (
-            self.ref_robot_arm_joint_pos - policy_joint_pos[:, self._target_arm_slice]
-        ).unsqueeze(dim=1)
+        # clean_base_joint_ref_err = (
+        #     self.ref_robot_base_joint_pos
+        #     - clean_joint_pos[:, self._target_base_rot_slice.start : self._target_base_xy_slice.stop]
+        # ).unsqueeze(dim=1)
+        # clean_arm_joint_ref_err = (self.ref_robot_arm_joint_pos - clean_joint_pos[:, self._target_arm_slice]).unsqueeze(
+        #     dim=1
+        # )
+        # policy_base_joint_ref_err = (
+        #     self.ref_robot_base_joint_pos
+        #     - policy_joint_pos[:, self._target_base_rot_slice.start : self._target_base_xy_slice.stop]
+        # ).unsqueeze(dim=1)
+        # policy_arm_joint_ref_err = (
+        #     self.ref_robot_arm_joint_pos - policy_joint_pos[:, self._target_arm_slice]
+        # ).unsqueeze(dim=1)
         policy_robot_key_body_pos_local, policy_robot_key_body_euler, policy_base_lin_vel_local, policy_base_ang_vel_local = self.transform_key_bodies_to_base_frame(
             policy_robot_key_body_pos,
             policy_robot_key_body_quat,
@@ -1198,32 +1203,33 @@ class DooropeningEnv(DirectRLEnv):
             "door_joint_pos_bias",
         ).unsqueeze(dim=1)
 
-        twist_obs = torch.cat(
-            (
-                self.ref_robot_key_body_pos_twist.reshape(self.num_envs, 1, -1),
-                self.ref_robot_key_body_quat_twist.reshape(self.num_envs, 1, -1),
-                self.ref_door_joint_pos_twist.reshape(self.num_envs, 1, -1),
-                (
-                    self.ref_robot_base_joint_pos_twist - clean_joint_pos[:, self._target_base_rot_slice.start : self._target_base_xy_slice.stop].unsqueeze(dim=1)
-                ).reshape(self.num_envs, 1, -1),
-                (
-                    self.ref_robot_arm_joint_pos_twist - clean_joint_pos[:, self._target_arm_slice].unsqueeze(dim=1)
-                ).reshape(self.num_envs, 1, -1),
-                (
-                    self.ref_robot_arx_joint_pos_twist - clean_joint_pos[:, self._target_arx_slice].unsqueeze(dim=1)
-                ).reshape(self.num_envs, 1, -1),
-                door_twist_in_robot_base_frame,
-            ),
-            dim=-1,
-        )
+        # twist_obs = torch.cat(
+        #     (
+        #         self.ref_robot_key_body_pos_twist.reshape(self.num_envs, 1, -1),
+        #         self.ref_robot_key_body_quat_twist.reshape(self.num_envs, 1, -1),
+        #         self.ref_door_joint_pos_twist.reshape(self.num_envs, 1, -1),
+        #         (
+        #             self.ref_robot_base_joint_pos_twist
+        #             - clean_joint_pos[:, self._target_base_rot_slice.start : self._target_base_xy_slice.stop].unsqueeze(dim=1)
+        #         ).reshape(self.num_envs, 1, -1),
+        #         (
+        #             self.ref_robot_arm_joint_pos_twist - clean_joint_pos[:, self._target_arm_slice].unsqueeze(dim=1)
+        #         ).reshape(self.num_envs, 1, -1),
+        #         (
+        #             self.ref_robot_arx_joint_pos_twist - clean_joint_pos[:, self._target_arx_slice].unsqueeze(dim=1)
+        #         ).reshape(self.num_envs, 1, -1),
+        #         door_twist_in_robot_base_frame,
+        #     ),
+        #     dim=-1,
+        # )
 
         policy_obs = torch.cat(
             (
                 policy_joint_pos.unsqueeze(dim=1),
                 policy_joint_vel.unsqueeze(dim=1),
                 self.robot_dof_targets.unsqueeze(dim = 1),
-                policy_base_joint_ref_err,
-                policy_arm_joint_ref_err,
+                # policy_base_joint_ref_err,
+                # policy_arm_joint_ref_err,
                 policy_key_pos_err,
                 policy_robot_key_body_pos_local.reshape(self.num_envs, 1, -1),
                 policy_robot_key_body_euler.reshape(self.num_envs, 1, -1),
@@ -1233,7 +1239,7 @@ class DooropeningEnv(DirectRLEnv):
                 policy_door_joint_pos,
                 self.ref_door_joint_pos[:, self._door_joint_idx].to(self.door_joint_pos).unsqueeze(dim = 1),
                 self.ref_robot_arx_joint_pos.to(self.robot_arx_joint_pos).unsqueeze(dim=1),
-                twist_obs,
+                # twist_obs,
             ),
             dim=-1,
         )
@@ -1243,8 +1249,8 @@ class DooropeningEnv(DirectRLEnv):
                 clean_joint_pos.unsqueeze(dim=1),
                 clean_joint_vel.unsqueeze(dim=1),
                 self.robot_dof_targets.unsqueeze(dim=1),
-                clean_base_joint_ref_err,
-                clean_arm_joint_ref_err,
+                # clean_base_joint_ref_err,
+                # clean_arm_joint_ref_err,
                 key_pos_err,
                 robot_key_body_pos.reshape(self.num_envs, 1, -1),
                 robot_key_body_euler.reshape(self.num_envs, 1, -1),
@@ -1254,7 +1260,7 @@ class DooropeningEnv(DirectRLEnv):
                 self.door_joint_pos[:, self._door_joint_idx].unsqueeze(dim = 1),
                 self.ref_door_joint_pos[:, self._door_joint_idx].to(self.door_joint_pos).unsqueeze(dim = 1),
                 self.ref_robot_arx_joint_pos.to(self.robot_arx_joint_pos).unsqueeze(dim=1),
-                twist_obs,
+                # twist_obs,
             ),
             dim=-1,
         )
@@ -1736,6 +1742,16 @@ class DooropeningEnv(DirectRLEnv):
             joint_upper_limits=self.robot_dof_upper_limits,
             soft_ratio=self.joint_limit_penalty_margin_ratio,
         )
+        arx_tuck_joint_pos_diff = hinge_angle_diff(
+            self._robot_arx_tuck_joint_pos_target.unsqueeze(0),
+            self.robot_arx_joint_pos,
+        )
+        arx_tuck_joint_pos_err = torch.sum(arx_tuck_joint_pos_diff * arx_tuck_joint_pos_diff, dim=-1)
+        arx_tuck_reward = torch.exp(-self.robot_arx_tuck_joint_pos_scale * arx_tuck_joint_pos_err)
+        weighted_arx_tuck_reward = self.robot_arx_tuck_joint_pos_w * arx_tuck_reward
+        self.extras["reward/arx_tuck_reward"] = weighted_arx_tuck_reward.mean().item()
+        self.extras["stats/arx_tuck_joint_pos_err_mean"] = arx_tuck_joint_pos_err.mean().item()
+        self.extras["stats/arx_tuck_joint_pos_err_max"] = arx_tuck_joint_pos_err.max().item()
         weighted_joint_limit_penalty = self.joint_limit_penalty_w * joint_limit_penalty
         self.extras["error/joint_limit_penalty"] = weighted_joint_limit_penalty.reshape(self.num_envs, -1).mean().item()
         self.extras["stats/joint_limit_active_fraction"] = (
@@ -1756,7 +1772,7 @@ class DooropeningEnv(DirectRLEnv):
         is_killed = self.reset_terminated
         termination_penalty = self.termination_penalty
         
-        final_reward = deep_mimic_reward + total_alive_reward - weighted_joint_limit_penalty
+        final_reward = deep_mimic_reward + weighted_arx_tuck_reward + total_alive_reward - weighted_joint_limit_penalty
         final_reward = torch.where(is_killed, final_reward + termination_penalty, final_reward)
 
         return final_reward
@@ -1771,11 +1787,9 @@ class DooropeningEnv(DirectRLEnv):
         reset_key_body_pos_delta = self.reset_key_body_pos_delta_min + (self.reset_key_body_pos_delta_max - self.reset_key_body_pos_delta_min) * progress
         reset_key_body_quat_delta = self.reset_key_body_quat_delta_min + (self.reset_key_body_quat_delta_max - self.reset_key_body_quat_delta_min) * progress
         reset_door_joint_pos_delta = self.reset_door_joint_pos_delta_min + (self.reset_door_joint_pos_delta_max - self.reset_door_joint_pos_delta_min) * progress
-        reset_arx_joint_pos_delta = self.reset_arx_joint_pos_delta_min + (self.reset_arx_joint_pos_delta_max - self.reset_arx_joint_pos_delta_min) * progress
         self.extras["reset/reset_key_body_pos_delta"] = reset_key_body_pos_delta
         self.extras["reset/reset_key_body_quat_delta"] = reset_key_body_quat_delta
         self.extras["reset/reset_door_joint_pos_delta"] = reset_door_joint_pos_delta
-        self.extras["reset/reset_arx_joint_pos_delta"] = reset_arx_joint_pos_delta
         # reset_key_body_pos_delta = reset_key_body_pos_delta ** 2 * len(self.cfg.robot_reset_key_bodies)
         # reset_key_body_quat_delta = reset_key_body_quat_delta ** 2 * len(self.cfg.robot_reset_key_bodies)
         # reset_door_joint_pos_delta = reset_door_joint_pos_delta ** 2 * len(self.cfg.door_joint_names)
@@ -1786,7 +1800,6 @@ class DooropeningEnv(DirectRLEnv):
         x5_body_force_norm = torch.linalg.vector_norm(x5_body_contact_forces, dim=-1)
         unsafe_x5_body_contact = x5_body_force_norm > self.cfg.x5_body_contact_force_threshold
         arx_joint_pos_diff = hinge_angle_diff(self.ref_robot_arx_joint_pos, self.robot_arx_joint_pos).abs()
-        unsafe_arx_joint_deviation = arx_joint_pos_diff.max(dim=-1).values > reset_arx_joint_pos_delta
         self.extras["stats/arx_joint_pos_diff_max"] = float(arx_joint_pos_diff.max().detach().cpu().item())
         # key_body_pos_err, key_body_quat_err, door_err, root_pos_err, root_rot_err, arm_joint_pos_err, finger_joint_pos_err, base_joint_vel_err, arm_joint_vel_err, finger_joint_vel_err, door_pos_err = compute_tracking_error(
         key_body_pos_err, key_body_quat_err, door_err, base_joint_pos_err, arm_joint_pos_err, finger_joint_pos_err, arx_joint_pos_err, base_joint_vel_err, arm_joint_vel_err, finger_joint_vel_err = compute_tracking_error(
@@ -1813,7 +1826,6 @@ class DooropeningEnv(DirectRLEnv):
             ref_robot_finger_joint_vel = self.ref_robot_finger_joint_vel,
         )
         return \
-            unsafe_arx_joint_deviation | \
             unsafe_x5_body_contact | \
             (key_body_pos_err > reset_key_body_pos_delta) | \
             (key_body_quat_err > reset_key_body_quat_delta) | \

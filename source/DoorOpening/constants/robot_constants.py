@@ -128,8 +128,7 @@ ROBOT_KEY_BODY_NAMES = [
     "panda_link4",
     "panda_link6",
     "palm_lower",
-    # First try without it, if needed add it back
-    # "x5_camera_link",
+    "x5_camera_link",
 ]
 
 ROBOT_RESET_KEY_BODY_NAMES = [

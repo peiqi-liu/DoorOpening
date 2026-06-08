@@ -301,7 +301,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     #   => `actuated_joints_num * 3`
     #   Adding the 4 ARX joints increases this block by `4 * 3 = 12` dims.
     # - current base and arm joint diffs to the reference motion
-    #   => `len(base_joints) + len(arm_joints)`
+    #   => currently disabled in _build_observations()
     # - key-body position tracking error in the base frame
     #   => `len(robot_key_bodies) * 3`
     # - non-base key-body poses in the base frame:
@@ -316,7 +316,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # - reference ARX/x5 joint positions
     #   => `len(arx_joints)`
     # - future reference motion summary at twist indices
-    #   => `twist_observation_space`
+    #   => currently disabled in _build_observations(), so not counted in observation_space
     proprioception_observation_space = actuated_joints_num * 3
     joint_reference_error_observation_space = len(base_joints) + len(arm_joints)
     key_body_error_observation_space = len(robot_key_bodies) * 3
@@ -328,14 +328,12 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     observation_space = (
         proprioception_observation_space
-        + joint_reference_error_observation_space
         + key_body_error_observation_space
         + robot_pose_observation_space
         + base_velocity_observation_space
         + door_body_observation_space
         + door_joint_observation_space
         + arx_joint_reference_observation_space
-        + twist_observation_space
     )
     state_space = observation_space
     num_observations = observation_space
@@ -344,9 +342,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=False)
 
-    base_action_scale = 1.0
+    base_action_scale = 0.3
     arm_action_scale = 0.6
-    finger_action_scale = 0.5
+    finger_action_scale = 1.5
     arx_action_scale = 0.6
 
     # Deep Mimic Reward Parameters
@@ -355,7 +353,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_base_joint_pos_w = 3.0
     robot_arm_joint_pos_w = 3.0
     robot_finger_joint_pos_w = 1.0
-    robot_arx_joint_pos_w = 3.0
+    robot_arx_joint_pos_w = 5.0
+    robot_arx_tuck_joint_pos_w = 2.0
     robot_base_joint_vel_w = 1.0
     robot_arm_joint_vel_w = 2.0
     robot_finger_joint_vel_w = 0.5
@@ -371,6 +370,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_base_joint_pos_scale = 0.5
     robot_arm_joint_pos_scale = 0.2
     robot_finger_joint_pos_scale = 1.0
+    robot_arx_tuck_joint_pos_scale = 0.2
     robot_base_joint_vel_scale = 0.5
     robot_arm_joint_vel_scale = 0.5
     robot_finger_joint_vel_scale = 0.5
@@ -384,8 +384,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     reset_key_body_quat_delta_max = 3.0
     reset_door_joint_pos_delta_min = 0.5
     reset_door_joint_pos_delta_max = 0.8
-    reset_arx_joint_pos_delta_min = 0.15
-    reset_arx_joint_pos_delta_max = 0.25
     # We are slowly increasing our tolerance on base position drift and slowly only resettting the env from the first key frame
     # This variable is used to indicate when we stop increasing the tolerance and reset the env from the first key frame for the greatest probability
     reset_progress_total = 4e5
