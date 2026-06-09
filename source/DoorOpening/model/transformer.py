@@ -669,8 +669,10 @@ class PCDTransformer(BaseModel):
         alias_map = {
             "tracking_err_arm": ("tracking_err_arm", "target_err_arm"),
             "tracking_err_hand": ("tracking_err_hand", "target_err_hand"),
+            "tracking_err_arx": ("tracking_err_arx", "target_err_arx"),
             "target_err_arm": ("target_err_arm", "tracking_err_arm"),
             "target_err_hand": ("target_err_hand", "tracking_err_hand"),
+            "target_err_arx": ("target_err_arx", "tracking_err_arx"),
             "push_pull_belief": ("push_pull_belief", "push_pull_cond"),
         }
         return alias_map.get(field_name, (field_name,))

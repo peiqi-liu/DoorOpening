@@ -5,7 +5,7 @@ dropout: 0.0
 normalize_state: True
 normalize_action: True
 action_space: "absolute"
-action_dim: 19
+action_dim: 23
 aux_weight: 0.1
 mode_prediction:
   enabled: false
@@ -27,7 +27,7 @@ push_pull_condition:
   dropout: 0.0
   use_layer_norm: true
 
-door_pcd_num_points: 30000  # Dense scene-door sampling before local policy crops are taken.
+scene_door_num_points: 30000  # GT door/model points cached in the scene before any sensor rendering.
 local_pcd_range: [1.2, 0.25, 0.25]
 x_direction_cutoff: -0.5
 
@@ -38,12 +38,14 @@ temporal_obs:
 
 temporal_state_encoders:
   enabled: true
-  # timestamps_ms: [0, 300, 600, 900, 1200, 1500]
-  timestamps_ms: [0, 400, 800, 1200, 1600, 2000, 2400, 2800]
+  timestamps_ms: [0, 300, 600, 900]
+  # timestamps_ms: [0, 400, 800, 1200, 1600, 2000, 2400, 2800]
   fields:
     - q_arm
+    - q_arx
     - q_hand
     - target_err_arm
+    - target_err_arx
     - target_err_hand
     - base_vel
     - aux_handle_pos
@@ -62,7 +64,7 @@ push_pull_condition_perturb:
 
 observation_lag:
   enabled: true
-  max_jitter_ms: 100
+  max_jitter_ms: 150
   mode: symmetric
   apply_to_proprio: true
   apply_to_pointcloud: false
@@ -74,7 +76,7 @@ pcd_encoders_cfg:
   local_pcd_t:
     type: "pointnet"
     num_output_tokens: 128
-    num_points: [2500, 1000, 0]  # Policy door input = base crop + palm crop; robot points are configured below.
+    num_points: [2500, 1000, 0]  # Policy crop counts for the fused depth+lidar observation; robot model points are configured below.
     use_pcd: true
 
 state_encoders_cfg:
@@ -85,6 +87,11 @@ state_encoders_cfg:
     use_state: true
   q_hand:
     input_dim: 9
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  q_arx:
+    input_dim: 4
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
@@ -111,6 +118,11 @@ state_encoders_cfg:
     use_state: true
   target_err_hand:
     input_dim: 9
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  target_err_arx:
+    input_dim: 4
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
@@ -160,22 +172,23 @@ dagger:
   save_interval: 5000
   reset_progress_total: 50000
   adr_reset_progress_total: 10000
-  pointcloud_source: "lidar"
-  robot_num_points: 30000
-  append_robot_gt_to_policy_cloud: true
-  robot_gt_policy_points: 2000  # Policy robot input appended after the two door crops above.
+  pointcloud_source: "both"
+  scene_robot_num_points: 30000  # GT robot/model points concatenated into the renderable scene cloud.
+  append_robot_model_to_policy_cloud: true
+  robot_model_policy_points: 2000  # Robot model points appended to the policy input after the depth/lidar crops.
   robot_pointcloud_filter:
     enabled: true
     sdf_cutoff: 0.02
     max_points_per_process: 5000
-  sampler_render:
+  depth_cam_render:
+    num_points: 12000
     inflate_px: 2
-    jitter_std_m: 0.004
+    jitter_std_m: 0.01
     clip_mode: "post"
     jitter_mode: "xyz"
     use_compile: true
   lidar_render:
-    num_points: 10000
+    num_points: 12000
     num_azimuth: 128
     num_polar: 256
     near_m: 0.1
@@ -183,24 +196,27 @@ dagger:
     suppress_bins: 2
     occlusion_eps_m: 0.02
     occlusion_eps_rel: 0.01
-    jitter_std_m: 0.001
+    jitter_std_m: 0.05
     use_compile: true
   wall_distractors:
     enabled: true
-    num_points: 30000
-    resample_each_step: false  # Faster and more realistic than regenerating wall geometry every simulation step.
-    side_margin_m: [0.35, 0.80]  # In column mode, this is the sampled column width in meters.
-    bottom_margin_scale: [0.02, 0.08]
-    edge_gap_m: [0.015, 0.04]
-    depth_m: [0.1, 0.8]  # Extra thickness beyond the door slab; a larger range gives thicker jambs/walls.
-    center_offset_m: [-0.30, 0.30]  # Allow both recessed and protruding wall columns along the door-thickness axis.
-    side_margin_min_m: 0.10
-    face_jitter_m: 0.004
+    wall_num_points: 40000
+    # The sampler builds two vertical "wall columns" beside the door panel in the door-panel local frame:
+    # - width axis: left/right across the panel, so the columns sit just outside the panel edges
+    # - height axis: bottom/top of the panel
+    # - thickness axis: through the panel, normal to the door slab
+    # Each sampled point comes from either the left or right column.
+    side_margin_m: [0.2, 0.80]  # Column width along the door width axis, i.e. how far each column extends outward from the left/right panel edge.
+    edge_gap_m: [0.0, 0.3]  # Empty gap between the panel side edge and the inner face of the wall column.
+    depth_m: [0.1, 1.5]  # Extra thickness added beyond the door slab thickness along the door-thickness axis.
+    center_offset_m: [-0.80, 0.80]  # Shift of the whole column along the door-thickness axis: negative is recessed behind the slab center, positive protrudes in front.
+    # Wall height is fixed in the sampler to [0.0 m, 2.0 m] in the ordered door-local height axis.
+    face_jitter_m: 0.1  # Small noise added only on the snapped outer faces so the walls do not look perfectly planar.
   viser:
-    env_id: 0
     raw:
       enabled: false  # Save raw `.pt` replay chunks for offline debugging.
       path: "viser_replay.pt"
+      capture_interval: 2  # Save one frame, skip one frame, so each replay chunk spans more rollout time.
       save_interval: 10000  # Write one raw `.pt` file every N iterations.
       max_points: 6000  # Raw replay is for debugging, not training; smaller clouds replay much better on laptops.
       max_frames: 2000  # Keep at most this many frames in each raw `.pt` file; set 0 to disable the cap.

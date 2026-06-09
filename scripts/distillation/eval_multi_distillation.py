@@ -166,7 +166,7 @@ parser.add_argument("--num_eval_runs", type=int, default=3, help="Number of repe
 parser.add_argument(
     "--pointcloud_source",
     type=str,
-    choices=["sampler", "depth", "lidar"],
+    choices=["sampler", "depth", "lidar", "both"],
     default=None,
     help="Point-cloud source. Defaults to dagger.pointcloud_source in the student YAML.",
 )
@@ -218,10 +218,10 @@ selected_door_families = _normalize_family_selection(
 if selected_door_families is not None:
     os.environ["DOOROPENING_MULTI_DOOR_FAMILIES"] = ",".join(selected_door_families)
     print(f"[INFO] Using multi-door families: {selected_door_families}")
-pointcloud_source = str(student_dagger_defaults.get("pointcloud_source", "sampler")).lower()
+pointcloud_source = str(student_dagger_defaults.get("pointcloud_source", "both")).lower()
 if args_cli.pointcloud_source is not None:
     pointcloud_source = args_cli.pointcloud_source
-if args_cli.video or pointcloud_source == "depth":
+if args_cli.video:
     args_cli.enable_cameras = True
 
 sys.argv = [sys.argv[0]] + hydra_args
@@ -853,13 +853,8 @@ def main(env_cfg, agent_cfg: dict):
     else:
         env_cfg.adr_reset_progress_total = 0.5 * float(env_cfg.reset_progress_total)
 
-    if pointcloud_source == "depth":
-        env_cfg.pointcloud_render_mode = "depth"
-    elif pointcloud_source == "lidar":
-        env_cfg.pointcloud_render_mode = "lidar"
-    else:
-        env_cfg.pointcloud_render_mode = "none"
-    env_cfg.enable_pointcloud_camera = env_cfg.pointcloud_render_mode == "depth"
+    env_cfg.pointcloud_render_mode = "none"
+    env_cfg.enable_pointcloud_camera = False
 
     timestamp = time.strftime("%Y-%m-%d-%H-%M-%S")
     experiment_dir = os.path.join("runs", f"DoorOpening-Distillation-Eval_{timestamp}")
@@ -1093,7 +1088,7 @@ def main(env_cfg, agent_cfg: dict):
                         robot_base_pos_w=dagger._viser_pending_debug_frame["robot_base_pos_w"],
                         robot_base_quat_w=dagger._viser_pending_debug_frame["robot_base_quat_w"],
                         ground_truth_pcd_world=dagger._viser_pending_debug_frame["ground_truth_pcd_world"],
-                        robot_obs_pcd_base=dagger._viser_pending_debug_frame["robot_obs_pcd_base"],
+                        scene_obs_pcd_base=dagger._viser_pending_debug_frame["robot_obs_pcd_base"],
                         policy_input_pcd_base=dagger._viser_pending_debug_frame["policy_input_pcd_base"],
                         aux_prediction=aux_prediction_for_replay,
                     )

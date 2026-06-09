@@ -17,7 +17,7 @@ try:
 except ImportError:
     wandb = None
 
-from isaaclab.utils.math import quat_apply, transform_points
+from isaaclab.utils.math import quat_apply
 from rl_games.algos_torch import torch_ext
 from rl_games.algos_torch.model_builder import ModelBuilder
 
@@ -32,7 +32,6 @@ from DoorOpening.tasks.dooropening.contact_force_utils import get_filtered_conta
 from DoorOpening.utils.camera_utils import (
     build_pinhole_intrinsics,
     crop_local_pcd,
-    depth_to_pointcloud,
     simulate_depth_cam_render_from_pose,
     simulate_lidar_render_from_pose,
 )
@@ -101,16 +100,18 @@ class Dagger:
         base_action_dim = len(self.ov_env._robot_base_dof_idx)
         arm_action_dim = len(self.ov_env._robot_arm_dof_idx)
         hand_action_dim = len(self.ov_env._robot_finger_dof_idx)
-        if base_action_dim + arm_action_dim + hand_action_dim != self.num_actions:
+        arx_action_dim = len(self.ov_env._robot_arx_dof_idx)
+        if base_action_dim + arm_action_dim + hand_action_dim + arx_action_dim != self.num_actions:
             raise ValueError(
-                "Action dimensions from base/arm/hand do not match env action dim: "
-                f"{base_action_dim} + {arm_action_dim} + {hand_action_dim} != {self.num_actions}."
+                "Action dimensions from base/arm/hand/arx do not match env action dim: "
+                f"{base_action_dim} + {arm_action_dim} + {hand_action_dim} + {arx_action_dim} != {self.num_actions}."
             )
         self.action_component_dims = OrderedDict(
             [
                 ("base", base_action_dim),
                 ("arm", arm_action_dim),
                 ("hand", hand_action_dim),
+                ("arx", arx_action_dim),
             ]
         )
         self.action_component_aliases = {
@@ -118,6 +119,9 @@ class Dagger:
             "arm": "arm",
             "hand": "hand",
             "finger": "hand",
+            "arx": "arx",
+            "camera": "arx",
+            "x5": "arx",
         }
         self.action_component_history_indices = self._build_action_component_history_indices()
         self.proprio_component_history_indices = self._build_proprio_component_history_indices()
@@ -152,14 +156,22 @@ class Dagger:
         self.teacher_forcing_min_beta = float(self.runtime_cfg.get("teacher_forcing_min_beta", 0.0))
         self.log_interval = int(self.runtime_cfg.get("log_interval", 100))
         self.save_interval = int(self.runtime_cfg.get("save_interval", 5_000))
-        self.pointcloud_source = str(self.runtime_cfg.get("pointcloud_source", "sampler")).lower()
-        self.robot_pcd_num_points = self.runtime_cfg.get("robot_num_points")
-        self.sampler_render_cfg = self.runtime_cfg.get("sampler_render", {})
-        self.sampler_render_inflate_px = int(self.sampler_render_cfg.get("inflate_px", 2))
-        self.sampler_render_jitter_std_m = float(self.sampler_render_cfg.get("jitter_std_m", 0.004))
-        self.sampler_render_clip_mode = str(self.sampler_render_cfg.get("clip_mode", "post"))
-        self.sampler_render_jitter_mode = str(self.sampler_render_cfg.get("jitter_mode", "xyz"))
-        self.sampler_render_use_compile = bool(self.sampler_render_cfg.get("use_compile", True))
+        self.pointcloud_source = str(self.runtime_cfg.get("pointcloud_source", "both")).lower()
+        self.scene_robot_pcd_num_points = self.runtime_cfg.get(
+            "scene_robot_num_points",
+            self.runtime_cfg.get("robot_num_points"),
+        )
+        # `sampler_render` is kept as a backwards-compatible alias for older configs.
+        self.depth_cam_render_cfg = self.runtime_cfg.get(
+            "depth_cam_render",
+            self.runtime_cfg.get("sampler_render", {}),
+        )
+        self.depth_cam_render_num_points = self.depth_cam_render_cfg.get("num_points")
+        self.depth_cam_render_inflate_px = int(self.depth_cam_render_cfg.get("inflate_px", 2))
+        self.depth_cam_render_jitter_std_m = float(self.depth_cam_render_cfg.get("jitter_std_m", 0.004))
+        self.depth_cam_render_clip_mode = str(self.depth_cam_render_cfg.get("clip_mode", "post"))
+        self.depth_cam_render_jitter_mode = str(self.depth_cam_render_cfg.get("jitter_mode", "xyz"))
+        self.depth_cam_render_use_compile = bool(self.depth_cam_render_cfg.get("use_compile", True))
         self.lidar_render_cfg = self.runtime_cfg.get("lidar_render", {})
         self.lidar_num_points = self.lidar_render_cfg.get("num_points")
         self.lidar_num_azimuth = int(self.lidar_render_cfg.get("num_azimuth", 512))
@@ -179,20 +191,31 @@ class Dagger:
         self.robot_pointcloud_filter_max_points_per_process = int(
             self.robot_pointcloud_filter_cfg.get("max_points_per_process", 5000)
         )
-        self.append_robot_gt_to_policy_cloud = bool(self.runtime_cfg.get("append_robot_gt_to_policy_cloud", True))
-        self.robot_gt_policy_points = self.runtime_cfg.get("robot_gt_policy_points")
+        self.append_robot_model_to_policy_cloud = bool(
+            self.runtime_cfg.get(
+                "append_robot_model_to_policy_cloud",
+                self.runtime_cfg.get("append_robot_gt_to_policy_cloud", True),
+            )
+        )
+        self.robot_model_policy_points = self.runtime_cfg.get(
+            "robot_model_policy_points",
+            self.runtime_cfg.get("robot_gt_policy_points"),
+        )
         # Runtime controls for optional raw point-cloud replay dumps.
         self.viser_cfg = dict(self.runtime_cfg.get("viser", {}))
         self.viser_raw_cfg = dict(self.viser_cfg.get("raw", {}))
-        self.viser_env_id = int(self.viser_cfg.get("env_id", 0))
         self.viser_raw_enabled = self.rank == 0 and bool(self.viser_raw_cfg.get("enabled", False))
         self.viser_raw_save_interval = max(
             1,
             int(self.viser_raw_cfg.get("save_interval", self.viser_cfg.get("raw_interval", 1000))),
         )
+        self.viser_raw_capture_interval = max(
+            1,
+            int(self.viser_raw_cfg.get("capture_interval", self.viser_raw_cfg.get("frame_stride", 2))),
+        )
         self.viser_raw_max_points = int(self.viser_raw_cfg.get("max_points", 12_000))
         self.viser_raw_max_frames = max(0, int(self.viser_raw_cfg.get("max_frames", 0)))
-        if self.pointcloud_source not in {"sampler", "depth", "lidar"}:
+        if self.pointcloud_source not in {"sampler", "depth", "lidar", "both"}:
             raise ValueError(f"Unsupported pointcloud_source '{self.pointcloud_source}'.")
         if self.teacher_forcing_warmup_iters < 0:
             raise ValueError("teacher_forcing_warmup_iters must be non-negative.")
@@ -403,7 +426,12 @@ class Dagger:
         student_yaml_runtime_cfg = dict(student_cfg_data.pop("dagger", {}) or {})
         self.local_pcd_range = list(student_cfg_data.pop("local_pcd_range", [1.0, 0.35, 0.35]))
         self.local_pcd_x_direction_cutoff = student_cfg_data.pop("x_direction_cutoff", -0.5)
-        self.door_pcd_num_points = int(student_cfg_data.pop("door_pcd_num_points", 4096))
+        self.scene_door_pcd_num_points = int(
+            student_cfg_data.pop(
+                "scene_door_num_points",
+                student_cfg_data.pop("door_pcd_num_points", 4096),
+            )
+        )
         self.temporal_obs_cfg = dict(student_cfg_data.pop("temporal_obs", {}) or {})
         self.observation_lag_cfg = dict(student_cfg_data.pop("observation_lag", {}) or {})
         self.push_pull_condition_perturb_cfg = dict(student_cfg_data.pop("push_pull_condition_perturb", {}) or {})
@@ -637,12 +665,12 @@ class Dagger:
         local_pcd_cfg = self.student_model.pcd_encoders_cfg.get("local_pcd_t")
         self.local_pcd_points = [0, 0, 0]
         if local_pcd_cfg is not None:
-            self.local_pcd_points = list(local_pcd_cfg.get("num_points", [self.door_pcd_num_points, 0, 0])[:3])
-        if self.robot_gt_policy_points is None and len(self.local_pcd_points) >= 3:
-            self.robot_gt_policy_points = int(self.local_pcd_points[2])
-        if self.robot_gt_policy_points is None:
-            self.robot_gt_policy_points = 0
-        self.robot_gt_policy_points = max(0, int(self.robot_gt_policy_points))
+            self.local_pcd_points = list(local_pcd_cfg.get("num_points", [self.scene_door_pcd_num_points, 0, 0])[:3])
+        if self.robot_model_policy_points is None and len(self.local_pcd_points) >= 3:
+            self.robot_model_policy_points = int(self.local_pcd_points[2])
+        if self.robot_model_policy_points is None:
+            self.robot_model_policy_points = 0
+        self.robot_model_policy_points = max(0, int(self.robot_model_policy_points))
 
     def _init_mode_prediction_training_state(self):
         self.mode_prediction_loss_enabled = self.mode_prediction_enabled and self.mode_weight > 0.0
@@ -1327,6 +1355,11 @@ class Dagger:
             device=self.device,
             dtype=torch.long,
         )
+        indices["arx"] = torch.as_tensor(
+            [joint_id_to_target_pos[int(joint_id)] for joint_id in self.ov_env._robot_arx_dof_idx],
+            device=self.device,
+            dtype=torch.long,
+        )
         return indices
 
     def _build_proprio_component_history_indices(self):
@@ -1336,6 +1369,7 @@ class Dagger:
                 ("base", torch.as_tensor(self.ov_env._robot_base_dof_idx, device=self.device, dtype=torch.long)),
                 ("arm", torch.as_tensor(self.ov_env._robot_arm_dof_idx, device=self.device, dtype=torch.long)),
                 ("hand", torch.as_tensor(self.ov_env._robot_finger_dof_idx, device=self.device, dtype=torch.long)),
+                ("arx", torch.as_tensor(self.ov_env._robot_arx_dof_idx, device=self.device, dtype=torch.long)),
             ]
         )
 
@@ -1363,7 +1397,7 @@ class Dagger:
             if len(parts) != 2:
                 return None
             component = self.action_component_aliases.get(parts[0])
-            if component not in {"arm", "hand"}:
+            if component not in {"arm", "hand", "arx"}:
                 raise KeyError(
                     f"Unsupported temporal q state key {key}. "
                     "Raw base pose history is disabled; use base_vel_<milliseconds>ms instead."
@@ -2064,6 +2098,9 @@ class Dagger:
         elif actual_state_key == "q_hand":
             full_value = self._get_temporal_sample_from_cache(sample_cache, "q_full", timestamp_s)
             value = full_value[:, self.ov_env._robot_finger_dof_idx]
+        elif actual_state_key == "q_arx":
+            full_value = self._get_temporal_sample_from_cache(sample_cache, "q_full", timestamp_s)
+            value = full_value[:, self.ov_env._robot_arx_dof_idx]
         elif actual_state_key == "base_vel":
             value = self._get_temporal_sample_from_cache(sample_cache, "base_vel", timestamp_s)
         elif actual_state_key in {"target_err_arm", "tracking_err_arm"}:
@@ -2072,6 +2109,9 @@ class Dagger:
         elif actual_state_key in {"target_err_hand", "tracking_err_hand"}:
             full_value = self._get_temporal_sample_from_cache(sample_cache, "target_err", timestamp_s)
             value = full_value[:, self.action_component_history_indices["hand"]]
+        elif actual_state_key in {"target_err_arx", "tracking_err_arx"}:
+            full_value = self._get_temporal_sample_from_cache(sample_cache, "target_err", timestamp_s)
+            value = full_value[:, self.action_component_history_indices["arx"]]
         elif actual_state_key == "aux_handle_pos":
             value = self._get_temporal_sample_from_cache(sample_cache, "aux_handle_pos", timestamp_s)
         elif field_name == "push_pull_belief" or actual_state_key == self.push_pull_condition_obs_key:
@@ -2278,12 +2318,21 @@ class Dagger:
         bbox_min = self.env_board_bboxes[:, 0]
         bbox_max = self.env_board_bboxes[:, 1]
         bbox_extent = (bbox_max - bbox_min).clamp_min(1e-4)
+        # We do not assume a fixed asset axis convention across all door families.
+        # Instead, we infer a stable local frame from the panel bbox extents:
+        # smallest extent -> door thickness axis (through the slab),
+        # middle extent  -> door width axis (left/right across the panel),
+        # largest extent -> door height axis (bottom/top).
         self.wall_distractor_axis_order = torch.argsort(bbox_extent, dim=-1)
         self.wall_distractor_bbox_min_ordered = torch.gather(bbox_min, 1, self.wall_distractor_axis_order)
         self.wall_distractor_bbox_max_ordered = torch.gather(bbox_max, 1, self.wall_distractor_axis_order)
         unique_asset_idx = sorted(set(self.env_asset_idx.detach().cpu().tolist()))
         self.door_samplers = {
-            idx: FrankaLeapSampler(door_asset_paths[idx], device=self.device, num_points=self.door_pcd_num_points)
+            idx: FrankaLeapSampler(
+                door_asset_paths[idx],
+                device=self.device,
+                num_points=self.scene_door_pcd_num_points,
+            )
             for idx in unique_asset_idx
         }
         door_geometry_aug_cfg = self.runtime_cfg.get("door_geometry_aug", {})
@@ -2298,11 +2347,15 @@ class Dagger:
             idx: build_first_visual_link_pointcloud_cache(sampler, link_names=("link_1", "link_2"), device=self.device)
             for idx, sampler in self.door_samplers.items()
         }
-        if self.robot_pcd_num_points is None:
-            self.robot_pcd_num_points = self.door_pcd_num_points
+        if self.scene_robot_pcd_num_points is None:
+            self.scene_robot_pcd_num_points = self.scene_door_pcd_num_points
 
-        self.robot_pcd_num_points = int(self.robot_pcd_num_points)
-        self.robot_sampler = FrankaLeapSampler(glorbot_urdf_path, device=self.device, num_points=self.robot_pcd_num_points)
+        self.scene_robot_pcd_num_points = int(self.scene_robot_pcd_num_points)
+        self.robot_sampler = FrankaLeapSampler(
+            glorbot_urdf_path,
+            device=self.device,
+            num_points=self.scene_robot_pcd_num_points,
+        )
         robot_sampler_joint_names = list(self.robot_sampler.robot.actuated_joint_names)
         robot_joint_ids, robot_joint_names = self.ov_env.robot.find_joints(robot_sampler_joint_names)
         self.robot_sampler_joint_ids = torch.tensor(robot_joint_ids, device=self.device, dtype=torch.long)
@@ -2338,7 +2391,10 @@ class Dagger:
         }
         self.wall_distractors_enabled = bool(self.wall_distractor_cfg.get("enabled", True))
         self.wall_distractor_num_points = int(
-            self.wall_distractor_cfg.get("num_points", max(256, self.door_pcd_num_points // 3))
+            self.wall_distractor_cfg.get(
+                "wall_num_points",
+                self.wall_distractor_cfg.get("num_points", max(256, self.scene_door_pcd_num_points // 3)),
+            )
         )
         self.wall_distractor_side_margin_scale_min, self.wall_distractor_side_margin_scale_max = map(
             float, self.wall_distractor_cfg.get("side_margin_scale", [0.35, 0.75])
@@ -2351,9 +2407,6 @@ class Dagger:
             self.wall_distractor_side_margin_abs_min_m, self.wall_distractor_side_margin_abs_max_m = map(
                 float, side_margin_abs_range
             )
-        self.wall_distractor_bottom_margin_scale_min, self.wall_distractor_bottom_margin_scale_max = map(
-            float, self.wall_distractor_cfg.get("bottom_margin_scale", [0.02, 0.08])
-        )
         self.wall_distractor_gap_min_m, self.wall_distractor_gap_max_m = map(
             float, self.wall_distractor_cfg.get("edge_gap_m", [0.015, 0.04])
         )
@@ -2363,7 +2416,6 @@ class Dagger:
         self.wall_distractor_center_offset_min_m, self.wall_distractor_center_offset_max_m = map(
             float, self.wall_distractor_cfg.get("center_offset_m", [-0.20, 0.20])
         )
-        self.wall_distractor_side_margin_min_m = float(self.wall_distractor_cfg.get("side_margin_min_m", 0.10))
         self.wall_distractor_face_jitter_m = float(self.wall_distractor_cfg.get("face_jitter_m", 0.004))
         self.wall_distractor_resample_each_step = bool(self.wall_distractor_cfg.get("resample_each_step", False))
         self._wall_distractor_local_points = None
@@ -2381,25 +2433,25 @@ class Dagger:
         self.robot_camera_body_idx = None
         self.sampler_camera_spec = None
 
-        if self.pointcloud_source in {"sampler", "depth"}:
+        if self.pointcloud_source in {"sampler", "depth", "both"}:
             self.robot_camera_body_idx = int(self.ov_env.robot.find_bodies("x5_camera_link")[0][0])
             self.sampler_camera_spec = self._build_sampler_camera_spec()
 
         self.robot_lidar_body_idx = None
-        if self.pointcloud_source == "lidar":
+        if self.pointcloud_source in {"lidar", "both"}:
             lidar_body_name = str(getattr(self.ov_env.cfg, "pointcloud_lidar_body_name", "lidar"))
             lidar_body_ids = self.ov_env.robot.find_bodies(lidar_body_name)[0]
             if len(lidar_body_ids) == 0:
                 raise ValueError(f"Could not find lidar body '{lidar_body_name}' on robot articulation.")
             self.robot_lidar_body_idx = int(lidar_body_ids[0])
 
-        if self.lidar_num_points is None:
-            self.lidar_num_points = self.door_pcd_num_points
-        self.lidar_num_points = int(self.lidar_num_points)
+        if self.depth_cam_render_num_points is None:
+            self.depth_cam_render_num_points = self.scene_door_pcd_num_points
+        self.depth_cam_render_num_points = int(self.depth_cam_render_num_points)
 
-        self.pointcloud_camera = getattr(self.ov_env, "pointcloud_camera", None)
-        if self.pointcloud_source == "depth" and self.pointcloud_camera is None:
-            raise ValueError("pointcloud_source='depth' requires DooropeningEnv to enable the pointcloud camera.")
+        if self.lidar_num_points is None:
+            self.lidar_num_points = self.scene_door_pcd_num_points
+        self.lidar_num_points = int(self.lidar_num_points)
 
     @staticmethod
     def _is_validation_asset_name(asset_name):
@@ -2465,44 +2517,51 @@ class Dagger:
             os.makedirs(raw_dir, exist_ok=True)
         self._init_viser_raw_streams()
 
-    def _get_viser_env_id(self):
-        """Clamp the configured replay env index so debug capture never indexes outside the batch."""
-        if self.num_envs <= 0:
-            return 0
-        return max(0, min(int(self.viser_env_id), self.num_envs - 1))
-
     def _init_viser_raw_streams(self):
         """Select one random env per door family for multi-door replay export."""
         self._viser_raw_streams = OrderedDict()
         for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
-            matching_envs = self.family_env_ids.get(int(family_id))
-            if matching_envs is None:
-                matching_envs = torch.nonzero(self.env_family_ids == int(family_id), as_tuple=False).squeeze(-1)
-            if matching_envs.numel() == 0:
-                continue
-            env_offset = int(torch.randint(matching_envs.numel(), (1,), device=self.device).detach().cpu().item())
-            env_id = int(matching_envs[env_offset].detach().cpu().item())
             self._viser_raw_streams[family_name] = {
                 "family_id": int(family_id),
                 "family_name": family_name,
-                "env_id": env_id,
+                "env_id": None,
                 "frames": [],
                 "frame_count": 0,
                 "chunk_index": 0,
                 "latest_iteration": None,
+                "resample_env_each_chunk": True,
             }
+            self._resample_viser_raw_stream_env(self._viser_raw_streams[family_name])
 
         if not self._viser_raw_streams:
-            env_id = self._get_viser_env_id()
             self._viser_raw_streams["env"] = {
                 "family_id": None,
                 "family_name": "env",
-                "env_id": env_id,
+                "env_id": None,
                 "frames": [],
                 "frame_count": 0,
                 "chunk_index": 0,
                 "latest_iteration": None,
+                "resample_env_each_chunk": True,
             }
+            self._resample_viser_raw_stream_env(self._viser_raw_streams["env"])
+
+    def _sample_random_env_id_for_family(self, family_id=None):
+        if self.num_envs <= 0:
+            return 0
+        if family_id is None:
+            return int(torch.randint(self.num_envs, (1,), device=self.device).detach().cpu().item())
+        matching_envs = self.family_env_ids.get(int(family_id))
+        if matching_envs is None:
+            matching_envs = torch.nonzero(self.env_family_ids == int(family_id), as_tuple=False).squeeze(-1)
+        if matching_envs.numel() == 0:
+            return int(torch.randint(self.num_envs, (1,), device=self.device).detach().cpu().item())
+        env_offset = int(torch.randint(matching_envs.numel(), (1,), device=self.device).detach().cpu().item())
+        return int(matching_envs[env_offset].detach().cpu().item())
+
+    def _resample_viser_raw_stream_env(self, stream):
+        family_id = stream.get("family_id")
+        stream["env_id"] = self._sample_random_env_id_for_family(family_id=family_id)
 
     def _viser_stream_env_ids(self):
         return [int(stream["env_id"]) for stream in self._viser_raw_streams.values()]
@@ -2578,6 +2637,8 @@ class Dagger:
         stream["frames"] = []
         stream["frame_count"] = 0
         stream["latest_iteration"] = None
+        if bool(stream.get("resample_env_each_chunk", False)):
+            self._resample_viser_raw_stream_env(stream)
 
     def _prepare_viser_world_points_from_local(
         self,
@@ -2617,12 +2678,14 @@ class Dagger:
         robot_base_pos_w,
         robot_base_quat_w,
         ground_truth_pcd_world,
-        robot_obs_pcd_base,
+        scene_obs_pcd_base,
         policy_input_pcd_base,
         aux_prediction=None,
     ):
         """Append one replay frame for each selected multi-door family env."""
         if not self.viser_raw_enabled:
+            return
+        if int(iteration) % self.viser_raw_capture_interval != 0:
             return
 
         for stream in self._viser_raw_streams.values():
@@ -2644,7 +2707,7 @@ class Dagger:
             ).to(dtype=torch.float16)
 
             robot_obs_points_world = self._prepare_viser_world_points_from_local(
-                robot_obs_pcd_base,
+                scene_obs_pcd_base,
                 robot_base_pos_w,
                 robot_base_quat_w,
                 env_id,
@@ -2974,11 +3037,14 @@ class Dagger:
         bbox_min_ordered = self.wall_distractor_bbox_min_ordered[env_ids]
         bbox_max_ordered = self.wall_distractor_bbox_max_ordered[env_ids]
 
-        thickness_min, width_min, height_min = bbox_min_ordered.unbind(dim=-1)
-        thickness_max, width_max, height_max = bbox_max_ordered.unbind(dim=-1)
+        # From here on, the ordered coordinates are:
+        #   axis 0 = thickness (normal to the door slab)
+        #   axis 1 = width (left/right of the panel)
+        #   axis 2 = height (bottom/top)
+        thickness_min, width_min, _height_min = bbox_min_ordered.unbind(dim=-1)
+        thickness_max, width_max, _height_max = bbox_max_ordered.unbind(dim=-1)
         thickness_extent = (thickness_max - thickness_min).clamp_min(1e-4)
         width_extent = (width_max - width_min).clamp_min(1e-4)
-        height_extent = (height_max - height_min).clamp_min(1e-4)
 
         def rand_range(low, high, shape):
             return torch.empty(shape, device=self.device, dtype=torch.float32).uniform_(float(low), float(high))
@@ -3010,26 +3076,20 @@ class Dagger:
                     (env_count,),
                 )
             else:
-                column_width = (
-                    width_extent
-                    * rand_range(
-                        self.wall_distractor_side_margin_scale_min,
-                        self.wall_distractor_side_margin_scale_max,
-                        (env_count,),
-                    )
-                    + self.wall_distractor_side_margin_min_m
+                column_width = width_extent * rand_range(
+                    self.wall_distractor_side_margin_scale_min,
+                    self.wall_distractor_side_margin_scale_max,
+                    (env_count,),
                 )
-            return torch.maximum(column_width, torch.full_like(column_width, self.wall_distractor_side_margin_min_m))
+            return column_width.clamp_min(1e-4)
 
         def sample_column_bounds(attach_on_right):
             edge_gap = rand_range(self.wall_distractor_gap_min_m, self.wall_distractor_gap_max_m, (env_count,))
             column_width = sample_column_width()
-            bottom_margin = height_extent * rand_range(
-                self.wall_distractor_bottom_margin_scale_min,
-                self.wall_distractor_bottom_margin_scale_max,
-                (env_count,),
-            )
             column_min_surface, column_max_surface = sample_column_surfaces()
+            # The inner face starts just outside the panel side edge.
+            # Right column: panel right edge + gap, then extends further in +width.
+            # Left column:  panel left edge  - gap, then extends further in -width.
             column_inner_width = torch.where(attach_on_right, width_max + edge_gap, width_min - edge_gap)
             column_outer_width = torch.where(
                 attach_on_right,
@@ -3038,8 +3098,11 @@ class Dagger:
             )
             column_width_lo = torch.minimum(column_inner_width, column_outer_width)
             column_width_hi = torch.maximum(column_inner_width, column_outer_width)
-            column_height_lo = height_min - bottom_margin
-            column_height_hi = height_max
+            # Policy crops already trim the vertical extent aggressively, so keep wall columns
+            # on a simple fixed door-local height span instead of tuning per-door height offsets.
+            # We manually set the height of the wall from 0m to 2m, we are cropping the pointcloud so it does not matter
+            column_height_lo = torch.zeros_like(column_width_lo)
+            column_height_hi = torch.full_like(column_width_lo, 2.0)
             return (
                 column_min_surface,
                 column_max_surface,
@@ -3055,6 +3118,8 @@ class Dagger:
         right_column_bounds = sample_column_bounds(
             torch.ones((env_count,), dtype=torch.bool, device=self.device)
         )
+        # We build both side columns for every env and then sample points from either side,
+        # so the final wall cloud can contain a mixture of left and right jamb surfaces.
         left_column_min_surface, left_column_max_surface, left_column_width_lo, left_column_width_hi, left_column_height_lo, left_column_height_hi = left_column_bounds
         right_column_min_surface, right_column_max_surface, right_column_width_lo, right_column_width_hi, right_column_height_lo, right_column_height_hi = right_column_bounds
 
@@ -3187,7 +3252,7 @@ class Dagger:
                 link_name: self.ov_env.robot.data.body_quat_w[:, body_idx]
                 for link_name, body_idx in self.robot_sampler_body_indices.items()
             },
-            num_points=self.robot_pcd_num_points,
+            num_points=self.scene_robot_pcd_num_points,
         )
 
     def _sample_robot_pointcloud_base_sampler(self):
@@ -3246,7 +3311,7 @@ class Dagger:
 
     def _sample_cached_door_pointcloud_world(self):
         door_pcd_world = torch.zeros(
-            (self.num_envs, self.door_pcd_num_points, 3),
+            (self.num_envs, self.scene_door_pcd_num_points, 3),
             dtype=torch.float32,
             device=self.device,
         )
@@ -3268,7 +3333,7 @@ class Dagger:
                     for link_name in ("link_1", "link_2")
                     if link_name in self.door_link_body_indices
                 },
-                num_points=self.door_pcd_num_points,
+                num_points=self.scene_door_pcd_num_points,
             )
             door_pcd_world[env_ids] = asset_pcd_world
         return door_pcd_world
@@ -3288,7 +3353,7 @@ class Dagger:
         door_joint_pos = self.ov_env.door.data.joint_pos
 
         door_pcd_world = torch.zeros(
-            (self.num_envs, self.door_pcd_num_points, 3),
+            (self.num_envs, self.scene_door_pcd_num_points, 3),
             dtype=torch.float32,
             device=self.device,
         )
@@ -3326,10 +3391,13 @@ class Dagger:
         )
         return world_to_local(rendered_pcd_world, robot_base_pos_w, robot_base_quat_w)
 
-    def _sample_door_pointcloud_base_sampler(self):
+    def _sample_scene_obs_pointcloud_base_sampler(self):
+        return self._sample_scene_obs_pointcloud_base_depth()
+
+    def _sample_scene_obs_pointcloud_base_depth(self):
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
-        gt_scene_pcd_world = self._sample_scene_pointcloud_world_sampler()
+        gt_scene_pcd_world = self._sample_scene_pointcloud_world_cached()
         if self.viser_raw_enabled:
             # Keep only the selected family envs on CPU so Viser debug does not retain an
             # extra full batched scene pointcloud on GPU during training/debug runs.
@@ -3337,51 +3405,18 @@ class Dagger:
         rendered_pcd_world, _ = simulate_depth_cam_render_from_pose(
             pcd=gt_scene_pcd_world,
             camera_pose=self._get_sampler_camera_pose(),
-            num_points=self.door_pcd_num_points,
-            inflate_px=self.sampler_render_inflate_px,
-            jitter_std_m=self.sampler_render_jitter_std_m,
+            num_points=self.depth_cam_render_num_points,
+            inflate_px=self.depth_cam_render_inflate_px,
+            jitter_std_m=self.depth_cam_render_jitter_std_m,
             cam_spec_dict=self.sampler_camera_spec,
-            clip_mode=self.sampler_render_clip_mode,
-            jitter_mode=self.sampler_render_jitter_mode,
-            use_compile=self.sampler_render_use_compile,
+            clip_mode=self.depth_cam_render_clip_mode,
+            jitter_mode=self.depth_cam_render_jitter_mode,
+            use_compile=self.depth_cam_render_use_compile,
         )
         scene_pointcloud_base = world_to_local(rendered_pcd_world, robot_base_pos_w, robot_base_quat_w)
         return scene_pointcloud_base
 
-    def _sample_door_pointcloud_base_depth(self):
-        robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
-        robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
-        depth = self.pointcloud_camera.data.output["distance_to_image_plane"]
-        if depth.ndim == 4 and depth.shape[-1] == 1:
-            depth_image = depth.squeeze(-1)
-        else:
-            depth_image = depth
-
-        door_pcd_camera = depth_to_pointcloud(
-            depth=depth_image,
-            intrinsics=self.pointcloud_camera.data.intrinsic_matrices,
-            num_local_points=None,
-        )
-
-        door_pcd_world = transform_points(
-            door_pcd_camera,
-            pos=self.pointcloud_camera.data.pos_w,
-            quat=self.pointcloud_camera.data.quat_w_ros,
-        )
-        scene_pcd_world = door_pcd_world
-        wall_pcd_world = self._sample_wall_pointcloud_world()
-        if wall_pcd_world.shape[1] > 0:
-            scene_pcd_world = torch.cat([scene_pcd_world, wall_pcd_world], dim=1)
-        if self.viser_raw_enabled:
-            self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(scene_pcd_world)
-        door_pcd_base = world_to_local(scene_pcd_world, robot_base_pos_w, robot_base_quat_w)
-        # Filter floor points while preserving the batched layout expected by the cropper.
-        floor_mask = door_pcd_base[..., 2] > 0.1
-        door_pcd_base = door_pcd_base.clone()
-        door_pcd_base[~floor_mask] = float("nan")
-        return door_pcd_base
-
-    def _sample_door_pointcloud_base_lidar(self):
+    def _sample_scene_obs_pointcloud_base_lidar(self):
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
         gt_scene_pcd_world = self._sample_scene_pointcloud_world_cached()
@@ -3390,23 +3425,50 @@ class Dagger:
 
         return self._render_lidar_scene_pointcloud_base(gt_scene_pcd_world, robot_base_pos_w, robot_base_quat_w)
 
-    def _sample_door_pointcloud_base(self):
-        self._viser_cached_ground_truth_pcd_world = None
-        if self.pointcloud_source == "sampler":
-            door_pcd_base = self._sample_door_pointcloud_base_sampler()
-        elif self.pointcloud_source == "depth":
-            door_pcd_base = self._sample_door_pointcloud_base_depth()
-        else:
-            door_pcd_base = self._sample_door_pointcloud_base_lidar()
-        door_pcd_base = self._filter_robot_points_base(door_pcd_base)
-        return door_pcd_base
+    def _sample_scene_obs_pointcloud_base_both(self):
+        robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
+        robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
+        gt_scene_pcd_world = self._sample_scene_pointcloud_world_cached()
+        if self.viser_raw_enabled:
+            self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(gt_scene_pcd_world)
 
-    def _build_local_pcd(self, door_pcd_base, palm_pos_base, robot_pcd_base=None):
+        rendered_depth_pcd_world, _ = simulate_depth_cam_render_from_pose(
+            pcd=gt_scene_pcd_world,
+            camera_pose=self._get_sampler_camera_pose(),
+            num_points=self.depth_cam_render_num_points,
+            inflate_px=self.depth_cam_render_inflate_px,
+            jitter_std_m=self.depth_cam_render_jitter_std_m,
+            cam_spec_dict=self.sampler_camera_spec,
+            clip_mode=self.depth_cam_render_clip_mode,
+            jitter_mode=self.depth_cam_render_jitter_mode,
+            use_compile=self.depth_cam_render_use_compile,
+        )
+        depth_pcd_base = world_to_local(rendered_depth_pcd_world, robot_base_pos_w, robot_base_quat_w)
+        lidar_pcd_base = self._render_lidar_scene_pointcloud_base(
+            gt_scene_pcd_world,
+            robot_base_pos_w,
+            robot_base_quat_w,
+        )
+        lidar_pcd_base = self._filter_robot_points_base(lidar_pcd_base)
+        return torch.cat([depth_pcd_base, lidar_pcd_base], dim=1)
+
+    def _sample_scene_obs_pointcloud_base(self):
+        self._viser_cached_ground_truth_pcd_world = None
+        if self.pointcloud_source in {"sampler", "depth"}:
+            scene_obs_pcd_base = self._sample_scene_obs_pointcloud_base_depth()
+        elif self.pointcloud_source == "lidar":
+            scene_obs_pcd_base = self._sample_scene_obs_pointcloud_base_lidar()
+        else:
+            scene_obs_pcd_base = self._sample_scene_obs_pointcloud_base_both()
+        scene_obs_pcd_base = self._filter_robot_points_base(scene_obs_pcd_base)
+        return scene_obs_pcd_base
+
+    def _build_local_pcd(self, scene_obs_pcd_base, palm_pos_base, robot_pcd_base=None):
         pcd_parts = []
 
         if self.local_pcd_points[0] > 0:
             base_crop, _ = crop_local_pcd(
-                door_pcd_base,
+                scene_obs_pcd_base,
                 local_range=self.local_pcd_range[0],
                 num_local_points=self.local_pcd_points[0],
                 is_cylindrical=True,
@@ -3418,7 +3480,7 @@ class Dagger:
 
         if self.local_pcd_points[1] > 0:
             palm_crop, _ = crop_local_pcd(
-                door_pcd_base,
+                scene_obs_pcd_base,
                 local_range=self.local_pcd_range[1],
                 num_local_points=self.local_pcd_points[1],
                 is_cylindrical=False,
@@ -3431,13 +3493,13 @@ class Dagger:
         if (
             robot_pcd_base is not None
             and robot_pcd_base.numel() > 0
-            and self.robot_gt_policy_points > 0
+            and self.robot_model_policy_points > 0
         ):
-            if robot_pcd_base.shape[1] > self.robot_gt_policy_points:
+            if robot_pcd_base.shape[1] > self.robot_model_policy_points:
                 sample_idx = torch.linspace(
                     0,
                     robot_pcd_base.shape[1] - 1,
-                    steps=self.robot_gt_policy_points,
+                    steps=self.robot_model_policy_points,
                     device=robot_pcd_base.device,
                     dtype=torch.float32,
                 ).round().to(dtype=torch.long)
@@ -3542,8 +3604,10 @@ class Dagger:
         self.latest_student_proprio_vector = q_pos.detach().clone()
 
         palm_pos_base = world_to_local(palm_pos_w, robot_base_pos_w, robot_base_quat_w).squeeze(1)
-        door_pcd_base = self._sample_door_pointcloud_base()
-        robot_pcd_base = self._sample_robot_pointcloud_base_sampler() if self.append_robot_gt_to_policy_cloud else None
+        scene_obs_pcd_base = self._sample_scene_obs_pointcloud_base()
+        robot_pcd_base = (
+            self._sample_robot_pointcloud_base_sampler() if self.append_robot_model_to_policy_cloud else None
+        )
         target_t = self._get_implemented_action_vector()
         need_aux_target_vector = self.has_aux_input and (not self.play_policy and self.has_aux_prediction)
         aux_target_vector = (
@@ -3623,6 +3687,11 @@ class Dagger:
                     obs[key] = lagged_q_full[:, self.ov_env._robot_finger_dof_idx]
                 else:
                     obs[key] = q_pos[:, self.ov_env._robot_finger_dof_idx]
+            elif key == "q_arx":
+                if lag_active and lagged_q_full is not None:
+                    obs[key] = lagged_q_full[:, self.ov_env._robot_arx_dof_idx]
+                else:
+                    obs[key] = q_pos[:, self.ov_env._robot_arx_dof_idx]
             elif key == "base_vel":
                 obs[key] = lagged_base_vel if lag_active and lagged_base_vel is not None else base_vel
             elif key in self.temporal_derived_state_specs:
@@ -3649,7 +3718,7 @@ class Dagger:
         for key in self.pcd_encoders_keys:
             if key == "local_pcd_t":
                 obs[key] = self._build_local_pcd(
-                    door_pcd_base,
+                    scene_obs_pcd_base,
                     palm_pos_base,
                     robot_pcd_base=robot_pcd_base,
                 )
@@ -3662,7 +3731,7 @@ class Dagger:
                 "robot_base_pos_w": robot_base_pos_w,
                 "robot_base_quat_w": robot_base_quat_w,
                 "ground_truth_pcd_world": self._viser_cached_ground_truth_pcd_world,
-                "robot_obs_pcd_base": door_pcd_base,
+                "robot_obs_pcd_base": scene_obs_pcd_base,
                 "policy_input_pcd_base": obs.get("local_pcd_t"),
             }
             self._viser_cached_ground_truth_pcd_world = None
@@ -4133,7 +4202,7 @@ class Dagger:
                         robot_base_pos_w=self._viser_pending_debug_frame["robot_base_pos_w"],
                         robot_base_quat_w=self._viser_pending_debug_frame["robot_base_quat_w"],
                         ground_truth_pcd_world=self._viser_pending_debug_frame["ground_truth_pcd_world"],
-                        robot_obs_pcd_base=self._viser_pending_debug_frame["robot_obs_pcd_base"],
+                        scene_obs_pcd_base=self._viser_pending_debug_frame["robot_obs_pcd_base"],
                         policy_input_pcd_base=self._viser_pending_debug_frame["policy_input_pcd_base"],
                         aux_prediction=aux_prediction_for_replay,
                     )

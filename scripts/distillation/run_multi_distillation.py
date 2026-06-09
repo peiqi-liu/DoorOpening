@@ -164,8 +164,8 @@ parser.add_argument(
 parser.add_argument(
     "--pointcloud_source",
     type=str,
-    choices=["sampler", "depth", "lidar"],
-    default="lidar",
+    choices=["sampler", "depth", "lidar", "both"],
+    default=None,
     help="Source used to build the student pointcloud observation. Defaults to dagger.pointcloud_source in the student YAML.",
 )
 parser.add_argument(
@@ -185,12 +185,6 @@ parser.add_argument(
     action=argparse.BooleanOptionalAction,
     default=None,
     help="Enable or disable raw `.pt` episode replays. Defaults to dagger.viser.raw.enabled.",
-)
-parser.add_argument(
-    "--viser_env_id",
-    type=int,
-    default=None,
-    help="Environment index used for live/replay Viser capture. Defaults to dagger.viser.env_id.",
 )
 parser.add_argument(
     "--viser_update_interval",
@@ -237,11 +231,12 @@ selected_door_families = _normalize_family_selection(
 if selected_door_families is not None:
     os.environ["DOOROPENING_MULTI_DOOR_FAMILIES"] = ",".join(selected_door_families)
     print(f"[INFO] Using multi-door families: {selected_door_families}")
-pointcloud_source = str(student_dagger_defaults.get("pointcloud_source", "sampler")).lower()
+pointcloud_source = str(student_dagger_defaults.get("pointcloud_source", "both")).lower()
 if args_cli.pointcloud_source is not None:
     pointcloud_source = args_cli.pointcloud_source
-# enable cameras only when we need rendered outputs from the simulator
-if args_cli.video or pointcloud_source == "depth":
+# The multi-door distillation stack now simulates depth/lidar from cached pointclouds,
+# so only RGB video recording still requires camera rendering.
+if args_cli.video:
     args_cli.enable_cameras = True
 
 
@@ -414,11 +409,11 @@ def main(env_cfg, agent_cfg: dict):
     if args_cli.pointcloud_source is not None:
         dagger_runtime_cfg["pointcloud_source"] = args_cli.pointcloud_source
     else:
-        dagger_runtime_cfg.setdefault("pointcloud_source", "sampler")
+        dagger_runtime_cfg.setdefault("pointcloud_source", "both")
     dagger_runtime_cfg["pointcloud_source"] = str(dagger_runtime_cfg["pointcloud_source"]).lower()
-    if dagger_runtime_cfg["pointcloud_source"] not in {"sampler", "depth", "lidar"}:
+    if dagger_runtime_cfg["pointcloud_source"] not in {"sampler", "depth", "lidar", "both"}:
         raise ValueError(
-            "dagger.pointcloud_source must be one of ['sampler', 'depth', 'lidar'], "
+            "dagger.pointcloud_source must be one of ['sampler', 'depth', 'lidar', 'both'], "
             f"got '{dagger_runtime_cfg['pointcloud_source']}'."
         )
 
@@ -444,8 +439,6 @@ def main(env_cfg, agent_cfg: dict):
         viser_cfg["update_interval"] = max(1, int(args_cli.viser_update_interval))
     else:
         viser_cfg.setdefault("update_interval", 1)
-    if args_cli.viser_env_id is not None:
-        viser_cfg["env_id"] = int(args_cli.viser_env_id)
     if args_cli.viser_serializer is not None:
         serializer_cfg["enabled"] = args_cli.viser_serializer
         print(f"Viser serializer enabled: {args_cli.viser_serializer}")
@@ -462,13 +455,8 @@ def main(env_cfg, agent_cfg: dict):
     viser_cfg["raw"] = raw_cfg
     dagger_runtime_cfg["viser"] = viser_cfg
 
-    if dagger_runtime_cfg["pointcloud_source"] == "depth":
-        env_cfg.pointcloud_render_mode = "depth"
-    elif dagger_runtime_cfg["pointcloud_source"] == "lidar":
-        env_cfg.pointcloud_render_mode = "lidar"
-    else:
-        env_cfg.pointcloud_render_mode = "none"
-    env_cfg.enable_pointcloud_camera = env_cfg.pointcloud_render_mode == "depth"
+    env_cfg.pointcloud_render_mode = "none"
+    env_cfg.enable_pointcloud_camera = False
 
     # Determine teacher checkpoint paths. Multi mode prefers one checkpoint per PartNet folder,
     # but keeps single-teacher fallback for smoke tests and old checkpoints.
