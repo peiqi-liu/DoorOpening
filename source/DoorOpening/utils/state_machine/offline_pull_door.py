@@ -329,8 +329,8 @@ def state_machine_offline_right_pull_door(
 
     release_base_x_delta_1 = -0.12
     release_base_y = 0.05
-    release_palm_x_delta = 0.15
-    release_palm_y_delta = 0.0
+    release_palm_x_delta = 0.25
+    release_palm_y_delta = -0.1
     release_base_x_delta_2 = -0.18
     release_door_open_angle = 1.35
 
@@ -344,18 +344,8 @@ def state_machine_offline_right_pull_door(
     )
     safe_open_hand_q = open_hand(1.0).to(q_robot.device)
     push_palm_rot = get_rotation_quat(0.0, 0.0, -math.pi / 2, device)
-    retreat_local_x = 0.10
-    retreat_local_y = 0.4
-    retreat_z_lift = -0.03
-    push_contact_x_offset = -0.2
-    push_contact_y_offset = 0.0
-    push_contact_z_offset = 0.25
     contact_virtual_door_angle = 1.1
     push_door_open_angle = 1.5
-
-    traverse_mid_x = 0.55
-    traverse_mid_y = 0.05
-    traverse_far_x = -0.5
 
     base_target_pos[:, 0] += release_base_x_delta_1
     base_target_pos[:, 1] = release_base_y
@@ -411,6 +401,9 @@ def state_machine_offline_right_pull_door(
     # Step 6: Retract the arm to the left side of the tilted base
     # -------------------------
     tilted_base_yaw_world = robot_initial_yaw + tilt_base_yaw
+    retreat_local_x = 0.2
+    retreat_local_y = 0.2
+    retreat_z_lift = -0.03
     retreat_dx, retreat_dy = _rotate_xy_counterclockwise(
         retreat_local_x,
         retreat_local_y,
@@ -444,6 +437,9 @@ def state_machine_offline_right_pull_door(
     # -------------------------
     # Step 7: Push the panel open with the arm while keeping the base still
     # -------------------------
+    push_contact_x_offset = -0.1
+    push_contact_y_offset = 0.1
+    push_contact_z_offset = 0.25
     contact_board_pos = get_board_edge(
         door_urdf_path,
         door_initial_pose,
@@ -508,6 +504,9 @@ def state_machine_offline_right_pull_door(
     # Step 8: Restore the base to normal yaw, traverse with a suitable arm pose,
     # then finish the traverse with default arm joints
     # -------------------------
+    traverse_mid_x = 0.45
+    traverse_mid_y = 0.15
+    traverse_far_x = -0.5
     base_target_pos[:, 0] = traverse_mid_x
     base_target_pos[:, 1] = traverse_mid_y
     base_target_pose = _make_pose(base_target_pos, base_target_rot)

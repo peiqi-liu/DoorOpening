@@ -433,7 +433,7 @@ def collocate_and_playback(robot_traj, door_traj, key_idx_in_key_indices, length
     N = len(key_idx_in_key_indices)
 
     # ---- Compute geometric length of each keyframe segment ----
-    def weighted_dist(x1, x2, base_weight=10.0):
+    def weighted_dist(x1, x2, base_weight=5):
         diff = x1 - x2
         diff = diff.copy()
 
