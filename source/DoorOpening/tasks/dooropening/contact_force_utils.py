@@ -22,14 +22,18 @@ HANDLE_CONTACT_FILTER_PRIM_PATHS = (
     "/World/envs/env_.*/Robot/fingertip_3",
 )
 
-X5_BODY_CONTACT_FILTER_PRIM_PATHS = (
-    "/World/envs/env_.*/Robot/x5_base_link",
-    "/World/envs/env_.*/Robot/link1",
-    "/World/envs/env_.*/Robot/link2",
-    "/World/envs/env_.*/Robot/link3",
-    "/World/envs/env_.*/Robot/link4",
-    "/World/envs/env_.*/Robot/link5",
-    "/World/envs/env_.*/Robot/x5_camera_link",
+# Source bodies for the x5 collision monitor. We attach the sensor to the robot-side bodies and
+# filter against door bodies so PhysX does not have to reconcile a many-door-body source pattern
+# against a one-robot-body-per-env filter pattern.
+X5_BODY_CONTACT_SENSOR_PRIM_PATH = (
+    "/World/envs/env_.*/Robot/(x5_base_link|link1|link2|link3|link4|link5|x5_camera_link)"
+)
+
+# Track x5 contact against all articulated door bodies, including the intermediate link_0 body.
+DOOR_BODY_CONTACT_FILTER_PRIM_PATHS = (
+    "/World/envs/env_.*/Door/link_0",
+    "/World/envs/env_.*/Door/link_1",
+    "/World/envs/env_.*/Door/link_2",
 )
 
 

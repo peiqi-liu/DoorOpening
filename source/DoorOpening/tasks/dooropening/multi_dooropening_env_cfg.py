@@ -16,8 +16,9 @@ from DoorOpening.constants.robot_constants import (
     ROBOT_BASE_BODY_LINK_NAME,
 )
 from DoorOpening.tasks.dooropening.contact_force_utils import (
+    DOOR_BODY_CONTACT_FILTER_PRIM_PATHS,
     HANDLE_CONTACT_FILTER_PRIM_PATHS,
-    X5_BODY_CONTACT_FILTER_PRIM_PATHS,
+    X5_BODY_CONTACT_SENSOR_PRIM_PATH,
 )
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
@@ -199,11 +200,11 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         filter_prim_paths_expr=list(HANDLE_CONTACT_FILTER_PRIM_PATHS),
     )
     contact_forces_door_x5 = ContactSensorCfg(
-        prim_path="/World/envs/env_.*/Door/link_.*",
+        prim_path=X5_BODY_CONTACT_SENSOR_PRIM_PATH,
         update_period=0.0,
         history_length=1,
         debug_vis=False,
-        filter_prim_paths_expr=list(X5_BODY_CONTACT_FILTER_PRIM_PATHS),
+        filter_prim_paths_expr=list(DOOR_BODY_CONTACT_FILTER_PRIM_PATHS),
     )
     handle_contact_force_threshold = 1.0
     x5_body_contact_force_threshold = 1.5
