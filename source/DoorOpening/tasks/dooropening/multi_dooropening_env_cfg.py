@@ -18,7 +18,7 @@ from DoorOpening.constants.robot_constants import (
 from DoorOpening.tasks.dooropening.contact_force_utils import (
     DOOR_BODY_CONTACT_FILTER_PRIM_PATHS,
     HANDLE_CONTACT_FILTER_PRIM_PATHS,
-    X5_BODY_CONTACT_SENSOR_PRIM_PATH,
+    X5_BODY_NAMES,
 )
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
@@ -199,8 +199,50 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         debug_vis=False,
         filter_prim_paths_expr=list(HANDLE_CONTACT_FILTER_PRIM_PATHS),
     )
-    contact_forces_door_x5 = ContactSensorCfg(
-        prim_path=X5_BODY_CONTACT_SENSOR_PRIM_PATH,
+    contact_forces_door_x5_base = ContactSensorCfg(
+        prim_path=f"/World/envs/env_.*/Robot/{X5_BODY_NAMES[0]}",
+        update_period=0.0,
+        history_length=1,
+        debug_vis=False,
+        filter_prim_paths_expr=list(DOOR_BODY_CONTACT_FILTER_PRIM_PATHS),
+    )
+    contact_forces_door_x5_link1 = ContactSensorCfg(
+        prim_path=f"/World/envs/env_.*/Robot/{X5_BODY_NAMES[1]}",
+        update_period=0.0,
+        history_length=1,
+        debug_vis=False,
+        filter_prim_paths_expr=list(DOOR_BODY_CONTACT_FILTER_PRIM_PATHS),
+    )
+    contact_forces_door_x5_link2 = ContactSensorCfg(
+        prim_path=f"/World/envs/env_.*/Robot/{X5_BODY_NAMES[2]}",
+        update_period=0.0,
+        history_length=1,
+        debug_vis=False,
+        filter_prim_paths_expr=list(DOOR_BODY_CONTACT_FILTER_PRIM_PATHS),
+    )
+    contact_forces_door_x5_link3 = ContactSensorCfg(
+        prim_path=f"/World/envs/env_.*/Robot/{X5_BODY_NAMES[3]}",
+        update_period=0.0,
+        history_length=1,
+        debug_vis=False,
+        filter_prim_paths_expr=list(DOOR_BODY_CONTACT_FILTER_PRIM_PATHS),
+    )
+    contact_forces_door_x5_link4 = ContactSensorCfg(
+        prim_path=f"/World/envs/env_.*/Robot/{X5_BODY_NAMES[4]}",
+        update_period=0.0,
+        history_length=1,
+        debug_vis=False,
+        filter_prim_paths_expr=list(DOOR_BODY_CONTACT_FILTER_PRIM_PATHS),
+    )
+    contact_forces_door_x5_link5 = ContactSensorCfg(
+        prim_path=f"/World/envs/env_.*/Robot/{X5_BODY_NAMES[5]}",
+        update_period=0.0,
+        history_length=1,
+        debug_vis=False,
+        filter_prim_paths_expr=list(DOOR_BODY_CONTACT_FILTER_PRIM_PATHS),
+    )
+    contact_forces_door_x5_camera = ContactSensorCfg(
+        prim_path=f"/World/envs/env_.*/Robot/{X5_BODY_NAMES[6]}",
         update_period=0.0,
         history_length=1,
         debug_vis=False,

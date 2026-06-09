@@ -28,7 +28,7 @@ from DoorOpening.tasks.dooropening.multi_dooropening_env_cfg import DooropeningE
 from DoorOpening.assets.glorbot.glorbot_cfg import glorbot_urdf_path
 from isaaclab.sensors import Camera, ContactSensor
 from DoorOpening.constants.robot_constants import CAMERA_JOINT_DEFAULT_VALUES, FULL_JOINT_NAMES, ROBOT_KEY_BODY_NAMES
-from DoorOpening.tasks.dooropening.contact_force_utils import get_filtered_contact_force_w
+from DoorOpening.tasks.dooropening.contact_force_utils import DOOR_FRAME_FILTER_INDEX, get_filtered_contact_force_w
 from DoorOpening.utils.pose_utils import world_to_local
 from isaaclab.utils.math import quat_conjugate, quat_apply, quat_mul
 from DoorOpening.utils.quat_utils import quat_to_6d
@@ -279,14 +279,35 @@ class DooropeningEnv(DirectRLEnv):
         self._log_verbose_dr_metrics = bool(self.cfg.log_verbose_dr_metrics)
         self._init_viser_pointcloud_recording()
 
-    def _get_filtered_contact_force_w(self, sensor, expected_num_envs=None) -> torch.Tensor:
-        return get_filtered_contact_force_w(sensor, expected_num_envs=expected_num_envs)
-
-    def _get_x5_body_contact_force_w(self) -> torch.Tensor:
-        return self._get_filtered_contact_force_w(
-            self.scene.sensors["contact_forces_door_x5"],
-            expected_num_envs=self.num_envs,
+    def _get_filtered_contact_force_w(self, sensor, expected_num_envs=None, filter_indices=None) -> torch.Tensor:
+        return get_filtered_contact_force_w(
+            sensor,
+            expected_num_envs=expected_num_envs,
+            filter_indices=filter_indices,
         )
+
+    def _get_x5_body_contact_force_norm(self, filter_indices=None) -> torch.Tensor:
+        sensor_names = (
+            "contact_forces_door_x5_base",
+            "contact_forces_door_x5_link1",
+            "contact_forces_door_x5_link2",
+            "contact_forces_door_x5_link3",
+            "contact_forces_door_x5_link4",
+            "contact_forces_door_x5_link5",
+            "contact_forces_door_x5_camera",
+        )
+        per_body_force_norms = []
+        for sensor_name in sensor_names:
+            force_w = self._get_filtered_contact_force_w(
+                self.scene.sensors[sensor_name],
+                expected_num_envs=self.num_envs,
+                filter_indices=filter_indices,
+            )
+            per_body_force_norms.append(torch.linalg.vector_norm(force_w, dim=-1))
+        return torch.stack(per_body_force_norms, dim=-1).max(dim=-1).values
+
+    def _get_x5_body_frame_contact_force_norm(self) -> torch.Tensor:
+        return self._get_x5_body_contact_force_norm(filter_indices=(DOOR_FRAME_FILTER_INDEX,))
 
     def set_train_info(self, env_frames: int, algo=None, **kwargs):
         self._rlgames_env_frames = int(env_frames)
@@ -632,7 +653,13 @@ class DooropeningEnv(DirectRLEnv):
             self.pointcloud_camera = Camera(self.cfg.pointcloud_camera_cfg)
             self.scene.sensors["pointcloud_camera"] = self.pointcloud_camera
         self.scene.sensors["contact_forces_door2"] = ContactSensor(self.cfg.contact_forces_door2)
-        self.scene.sensors["contact_forces_door_x5"] = ContactSensor(self.cfg.contact_forces_door_x5)
+        self.scene.sensors["contact_forces_door_x5_base"] = ContactSensor(self.cfg.contact_forces_door_x5_base)
+        self.scene.sensors["contact_forces_door_x5_link1"] = ContactSensor(self.cfg.contact_forces_door_x5_link1)
+        self.scene.sensors["contact_forces_door_x5_link2"] = ContactSensor(self.cfg.contact_forces_door_x5_link2)
+        self.scene.sensors["contact_forces_door_x5_link3"] = ContactSensor(self.cfg.contact_forces_door_x5_link3)
+        self.scene.sensors["contact_forces_door_x5_link4"] = ContactSensor(self.cfg.contact_forces_door_x5_link4)
+        self.scene.sensors["contact_forces_door_x5_link5"] = ContactSensor(self.cfg.contact_forces_door_x5_link5)
+        self.scene.sensors["contact_forces_door_x5_camera"] = ContactSensor(self.cfg.contact_forces_door_x5_camera)
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)    
@@ -1044,7 +1071,13 @@ class DooropeningEnv(DirectRLEnv):
         self.scaled_actions = self._scale_actions(actions)
         targets = self.robot_dof_targets + self.dt * self.scaled_actions
         self.scene.sensors["contact_forces_door2"].update(self.cfg.sim_dt)
-        self.scene.sensors["contact_forces_door_x5"].update(self.cfg.sim_dt)
+        self.scene.sensors["contact_forces_door_x5_base"].update(self.cfg.sim_dt)
+        self.scene.sensors["contact_forces_door_x5_link1"].update(self.cfg.sim_dt)
+        self.scene.sensors["contact_forces_door_x5_link2"].update(self.cfg.sim_dt)
+        self.scene.sensors["contact_forces_door_x5_link3"].update(self.cfg.sim_dt)
+        self.scene.sensors["contact_forces_door_x5_link4"].update(self.cfg.sim_dt)
+        self.scene.sensors["contact_forces_door_x5_link5"].update(self.cfg.sim_dt)
+        self.scene.sensors["contact_forces_door_x5_camera"].update(self.cfg.sim_dt)
 
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
         # Advance the reference once per RL/env step. IsaacLab will call _apply_action()
@@ -1715,14 +1748,16 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["stats/filtered_handle_contact_frac"] = float(
             (handle_force_norm > self.cfg.handle_contact_force_threshold).float().mean().detach().cpu().item()
         )
-        x5_body_contact_forces = self._get_x5_body_contact_force_w()
-        x5_body_force_norm = torch.linalg.vector_norm(x5_body_contact_forces, dim=-1)
+        x5_body_force_norm = self._get_x5_body_contact_force_norm()
         unsafe_x5_body_contact = x5_body_force_norm > self.cfg.x5_body_contact_force_threshold
+        x5_frame_force_norm = self._get_x5_body_frame_contact_force_norm()
         self.extras["stats/x5_body_contact_force_norm_mean"] = float(x5_body_force_norm.mean().detach().cpu().item())
         self.extras["stats/x5_body_contact_force_norm_max"] = float(x5_body_force_norm.max().detach().cpu().item())
         self.extras["stats/x5_body_unsafe_contact_frac"] = float(
             unsafe_x5_body_contact.float().mean().detach().cpu().item()
         )
+        self.extras["stats/x5_frame_contact_force_norm_mean"] = float(x5_frame_force_norm.mean().detach().cpu().item())
+        self.extras["stats/x5_frame_contact_force_norm_max"] = float(x5_frame_force_norm.max().detach().cpu().item())
 
         deep_mimic_reward = compute_deep_mimic_rewards(
             robot_key_body_pos = self.robot_key_body_pos, 
@@ -1841,8 +1876,7 @@ class DooropeningEnv(DirectRLEnv):
         reset_key_body_pos_delta = reset_key_body_pos_delta ** 2
         reset_key_body_quat_delta = reset_key_body_quat_delta ** 2
         reset_door_joint_pos_delta = reset_door_joint_pos_delta ** 2
-        x5_body_contact_forces = self._get_x5_body_contact_force_w()
-        x5_body_force_norm = torch.linalg.vector_norm(x5_body_contact_forces, dim=-1)
+        x5_body_force_norm = self._get_x5_body_contact_force_norm()
         unsafe_x5_body_contact = x5_body_force_norm > self.cfg.x5_body_contact_force_threshold
         arx_joint_pos_diff = hinge_angle_diff(self.ref_robot_arx_joint_pos, self.robot_arx_joint_pos).abs()
         self.extras["stats/arx_joint_pos_diff_max"] = float(arx_joint_pos_diff.max().detach().cpu().item())

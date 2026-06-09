@@ -181,9 +181,9 @@ def state_machine_offline_push_right_door(
     base_target_pose = _make_pose(base_target_pos, base_target_rot)
 
     palm_target_pos = handle_pos.clone()
-    palm_target_pos[:, 0] += 0.2
-    palm_target_pos[:, 1] += -0.1
-    palm_target_pos[:, 2] += 0.2
+    palm_target_pos[:, 0] += 0.3
+    palm_target_pos[:, 1] += 0.05
+    palm_target_pos[:, 2] += 0.25
     palm_target_pose = _make_pose(palm_target_pos, default_palm_rot)
 
     q_robot[:10] = solve_ik(
@@ -238,7 +238,7 @@ def state_machine_offline_push_right_door(
     q_door = torch.tensor([0.0, 1.0], device=device)
 
     palm_target_pose = palm_target_pose.clone()
-    palm_target_pose[:, 1] += -0.02
+    palm_target_pose[:, 1] += 0
     palm_target_pose[:, 2] -= 0.08
     palm_target_pose[:, 3:] = get_rotation_quat(
         math.pi,
@@ -289,12 +289,12 @@ def state_machine_offline_push_right_door(
 
         base_target_pos = handle_pos.clone()
         base_target_pos[:, 0] += 0.55
-        base_target_pos[:, 1] = 0.15
+        base_target_pos[:, 1] = 0.05
         base_target_pose = _make_pose(base_target_pos, base_target_rot)
 
         # The door handle position does not indicate the door handle's actual tip, we want an offset to make the palm is grasping the door handle
         push_palm_x_offset = 0.02
-        push_palm_y_offset = -0.04
+        push_palm_y_offset = 0.0
         palm_dx, palm_dy = _rotate_xy_counterclockwise(
             push_palm_x_offset,
             push_palm_y_offset,
@@ -375,7 +375,7 @@ def state_machine_offline_push_right_door(
     q_robot[10:26] = safe_open_hand_q
 
     # Starting from the last stage's door joint stop, keep opening until fully open
-    board_push_theta_start = push_theta_stop
+    board_push_theta_start = push_theta_stop + 0.4
     board_push_theta_stop = 1.50
     for theta in torch.arange(
         board_push_theta_start,
@@ -547,8 +547,8 @@ def state_machine_offline_push_left_door(
 
     palm_target_pos = handle_pos.clone()
     palm_target_pos[:, 0] += 0.2
-    palm_target_pos[:, 1] += -0.1
-    palm_target_pos[:, 2] += 0.2
+    palm_target_pos[:, 1] += 0.1
+    palm_target_pos[:, 2] += 0.25
     palm_target_pose = _make_pose(palm_target_pos, default_palm_rot)
 
     q_robot[:10] = solve_ik(
@@ -575,7 +575,7 @@ def state_machine_offline_push_left_door(
     # -------------------------
     palm_target_pos = handle_pos.clone()
     palm_target_pos[:, 0] += 0.04
-    palm_target_pos[:, 1] += 0.02
+    palm_target_pos[:, 1] += 0.0
     palm_target_pos[:, 2] += 0.08
     palm_target_pose = _make_pose(palm_target_pos, default_palm_rot)
 
@@ -604,7 +604,7 @@ def state_machine_offline_push_left_door(
 
     palm_target_pose = palm_target_pose.clone()
     palm_target_pose[:, 1] += 0.02
-    palm_target_pose[:, 2] -= 0.08
+    palm_target_pose[:, 2] -= 0.0
     palm_target_pose[:, 3:] = get_rotation_quat(
         math.pi,
         math.pi,
@@ -657,12 +657,12 @@ def state_machine_offline_push_left_door(
 
         base_target_pos = handle_pos.clone()
         base_target_pos[:, 0] += 0.55
-        base_target_pos[:, 1] = -0.15
+        base_target_pos[:, 1] = -0.05
         base_target_pose = _make_pose(base_target_pos, base_target_rot)
 
         # The door handle position does not indicate the door handle's actual tip, we want an offset to make the palm is grasping the door handle
         push_palm_x_offset = 0.02
-        push_palm_y_offset = 0.04
+        push_palm_y_offset = 0.0
         palm_dx, palm_dy = _rotate_xy_counterclockwise(
             push_palm_x_offset,
             push_palm_y_offset,
@@ -743,7 +743,7 @@ def state_machine_offline_push_left_door(
     q_robot[10:26] = safe_open_hand_q
 
     # Starting from the last stage's door joint stop, keep opening until fully open
-    board_push_theta_start = push_theta_stop
+    board_push_theta_start = push_theta_stop + 0.4
     board_push_theta_stop = 1.50
     for theta in torch.arange(
         board_push_theta_start,

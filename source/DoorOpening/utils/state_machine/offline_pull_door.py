@@ -140,7 +140,7 @@ def state_machine_offline_right_pull_door(
     pregrasp_base_x_offset = 0.55
     pregrasp_base_y_offset = -0.30
     pregrasp_palm_x_offset = 0.25
-    pregrasp_palm_y_offset = -0.10
+    pregrasp_palm_y_offset = 0.05
     pregrasp_palm_z_offset = 0.25
 
     base_target_pos = handle_pos.clone()
@@ -177,7 +177,7 @@ def state_machine_offline_right_pull_door(
     # Step 2: Move to grasp
     # -------------------------
     grasp_palm_x_offset = 0.05
-    grasp_palm_y_offset = -0.10
+    grasp_palm_y_offset = -0.05
     grasp_palm_z_offset = 0.08
     grasp_open_ratio = 0.70
 
@@ -209,7 +209,7 @@ def state_machine_offline_right_pull_door(
     # Step 3: Rotate hinge (unlatch)
     # -------------------------
     unlatch_hinge_angle = 1.0
-    unlatch_palm_y_delta = -0.02
+    unlatch_palm_y_delta = 0.0
     unlatch_palm_z_delta = -0.08
     unlatch_rot_roll = math.pi
     unlatch_rot_pitch = math.pi
@@ -328,7 +328,7 @@ def state_machine_offline_right_pull_door(
     _, _, robot_initial_yaw = euler_xyz_from_quat(base_target_rot)
 
     release_base_x_delta_1 = -0.12
-    release_base_y = 0.05
+    release_base_y = 0.25
     release_palm_x_delta = 0.25
     release_palm_y_delta = -0.1
     release_base_x_delta_2 = -0.18
@@ -402,7 +402,7 @@ def state_machine_offline_right_pull_door(
     # -------------------------
     tilted_base_yaw_world = robot_initial_yaw + tilt_base_yaw
     retreat_local_x = 0.2
-    retreat_local_y = 0.2
+    retreat_local_y = 0.3
     retreat_z_lift = -0.03
     retreat_dx, retreat_dy = _rotate_xy_counterclockwise(
         retreat_local_x,
@@ -437,8 +437,8 @@ def state_machine_offline_right_pull_door(
     # -------------------------
     # Step 7: Push the panel open with the arm while keeping the base still
     # -------------------------
-    push_contact_x_offset = -0.1
-    push_contact_y_offset = 0.1
+    push_contact_x_offset = 0.35
+    push_contact_y_offset = 0.25
     push_contact_z_offset = 0.25
     contact_board_pos = get_board_edge(
         door_urdf_path,
@@ -478,7 +478,7 @@ def state_machine_offline_right_pull_door(
     ).to(device)
 
     palm_target_pos = board_pos.clone()
-    palm_target_pos[:, 0] += push_contact_x_offset
+    # palm_target_pos[:, 0] += push_contact_x_offset
     palm_target_pos[:, 2] += push_contact_z_offset
     palm_target_pose = _make_pose(palm_target_pos, push_palm_rot)
 
@@ -504,8 +504,8 @@ def state_machine_offline_right_pull_door(
     # Step 8: Restore the base to normal yaw, traverse with a suitable arm pose,
     # then finish the traverse with default arm joints
     # -------------------------
-    traverse_mid_x = 0.45
-    traverse_mid_y = 0.15
+    traverse_mid_x = 0.35
+    traverse_mid_y = 0.1
     traverse_far_x = -0.5
     base_target_pos[:, 0] = traverse_mid_x
     base_target_pos[:, 1] = traverse_mid_y
@@ -622,7 +622,7 @@ def state_machine_offline_left_pull_door(
     pregrasp_base_x_offset = 0.55
     pregrasp_base_y_offset = 0.3
     pregrasp_palm_x_offset = 0.25
-    pregrasp_palm_y_offset = 0.03
+    pregrasp_palm_y_offset = -0.03
     pregrasp_palm_z_offset = 0.25
 
     base_target_pos = handle_pos.clone()
@@ -659,7 +659,7 @@ def state_machine_offline_left_pull_door(
     # Step 2: Move to grasp
     # -------------------------
     grasp_palm_x_offset = 0.04
-    grasp_palm_y_offset = 0.02
+    grasp_palm_y_offset = 0.0
     grasp_palm_z_offset = 0.10
     grasp_open_ratio = 0.7
 
@@ -691,7 +691,7 @@ def state_machine_offline_left_pull_door(
     # Step 3: Rotate hinge (unlatch)
     # -------------------------
     unlatch_hinge_angle = 1.0
-    unlatch_palm_y_delta = 0.02
+    unlatch_palm_y_delta = 0.0
     unlatch_palm_z_delta = -0.08
     unlatch_rot_roll = math.pi
     unlatch_rot_pitch = math.pi
@@ -837,10 +837,6 @@ def state_machine_offline_left_pull_door(
     push_contact_z_offset = 0.1
     contact_virtual_door_angle = 1.0
     push_door_open_angle = 1.5
-
-    traverse_mid_x = 0.45
-    traverse_mid_y = -0.05
-    traverse_far_x = -0.5
 
     base_target_pos[:, 0] += release_base_x_delta_1
     base_target_pos[:, 1] = release_base_y
@@ -995,6 +991,9 @@ def state_machine_offline_left_pull_door(
     # Step 8: Restore the base to normal yaw, traverse with a suitable arm pose,
     # then finish the traverse with default arm joints
     # -------------------------
+    traverse_mid_x = 0.45
+    traverse_mid_y = -0.05
+    traverse_far_x = -0.5
     base_target_pos[:, 0] = traverse_mid_x
     base_target_pos[:, 1] = traverse_mid_y
     base_target_pose = _make_pose(base_target_pos, base_target_rot)
@@ -1020,7 +1019,15 @@ def state_machine_offline_left_pull_door(
 
     base_target_pos[:, 0] = traverse_far_x
     base_target_pos[:, 1] = 0.0
-    base_target_pose = _make_pose(base_target_pos, base_target_rot)
+    # Tilt a little to protect active perception arm
+    tilt_base_yaw = 0.5
+    tilted_base_rot = get_rotation_quat(
+        0.0,
+        0.0,
+        robot_initial_yaw.item() + tilt_base_yaw,
+        device,
+    )
+    base_target_pose = _make_pose(base_target_pos, tilted_base_rot)
 
     q_robot[:10] = solve_ik(
         robot_urdf_path,

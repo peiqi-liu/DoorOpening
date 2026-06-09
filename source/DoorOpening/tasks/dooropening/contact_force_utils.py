@@ -22,22 +22,27 @@ HANDLE_CONTACT_FILTER_PRIM_PATHS = (
     "/World/envs/env_.*/Robot/fingertip_3",
 )
 
-# Source bodies for the x5 collision monitor. We attach the sensor to the robot-side bodies and
-# filter against door bodies so PhysX does not have to reconcile a many-door-body source pattern
-# against a one-robot-body-per-env filter pattern.
-X5_BODY_CONTACT_SENSOR_PRIM_PATH = (
-    "/World/envs/env_.*/Robot/(x5_base_link|link1|link2|link3|link4|link5|x5_camera_link)"
+X5_BODY_NAMES = (
+    "x5_base_link",
+    "link1",
+    "link2",
+    "link3",
+    "link4",
+    "link5",
+    "x5_camera_link",
 )
 
-# Track x5 contact against all articulated door bodies, including the intermediate link_0 body.
+# Track x5 contact against all articulated door bodies. The URDF contains a fixed
+# link_0 frame, but the converter merges fixed joints so the runtime body is `base`.
 DOOR_BODY_CONTACT_FILTER_PRIM_PATHS = (
-    "/World/envs/env_.*/Door/link_0",
+    "/World/envs/env_.*/Door/base",
     "/World/envs/env_.*/Door/link_1",
     "/World/envs/env_.*/Door/link_2",
 )
+DOOR_FRAME_FILTER_INDEX = 0
 
 
-def get_filtered_contact_force_w(sensor, expected_num_envs=None) -> torch.Tensor:
+def get_filtered_contact_force_w(sensor, expected_num_envs=None, filter_indices: tuple[int, ...] | None = None) -> torch.Tensor:
     force_matrix = sensor.data.force_matrix_w
     if force_matrix is None:
         raise RuntimeError(
@@ -48,6 +53,9 @@ def get_filtered_contact_force_w(sensor, expected_num_envs=None) -> torch.Tensor
         raise RuntimeError(
             f"Expected force_matrix_w shape [N, B, M, 3], got {tuple(force_matrix.shape)}"
         )
+
+    if filter_indices is not None:
+        force_matrix = force_matrix[:, :, filter_indices, :]
 
     force_w = torch.nan_to_num(force_matrix, nan=0.0).sum(dim=(1, 2))
     if force_w.ndim != 2 or force_w.shape[-1] != 3:
