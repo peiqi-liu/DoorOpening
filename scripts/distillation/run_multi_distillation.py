@@ -5,6 +5,7 @@ import os
 import pathlib
 import sys
 import time
+from datetime import datetime
 from distutils.util import strtobool
 
 import yaml
@@ -235,9 +236,12 @@ pointcloud_source = str(student_dagger_defaults.get("pointcloud_source", "both")
 if args_cli.pointcloud_source is not None:
     pointcloud_source = args_cli.pointcloud_source
 # The multi-door distillation stack now simulates depth/lidar from cached pointclouds,
-# so only RGB video recording still requires camera rendering.
+# so Isaac camera rendering should stay disabled unless RGB video recording is requested.
 if args_cli.video:
     args_cli.enable_cameras = True
+else:
+    os.environ["ENABLE_CAMERAS"] = "0"
+    args_cli.enable_cameras = False
 
 
 _stagger_isaac_sim_startup()
@@ -253,7 +257,6 @@ simulation_app = app_launcher.app
 
 import gymnasium as gym
 import math
-from datetime import datetime
 import torch
 import torch.distributed as dist
 
