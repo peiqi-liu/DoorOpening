@@ -105,6 +105,17 @@ def _normalize_family_selection(family_spec):
     return family_names or None
 
 
+def _expected_viser_stream_names(pointcloud_source):
+    pointcloud_source = str(pointcloud_source).lower()
+    streams = ["ground_truth"]
+    if pointcloud_source in {"lidar", "both"}:
+        streams.append("robot_lidar_obs")
+    if pointcloud_source in {"sampler", "depth", "both"}:
+        streams.append("robot_depth_cam_obs")
+    streams.append("policy_input")
+    return streams
+
+
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Train an RL agent with RL-Games.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
@@ -170,43 +181,26 @@ parser.add_argument(
     help="Source used to build the student pointcloud observation. Defaults to dagger.pointcloud_source in the student YAML.",
 )
 parser.add_argument(
-    "--viser_live",
-    action=argparse.BooleanOptionalAction,
-    default=None,
-    help="Enable or disable live Viser streaming. Defaults to dagger.viser.enabled in the student YAML.",
-)
-parser.add_argument(
-    "--viser_serializer",
-    action=argparse.BooleanOptionalAction,
-    default=None,
-    help="Enable or disable serialized `.viser` episode replays. Defaults to dagger.viser.serializer.enabled.",
-)
-parser.add_argument(
+    "--viser",
+    "--viser-raw",
     "--viser_raw",
+    dest="viser_raw",
     action=argparse.BooleanOptionalAction,
     default=None,
     help="Enable or disable raw `.pt` episode replays. Defaults to dagger.viser.raw.enabled.",
 )
 parser.add_argument(
-    "--viser_update_interval",
-    type=int,
-    default=None,
-    help="Iteration interval for live Viser streaming. Defaults to dagger.viser.update_interval.",
-)
-parser.add_argument(
-    "--viser_serializer_path",
-    type=str,
-    default=None,
-    help="Base output path for serialized `.viser` replays.",
-)
-parser.add_argument(
+    "--viser-raw-path",
     "--viser_raw_path",
+    dest="viser_raw_path",
     type=str,
     default=None,
     help="Base output path for raw `.pt` replays.",
 )
 parser.add_argument(
+    "--viser-raw-interval",
     "--viser_raw_interval",
+    dest="viser_raw_interval",
     type=int,
     default=None,
     help="Iteration interval for periodic raw `.pt` replay snapshots. Defaults to dagger.viser.raw_interval.",
@@ -430,33 +424,26 @@ def main(env_cfg, agent_cfg: dict):
     viser_cfg = dagger_runtime_cfg.get("viser", {})
     if not isinstance(viser_cfg, dict):
         viser_cfg = {}
-    serializer_cfg = viser_cfg.get("serializer", {})
-    if not isinstance(serializer_cfg, dict):
-        serializer_cfg = {}
     raw_cfg = viser_cfg.get("raw", {})
     if not isinstance(raw_cfg, dict):
         raw_cfg = {}
-    if args_cli.viser_live is not None:
-        viser_cfg["enabled"] = args_cli.viser_live
-    if args_cli.viser_update_interval is not None:
-        viser_cfg["update_interval"] = max(1, int(args_cli.viser_update_interval))
-    else:
-        viser_cfg.setdefault("update_interval", 1)
-    if args_cli.viser_serializer is not None:
-        serializer_cfg["enabled"] = args_cli.viser_serializer
-        print(f"Viser serializer enabled: {args_cli.viser_serializer}")
     if args_cli.viser_raw is not None:
         raw_cfg["enabled"] = args_cli.viser_raw
         print(f"Viser raw enabled: {args_cli.viser_raw}")
-    if args_cli.viser_serializer_path is not None:
-        serializer_cfg["path"] = args_cli.viser_serializer_path
     if args_cli.viser_raw_path is not None:
         raw_cfg["path"] = args_cli.viser_raw_path
     if args_cli.viser_raw_interval is not None:
-        viser_cfg["raw_interval"] = max(1, int(args_cli.viser_raw_interval))
-    viser_cfg["serializer"] = serializer_cfg
+        raw_cfg["save_interval"] = max(1, int(args_cli.viser_raw_interval))
     viser_cfg["raw"] = raw_cfg
     dagger_runtime_cfg["viser"] = viser_cfg
+    if bool(raw_cfg.get("enabled", False)):
+        expected_streams = _expected_viser_stream_names(dagger_runtime_cfg["pointcloud_source"])
+        print(
+            "[INFO] Multi-distillation Viser raw streams: "
+            + ", ".join(expected_streams)
+        )
+        if raw_cfg.get("path") is not None:
+            print(f"[INFO] Multi-distillation Viser raw path override: {raw_cfg['path']}")
 
     env_cfg.pointcloud_render_mode = "none"
     env_cfg.enable_pointcloud_camera = False

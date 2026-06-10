@@ -33,34 +33,78 @@ parser.add_argument("--video", action="store_true", default=False, help="Record 
 parser.add_argument("--video_length", type=int, default=600, help="Length of the recorded video (in steps).")
 parser.add_argument("--video_interval", type=int, default=10000, help="Interval between video recordings (in steps).")
 parser.add_argument(
+    "--viser",
+    "--viser-raw",
     "--viser_pt",
+    dest="viser_pt",
     action="store_true",
     default=False,
     help="Save raw robot/door point-cloud .pt chunks for Viser replay during teacher training.",
 )
-parser.add_argument("--viser_pt_path", type=str, default=None, help="Output path for Viser .pt replay chunks.")
-parser.add_argument("--viser_pt_env_id", type=int, default=None, help="Environment index to record in Viser .pt dumps.")
 parser.add_argument(
+    "--viser-raw-path",
+    "--viser_pt_path",
+    dest="viser_pt_path",
+    type=str,
+    default=None,
+    help="Output path for Viser .pt replay chunks.",
+)
+parser.add_argument(
+    "--viser-env-id",
+    "--viser_pt_env_id",
+    dest="viser_pt_env_id",
+    type=int,
+    default=None,
+    help="Environment index to record in Viser .pt dumps.",
+)
+parser.add_argument(
+    "--viser-raw-interval",
     "--viser_pt_interval",
+    dest="viser_pt_interval",
     type=int,
     default=None,
     help="Environment-step interval between recorded point-cloud frames.",
 )
 parser.add_argument(
+    "--viser-raw-save-interval",
     "--viser_pt_save_interval",
+    dest="viser_pt_save_interval",
     type=int,
     default=None,
     help="Iteration interval between saved Viser .pt chunks.",
 )
-parser.add_argument("--viser_pt_max_frames", type=int, default=None, help="Maximum frames kept in each Viser .pt chunk.")
 parser.add_argument(
+    "--viser-raw-max-frames",
+    "--viser_pt_max_frames",
+    dest="viser_pt_max_frames",
+    type=int,
+    default=None,
+    help="Maximum frames kept in each Viser .pt chunk.",
+)
+parser.add_argument(
+    "--viser-raw-max-points",
     "--viser_pt_max_points",
+    dest="viser_pt_max_points",
     type=int,
     default=None,
     help="Maximum exported points per cloud in each Viser .pt frame.",
 )
-parser.add_argument("--viser_pt_robot_points", type=int, default=None, help="Robot sampler point count before export.")
-parser.add_argument("--viser_pt_door_points", type=int, default=None, help="Door sampler point count before export.")
+parser.add_argument(
+    "--viser-raw-robot-points",
+    "--viser_pt_robot_points",
+    dest="viser_pt_robot_points",
+    type=int,
+    default=None,
+    help="Robot sampler point count before export.",
+)
+parser.add_argument(
+    "--viser-raw-door-points",
+    "--viser_pt_door_points",
+    dest="viser_pt_door_points",
+    type=int,
+    default=None,
+    help="Door sampler point count before export.",
+)
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default="DooropeningMulti", help="Name of the task.")
 parser.add_argument(

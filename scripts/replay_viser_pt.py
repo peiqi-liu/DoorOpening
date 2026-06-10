@@ -14,12 +14,22 @@ import torch
 
 DEFAULT_CLOUD_COLORS = {
     "ground_truth": (120, 120, 120),
+    "robot_lidar_obs": (255, 140, 0),
+    "robot_depth_cam_obs": (79, 195, 247),
     "robot_obs": (79, 195, 247),
     "policy_input": (0, 170, 120),
     "robot": (79, 195, 247),
     "door": (255, 193, 7),
 }
-PREFERRED_STREAM_ORDER = ("ground_truth", "robot_obs", "policy_input", "robot", "door")
+PREFERRED_STREAM_ORDER = (
+    "ground_truth",
+    "robot_lidar_obs",
+    "robot_depth_cam_obs",
+    "policy_input",
+    "robot_obs",
+    "robot",
+    "door",
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -131,6 +141,8 @@ def _coerce_color(value: object, default: tuple[int, int, int]) -> tuple[int, in
 def _stream_label(name: str) -> str:
     labels = {
         "ground_truth": "GT",
+        "robot_lidar_obs": "Robot Lidar Obs",
+        "robot_depth_cam_obs": "Robot Depth Cam Obs",
         "robot_obs": "Robot Obs",
         "policy_input": "Policy Input",
         "robot": "Robot",
