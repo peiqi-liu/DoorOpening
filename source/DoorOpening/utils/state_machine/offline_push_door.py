@@ -546,8 +546,8 @@ def state_machine_offline_push_left_door(
     base_target_pose = _make_pose(base_target_pos, base_target_rot)
 
     palm_target_pos = handle_pos.clone()
-    palm_target_pos[:, 0] += 0.2
-    palm_target_pos[:, 1] += 0.1
+    palm_target_pos[:, 0] += 0.25
+    palm_target_pos[:, 1] += -0.05
     palm_target_pos[:, 2] += 0.25
     palm_target_pose = _make_pose(palm_target_pos, default_palm_rot)
 
@@ -603,8 +603,8 @@ def state_machine_offline_push_left_door(
     q_door = torch.tensor([0.0, 1.0], device=device)
 
     palm_target_pose = palm_target_pose.clone()
-    palm_target_pose[:, 1] += 0.02
-    palm_target_pose[:, 2] -= 0.0
+    palm_target_pose[:, 1] += 0.00
+    palm_target_pose[:, 2] -= 0.08
     palm_target_pose[:, 3:] = get_rotation_quat(
         math.pi,
         math.pi,
@@ -657,7 +657,7 @@ def state_machine_offline_push_left_door(
 
         base_target_pos = handle_pos.clone()
         base_target_pos[:, 0] += 0.55
-        base_target_pos[:, 1] = -0.05
+        base_target_pos[:, 1] = -0.1
         base_target_pose = _make_pose(base_target_pos, base_target_rot)
 
         # The door handle position does not indicate the door handle's actual tip, we want an offset to make the palm is grasping the door handle

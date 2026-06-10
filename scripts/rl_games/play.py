@@ -637,15 +637,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if pointcloud_camera_state is not None and pointcloud_camera_state["viewer"] is not None:
             pointcloud_camera_state["viewer"].close()
 
-    if pointcloud_camera_state is not None:
-        print(
-            "[CAM][SUMMARY] "
-            f"last_frame={pointcloud_camera_state['last_frame']} "
-            f"saved_frames={pointcloud_camera_state['saved_frames']}"
-        )
+        if pointcloud_camera_state is not None:
+            print(
+                "[CAM][SUMMARY] "
+                f"last_frame={pointcloud_camera_state['last_frame']} "
+                f"saved_frames={pointcloud_camera_state['saved_frames']}"
+            )
 
-    # close the simulator
-    env.close()
+        # Always close the env so resources are released even on interruption.
+        env.close()
 
 
 if __name__ == "__main__":

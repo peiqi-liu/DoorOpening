@@ -2489,6 +2489,7 @@ class Dagger:
     def _init_viser_debug_tools(self):
         """Initialize optional raw replay capture state used for point-cloud debugging."""
         self._viser_cached_ground_truth_pcd_world = None
+        self._viser_cached_sensor_obs_pcd_base = OrderedDict()
         self._viser_pending_debug_frame = None
         self._viser_raw_streams = OrderedDict()
 
@@ -2578,10 +2579,58 @@ class Dagger:
             for env_id in self._viser_stream_env_ids()
         }
 
+    def _viser_raw_pointcloud_stream_specs(self):
+        streams = [
+            {
+                "name": "ground_truth",
+                "label": "GT",
+                "color": (120, 120, 120),
+                "point_size_scale": 1.0,
+            }
+        ]
+        if self.pointcloud_source in {"lidar", "both"}:
+            streams.append(
+                {
+                    "name": "robot_lidar_obs",
+                    "label": "Robot Lidar Obs",
+                    "color": (255, 140, 0),
+                    "point_size_scale": 1.0,
+                }
+            )
+        if self.pointcloud_source in {"sampler", "depth", "both"}:
+            streams.append(
+                {
+                    "name": "robot_depth_cam_obs",
+                    "label": "Robot Depth Cam Obs",
+                    "color": (79, 195, 247),
+                    "point_size_scale": 1.0,
+                }
+            )
+        streams.append(
+            {
+                "name": "policy_input",
+                "label": "Policy Input",
+                "color": (0, 170, 120),
+                "point_size_scale": 1.0,
+            }
+        )
+        return streams
+
     def _build_viser_raw_payload(self, stream):
+        frame_dt = float(self.viser_env_step_dt * self.viser_raw_capture_interval)
         return {
             "format": "dooropening_viser_replay_v1",
-            "frame_dt": float(self.viser_env_step_dt),
+            "pointcloud_frame": "world",
+            "pointcloud_source": self.pointcloud_source,
+            "pointcloud_streams": self._viser_raw_pointcloud_stream_specs(),
+            "sim_dt": float(self.viser_sim_dt),
+            "decimation": int(getattr(self.ov_env.cfg, "decimation", 1)),
+            "env_step_dt": float(self.viser_env_step_dt),
+            "env_step_fps": 1.0 / float(self.viser_env_step_dt),
+            "frame_dt": frame_dt,
+            "frame_fps": 1.0 / frame_dt,
+            "pointcloud_sensor_dt": frame_dt,
+            "pointcloud_sensor_fps": 1.0 / frame_dt,
             "frames": stream["frames"],
         }
 
@@ -2678,7 +2727,7 @@ class Dagger:
         robot_base_pos_w,
         robot_base_quat_w,
         ground_truth_pcd_world,
-        scene_obs_pcd_base,
+        sensor_obs_pcd_base_by_name,
         policy_input_pcd_base,
         aux_prediction=None,
     ):
@@ -2686,6 +2735,9 @@ class Dagger:
         if not self.viser_raw_enabled:
             return
         if int(iteration) % self.viser_raw_capture_interval != 0:
+            # Save cadence is iteration-based, not capture-based. Still check whether an
+            # existing chunk should flush on iterations where we intentionally skip capture.
+            self._maybe_flush_viser_raw_snapshot(iteration)
             return
 
         for stream in self._viser_raw_streams.values():
@@ -2706,14 +2758,20 @@ class Dagger:
                 self.viser_raw_max_points,
             ).to(dtype=torch.float16)
 
-            robot_obs_points_world = self._prepare_viser_world_points_from_local(
-                scene_obs_pcd_base,
-                robot_base_pos_w,
-                robot_base_quat_w,
-                env_id,
-                self.viser_raw_max_points,
-                drop_zero_rows=True,
-            ).to(dtype=torch.float16)
+            pointclouds = {
+                "ground_truth": ground_truth_points_world,
+            }
+            for name, pointcloud_base in (sensor_obs_pcd_base_by_name or {}).items():
+                if pointcloud_base is None:
+                    continue
+                pointclouds[name] = self._prepare_viser_world_points_from_local(
+                    pointcloud_base,
+                    robot_base_pos_w,
+                    robot_base_quat_w,
+                    env_id,
+                    self.viser_raw_max_points,
+                    drop_zero_rows=True,
+                ).to(dtype=torch.float16)
 
             policy_input_points_world = None
             if policy_input_pcd_base is not None:
@@ -2725,6 +2783,7 @@ class Dagger:
                     self.viser_raw_max_points,
                     drop_zero_rows=True,
                 ).to(dtype=torch.float16)
+            pointclouds["policy_input"] = policy_input_points_world
 
             aux_prediction_base = (
                 None
@@ -2732,11 +2791,7 @@ class Dagger:
                 else self._aux_to_2d(aux_prediction)[env_id].detach().cpu().to(dtype=torch.float32)
             )
             frame_record = {
-                "pointclouds": {
-                    "ground_truth": ground_truth_points_world,
-                    "robot_obs": robot_obs_points_world,
-                    "policy_input": policy_input_points_world,
-                },
+                "pointclouds": pointclouds,
             }
             if aux_prediction_base is not None:
                 frame_record["aux_prediction"] = aux_prediction_base
@@ -3041,8 +3096,8 @@ class Dagger:
         #   axis 0 = thickness (normal to the door slab)
         #   axis 1 = width (left/right of the panel)
         #   axis 2 = height (bottom/top)
-        thickness_min, width_min, _height_min = bbox_min_ordered.unbind(dim=-1)
-        thickness_max, width_max, _height_max = bbox_max_ordered.unbind(dim=-1)
+        thickness_min, width_min, height_min = bbox_min_ordered.unbind(dim=-1)
+        thickness_max, width_max, height_max = bbox_max_ordered.unbind(dim=-1)
         thickness_extent = (thickness_max - thickness_min).clamp_min(1e-4)
         width_extent = (width_max - width_min).clamp_min(1e-4)
 
@@ -3098,11 +3153,10 @@ class Dagger:
             )
             column_width_lo = torch.minimum(column_inner_width, column_outer_width)
             column_width_hi = torch.maximum(column_inner_width, column_outer_width)
-            # Policy crops already trim the vertical extent aggressively, so keep wall columns
-            # on a simple fixed door-local height span instead of tuning per-door height offsets.
-            # We manually set the height of the wall from 0m to 2m, we are cropping the pointcloud so it does not matter
-            column_height_lo = torch.zeros_like(column_width_lo)
-            column_height_hi = torch.full_like(column_width_lo, 2.0)
+            # Keep wall distractors aligned with the current door panel instead of using a
+            # global height span, so they stay at the same vertical level as the slab.
+            column_height_lo = height_min
+            column_height_hi = height_max
             return (
                 column_min_surface,
                 column_max_surface,
@@ -3449,18 +3503,26 @@ class Dagger:
             robot_base_pos_w,
             robot_base_quat_w,
         )
-        lidar_pcd_base = self._filter_robot_points_base(lidar_pcd_base)
-        return torch.cat([depth_pcd_base, lidar_pcd_base], dim=1)
+        return depth_pcd_base, lidar_pcd_base
 
     def _sample_scene_obs_pointcloud_base(self):
         self._viser_cached_ground_truth_pcd_world = None
+        self._viser_cached_sensor_obs_pcd_base = OrderedDict()
         if self.pointcloud_source in {"sampler", "depth"}:
-            scene_obs_pcd_base = self._sample_scene_obs_pointcloud_base_depth()
+            depth_pcd_base = self._filter_robot_points_base(self._sample_scene_obs_pointcloud_base_depth())
+            self._viser_cached_sensor_obs_pcd_base["robot_depth_cam_obs"] = depth_pcd_base
+            scene_obs_pcd_base = depth_pcd_base
         elif self.pointcloud_source == "lidar":
-            scene_obs_pcd_base = self._sample_scene_obs_pointcloud_base_lidar()
+            lidar_pcd_base = self._filter_robot_points_base(self._sample_scene_obs_pointcloud_base_lidar())
+            self._viser_cached_sensor_obs_pcd_base["robot_lidar_obs"] = lidar_pcd_base
+            scene_obs_pcd_base = lidar_pcd_base
         else:
-            scene_obs_pcd_base = self._sample_scene_obs_pointcloud_base_both()
-        scene_obs_pcd_base = self._filter_robot_points_base(scene_obs_pcd_base)
+            depth_pcd_base, lidar_pcd_base = self._sample_scene_obs_pointcloud_base_both()
+            depth_pcd_base = self._filter_robot_points_base(depth_pcd_base)
+            lidar_pcd_base = self._filter_robot_points_base(lidar_pcd_base)
+            self._viser_cached_sensor_obs_pcd_base["robot_lidar_obs"] = lidar_pcd_base
+            self._viser_cached_sensor_obs_pcd_base["robot_depth_cam_obs"] = depth_pcd_base
+            scene_obs_pcd_base = torch.cat([depth_pcd_base, lidar_pcd_base], dim=1)
         return scene_obs_pcd_base
 
     def _build_local_pcd(self, scene_obs_pcd_base, palm_pos_base, robot_pcd_base=None):
@@ -3731,10 +3793,11 @@ class Dagger:
                 "robot_base_pos_w": robot_base_pos_w,
                 "robot_base_quat_w": robot_base_quat_w,
                 "ground_truth_pcd_world": self._viser_cached_ground_truth_pcd_world,
-                "robot_obs_pcd_base": scene_obs_pcd_base,
+                "sensor_obs_pcd_base_by_name": self._viser_cached_sensor_obs_pcd_base,
                 "policy_input_pcd_base": obs.get("local_pcd_t"),
             }
             self._viser_cached_ground_truth_pcd_world = None
+            self._viser_cached_sensor_obs_pcd_base = OrderedDict()
 
         self.latest_aux_input_vector = None if aux_input_vector is None else aux_input_vector.detach().clone()
         self.latest_aux_target_vector = None if aux_target_vector is None else aux_target_vector.detach().clone()
@@ -4202,7 +4265,7 @@ class Dagger:
                         robot_base_pos_w=self._viser_pending_debug_frame["robot_base_pos_w"],
                         robot_base_quat_w=self._viser_pending_debug_frame["robot_base_quat_w"],
                         ground_truth_pcd_world=self._viser_pending_debug_frame["ground_truth_pcd_world"],
-                        scene_obs_pcd_base=self._viser_pending_debug_frame["robot_obs_pcd_base"],
+                        sensor_obs_pcd_base_by_name=self._viser_pending_debug_frame["sensor_obs_pcd_base_by_name"],
                         policy_input_pcd_base=self._viser_pending_debug_frame["policy_input_pcd_base"],
                         aux_prediction=aux_prediction_for_replay,
                     )

@@ -10,6 +10,8 @@ import torch
 
 DEFAULT_STREAM_COLORS = {
     "ground_truth": (120, 120, 120),
+    "robot_lidar_obs": (255, 140, 0),
+    "robot_depth_cam_obs": (79, 195, 247),
     "robot_obs": (79, 195, 247),
     "policy_input": (0, 170, 120),
     "robot": (79, 195, 247),

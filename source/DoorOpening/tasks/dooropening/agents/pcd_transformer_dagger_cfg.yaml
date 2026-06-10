@@ -196,7 +196,7 @@ dagger:
     suppress_bins: 2
     occlusion_eps_m: 0.02
     occlusion_eps_rel: 0.01
-    jitter_std_m: 0.05
+    jitter_std_m: 0.01
     use_compile: true
   wall_distractors:
     enabled: true
@@ -206,11 +206,11 @@ dagger:
     # - height axis: bottom/top of the panel
     # - thickness axis: through the panel, normal to the door slab
     # Each sampled point comes from either the left or right column.
-    side_margin_m: [0.2, 0.80]  # Column width along the door width axis, i.e. how far each column extends outward from the left/right panel edge.
-    edge_gap_m: [0.0, 0.3]  # Empty gap between the panel side edge and the inner face of the wall column.
-    depth_m: [0.1, 1.5]  # Extra thickness added beyond the door slab thickness along the door-thickness axis.
+    side_margin_m: [0.2, 1.20]  # Column width along the door width axis, i.e. how far each column extends outward from the left/right panel edge.
+    edge_gap_m: [-0.05, 0.3]  # Empty gap between the panel side edge and the inner face of the wall column.
+    depth_m: [0.7, 1.5]  # Extra thickness added beyond the door slab thickness along the door-thickness axis.
     center_offset_m: [-0.80, 0.80]  # Shift of the whole column along the door-thickness axis: negative is recessed behind the slab center, positive protrudes in front.
-    # Wall height is fixed in the sampler to [0.0 m, 2.0 m] in the ordered door-local height axis.
+    # Wall height follows the door panel bbox height in the ordered door-local height axis.
     face_jitter_m: 0.1  # Small noise added only on the snapped outer faces so the walls do not look perfectly planar.
   viser:
     raw:

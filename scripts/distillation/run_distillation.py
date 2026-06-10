@@ -108,18 +108,6 @@ parser.add_argument(
     help="Source used to build the student pointcloud observation. Defaults to dagger.pointcloud_source in the student YAML.",
 )
 parser.add_argument(
-    "--viser_live",
-    action=argparse.BooleanOptionalAction,
-    default=None,
-    help="Enable or disable live Viser streaming. Defaults to dagger.viser.enabled in the student YAML.",
-)
-parser.add_argument(
-    "--viser_serializer",
-    action=argparse.BooleanOptionalAction,
-    default=None,
-    help="Enable or disable serialized `.viser` episode replays. Defaults to dagger.viser.serializer.enabled.",
-)
-parser.add_argument(
     "--viser_raw",
     action=argparse.BooleanOptionalAction,
     default=None,
@@ -130,18 +118,6 @@ parser.add_argument(
     type=int,
     default=None,
     help="Environment index used for live/replay Viser capture. Defaults to dagger.viser.env_id.",
-)
-parser.add_argument(
-    "--viser_update_interval",
-    type=int,
-    default=None,
-    help="Iteration interval for live Viser streaming. Defaults to dagger.viser.update_interval.",
-)
-parser.add_argument(
-    "--viser_serializer_path",
-    type=str,
-    default=None,
-    help="Base output path for serialized `.viser` replays.",
 )
 parser.add_argument(
     "--viser_raw_path",
@@ -296,33 +272,18 @@ def main(env_cfg, agent_cfg: dict):
     viser_cfg = dagger_runtime_cfg.get("viser", {})
     if not isinstance(viser_cfg, dict):
         viser_cfg = {}
-    serializer_cfg = viser_cfg.get("serializer", {})
-    if not isinstance(serializer_cfg, dict):
-        serializer_cfg = {}
     raw_cfg = viser_cfg.get("raw", {})
     if not isinstance(raw_cfg, dict):
         raw_cfg = {}
-    if args_cli.viser_live is not None:
-        viser_cfg["enabled"] = args_cli.viser_live
-    if args_cli.viser_update_interval is not None:
-        viser_cfg["update_interval"] = max(1, int(args_cli.viser_update_interval))
-    else:
-        viser_cfg.setdefault("update_interval", 1)
     if args_cli.viser_env_id is not None:
         viser_cfg["env_id"] = int(args_cli.viser_env_id)
-    if args_cli.viser_serializer is not None:
-        serializer_cfg["enabled"] = args_cli.viser_serializer
-        print(f"Viser serializer enabled: {args_cli.viser_serializer}")
     if args_cli.viser_raw is not None:
         raw_cfg["enabled"] = args_cli.viser_raw
         print(f"Viser raw enabled: {args_cli.viser_raw}")
-    if args_cli.viser_serializer_path is not None:
-        serializer_cfg["path"] = args_cli.viser_serializer_path
     if args_cli.viser_raw_path is not None:
         raw_cfg["path"] = args_cli.viser_raw_path
     if args_cli.viser_raw_interval is not None:
-        viser_cfg["raw_interval"] = max(1, int(args_cli.viser_raw_interval))
-    viser_cfg["serializer"] = serializer_cfg
+        raw_cfg["save_interval"] = max(1, int(args_cli.viser_raw_interval))
     viser_cfg["raw"] = raw_cfg
     dagger_runtime_cfg["viser"] = viser_cfg
 

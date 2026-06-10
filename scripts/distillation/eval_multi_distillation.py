@@ -244,7 +244,6 @@ from DoorOpening.assets.door.multi_door_cfg import ALL_DOOR_CONFIGS as MULTI_DOO
 from DoorOpening.assets.door.multi_door_cfg import DOOR_FAMILY_NAMES, asset_family_ids, asset_paths
 from DoorOpening.distillation.multi_pcd_dagger import Dagger
 from DoorOpening.tasks.dooropening.multi_dooropening_env import compute_tracking_error
-from DoorOpening.utils.quat_utils import quat_diff_angle
 
 
 DIRECTION_NAME_TO_ID = {"pull": 0, "push": 1}
@@ -260,6 +259,8 @@ def _get_base_env(env):
 def _patch_no_auto_resets(base_env):
     if getattr(base_env, "_eval_no_auto_reset_patch", False):
         return
+
+    base_env._eval_original_get_dones = base_env._get_dones
 
     def _get_dones_without_eval_resets(self):
         zeros = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -379,27 +380,7 @@ def _install_freeze_patch(base_env, frozen_state):
     base_env._eval_freeze_patch = True
 
 
-def _resolve_drift_thresholds(base_env):
-    return {
-        "key_body_pos": float(
-            args_cli.key_body_pos_threshold
-            if args_cli.key_body_pos_threshold is not None
-            else base_env.cfg.reset_key_body_pos_delta_max
-        ),
-        "key_body_quat": float(
-            args_cli.key_body_quat_threshold
-            if args_cli.key_body_quat_threshold is not None
-            else base_env.cfg.reset_key_body_quat_delta_max
-        ),
-        "door_joint_pos": float(
-            args_cli.door_joint_pos_threshold
-            if args_cli.door_joint_pos_threshold is not None
-            else base_env.cfg.reset_door_joint_pos_delta_max
-        ),
-    }
-
-
-def _compute_drift(base_env, thresholds):
+def _compute_tracking_metrics(base_env):
     base_env._get_intermediate_values()
 
     key_body_pos_err_sq, key_body_quat_err_sq, door_joint_pos_err_sq, *_ = compute_tracking_error(
@@ -409,6 +390,7 @@ def _compute_drift(base_env, thresholds):
         robot_base_joint_pos=base_env.robot_base_joint_pos,
         robot_arm_joint_pos=base_env.robot_arm_joint_pos,
         robot_finger_joint_pos=base_env.robot_finger_joint_pos,
+        robot_arx_joint_pos=base_env.robot_arx_joint_pos,
         robot_base_joint_vel=base_env.robot_base_joint_vel,
         robot_arm_joint_vel=base_env.robot_arm_joint_vel,
         robot_finger_joint_vel=base_env.robot_finger_joint_vel,
@@ -418,30 +400,55 @@ def _compute_drift(base_env, thresholds):
         ref_robot_base_joint_pos=base_env.ref_robot_base_joint_pos,
         ref_robot_arm_joint_pos=base_env.ref_robot_arm_joint_pos,
         ref_robot_finger_joint_pos=base_env.ref_robot_finger_joint_pos,
+        ref_robot_arx_joint_pos=base_env.ref_robot_arx_joint_pos,
         ref_robot_base_joint_vel=base_env.ref_robot_base_joint_vel,
         ref_robot_arm_joint_vel=base_env.ref_robot_arm_joint_vel,
         ref_robot_finger_joint_vel=base_env.ref_robot_finger_joint_vel,
     )
 
-    threshold_sq = {name: float(value) * float(value) for name, value in thresholds.items()}
-
-    # Keep printed diagnostics in human-readable units while matching the env's
-    # squared-error termination criterion exactly.
     key_body_pos_err = torch.sqrt(torch.clamp_min(key_body_pos_err_sq, 0.0))
     key_body_quat_err = torch.sqrt(torch.clamp_min(key_body_quat_err_sq, 0.0))
     door_joint_pos_err = torch.sqrt(torch.clamp_min(door_joint_pos_err_sq, 0.0))
 
-    metrics = {
+    return {
         "key_body_pos": key_body_pos_err,
         "key_body_quat": key_body_quat_err,
         "door_joint_pos": door_joint_pos_err,
     }
-    drifted = (
-        (key_body_pos_err_sq > threshold_sq["key_body_pos"])
-        | (key_body_quat_err_sq > threshold_sq["key_body_quat"])
-        | (door_joint_pos_err_sq > threshold_sq["door_joint_pos"])
+
+
+def _get_eval_done_status(base_env):
+    original_get_dones = getattr(base_env, "_eval_original_get_dones", None)
+    if original_get_dones is None:
+        original_get_dones = base_env._get_dones
+
+    original_early_stopping = bool(getattr(base_env, "early_stopping", False))
+    override_state = []
+
+    threshold_overrides = (
+        ("reset_key_body_pos_delta_min", "reset_key_body_pos_delta_max", args_cli.key_body_pos_threshold),
+        ("reset_key_body_quat_delta_min", "reset_key_body_quat_delta_max", args_cli.key_body_quat_threshold),
+        ("reset_door_joint_pos_delta_min", "reset_door_joint_pos_delta_max", args_cli.door_joint_pos_threshold),
     )
-    return drifted, metrics
+    try:
+        for min_attr, max_attr, override_value in threshold_overrides:
+            if override_value is None:
+                continue
+            override_state.append((min_attr, getattr(base_env, min_attr), getattr(base_env.cfg, min_attr)))
+            override_state.append((max_attr, getattr(base_env, max_attr), getattr(base_env.cfg, max_attr)))
+            setattr(base_env, min_attr, float(override_value))
+            setattr(base_env, max_attr, float(override_value))
+            setattr(base_env.cfg, min_attr, float(override_value))
+            setattr(base_env.cfg, max_attr, float(override_value))
+        base_env.early_stopping = True
+        killed, timed_out = original_get_dones()
+    finally:
+        for attr_name, attr_value, cfg_value in reversed(override_state):
+            setattr(base_env, attr_name, attr_value)
+            setattr(base_env.cfg, attr_name, cfg_value)
+        base_env.early_stopping = original_early_stopping
+
+    return killed, timed_out
 
 
 def _get_env_family_ids(base_env):
@@ -983,8 +990,26 @@ def main(env_cfg, agent_cfg: dict):
     _reset_dagger_rollout_state(dagger)
     _install_freeze_patch(base_env, frozen_state)
 
-    thresholds = _resolve_drift_thresholds(base_env)
-    print("[INFO] Drift thresholds:", thresholds)
+    print(
+        "[INFO] Drift thresholds:",
+        {
+            "key_body_pos": float(
+                args_cli.key_body_pos_threshold
+                if args_cli.key_body_pos_threshold is not None
+                else base_env.cfg.reset_key_body_pos_delta_max
+            ),
+            "key_body_quat": float(
+                args_cli.key_body_quat_threshold
+                if args_cli.key_body_quat_threshold is not None
+                else base_env.cfg.reset_key_body_quat_delta_max
+            ),
+            "door_joint_pos": float(
+                args_cli.door_joint_pos_threshold
+                if args_cli.door_joint_pos_threshold is not None
+                else base_env.cfg.reset_door_joint_pos_delta_max
+            ),
+        },
+    )
     mode_tracker = None
     if dagger.mode_prediction_enabled and not args_cli.use_teacher:
         mode_tracker = ModePredictionTracker(base_env.device, base_env.num_envs, dagger.num_modes)
@@ -1083,21 +1108,26 @@ def main(env_cfg, agent_cfg: dict):
                         and "aux" in student_output
                     ):
                         aux_prediction_for_replay = dagger._decode_aux_prediction(student_output["aux"].detach())
+                    pending_debug_frame = dagger._viser_pending_debug_frame
+                    sensor_obs_pcd_base_by_name = pending_debug_frame.get("sensor_obs_pcd_base_by_name")
+                    if sensor_obs_pcd_base_by_name is None and "robot_obs_pcd_base" in pending_debug_frame:
+                        sensor_obs_pcd_base_by_name = {
+                            "robot_obs": pending_debug_frame["robot_obs_pcd_base"],
+                        }
                     dagger._maybe_update_viser_debug(
-                        iteration=dagger._viser_pending_debug_frame["iteration"],
-                        robot_base_pos_w=dagger._viser_pending_debug_frame["robot_base_pos_w"],
-                        robot_base_quat_w=dagger._viser_pending_debug_frame["robot_base_quat_w"],
-                        ground_truth_pcd_world=dagger._viser_pending_debug_frame["ground_truth_pcd_world"],
-                        scene_obs_pcd_base=dagger._viser_pending_debug_frame["robot_obs_pcd_base"],
-                        policy_input_pcd_base=dagger._viser_pending_debug_frame["policy_input_pcd_base"],
+                        iteration=pending_debug_frame["iteration"],
+                        robot_base_pos_w=pending_debug_frame["robot_base_pos_w"],
+                        robot_base_quat_w=pending_debug_frame["robot_base_quat_w"],
+                        ground_truth_pcd_world=pending_debug_frame["ground_truth_pcd_world"],
+                        sensor_obs_pcd_base_by_name=sensor_obs_pcd_base_by_name,
+                        policy_input_pcd_base=pending_debug_frame["policy_input_pcd_base"],
                         aux_prediction=aux_prediction_for_replay,
                     )
                     dagger._viser_pending_debug_frame = None
 
-                reached_last_frame = base_env._get_reached_last_frame_mask()
-                trial_timed_out = base_env.episode_length_buf >= (base_env.max_trial_steps - 1)
-                drift_mask, last_metrics = _compute_drift(base_env, thresholds)
-                new_timeouts = (reached_last_frame | trial_timed_out) & active
+                drift_mask, timeout_mask = _get_eval_done_status(base_env)
+                last_metrics = _compute_tracking_metrics(base_env)
+                new_timeouts = timeout_mask & active
                 new_drifts = drift_mask & active & ~new_timeouts
                 newly_finished = new_timeouts | new_drifts
                 if torch.any(newly_finished):
