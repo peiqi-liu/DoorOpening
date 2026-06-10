@@ -385,7 +385,11 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=False)
 
-    base_action_scale = 0.3
+    # base_action_scale = 0.3
+    # arm_action_scale = 0.3
+    # finger_action_scale = 0.4
+    # arx_action_scale = 0.3
+    base_action_scale = 1.0
     arm_action_scale = 0.6
     finger_action_scale = 1.5
     arx_action_scale = 0.6
