@@ -25,6 +25,7 @@ from DoorOpening.assets.door.multi_door_cfg import DOOR_FAMILY_NAMES
 from DoorOpening.assets.door.multi_door_cfg import asset_family_ids as door_asset_family_ids
 from DoorOpening.assets.door.multi_door_cfg import asset_paths as door_asset_paths
 from DoorOpening.assets.door.multi_door_cfg import board_bboxes as door_board_bboxes
+from DoorOpening.assets.door.multi_door_cfg import board_bboxes_link1 as door_board_bboxes_link1
 from DoorOpening.assets.door.multi_door_cfg import motion_family_ids, motion_traj_paths
 from DoorOpening.assets.glorbot.glorbot_cfg import glorbot_urdf_path
 from DoorOpening.model.transformer import PCDTransformer, strip_prefix_from_state_dict
@@ -34,6 +35,10 @@ from DoorOpening.utils.camera_utils import (
     crop_local_pcd,
     simulate_depth_cam_render_from_pose,
     simulate_lidar_render_from_pose,
+)
+from DoorOpening.utils.door_window_dropout import (
+    apply_window_dropout_to_door_points,
+    sample_random_window_hole_metadata,
 )
 from DoorOpening.utils.extract_pointcloud_from_articulation import (
     FrankaLeapSampler,
@@ -136,6 +141,7 @@ class Dagger:
         self.play_policy = bool(self.config.get("play_policy", False))
         self.runtime_cfg = self.config.get("dagger", {})
         self.wall_distractor_cfg = dict(self.runtime_cfg.get("wall_distractors", {}))
+        self.door_hole_aug_cfg = dict(self.runtime_cfg.get("door_hole_aug", {}))
 
         self.lr = float(self.runtime_cfg.get("learning_rate", 1e-4))
         self.lr_schedule = str(self.runtime_cfg.get("lr_schedule", "cosine")).lower()
@@ -2315,6 +2321,9 @@ class Dagger:
             sample.append(f"env{env_id}:{DOOR_FAMILY_NAMES[family_id]}/{asset_name}")
         print("[INFO] Rank door family sample:", ", ".join(sample))
         self.env_board_bboxes = door_board_bboxes.to(device=self.device, dtype=torch.float32)[self.env_asset_idx]
+        self.env_board_bboxes_link1 = door_board_bboxes_link1.to(device=self.device, dtype=torch.float32)[
+            self.env_asset_idx
+        ]
         bbox_min = self.env_board_bboxes[:, 0]
         bbox_max = self.env_board_bboxes[:, 1]
         bbox_extent = (bbox_max - bbox_min).clamp_min(1e-4)
@@ -2389,6 +2398,7 @@ class Dagger:
             link_name: int(self.ov_env._door_body_idx[self.ov_env.door_body_names.index(link_name)])
             for link_name in ("link_1", "link_2")
         }
+        self.door_hole_link1_body_idx = int(self.door_link_body_indices["link_1"])
         self.wall_distractors_enabled = bool(self.wall_distractor_cfg.get("enabled", True))
         self.wall_distractor_num_points = int(
             self.wall_distractor_cfg.get(
@@ -2428,6 +2438,47 @@ class Dagger:
                 (self.num_envs, self.wall_distractor_num_points, 3),
                 dtype=torch.float32,
                 device=self.device,
+            )
+
+        self.door_hole_aug_enabled = bool(self.door_hole_aug_cfg.get("enabled", False))
+        self.door_hole_aug_env_prob = float(self.door_hole_aug_cfg.get("env_prob", 0.35))
+        self.door_hole_aug_width_range_m = tuple(
+            float(v) for v in self.door_hole_aug_cfg.get("width_range_m", [0.12, 1.60])
+        )
+        self.door_hole_aug_height_range_m = tuple(
+            float(v) for v in self.door_hole_aug_cfg.get("height_range_m", [0.18, 2.20])
+        )
+        self.door_hole_aug_center_height_range_m = tuple(
+            float(v) for v in self.door_hole_aug_cfg.get("center_height_range_m", [0.10, 1.90])
+        )
+        self.door_hole_aug_side_margin_range_m = tuple(
+            float(v) for v in self.door_hole_aug_cfg.get("side_margin_range_m", [0.0, 0.18])
+        )
+        self.door_hole_aug_surface_eps_m = float(self.door_hole_aug_cfg.get("surface_eps_m", 0.03))
+        if not 0.0 <= self.door_hole_aug_env_prob <= 1.0:
+            raise ValueError("door_hole_aug.env_prob must be in [0, 1].")
+        if self.door_hole_aug_surface_eps_m < 0.0:
+            raise ValueError("door_hole_aug.surface_eps_m must be non-negative.")
+        for range_name, value_range in (
+            ("width_range_m", self.door_hole_aug_width_range_m),
+            ("height_range_m", self.door_hole_aug_height_range_m),
+            ("center_height_range_m", self.door_hole_aug_center_height_range_m),
+            ("side_margin_range_m", self.door_hole_aug_side_margin_range_m),
+        ):
+            if len(value_range) != 2:
+                raise ValueError(f"door_hole_aug.{range_name} must contain exactly two values.")
+            if float(value_range[1]) < float(value_range[0]):
+                raise ValueError(f"door_hole_aug.{range_name} must satisfy min <= max.")
+        self.latest_door_hole_aug_stats = {}
+        if self.door_hole_aug_enabled:
+            print(
+                "[INFO] door_hole_aug enabled: "
+                f"env_prob={self.door_hole_aug_env_prob}, "
+                f"width_range_m={self.door_hole_aug_width_range_m}, "
+                f"height_range_m={self.door_hole_aug_height_range_m}, "
+                f"center_height_range_m={self.door_hole_aug_center_height_range_m}, "
+                f"side_margin_range_m={self.door_hole_aug_side_margin_range_m}, "
+                f"surface_eps_m={self.door_hole_aug_surface_eps_m}"
             )
 
         self.robot_camera_body_idx = None
@@ -3340,6 +3391,52 @@ class Dagger:
             max_points_per_process=self.robot_pointcloud_filter_max_points_per_process,
         )
 
+    def _door_hole_aug_active(self):
+        # Window-hole simulation is a pointcloud/world-geometry transform and should
+        # follow its own config regardless of whether we are training or replaying.
+        return self.door_hole_aug_enabled
+
+    def _get_link1_pose_world(self):
+        link1_pos_w = self.ov_env.door.data.body_pos_w[:, self.door_hole_link1_body_idx]
+        link1_quat_w = self.ov_env.door.data.body_quat_w[:, self.door_hole_link1_body_idx]
+        return torch.cat([link1_pos_w, link1_quat_w], dim=-1)
+
+    def _sample_door_hole_aug_metadata(self, link1_pose_world):
+        if not self._door_hole_aug_active():
+            return None
+        metadata = sample_random_window_hole_metadata(
+            link1_pose_world=link1_pose_world,
+            board_bbox_link1=self.env_board_bboxes_link1,
+            window_prob=self.door_hole_aug_env_prob,
+            width_range=self.door_hole_aug_width_range_m,
+            height_range=self.door_hole_aug_height_range_m,
+            center_height_range=self.door_hole_aug_center_height_range_m,
+            side_margin_range=self.door_hole_aug_side_margin_range_m,
+        )
+        enabled = metadata["enabled"].to(dtype=torch.float32)
+        self.latest_door_hole_aug_stats = {
+            "door_hole_aug/env_fraction": float(enabled.mean().detach().cpu()),
+            "door_hole_aug/no_hole_fraction": float((1.0 - enabled).mean().detach().cpu()),
+            "door_hole_aug/hole_width_mean_m": float(metadata["hole_width"].mean().detach().cpu()),
+            "door_hole_aug/hole_height_mean_m": float(metadata["hole_height"].mean().detach().cpu()),
+        }
+        return metadata
+
+    def _apply_door_hole_aug_to_world(self, pointcloud_world, link1_pose_world, hole_metadata):
+        if pointcloud_world is None or hole_metadata is None:
+            return pointcloud_world
+        filtered_points, hole_metadata = apply_window_dropout_to_door_points(
+            points_world=pointcloud_world,
+            link1_pose_world=link1_pose_world,
+            board_bbox_link1=self.env_board_bboxes_link1,
+            hole_metadata=hole_metadata,
+            surface_eps=self.door_hole_aug_surface_eps_m,
+        )
+        self.latest_door_hole_aug_stats["door_hole_aug/dropped_points_mean"] = float(
+            hole_metadata["num_dropped_points"].to(dtype=torch.float32).mean().detach().cpu()
+        )
+        return filtered_points
+
     def _sample_wall_pointcloud_world(self, num_points=None):
         if not self.wall_distractors_enabled:
             return torch.zeros((self.num_envs, 0, 3), dtype=torch.float32, device=self.device)
@@ -3363,12 +3460,13 @@ class Dagger:
         quat = door_base_quat_w.unsqueeze(1).expand(-1, wall_points_base.shape[1], -1)
         return quat_apply(quat, wall_points_base) + door_base_pos_w.unsqueeze(1)
 
-    def _sample_cached_door_pointcloud_world(self):
+    def _sample_cached_door_pointcloud_world(self, hole_metadata=None):
         door_pcd_world = torch.zeros(
             (self.num_envs, self.scene_door_pcd_num_points, 3),
             dtype=torch.float32,
             device=self.device,
         )
+        link1_pose_world_all = self._get_link1_pose_world() if hole_metadata is not None else None
         for asset_idx, link_points_by_name in self.door_link_pointclouds.items():
             env_ids = self.door_sampler_env_ids.get(asset_idx)
             if env_ids is None:
@@ -3389,38 +3487,17 @@ class Dagger:
                 },
                 num_points=self.scene_door_pcd_num_points,
             )
+            if hole_metadata is not None:
+                asset_pcd_world = self._apply_door_hole_aug_to_world(
+                    asset_pcd_world,
+                    link1_pose_world_all[env_ids],
+                    {key: value[env_ids] for key, value in hole_metadata.items()},
+                )
             door_pcd_world[env_ids] = asset_pcd_world
         return door_pcd_world
 
-    def _sample_scene_pointcloud_world_cached(self):
-        door_pcd_world = self._sample_cached_door_pointcloud_world()
-        robot_pcd_world = self._sample_robot_pointcloud_world_sampler()
-        scene_parts = [door_pcd_world, robot_pcd_world]
-        wall_pcd_world = self._sample_wall_pointcloud_world()
-        if wall_pcd_world.shape[1] > 0:
-            scene_parts.append(wall_pcd_world)
-        return torch.cat(scene_parts, dim=1)
-
-    def _sample_scene_pointcloud_world_sampler(self):
-        door_base_pos_w = self.ov_env.door.data.body_pos_w[:, self.door_base_body_idx]
-        door_base_quat_w = self.ov_env.door.data.body_quat_w[:, self.door_base_body_idx]
-        door_joint_pos = self.ov_env.door.data.joint_pos
-
-        door_pcd_world = torch.zeros(
-            (self.num_envs, self.scene_door_pcd_num_points, 3),
-            dtype=torch.float32,
-            device=self.device,
-        )
-        for asset_idx, sampler in self.door_samplers.items():
-            env_ids = self.door_sampler_env_ids.get(asset_idx)
-            if env_ids is None:
-                env_ids = torch.nonzero(self.env_asset_idx == asset_idx, as_tuple=False).squeeze(-1)
-            if env_ids.numel() == 0:
-                continue
-            local_pcd = sampler.sample(door_joint_pos[env_ids])
-            quat = door_base_quat_w[env_ids].unsqueeze(1).expand(-1, local_pcd.shape[1], -1)
-            world_pcd = quat_apply(quat, local_pcd) + door_base_pos_w[env_ids].unsqueeze(1)
-            door_pcd_world[env_ids] = world_pcd
+    def _sample_scene_pointcloud_world_cached(self, hole_metadata=None):
+        door_pcd_world = self._sample_cached_door_pointcloud_world(hole_metadata=hole_metadata)
         robot_pcd_world = self._sample_robot_pointcloud_world_sampler()
         scene_parts = [door_pcd_world, robot_pcd_world]
         wall_pcd_world = self._sample_wall_pointcloud_world()
@@ -3451,7 +3528,9 @@ class Dagger:
     def _sample_scene_obs_pointcloud_base_depth(self):
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
-        gt_scene_pcd_world = self._sample_scene_pointcloud_world_cached()
+        gt_scene_pcd_world = self._sample_scene_pointcloud_world_cached(
+            hole_metadata=getattr(self, "_current_door_hole_aug_metadata", None)
+        )
         if self.viser_raw_enabled:
             # Keep only the selected family envs on CPU so Viser debug does not retain an
             # extra full batched scene pointcloud on GPU during training/debug runs.
@@ -3473,7 +3552,9 @@ class Dagger:
     def _sample_scene_obs_pointcloud_base_lidar(self):
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
-        gt_scene_pcd_world = self._sample_scene_pointcloud_world_cached()
+        gt_scene_pcd_world = self._sample_scene_pointcloud_world_cached(
+            hole_metadata=getattr(self, "_current_door_hole_aug_metadata", None)
+        )
         if self.viser_raw_enabled:
             self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(gt_scene_pcd_world)
 
@@ -3482,7 +3563,9 @@ class Dagger:
     def _sample_scene_obs_pointcloud_base_both(self):
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
-        gt_scene_pcd_world = self._sample_scene_pointcloud_world_cached()
+        gt_scene_pcd_world = self._sample_scene_pointcloud_world_cached(
+            hole_metadata=getattr(self, "_current_door_hole_aug_metadata", None)
+        )
         if self.viser_raw_enabled:
             self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(gt_scene_pcd_world)
 
@@ -3508,22 +3591,28 @@ class Dagger:
     def _sample_scene_obs_pointcloud_base(self):
         self._viser_cached_ground_truth_pcd_world = None
         self._viser_cached_sensor_obs_pcd_base = OrderedDict()
-        if self.pointcloud_source in {"sampler", "depth"}:
-            depth_pcd_base = self._filter_robot_points_base(self._sample_scene_obs_pointcloud_base_depth())
-            self._viser_cached_sensor_obs_pcd_base["robot_depth_cam_obs"] = depth_pcd_base
-            scene_obs_pcd_base = depth_pcd_base
-        elif self.pointcloud_source == "lidar":
-            lidar_pcd_base = self._filter_robot_points_base(self._sample_scene_obs_pointcloud_base_lidar())
-            self._viser_cached_sensor_obs_pcd_base["robot_lidar_obs"] = lidar_pcd_base
-            scene_obs_pcd_base = lidar_pcd_base
-        else:
-            depth_pcd_base, lidar_pcd_base = self._sample_scene_obs_pointcloud_base_both()
-            depth_pcd_base = self._filter_robot_points_base(depth_pcd_base)
-            lidar_pcd_base = self._filter_robot_points_base(lidar_pcd_base)
-            self._viser_cached_sensor_obs_pcd_base["robot_lidar_obs"] = lidar_pcd_base
-            self._viser_cached_sensor_obs_pcd_base["robot_depth_cam_obs"] = depth_pcd_base
-            scene_obs_pcd_base = torch.cat([depth_pcd_base, lidar_pcd_base], dim=1)
-        return scene_obs_pcd_base
+        self.latest_door_hole_aug_stats = {}
+        link1_pose_world = self._get_link1_pose_world()
+        self._current_door_hole_aug_metadata = self._sample_door_hole_aug_metadata(link1_pose_world)
+        try:
+            if self.pointcloud_source in {"sampler", "depth"}:
+                depth_pcd_base = self._filter_robot_points_base(self._sample_scene_obs_pointcloud_base_depth())
+                self._viser_cached_sensor_obs_pcd_base["robot_depth_cam_obs"] = depth_pcd_base
+                scene_obs_pcd_base = depth_pcd_base
+            elif self.pointcloud_source == "lidar":
+                lidar_pcd_base = self._filter_robot_points_base(self._sample_scene_obs_pointcloud_base_lidar())
+                self._viser_cached_sensor_obs_pcd_base["robot_lidar_obs"] = lidar_pcd_base
+                scene_obs_pcd_base = lidar_pcd_base
+            else:
+                depth_pcd_base, lidar_pcd_base = self._sample_scene_obs_pointcloud_base_both()
+                depth_pcd_base = self._filter_robot_points_base(depth_pcd_base)
+                lidar_pcd_base = self._filter_robot_points_base(lidar_pcd_base)
+                self._viser_cached_sensor_obs_pcd_base["robot_lidar_obs"] = lidar_pcd_base
+                self._viser_cached_sensor_obs_pcd_base["robot_depth_cam_obs"] = depth_pcd_base
+                scene_obs_pcd_base = torch.cat([depth_pcd_base, lidar_pcd_base], dim=1)
+            return scene_obs_pcd_base
+        finally:
+            self._current_door_hole_aug_metadata = None
 
     def _build_local_pcd(self, scene_obs_pcd_base, palm_pos_base, robot_pcd_base=None):
         pcd_parts = []
@@ -4208,6 +4297,9 @@ class Dagger:
         metrics["schedule/student_rollout_env_fraction"] = student_env_fraction
         if iteration_time_ms is not None:
             metrics["timing/iteration_ms"] = iteration_time_ms
+        if self.latest_door_hole_aug_stats:
+            for key, value in self.latest_door_hole_aug_stats.items():
+                metrics[key] = value
         if self.latest_env_log_metrics:
             for key, value in self.latest_env_log_metrics.items():
                 if key == "stats/success_rate" or key.startswith("stats/success_rate/"):

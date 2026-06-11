@@ -216,16 +216,19 @@ def _collect_multi_family_assets():
 asset_paths, asset_family_ids, asset_family_names = _collect_multi_family_assets()
 board_offsets = []
 board_bboxes = []
+board_bboxes_link1 = []
 handle_offsets = []
 
 for asset_path in asset_paths:
     keypoints = compute_exact_door_keypoints(asset_path)
     board_offsets.append(keypoints["link_1"])
     board_bboxes.append(keypoints["link_1_bbox_base"])
+    board_bboxes_link1.append(keypoints["link_1_bbox_link1"])
     handle_offsets.append(keypoints["link_2"])
 
 board_offsets = torch.tensor(board_offsets)
 board_bboxes = torch.tensor(board_bboxes)
+board_bboxes_link1 = torch.tensor(board_bboxes_link1)
 handle_offsets = torch.tensor(handle_offsets)
 asset_family_ids = torch.tensor(asset_family_ids, dtype=torch.long)
 

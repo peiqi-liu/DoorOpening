@@ -212,6 +212,8 @@ dagger:
     center_offset_m: [-0.80, 0.80]  # Shift of the whole column along the door-thickness axis: negative is recessed behind the slab center, positive protrudes in front.
     # Wall height follows the door panel bbox height in the ordered door-local height axis.
     face_jitter_m: 0.1  # Small noise added only on the snapped outer faces so the walls do not look perfectly planar.
+  door_hole_aug:
+    enabled: false  # When enabled, drop points from link_1 to simulate a window/open hole in the door panel.
   viser:
     raw:
       enabled: false  # Save raw `.pt` replay chunks for offline debugging.

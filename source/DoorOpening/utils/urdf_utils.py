@@ -136,6 +136,7 @@ def compute_exact_door_keypoints(urdf_path):
             axis=0,
         )
         keypoints["link_1_bbox_base"] = board_bbox_base.tolist()
+        keypoints["link_1_bbox_link1"] = [min_b.tolist(), max_b.tolist()]
 
     # --- Link 2: Handle / Hinge ---
     link_2 = root.find(".//link[@name='link_2']")
