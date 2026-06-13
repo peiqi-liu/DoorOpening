@@ -46,6 +46,21 @@ def _body_names(door):
     return list(names) if names is not None else []
 
 
+def _joint_names(door):
+    names = getattr(door, "joint_names", None)
+    if names is None:
+        names = getattr(door.data, "joint_names", None)
+    return list(names) if names is not None else []
+
+
+def _joint_index(door, joint_name, fallback_idx):
+    names = _joint_names(door)
+    if joint_name in names:
+        return names.index(joint_name)
+    num_joints = door.data.joint_pos.shape[1]
+    return min(fallback_idx, max(0, num_joints - 1))
+
+
 def _body_indices_for_stats(door):
     names = _body_names(door)
     if names:
@@ -110,6 +125,9 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     sim_dt = sim.get_physics_dt()
     sim_time = 0.0
     count = 0
+    door = scene["door"]
+    joint_1_idx = _joint_index(door, "joint_1", fallback_idx=0)
+    joint_2_idx = _joint_index(door, "joint_2", fallback_idx=1)
 
     # door_generator = BASIC_DOOR_CFG
 
@@ -141,14 +159,24 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             root_state[:, :3] += scene.env_origins
             scene["door"].write_root_pose_to_sim(root_state[:, :7])
             scene["door"].write_root_velocity_to_sim(root_state[:, 7:])
-            door_pos = scene["door"].data.joint_pos_limits[..., 0]
-            scene["door"].write_joint_position_to_sim(door_pos)
+            door_pos = door.data.joint_pos_limits[..., 0].clone()
+            door.write_joint_position_to_sim(door_pos)
             # clear internal buffers
             scene.reset()
             # print("joint_pos: ", scene["door"].data.joint_pos)
 
-        door_target_pos = (scene["door"].data.joint_pos_limits[..., 1] - scene["door"].data.soft_joint_pos_limits[..., 0]) * ((count % 500) / 500) + scene["door"].data.soft_joint_pos_limits[..., 0]
-        scene["door"].write_joint_position_to_sim(door_target_pos)
+        joint_lower = door.data.soft_joint_pos_limits[..., 0]
+        joint_upper = door.data.joint_pos_limits[..., 1]
+        door_target_pos = joint_lower.clone()
+        door_target_pos[:, joint_1_idx] = (
+            (joint_upper[:, joint_1_idx] - joint_lower[:, joint_1_idx]) * ((count % 500) / 500)
+            + joint_lower[:, joint_1_idx]
+        )
+        door_target_pos[:, joint_2_idx] = (
+            (joint_upper[:, joint_2_idx] - joint_lower[:, joint_2_idx]) * ((count % 500) / 500)
+            + joint_lower[:, joint_2_idx]
+        )
+        door.write_joint_position_to_sim(door_target_pos)
         if count % 100 == 0:
             # print("joint_pos: ", scene["door"].data.joint_pos)
             print("door pos: ", scene["door"].data.body_pos_w[..., 2, 2].max(), scene["door"].data.body_pos_w[..., 2, 2].min())

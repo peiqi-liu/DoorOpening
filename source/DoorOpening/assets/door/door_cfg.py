@@ -26,7 +26,7 @@ DOOR_SOLVER_POSITION_ITERS = 8
 DOOR_SOLVER_VELOCITY_ITERS = 2
 DOOR_CONTACT_OFFSET = 0.015
 DOOR_REST_OFFSET = 0.002
-DOOR_MAX_DEPENETRATION_VELOCITY = 150.0
+DOOR_MAX_DEPENETRATION_VELOCITY = 500.0
 
 
 def load_meta_data(board_meta_data_paths: str, handle_meta_data_paths: str, device: str = "cuda" if torch.cuda.is_available() else "cpu"):
@@ -164,7 +164,7 @@ def create_door_cfg(
 
 
 root_path = os.path.dirname(os.path.dirname(__file__))
-asset_base_folder = os.path.join(root_path, "door/PartNetv4")
+asset_base_folder = os.path.join(root_path, "door/ScratchDoors")
 asset_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/mobility.urdf"), recursive=True))
 board_offsets = []
 board_bboxes = []
