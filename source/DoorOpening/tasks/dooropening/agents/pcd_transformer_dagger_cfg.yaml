@@ -18,8 +18,8 @@ force_prediction:
   weight: 0.01
 
 push_pull_condition:
-  enabled: false
-  source: predicted
+  enabled: true
+  source: oracle
   obs_key: push_pull_cond
   detach_predicted_condition: true
   input_dim: 2
@@ -45,7 +45,7 @@ temporal_state_encoders:
     - q_arx
     - q_hand
     - target_err_arm
-    - target_err_arx
+    - push_pull_belief
     - target_err_hand
     - base_vel
     - aux_handle_pos
@@ -217,7 +217,7 @@ dagger:
       enabled: false  # Save raw `.pt` replay chunks for offline debugging.
       path: "viser_replay.pt"
       capture_interval: 2  # Save one frame, skip one frame, so each replay chunk spans more rollout time.
-      save_interval: 5000  # Write one raw `.pt` file every N iterations.
+      save_interval: 10000  # Write one raw `.pt` file every N iterations.
       max_points: 6000  # Raw replay is for debugging, not training; smaller clouds replay much better on laptops.
       max_frames: 2000  # Keep at most this many frames in each raw `.pt` file; set 0 to disable the cap.
   wandb:
