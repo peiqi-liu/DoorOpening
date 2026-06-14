@@ -18,8 +18,8 @@ force_prediction:
   weight: 0.01
 
 push_pull_condition:
-  enabled: false
-  source: predicted
+  enabled: true
+  source: oracle
   obs_key: push_pull_cond
   detach_predicted_condition: true
   input_dim: 2
@@ -45,7 +45,7 @@ temporal_state_encoders:
     - q_arx
     - q_hand
     - target_err_arm
-    - target_err_arx
+    - push_pull_belief
     - target_err_hand
     - base_vel
     - aux_handle_pos
@@ -182,7 +182,7 @@ dagger:
     max_points_per_process: 5000
   depth_cam_render:
     num_points: 12000
-    inflate_px: 2
+    inflate_px: 4
     jitter_std_m: 0.01
     clip_mode: "post"
     jitter_mode: "xyz"

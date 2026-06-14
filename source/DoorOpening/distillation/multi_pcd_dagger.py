@@ -3092,29 +3092,39 @@ class Dagger:
         return mean_ms
 
     def _build_sampler_camera_spec(self):
-        camera_cfg = self.ov_env.cfg.pointcloud_camera_cfg
-        height = int(camera_cfg.height)
-        width = int(camera_cfg.width)
-        focal_length = float(camera_cfg.spawn.focal_length)
-        horizontal_aperture = float(camera_cfg.spawn.horizontal_aperture)
-        vertical_aperture = camera_cfg.spawn.vertical_aperture
-        near_m, far_m = camera_cfg.spawn.clipping_range
-        intrinsics = build_pinhole_intrinsics(
-            height=height,
-            width=width,
-            focal_length=focal_length,
-            horizontal_aperture=horizontal_aperture,
-            vertical_aperture=None if vertical_aperture is None else float(vertical_aperture),
-            device=self.device,
-            dtype=torch.float32,
-        )
-        return {
-            "H": int(height),
-            "W": int(width),
-            "intrinsics": intrinsics,
-            "near_m": float(near_m),
-            "far_m": float(far_m),
-        }
+      camera_cfg = self.ov_env.cfg.pointcloud_camera_cfg
+
+      # Keep the render cheap, but match the IsaacGymEnvs D435 FOV/range.
+      height = int(camera_cfg.height) // 2
+      width = int(camera_cfg.width) // 2
+
+      fov_x_deg = 85.2
+      fov_y_deg = 58.0
+      near_m = 0.3
+      far_m = 3.0
+
+      fx = width / (2.0 * math.tan(math.radians(fov_x_deg) * 0.5))
+      fy = height / (2.0 * math.tan(math.radians(fov_y_deg) * 0.5))
+      cx = (width - 1.0) * 0.5
+      cy = (height - 1.0) * 0.5
+
+      intrinsics = torch.tensor(
+          [
+              [fx, 0.0, cx],
+              [0.0, fy, cy],
+              [0.0, 0.0, 1.0],
+          ],
+          device=self.device,
+          dtype=torch.float32,
+      )
+
+      return {
+          "H": height,
+          "W": width,
+          "intrinsics": intrinsics,
+          "near_m": near_m,
+          "far_m": far_m,
+      }
 
     def _get_sampler_camera_pose(self):
         camera_link_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_camera_body_idx]
