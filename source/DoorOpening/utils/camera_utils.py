@@ -349,6 +349,8 @@ def rasterize_depth_zbuffer_from_pose(
     far_m = cam_spec_dict["far_m"]
     far_val = float("inf") if far_m is None else float(far_m)
     device, dtype = pcd.device, pcd.dtype
+    finite_input = torch.isfinite(pcd).all(dim=-1)
+    pcd = torch.nan_to_num(pcd, nan=0.0, posinf=0.0, neginf=0.0)
 
     fx, fy, cx, cy = _get_render_intrinsics(cam_spec_dict, device, dtype)
     intr = (fx, fy, cx, cy)
@@ -366,7 +368,7 @@ def rasterize_depth_zbuffer_from_pose(
     v_pix = fy * (y * invz) + cy
 
     in_front = z > 0
-    inside = (u_pix >= 0) & (u_pix < W) & (v_pix >= 0) & (v_pix < H) & in_front
+    inside = finite_input & (u_pix >= 0) & (u_pix < W) & (v_pix >= 0) & (v_pix < H) & in_front
     if clip_mode == "pre":
         inside = inside & (z >= near_m) & (z <= far_val)
 
@@ -510,6 +512,8 @@ def get_compiled_renderer_fixed_shapes(
 
         @torch.no_grad()
         def _compiled_fn(pcd: torch.Tensor, camera_pose: torch.Tensor, jitter_std: torch.Tensor):
+            finite_input = torch.isfinite(pcd).all(dim=-1)
+            pcd = torch.nan_to_num(pcd, nan=0.0, posinf=0.0, neginf=0.0)
             cam_pos = camera_pose[:, 0:3]
             u_hat, w_hat, v_hat = _camera_basis_from_pose_x_forward(camera_pose)
 
@@ -523,7 +527,7 @@ def get_compiled_renderer_fixed_shapes(
             v_pix = fy * (y * invz) + cy
 
             in_front = z > 0
-            inside = (u_pix >= 0) & (u_pix < W) & (v_pix >= 0) & (v_pix < H) & in_front
+            inside = finite_input & (u_pix >= 0) & (u_pix < W) & (v_pix >= 0) & (v_pix < H) & in_front
             if clip_pre:
                 inside = inside & (z >= near_m) & (z <= far_val)
 
