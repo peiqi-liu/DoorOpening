@@ -182,7 +182,7 @@ dagger:
     max_points_per_process: 5000
   depth_cam_render:
     num_points: 12000
-    inflate_px: 2
+    inflate_px: 4
     jitter_std_m: 0.01
     clip_mode: "post"
     jitter_mode: "xyz"
