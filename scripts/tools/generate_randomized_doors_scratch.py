@@ -1,10 +1,19 @@
 import argparse
+import hashlib
 import json
 import math
 import random
 import shutil
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SOURCE_ROOT = REPO_ROOT / "source"
+if str(SOURCE_ROOT) not in sys.path:
+    sys.path.insert(0, str(SOURCE_ROOT))
+
+from DoorOpening.constants.env_constants import DOOR_INITIAL_POS, DOOR_INITIAL_ROT, ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
 
 """
 Generate simple scratch-built door assets with a fixed 3-link / 2-joint topology.
@@ -40,17 +49,23 @@ DEFAULT_HANDLE_LENGTH_RANGE_M = (0.08, 0.14)
 DEFAULT_HANDLE_RETURN_LENGTH_RANGE_M = (0.035, 0.075)
 DEFAULT_HANDLE_RETURN_TIP_CLEARANCE_RANGE_M = (0.025, 0.050)
 DEFAULT_HANDLE_NUM_SEGMENTS = 16
-DEFAULT_RETURN_HANDLE_PROB = 0.5
+DEFAULT_RETURN_HANDLE_PROB = 0.7
 
 DEFAULT_NUM_VARIANTS = 64
 DEFAULT_DEBUG_FIRST_N = 0
+DEFAULT_START_BASE_SAMPLING = "paired"
+DEFAULT_START_BASE_RADIUS_M = 1.0
+DEFAULT_START_BASE_ANGLE_RANGE_DEG = 30.0
+DEFAULT_START_BASE_PAIR_SEED = 0
 
-DOOR_OPEN_LIMIT_RAD = 1.5079644737231006
-HANDLE_OPEN_LIMIT_RAD = 1.5079644737231006
+DOOR_OPEN_LIMIT_RAD = 1.57
+HANDLE_OPEN_LIMIT_RAD = 1.57
 ROOT_JOINT_RPY = [math.pi / 2.0, 0.0, -math.pi / 2.0]
 # With the fixed root rotation above, link_1 local -z points toward the
 # default front view used by scripts/test_door.py, while +z points to the back.
 FRONT_FACE_SIGN_LINK1 = -1.0
+BACK_FACE_SIGN_LINK1 = -FRONT_FACE_SIGN_LINK1
+HANDLE_FACE_SIGN_LINK1 = BACK_FACE_SIGN_LINK1
 
 MIN_HANDLE_BOTTOM_CLEARANCE_M = 0.15
 MIN_HANDLE_TOP_CLEARANCE_M = 0.15
@@ -62,8 +77,7 @@ REQUIRED_JOINT_NAMES = {"joint_0", "joint_1", "joint_2"}
 
 
 def parse_args():
-    repo_root = Path(__file__).resolve().parents[2]
-    default_output_dir = repo_root / "source" / "DoorOpening" / "assets" / "door" / "ScratchDoors"
+    default_output_dir = REPO_ROOT / "source" / "DoorOpening" / "assets" / "door" / "ScratchDoors"
 
     parser = argparse.ArgumentParser(
         description="Generate simple scratch-built door assets with procedural frames, boards, and lever handles."
@@ -192,6 +206,30 @@ def parse_args():
     parser.add_argument("--return-handle-prob", type=float, default=DEFAULT_RETURN_HANDLE_PROB)
     parser.add_argument("--handle-num-segments", type=int, default=DEFAULT_HANDLE_NUM_SEGMENTS)
     parser.add_argument("--debug-first-n", type=int, default=DEFAULT_DEBUG_FIRST_N)
+    parser.add_argument(
+        "--start-base-sampling",
+        choices=("paired", "random", "none"),
+        default=DEFAULT_START_BASE_SAMPLING,
+        help="How to sample and store the initial mobile-base state in variant_meta.json.",
+    )
+    parser.add_argument(
+        "--start-base-radius",
+        type=float,
+        default=DEFAULT_START_BASE_RADIUS_M,
+        help="Radius in meters for the initial mobile-base waypoint around the door.",
+    )
+    parser.add_argument(
+        "--start-base-angle-range-deg",
+        type=float,
+        default=DEFAULT_START_BASE_ANGLE_RANGE_DEG,
+        help="Symmetric angle range in degrees for initial mobile-base waypoint sampling.",
+    )
+    parser.add_argument(
+        "--start-base-pair-seed",
+        type=int,
+        default=DEFAULT_START_BASE_PAIR_SEED,
+        help="Seed mixed into the deterministic paired start-base hash.",
+    )
     return parser.parse_args()
 
 
@@ -224,6 +262,89 @@ def clamp(value, low, high):
 
 def midpoint(a, b):
     return [(x + y) * 0.5 for x, y in zip(a, b)]
+
+
+def wrap_to_pi(angle_rad):
+    return ((angle_rad + math.pi) % (2.0 * math.pi)) - math.pi
+
+
+def quat_xyzw_to_yaw(quat):
+    x, y, z, w = [float(v) for v in quat]
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    return math.atan2(siny_cosp, cosy_cosp)
+
+
+def stable_unit_interval(key):
+    digest = hashlib.blake2b(key.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, byteorder="big", signed=False) / float(1 << 64)
+
+
+def paired_start_angle(pair_key, seed, angle_range_deg):
+    angle_limit = math.radians(angle_range_deg)
+    unit = stable_unit_interval(f"dooropening-start-base-v1:{int(seed)}:{pair_key}")
+    return -angle_limit + 2.0 * angle_limit * unit
+
+
+def compute_base_joint_from_world_pose(base_world_pose, target_world_pose):
+    base_pos = base_world_pose["pos"]
+    base_yaw = quat_xyzw_to_yaw(base_world_pose["rot"])
+    target_pos = target_world_pose["pos"]
+    target_yaw = quat_xyzw_to_yaw(target_world_pose["rot"])
+    dx = float(target_pos[0]) - float(base_pos[0])
+    dy = float(target_pos[1]) - float(base_pos[1])
+    x_r = math.cos(base_yaw) * dx + math.sin(base_yaw) * dy
+    y_r = -math.sin(base_yaw) * dx + math.cos(base_yaw) * dy
+    theta_r = wrap_to_pi(target_yaw - base_yaw)
+    return [x_r, y_r, theta_r]
+
+
+def sample_initial_state(rng, variant_name, args):
+    robot_world_pose = {"pos": list(ROBOT_INITIAL_POS), "rot": list(ROBOT_INITIAL_ROT)}
+    door_world_pose = {"pos": list(DOOR_INITIAL_POS), "rot": list(DOOR_INITIAL_ROT)}
+    door_joint_pos = [0.0, 0.0]
+    robot_base_joint_pos = [0.0, 0.0, 0.0]
+    sampled_robot_world_pose = None
+    sampled_approach_angle_rad = None
+    pair_key = None
+
+    if args.start_base_sampling != "none":
+        if args.start_base_sampling == "paired":
+            pair_key = build_direction_pair_key(variant_name)
+            sampled_approach_angle_rad = paired_start_angle(
+                pair_key,
+                args.start_base_pair_seed,
+                args.start_base_angle_range_deg,
+            )
+        else:
+            angle_limit = math.radians(args.start_base_angle_range_deg)
+            sampled_approach_angle_rad = rng.uniform(-angle_limit, angle_limit)
+
+        sampled_robot_world_pose = {
+            "pos": [
+                float(DOOR_INITIAL_POS[0]) + float(args.start_base_radius) * math.cos(sampled_approach_angle_rad),
+                float(DOOR_INITIAL_POS[1]) + float(args.start_base_radius) * math.sin(sampled_approach_angle_rad),
+                float(ROBOT_INITIAL_POS[2]),
+            ],
+            "rot": list(ROBOT_INITIAL_ROT),
+        }
+        robot_base_joint_pos = compute_base_joint_from_world_pose(robot_world_pose, sampled_robot_world_pose)
+
+    return {
+        "robot_world_pose": robot_world_pose,
+        "door_world_pose": door_world_pose,
+        "robot_base_joint_pos": robot_base_joint_pos,
+        "door_joint_pos": door_joint_pos,
+        "start_base_sampling": str(args.start_base_sampling),
+        "start_base_radius_m": float(args.start_base_radius),
+        "start_base_angle_range_deg": float(args.start_base_angle_range_deg),
+        "start_base_pair_seed": int(args.start_base_pair_seed),
+        "start_base_pair_key": None if pair_key is None else str(pair_key),
+        "sampled_robot_world_pose": sampled_robot_world_pose,
+        "sampled_approach_angle_rad": (
+            None if sampled_approach_angle_rad is None else float(sampled_approach_angle_rad)
+        ),
+    }
 
 
 class ObjMeshBuilder:
@@ -497,10 +618,10 @@ def build_handle_spec(spec, board_min, board_max):
         joint_x = board_min[0] + edge_distance
         lever_direction_x = 1.0
 
-    # Keep the generated scratch handle on the front face of the door panel.
+    # Keep the generated scratch handle on the back face of the door panel.
     # Opening direction is still represented through joint_1, not by moving the
-    # single visible handle to the back side of the slab.
-    face_sign = FRONT_FACE_SIGN_LINK1
+    # single visible handle across the slab faces.
+    face_sign = HANDLE_FACE_SIGN_LINK1
     joint_origin_link1 = [
         joint_x,
         board_min[1] + handle_height,
@@ -609,9 +730,16 @@ def build_handle_collision_primitives(handle_spec):
 
 
 def build_door_axis(spec):
-    if spec["hinge_side"] == "max" and spec["opening_direction"] == "pull":
+    opening_direction = spec["opening_direction"]
+    # Push/pull is defined from the visible handle side. If the generated handle
+    # lives on the back face instead of the historical front face, flip the
+    # joint_1 convention so the label semantics stay unchanged.
+    if HANDLE_FACE_SIGN_LINK1 != FRONT_FACE_SIGN_LINK1:
+        opening_direction = "push" if opening_direction == "pull" else "pull"
+
+    if spec["hinge_side"] == "max" and opening_direction == "pull":
         return [0.0, -1.0, 0.0]
-    if spec["hinge_side"] == "min" and spec["opening_direction"] == "push":
+    if spec["hinge_side"] == "min" and opening_direction == "push":
         return [0.0, -1.0, 0.0]
     return [0.0, 1.0, 0.0]
 
@@ -707,11 +835,57 @@ def validate_variant(variant_dir, root):
         raise ValueError("link_2 should keep multiple simple collision primitives")
 
 
-def write_variant_meta(meta_path, variant_name, spec, board_min, board_max, handle_spec, door_axis, collisions):
+def write_variant_meta(meta_path, variant_name, spec, board_min, board_max, handle_spec, door_axis, collisions, initial_state):
+    if spec["handle_side"] == "max":
+        actual_edge_distance = board_max[0] - handle_spec["joint_origin_link1"][0]
+    else:
+        actual_edge_distance = handle_spec["joint_origin_link1"][0] - board_min[0]
+    frame_height = spec["panel_height_m"] + spec["frame_clearance_m"] + spec["frame_head_height_m"]
+    frame_panel_extra_height = frame_height - spec["panel_height_m"]
+    actual_props = {
+        "panel_width_m": spec["panel_width_m"],
+        "panel_height_m": spec["panel_height_m"],
+        "frame_height_m": frame_height,
+        "frame_panel_extra_height_m": frame_panel_extra_height,
+        "handle_height_m": handle_spec["joint_origin_link1"][1] - board_min[1],
+        "handle_to_edge_distance_m": actual_edge_distance,
+        "handle_side": spec["handle_side"],
+        "opening_direction": spec["opening_direction"],
+        "handle_attachment_joint": "joint_2",
+        "board_min_x": board_min[0],
+        "board_max_x": board_max[0],
+        "board_min_y": board_min[1],
+        "board_max_y": board_max[1],
+    }
+    target_props = {
+        "panel_width_m": spec["panel_width_m"],
+        "panel_height_m": spec["panel_height_m"],
+        "handle_height_m": spec["handle_height_m"],
+        "handle_to_edge_distance_m": spec["handle_edge_distance_m"],
+        "flip_hinge_side": False,
+        "opening_direction": spec["opening_direction"],
+        "handle_side": spec["handle_side"],
+    }
+    source_props = {
+        "panel_width_m": spec["panel_width_m"],
+        "panel_height_m": spec["panel_height_m"],
+        "panel_thickness_m": spec["panel_thickness_m"],
+        "frame_height_m": frame_height,
+        "frame_panel_extra_height_m": frame_panel_extra_height,
+        "handle_height_m": actual_props["handle_height_m"],
+        "handle_to_edge_distance_m": actual_props["handle_to_edge_distance_m"],
+        "handle_side": actual_props["handle_side"],
+        "opening_direction": actual_props["opening_direction"],
+    }
     meta = {
         "generator": "generate_randomized_doors_scratch.py",
         "variant_name": variant_name,
         "source_asset": None,
+        "direction_pair_key": build_direction_pair_key(variant_name),
+        "target_properties": target_props,
+        "actual_properties": actual_props,
+        "source_properties": source_props,
+        "initial_state": initial_state,
         "topology": {
             "links": ["base", "link_0", "link_1", "link_2"],
             "joints": ["joint_0", "joint_1", "joint_2"],
@@ -758,6 +932,11 @@ def build_variant_name(asset_name_prefix, index):
     return f"{asset_name_prefix}__rnd_{index:02d}"
 
 
+def build_direction_pair_key(variant_name):
+    # Match the shared metadata contract used by the other door generators.
+    return str(variant_name)
+
+
 def generate_variants(args):
     rng = random.Random(args.seed)
     output_dir = args.output_dir.resolve()
@@ -780,6 +959,7 @@ def generate_variants(args):
         collisions = build_handle_collision_primitives(handle_spec)
         door_axis = build_door_axis(spec)
         joint_1_origin = build_joint_1_origin(spec)
+        initial_state = sample_initial_state(rng, variant_name, args)
 
         write_board_mesh(texture_dir / "board.obj", board_min, board_max)
         write_frame_mesh(texture_dir / "frame.obj", frame_boxes)
@@ -804,6 +984,7 @@ def generate_variants(args):
             handle_spec=handle_spec,
             door_axis=door_axis,
             collisions=collisions,
+            initial_state=initial_state,
         )
 
         if handle_spec["type"] == "return":

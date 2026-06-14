@@ -114,19 +114,19 @@ def state_machine_offline_right_pull_door(
     # Step 0: Observe
     # -------------------------
 
-    q_robot[3: 10] = franka_default_q
-    q_robot[:3] = torch.tensor([0.15, 0.2, 0])
+    # q_robot[3: 10] = franka_default_q
+    # q_robot[:3] = torch.tensor([0.15, 0.2, 0])
 
-    q_robot[-6:] = torch.tensor(list(CAMERA_JOINT_VALUES_WHEN_SEARCHING_HINGE.values()))
+    # q_robot[-6:] = torch.tensor(list(CAMERA_JOINT_VALUES_WHEN_SEARCHING_HINGE.values()))
 
-    _append_state(
-        robot_traj,
-        door_traj,
-        key_idx_in_key_indices,
-        q_robot,
-        q_door,
-        mark_keyframe=True,
-    )
+    # _append_state(
+    #     robot_traj,
+    #     door_traj,
+    #     key_idx_in_key_indices,
+    #     q_robot,
+    #     q_door,
+    #     mark_keyframe=True,
+    # )
 
     # -------------------------
     # Step 1: Pregrasp
@@ -140,7 +140,7 @@ def state_machine_offline_right_pull_door(
     pregrasp_base_x_offset = 0.55
     pregrasp_base_y_offset = -0.30
     pregrasp_palm_x_offset = 0.25
-    pregrasp_palm_y_offset = 0.05
+    pregrasp_palm_y_offset = -0.1
     pregrasp_palm_z_offset = 0.25
 
     base_target_pos = handle_pos.clone()
@@ -177,7 +177,7 @@ def state_machine_offline_right_pull_door(
     # Step 2: Move to grasp
     # -------------------------
     grasp_palm_x_offset = 0.05
-    grasp_palm_y_offset = -0.05
+    grasp_palm_y_offset = -0.08
     grasp_palm_z_offset = 0.08
     grasp_open_ratio = 0.70
 
@@ -328,7 +328,7 @@ def state_machine_offline_right_pull_door(
     _, _, robot_initial_yaw = euler_xyz_from_quat(base_target_rot)
 
     release_base_x_delta_1 = -0.12
-    release_base_y = 0.25
+    release_base_y = 0.15
     release_palm_x_delta = 0.25
     release_palm_y_delta = -0.1
     release_base_x_delta_2 = -0.18
@@ -401,8 +401,8 @@ def state_machine_offline_right_pull_door(
     # Step 6: Retract the arm to the left side of the tilted base
     # -------------------------
     tilted_base_yaw_world = robot_initial_yaw + tilt_base_yaw
-    retreat_local_x = 0.2
-    retreat_local_y = 0.3
+    retreat_local_x = 0.15
+    retreat_local_y = 0.25
     retreat_z_lift = -0.03
     retreat_dx, retreat_dy = _rotate_xy_counterclockwise(
         retreat_local_x,
@@ -504,8 +504,8 @@ def state_machine_offline_right_pull_door(
     # Step 8: Restore the base to normal yaw, traverse with a suitable arm pose,
     # then finish the traverse with default arm joints
     # -------------------------
-    traverse_mid_x = 0.35
-    traverse_mid_y = 0.1
+    traverse_mid_x = 0.4
+    traverse_mid_y = 0.0
     traverse_far_x = -0.5
     base_target_pos[:, 0] = traverse_mid_x
     base_target_pos[:, 1] = traverse_mid_y
@@ -596,19 +596,19 @@ def state_machine_offline_left_pull_door(
     # Step 0: Observe
     # -------------------------
 
-    q_robot[3: 10] = franka_default_q
-    q_robot[:3] = torch.tensor([0.15, 0.2, 0])
+    # q_robot[3: 10] = franka_default_q
+    # q_robot[:3] = torch.tensor([0.15, 0.2, 0])
 
-    q_robot[-6:] = torch.tensor(list(CAMERA_JOINT_VALUES_WHEN_SEARCHING_HINGE.values()))
+    # q_robot[-6:] = torch.tensor(list(CAMERA_JOINT_VALUES_WHEN_SEARCHING_HINGE.values()))
 
-    _append_state(
-        robot_traj,
-        door_traj,
-        key_idx_in_key_indices,
-        q_robot,
-        q_door,
-        mark_keyframe=True,
-    )
+    # _append_state(
+    #     robot_traj,
+    #     door_traj,
+    #     key_idx_in_key_indices,
+    #     q_robot,
+    #     q_door,
+    #     mark_keyframe=True,
+    # )
 
     # -------------------------
     # Step 1: Pregrasp
@@ -620,9 +620,9 @@ def state_machine_offline_left_pull_door(
     ).to(device)
 
     pregrasp_base_x_offset = 0.55
-    pregrasp_base_y_offset = 0.3
+    pregrasp_base_y_offset = 0.2
     pregrasp_palm_x_offset = 0.25
-    pregrasp_palm_y_offset = -0.03
+    pregrasp_palm_y_offset = 0.03
     pregrasp_palm_z_offset = 0.25
 
     base_target_pos = handle_pos.clone()

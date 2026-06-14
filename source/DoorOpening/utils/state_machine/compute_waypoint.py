@@ -32,6 +32,62 @@ def _load_variant_metadata(door_urdf_path):
         return json.load(meta_file)
 
 
+def _load_initial_state_metadata(door_urdf_path):
+    metadata = _load_variant_metadata(door_urdf_path)
+    if not isinstance(metadata, dict):
+        return None
+    initial_state = metadata.get("initial_state")
+    if not isinstance(initial_state, dict):
+        return None
+    return initial_state
+
+
+def _parse_pose_tensor(pose_meta, default_tensor):
+    if not isinstance(pose_meta, dict):
+        return default_tensor
+    pos = pose_meta.get("pos")
+    rot = pose_meta.get("rot")
+    if not (
+        isinstance(pos, (list, tuple))
+        and len(pos) == 3
+        and isinstance(rot, (list, tuple))
+        and len(rot) == 4
+    ):
+        return default_tensor
+    values = [float(v) for v in list(pos) + list(rot)]
+    return torch.tensor([values], dtype=default_tensor.dtype, device=default_tensor.device)
+
+
+def _parse_joint_tensor(values, default_tensor, expected_len):
+    if not isinstance(values, (list, tuple)) or len(values) != expected_len:
+        return default_tensor
+    return torch.tensor([float(v) for v in values], dtype=default_tensor.dtype, device=default_tensor.device)
+
+
+def _apply_initial_state_metadata(door_urdf_path, robot_initial_pose, door_initial_pose, robot_initial_q, door_initial_q):
+    initial_state = _load_initial_state_metadata(door_urdf_path)
+    if initial_state is None:
+        return robot_initial_pose, door_initial_pose, robot_initial_q, door_initial_q, False
+
+    robot_initial_pose = _parse_pose_tensor(initial_state.get("robot_world_pose"), robot_initial_pose)
+    door_initial_pose = _parse_pose_tensor(initial_state.get("door_world_pose"), door_initial_pose)
+
+    robot_joint_pos = initial_state.get("robot_joint_pos")
+    if isinstance(robot_joint_pos, (list, tuple)) and len(robot_joint_pos) == len(robot_initial_q):
+        robot_initial_q = _parse_joint_tensor(robot_joint_pos, robot_initial_q, len(robot_initial_q))
+    else:
+        robot_base_joint_pos = initial_state.get("robot_base_joint_pos")
+        if isinstance(robot_base_joint_pos, (list, tuple)) and len(robot_base_joint_pos) >= 3:
+            robot_initial_q = robot_initial_q.clone()
+            robot_initial_q[:3] = _parse_joint_tensor(robot_base_joint_pos[:3], robot_initial_q[:3], 3)
+
+    door_joint_pos = initial_state.get("door_joint_pos")
+    if isinstance(door_joint_pos, (list, tuple)) and len(door_joint_pos) == len(door_initial_q):
+        door_initial_q = _parse_joint_tensor(door_joint_pos, door_initial_q, len(door_initial_q))
+
+    return robot_initial_pose, door_initial_pose, robot_initial_q, door_initial_q, True
+
+
 def _metadata_handle_side_to_planner_side(handle_side):
     if handle_side == "max":
         return "right"
@@ -718,40 +774,51 @@ def play_and_save_traj(
     robot_initial_pose = torch.tensor([[ROBOT_INITIAL_POS[0], ROBOT_INITIAL_POS[1], ROBOT_INITIAL_POS[2], ROBOT_INITIAL_ROT[0], ROBOT_INITIAL_ROT[1], ROBOT_INITIAL_ROT[2], ROBOT_INITIAL_ROT[3]]], device="cpu")
     door_initial_pose = torch.tensor([[DOOR_INITIAL_POS[0], DOOR_INITIAL_POS[1], DOOR_INITIAL_POS[2], DOOR_INITIAL_ROT[0], DOOR_INITIAL_ROT[1], DOOR_INITIAL_ROT[2], DOOR_INITIAL_ROT[3]]], device="cpu")
     robot_constants, robot_initial_q = get_robot_constants()
-    if start_base_sampling == "none":
-        randomize_start_base = False
-    elif start_base_sampling not in {"paired", "random"}:
-        raise ValueError(
-            f"Unsupported start_base_sampling '{start_base_sampling}'. Expected paired, random, or none."
-        )
-
-    if randomize_start_base:
-        approach_angle = None
-        if start_base_sampling == "paired":
-            pair_key = resolve_start_base_pair_key(door_urdf_path)
-            approach_angle = paired_start_angle(
-                pair_key,
-                start_base_pair_seed,
-                start_base_angle_range_deg,
+    door_initial_q = torch.tensor([0.0, 0.0], device="cpu")
+    robot_initial_pose, door_initial_pose, robot_initial_q, door_initial_q, loaded_initial_state = _apply_initial_state_metadata(
+        door_urdf_path,
+        robot_initial_pose,
+        door_initial_pose,
+        robot_initial_q,
+        door_initial_q,
+    )
+    if loaded_initial_state:
+        print(f"Using initial_state from variant_meta.json: {door_urdf_path}")
+    else:
+        if start_base_sampling == "none":
+            randomize_start_base = False
+        elif start_base_sampling not in {"paired", "random"}:
+            raise ValueError(
+                f"Unsupported start_base_sampling '{start_base_sampling}'. Expected paired, random, or none."
             )
 
-        sampled_base_joint, sampled_world_pose, sampled_angle = sample_robot_initial_base_joints_on_door_ring(
-            robot_initial_pose,
-            door_initial_pose,
-            radius=start_base_radius,
-            angle_range_deg=start_base_angle_range_deg,
-            approach_angle=approach_angle,
-        )
-        robot_initial_q[:3] = sampled_base_joint
-        sampling_label = "Paired" if start_base_sampling == "paired" else "Randomized"
-        print(
-            f"{sampling_label} start base joints:",
-            robot_initial_q[:3],
-            "world pose:",
-            sampled_world_pose,
-            f"(radius={start_base_radius:.2f} m, angle={math.degrees(sampled_angle):.1f} deg)",
-        )
-    door_initial_q = torch.tensor([0.0, 0.0], device="cpu")
+        if randomize_start_base:
+            approach_angle = None
+            if start_base_sampling == "paired":
+                pair_key = resolve_start_base_pair_key(door_urdf_path)
+                approach_angle = paired_start_angle(
+                    pair_key,
+                    start_base_pair_seed,
+                    start_base_angle_range_deg,
+                )
+
+            sampled_base_joint, sampled_world_pose, sampled_angle = sample_robot_initial_base_joints_on_door_ring(
+                robot_initial_pose,
+                door_initial_pose,
+                radius=start_base_radius,
+                angle_range_deg=start_base_angle_range_deg,
+                approach_angle=approach_angle,
+            )
+            robot_initial_q[:3] = sampled_base_joint
+            sampling_label = "Paired" if start_base_sampling == "paired" else "Randomized"
+            print(
+                f"{sampling_label} start base joints:",
+                robot_initial_q[:3],
+                "world pose:",
+                sampled_world_pose,
+                f"(radius={start_base_radius:.2f} m, angle={math.degrees(sampled_angle):.1f} deg)",
+            )
+
     planner_handle_side, planner_opening_direction = resolve_planner_options(
         door_urdf_path,
         handle_side,

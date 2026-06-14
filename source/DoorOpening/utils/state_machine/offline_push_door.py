@@ -152,19 +152,19 @@ def state_machine_offline_push_right_door(
     # Step 0: Observe
     # -------------------------
 
-    q_robot[3: 10] = franka_default_q
-    q_robot[:3] = torch.tensor([0.15, 0.2, 0])
+    # q_robot[3: 10] = franka_default_q
+    # q_robot[:3] = torch.tensor([0.15, 0.2, 0])
 
-    q_robot[-6:] = torch.tensor(list(CAMERA_JOINT_VALUES_WHEN_SEARCHING_HINGE.values()))
+    # q_robot[-6:] = torch.tensor(list(CAMERA_JOINT_VALUES_WHEN_SEARCHING_HINGE.values()))
 
-    _append_state(
-        robot_traj,
-        door_traj,
-        key_idx_in_key_indices,
-        q_robot,
-        q_door,
-        mark_keyframe=True,
-    )
+    # _append_state(
+    #     robot_traj,
+    #     door_traj,
+    #     key_idx_in_key_indices,
+    #     q_robot,
+    #     q_door,
+    #     mark_keyframe=True,
+    # )
 
     # -------------------------
     # Step 1: Pregrasp
@@ -517,19 +517,19 @@ def state_machine_offline_push_left_door(
     # Step 0: Observe
     # -------------------------
 
-    q_robot[3: 10] = franka_default_q
-    q_robot[:3] = torch.tensor([0.15, 0.2, 0])
+    # q_robot[3: 10] = franka_default_q
+    # q_robot[:3] = torch.tensor([0.15, 0.2, 0])
 
-    q_robot[-6:] = torch.tensor(list(CAMERA_JOINT_VALUES_WHEN_SEARCHING_HINGE.values()))
+    # q_robot[-6:] = torch.tensor(list(CAMERA_JOINT_VALUES_WHEN_SEARCHING_HINGE.values()))
 
-    _append_state(
-        robot_traj,
-        door_traj,
-        key_idx_in_key_indices,
-        q_robot,
-        q_door,
-        mark_keyframe=True,
-    )
+    # _append_state(
+    #     robot_traj,
+    #     door_traj,
+    #     key_idx_in_key_indices,
+    #     q_robot,
+    #     q_door,
+    #     mark_keyframe=True,
+    # )
 
     # -------------------------
     # Step 1: Pregrasp

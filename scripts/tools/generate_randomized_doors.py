@@ -187,6 +187,22 @@ def get_door_properties(asset_dir, root, bounds_cache):
     }
 
 
+def get_named_side_from_handle_side(handle_side):
+    # With the generated handle moved to the back face of the panel, the
+    # user-facing left/right naming should again follow the raw x-edge that
+    # carries the handle anchor.
+    if handle_side == "max":
+        return "right"
+    if handle_side == "min":
+        return "left"
+    raise ValueError(f"Unsupported handle_side {handle_side}")
+
+
+def build_robot_name(actual_props, opening_direction):
+    lateral_side = get_named_side_from_handle_side(actual_props["handle_side"])
+    return f"{lateral_side}-{opening_direction}-door"
+
+
 def is_supported_source_asset(urdf_path):
     root = ET.parse(urdf_path).getroot()
     link_names = {link.attrib.get("name") for link in root.findall("link")}
@@ -280,6 +296,16 @@ def mirror_joint_origin_x(root, joint_name):
     origin.attrib["xyz"] = format_vector(origin_xyz)
 
 
+def mirror_joint_origin_z(root, joint_name):
+    origin = root.find(f".//joint[@name='{joint_name}']/origin")
+    if origin is None:
+        return
+
+    origin_xyz = parse_vector(origin.attrib.get("xyz"))
+    origin_xyz[2] *= -1.0
+    origin.attrib["xyz"] = format_vector(origin_xyz)
+
+
 def negate_joint_axis(root, joint_name):
     axis = root.find(f".//joint[@name='{joint_name}']/axis")
     if axis is None:
@@ -355,7 +381,7 @@ def apply_variant_to_root(asset_dir, root, target_props, bounds_cache, source_pr
     return source_props, actual_props
 
 
-def mirror_obj_file_x(source_path, mirrored_path):
+def mirror_obj_file_axis(source_path, mirrored_path, axis_idx):
     with open(source_path, encoding="utf-8", errors="ignore") as src_file:
         lines = src_file.readlines()
 
@@ -363,13 +389,13 @@ def mirror_obj_file_x(source_path, mirrored_path):
         for line in lines:
             if line.startswith("v "):
                 tokens = line.rstrip("\n").split()
-                tokens[1] = str(-float(tokens[1]))
+                tokens[axis_idx] = str(-float(tokens[axis_idx]))
                 dst_file.write(" ".join(tokens) + "\n")
                 continue
 
             if line.startswith("vn "):
                 tokens = line.rstrip("\n").split()
-                tokens[1] = str(-float(tokens[1]))
+                tokens[axis_idx] = str(-float(tokens[axis_idx]))
                 dst_file.write(" ".join(tokens) + "\n")
                 continue
 
@@ -381,24 +407,29 @@ def mirror_obj_file_x(source_path, mirrored_path):
             dst_file.write(line)
 
 
-def ensure_mirrored_mesh(mesh_path, mirrored_cache):
+def ensure_mirrored_mesh(mesh_path, mirrored_cache, axis_name):
     mesh_path = mesh_path.resolve()
-    cached = mirrored_cache.get(mesh_path)
+    cache_key = (mesh_path, axis_name)
+    cached = mirrored_cache.get(cache_key)
     if cached is not None:
         return cached
 
     if mesh_path.suffix.lower() != ".obj":
-        raise ValueError(f"Expected OBJ mesh for hinge flip, got {mesh_path}")
+        raise ValueError(f"Expected OBJ mesh for mirroring, got {mesh_path}")
 
-    mirrored_path = mesh_path.with_name(f"{mesh_path.stem}__mirrored_x{mesh_path.suffix}")
+    axis_indices = {"x": 1, "y": 2, "z": 3}
+    if axis_name not in axis_indices:
+        raise ValueError(f"Unsupported mirror axis {axis_name}")
+
+    mirrored_path = mesh_path.with_name(f"{mesh_path.stem}__mirrored_{axis_name}{mesh_path.suffix}")
     if not mirrored_path.exists():
-        mirror_obj_file_x(mesh_path, mirrored_path)
+        mirror_obj_file_axis(mesh_path, mirrored_path, axis_indices[axis_name])
 
-    mirrored_cache[mesh_path] = mirrored_path
+    mirrored_cache[cache_key] = mirrored_path
     return mirrored_path
 
 
-def mirror_link_meshes_x(root, variant_dir, link_name, mirrored_cache):
+def mirror_link_meshes(root, variant_dir, link_name, mirrored_cache, axis_name):
     for tag in ("visual", "collision"):
         body = root.find(f".//link[@name='{link_name}']/{tag}")
         if body is None:
@@ -406,7 +437,7 @@ def mirror_link_meshes_x(root, variant_dir, link_name, mirrored_cache):
 
         mesh, _ = get_mesh_and_origin(body)
         mesh_path = (variant_dir / mesh.attrib["filename"]).resolve()
-        mirrored_path = ensure_mirrored_mesh(mesh_path, mirrored_cache)
+        mirrored_path = ensure_mirrored_mesh(mesh_path, mirrored_cache, axis_name)
         mesh.attrib["filename"] = mirrored_path.relative_to(variant_dir).as_posix()
 
 
@@ -415,7 +446,19 @@ def apply_flipped_mesh_variants(root, variant_dir):
     # When we flip hinge side, these meshes should look mirrored too rather than
     # only moving the joints. That includes the frame, panel, and handle/lock.
     for link_name in ("link_0", "link_1", "link_2", "link_3"):
-        mirror_link_meshes_x(root, variant_dir, link_name, mirrored_cache)
+        mirror_link_meshes(root, variant_dir, link_name, mirrored_cache, "x")
+
+
+def apply_backside_handle_variants(root, variant_dir):
+    mirrored_cache = {}
+    handle_anchor_joint = get_handle_attachment_joint_name(root)
+    # Move the whole handle assembly to the opposite face of the door slab.
+    mirror_joint_origin_z(root, handle_anchor_joint)
+    # Mirroring the handle assembly changes handedness once, so negate the lever
+    # axis to preserve the intended articulation direction.
+    negate_joint_axis(root, "joint_2")
+    for link_name in ("link_2", "link_3"):
+        mirror_link_meshes(root, variant_dir, link_name, mirrored_cache, "z")
 
 
 def attach_variant_files(source_dir, variant_dir):
@@ -512,6 +555,8 @@ def generate_variants(args):
                 bounds_cache,
                 source_props=source_props,
             )
+            robot_name = build_robot_name(actual_props, target_props["opening_direction"])
+            root.attrib["name"] = robot_name
 
             attach_variant_files(
                 source_dir=source_dir,
@@ -519,6 +564,7 @@ def generate_variants(args):
             )
             if target_props["flip_hinge_side"]:
                 apply_flipped_mesh_variants(root, variant_dir)
+            apply_backside_handle_variants(root, variant_dir)
 
             # Each generated asset is still a normal standalone URDF directory
             # with the same link/joint structure as the source asset.
@@ -535,6 +581,9 @@ def generate_variants(args):
                 "target_properties": target_props,
                 "actual_properties": actual_props,
                 "source_properties": source_props,
+                "robot_name": robot_name,
+                "robot_name_basis": "back_face_handle_side",
+                "handle_face": "back",
             }
             with open(variant_dir / "variant_meta.json", "w", encoding="utf-8") as meta_file:
                 json.dump(metadata, meta_file, indent=2)

@@ -117,11 +117,22 @@ def update_variant_meta(dst_dir: Path, src_dir: Path):
     if not meta_path.exists():
         return
 
+    src_meta_path = src_dir / "variant_meta.json"
+    src_meta = {}
+    if src_meta_path.exists():
+        with open(src_meta_path, "r", encoding="utf-8") as f:
+            src_meta = json.load(f)
+
     with open(meta_path, "r", encoding="utf-8") as f:
         meta = json.load(f)
 
     target_props = meta.setdefault("target_properties", {})
     target_props["opening_direction"] = "push"
+
+    if isinstance(src_meta, dict) and "initial_state" in src_meta:
+        # Keep the exact sampled initial state from the pull asset so the
+        # copied push asset can reuse the same base/door start configuration.
+        meta["initial_state"] = src_meta["initial_state"]
 
     meta["copied_from_pull_asset"] = str(src_dir)
     meta["conversion"] = {

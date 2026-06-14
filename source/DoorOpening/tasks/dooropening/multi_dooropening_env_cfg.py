@@ -22,7 +22,11 @@ from DoorOpening.tasks.dooropening.contact_force_utils import (
 )
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
-from isaaclab.envs.mdp.events import randomize_actuator_gains, randomize_rigid_body_material
+from isaaclab.envs.mdp.events import (
+    randomize_actuator_gains,
+    randomize_rigid_body_mass,
+    randomize_rigid_body_material,
+)
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg, PhysxCfg
 from isaaclab.utils import configclass
@@ -67,6 +71,19 @@ class EventCfg:
             "dynamic_friction_range": (0.9, 1.1),
             "restitution_range": (0.0, 0.0),
             "num_buckets": 250,
+        },
+    )
+
+    door_board_mass = EventTerm(
+        func=randomize_rigid_body_mass,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("door", body_names="link_1"),
+            # Control the door board mass directly in kilograms.
+            "mass_distribution_params": (80.0, 80.0),
+            "operation": "abs",
+            "distribution": "uniform",
+            "recompute_inertia": True,
         },
     )
 
@@ -452,10 +469,13 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     events: EventCfg = EventCfg()
 
     # These are the ADR endpoints for simulator parameters handled by EventTerms at reset.
-    # Robot gains use multipliers on the actuator defaults, while door gains are specified in physical units.
+    # Door-board mass and door gains are specified in physical units, while robot gains use multipliers.
     # The door board starts at stiffness=100 and damping=10, and the hinge starts at stiffness=1 and damping=1.
     adr_cfg_dict = {
         "num_increments": num_adr_increments,
+        "door_board_mass": {
+            "mass_distribution_params": (60.0, 150.0),
+        },
         "robot_joint_stiffness_and_damping": {
             "stiffness_distribution_params": (0.8, 1.2),
             "damping_distribution_params": (0.7, 1.3),
