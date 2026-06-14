@@ -3422,13 +3422,13 @@ class Dagger:
         }
         return metadata
 
-    def _apply_door_hole_aug_to_world(self, pointcloud_world, link1_pose_world, hole_metadata):
+    def _apply_door_hole_aug_to_world(self, pointcloud_world, link1_pose_world, board_bbox_link1, hole_metadata):
         if pointcloud_world is None or hole_metadata is None:
             return pointcloud_world
         filtered_points, hole_metadata = apply_window_dropout_to_door_points(
             points_world=pointcloud_world,
             link1_pose_world=link1_pose_world,
-            board_bbox_link1=self.env_board_bboxes_link1,
+            board_bbox_link1=board_bbox_link1,
             hole_metadata=hole_metadata,
             surface_eps=self.door_hole_aug_surface_eps_m,
         )
@@ -3491,6 +3491,7 @@ class Dagger:
                 asset_pcd_world = self._apply_door_hole_aug_to_world(
                     asset_pcd_world,
                     link1_pose_world_all[env_ids],
+                    self.env_board_bboxes_link1[env_ids],
                     {key: value[env_ids] for key, value in hole_metadata.items()},
                 )
             door_pcd_world[env_ids] = asset_pcd_world
