@@ -167,6 +167,7 @@ import gymnasium as gym
 import logging
 import math
 import random
+import torch
 from datetime import datetime
 
 import rl_games.torch_runner as rl_games_torch_runner
@@ -260,6 +261,20 @@ def _install_writer_step_counter(agent):
     writer._dooropening_wandb_step_counter_installed = True
 
 
+def _bind_distributed_cuda_device(enabled: bool):
+    """Select the current rank's CUDA device before RL-Games initializes NCCL."""
+
+    if not enabled:
+        return
+    if not torch.cuda.is_available():
+        raise RuntimeError("Distributed training was requested, but CUDA is not available.")
+
+    local_rank = int(os.getenv("LOCAL_RANK", "0"))
+    global_rank = int(os.getenv("RANK", "0"))
+    torch.cuda.set_device(local_rank)
+    print(f"[INFO][rank {global_rank}] Bound torch CUDA device to cuda:{local_rank} before RL-Games init.")
+
+
 def _configure_viser_pt_recording(env_cfg, log_dir: str):
     """Apply CLI overrides for headless point-cloud replay dumps."""
 
@@ -336,6 +351,7 @@ class DoorOpeningRunner(Runner):
 
     def run_train(self, args):
         print("Started to train")
+        _bind_distributed_cuda_device(self.params["config"].get("multi_gpu", False))
         agent = self.algo_factory.create(self.algo_name, base_name="run", params=self.params)
         _install_writer_step_counter(agent)
         rl_games_torch_runner._restore(agent, args)
@@ -346,11 +362,18 @@ class DoorOpeningRunner(Runner):
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: dict):
     """Train with RL-Games agent."""
+    world_size = int(os.getenv("WORLD_SIZE", "1"))
+    global_rank = int(os.getenv("RANK", "0"))
+    local_rank = int(os.getenv("LOCAL_RANK", "0"))
+    use_distributed = args_cli.distributed or world_size > 1
+
+    _bind_distributed_cuda_device(use_distributed)
+
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     # check for invalid combination of CPU device with distributed training
-    if args_cli.distributed and args_cli.device is not None and "cpu" in args_cli.device:
+    if use_distributed and args_cli.device is not None and "cpu" in args_cli.device:
         raise ValueError(
             "Distributed training is not supported when using CPU device. "
             "Please use GPU device (e.g., --device cuda) for distributed training."
@@ -378,16 +401,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     train_sigma = float(args_cli.sigma) if args_cli.sigma is not None else None
 
     # multi-gpu training config
-    if args_cli.distributed:
+    if use_distributed:
         agent_cfg["params"]["seed"] += app_launcher.global_rank
         agent_cfg["params"]["config"]["device"] = f"cuda:{app_launcher.local_rank}"
         agent_cfg["params"]["config"]["device_name"] = f"cuda:{app_launcher.local_rank}"
         agent_cfg["params"]["config"]["multi_gpu"] = True
         # update env config device
         env_cfg.sim.device = f"cuda:{app_launcher.local_rank}"
-
-    global_rank = int(os.getenv("RANK", "0"))
-    local_rank = int(os.getenv("LOCAL_RANK", "0"))
 
     # set the environment seed (after multi-gpu config for updated rank from agent seed)
     # note: certain randomizations occur in the environment initialization so we set the seed here
@@ -405,7 +425,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # specify directory for logging runs
     log_dir = agent_cfg["params"]["config"].get("full_experiment_name", datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
     base_experiment_name = log_dir
-    if args_cli.distributed:
+    if use_distributed:
         rank_tag = f"rank{global_rank:03d}_local{local_rank:03d}"
         log_dir = f"{base_experiment_name}_{rank_tag}"
     # set directory into agent config
