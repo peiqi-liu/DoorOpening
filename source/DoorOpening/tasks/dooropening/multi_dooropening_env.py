@@ -702,10 +702,10 @@ class DooropeningEnv(DirectRLEnv):
         if not self._adr_enabled:
             effort = float(self.cfg.door_handle_effort_limit_sim)
             return effort, effort
-        return (
-            float(self.dooropening_adr.get_custom_param_value("door_dynamics", "handle_effort_limit_min")),
-            float(self.dooropening_adr.get_custom_param_value("door_dynamics", "handle_effort_limit_max")),
+        effort_limits = self._current_event_param(
+            "door_hinge_joint_effort_limit", "effort_limit_distribution_params"
         )
+        return float(effort_limits[0]), float(effort_limits[1])
 
     def _refresh_nominal_door_joint_gains(self, env_ids: torch.Tensor | None = None):
         if env_ids is None:
