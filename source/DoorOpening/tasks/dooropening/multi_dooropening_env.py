@@ -133,6 +133,9 @@ class DooropeningEnv(DirectRLEnv):
         self._target_arm_slice = slice(self.num_base_joints, self.num_base_joints + self.num_arm_joints)
         self._target_finger_slice = slice(self._target_arm_slice.stop, self._target_arm_slice.stop + self.num_finger_joints)
         self._target_arx_slice = slice(self._target_finger_slice.stop, self.robot_dof_targets.shape[1])
+        self.consume_arx_actions_without_commanding = bool(
+            getattr(self.cfg, "consume_arx_actions_without_commanding", False)
+        )
 
         # Loading all reward parameters
         self.robot_key_body_pos_scale = self.cfg.robot_key_body_pos_scale
@@ -1066,10 +1069,18 @@ class DooropeningEnv(DirectRLEnv):
         )
         return scaled_actions
 
+    def _freeze_arx_target_updates(self, target_tensor: torch.Tensor, reference_tensor: torch.Tensor) -> torch.Tensor:
+        if not self.consume_arx_actions_without_commanding or self.num_arx_joints <= 0:
+            return target_tensor
+        frozen_targets = target_tensor.clone()
+        frozen_targets[:, self._target_arx_slice] = reference_tensor[:, self._target_arx_slice]
+        return frozen_targets
+
     def _pre_physics_step(self, actions: torch.Tensor):
         # delta actions
         self.scaled_actions = self._scale_actions(actions)
         targets = self.robot_dof_targets + self.dt * self.scaled_actions
+        targets = self._freeze_arx_target_updates(targets, self.robot_dof_targets)
         self.scene.sensors["contact_forces_door2"].update(self.cfg.sim_dt)
         self.scene.sensors["contact_forces_door_x5_base"].update(self.cfg.sim_dt)
         self.scene.sensors["contact_forces_door_x5_link1"].update(self.cfg.sim_dt)
@@ -1110,6 +1121,7 @@ class DooropeningEnv(DirectRLEnv):
             applied_targets = (1.0 - lag_alpha) * applied_targets + lag_alpha * self.applied_robot_dof_targets
         # Controller-side DR is applied on the position targets after action integration.
         applied_targets += self._get_policy_target_noise()
+        applied_targets = self._freeze_arx_target_updates(applied_targets, self.applied_robot_dof_targets)
         self.applied_robot_dof_targets[:] = torch.clamp(
             applied_targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits
         )
