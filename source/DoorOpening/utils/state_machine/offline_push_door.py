@@ -542,12 +542,12 @@ def state_machine_offline_push_left_door(
 
     base_target_pos = handle_pos.clone()
     base_target_pos[:, 0] += 0.55
-    base_target_pos[:, 1] += 0.3
+    base_target_pos[:, 1] += 0.2
     base_target_pose = _make_pose(base_target_pos, base_target_rot)
 
     palm_target_pos = handle_pos.clone()
     palm_target_pos[:, 0] += 0.25
-    palm_target_pos[:, 1] += -0.05
+    palm_target_pos[:, 1] += 0.03
     palm_target_pos[:, 2] += 0.25
     palm_target_pose = _make_pose(palm_target_pos, default_palm_rot)
 
@@ -576,7 +576,7 @@ def state_machine_offline_push_left_door(
     palm_target_pos = handle_pos.clone()
     palm_target_pos[:, 0] += 0.04
     palm_target_pos[:, 1] += 0.0
-    palm_target_pos[:, 2] += 0.08
+    palm_target_pos[:, 2] += 0.10
     palm_target_pose = _make_pose(palm_target_pos, default_palm_rot)
 
     q_robot[:10] = solve_ik(
