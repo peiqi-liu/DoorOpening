@@ -148,6 +148,7 @@ dagger:
   teacher_forcing_transition_iters: 18000
   teacher_forcing_min_beta: 0.0
   aux_feedback_to_policy: true  # When false, aux input stays zero instead of feeding back predictions.
+  consume_arx_actions_without_commanding: false  # Keep 23-dim supervision/action heads, but swallow the 4 ARX commands before they reach the robot.
   prediction_training:
     loss_window_start: 40
     loss_window_end: 100

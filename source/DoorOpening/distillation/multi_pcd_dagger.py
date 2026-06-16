@@ -130,6 +130,10 @@ class Dagger:
         }
         self.action_component_history_indices = self._build_action_component_history_indices()
         self.proprio_component_history_indices = self._build_proprio_component_history_indices()
+        self._env_arx_action_slice = slice(
+            base_action_dim + arm_action_dim + hand_action_dim,
+            base_action_dim + arm_action_dim + hand_action_dim + arx_action_dim,
+        )
         self.base_action_rot_local_idx = int(self.ov_env._robot_base_rot_local_idx[0].detach().cpu().item())
         self.base_action_xy_local_idx = [
             int(idx) for idx in self.ov_env._robot_base_xy_local_idx.detach().cpu().tolist()
@@ -272,6 +276,7 @@ class Dagger:
         self.temporal_push_pull_belief_history = None
         self.proprio_temporal_enabled = False
         self.proprio_temporal_obs_key = None
+        self.consume_arx_actions_without_commanding = False
         self.proprio_temporal_timestamps_ms = tuple()
         self.proprio_temporal_timestamps_s = tuple()
         self.proprio_temporal_fields = tuple()
@@ -462,6 +467,17 @@ class Dagger:
             getattr(self.student_model, "push_pull_detach_predicted_condition", True)
         )
         self.push_pull_condition_cfg = dict(getattr(self.student_model, "push_pull_condition_cfg", {}) or {})
+        self.consume_arx_actions_without_commanding = bool(
+            self.runtime_cfg.get(
+                "consume_arx_actions_without_commanding",
+                student_yaml_runtime_cfg.get("consume_arx_actions_without_commanding", False),
+            )
+        )
+        setattr(
+            self.ov_env,
+            "consume_arx_actions_without_commanding",
+            self.consume_arx_actions_without_commanding,
+        )
         self.proprio_temporal_enabled = bool(
             getattr(
                 self.student_model,
@@ -2020,7 +2036,17 @@ class Dagger:
         # The env applies dt in _pre_physics_step when integrating delta actions.
         # Keep arm/hand untouched here; only rotate/scale the base velocity command.
         env_actions[:, :3] = self._robot_base_vector_to_env_frame(student_actions[:, :3]) / self.base_action_scale
+        env_actions = self._mask_env_actions_for_execution(env_actions)
         return env_actions.clamp(-1.0, 1.0)
+
+    def _mask_env_actions_for_execution(self, env_actions):
+        if env_actions.ndim != 2 or env_actions.shape[-1] != self.num_actions:
+            raise RuntimeError(f"Expected env action shape [N, {self.num_actions}], got {tuple(env_actions.shape)}.")
+        if not self.consume_arx_actions_without_commanding or self.action_component_dims["arx"] <= 0:
+            return env_actions
+        masked_env_actions = env_actions.clone()
+        masked_env_actions[:, self._env_arx_action_slice] = 0.0
+        return masked_env_actions
 
     def _get_student_base_velocity_vector(self):
         # joint_vel is already per-second in env/base-joint order [wz, vx_w, vy_w].
@@ -4031,16 +4057,16 @@ class Dagger:
 
     def _mix_actions(self, student_actions, teacher_actions, iteration):
         if self.play_policy or teacher_actions is None:
-            return student_actions, 0.0
+            return self._mask_env_actions_for_execution(student_actions), 0.0
         beta = self._get_teacher_forcing_beta(iteration)
         teacher_mask = self.teacher_forcing_env_mask
         if not torch.any(teacher_mask):
-            return student_actions, beta
+            return self._mask_env_actions_for_execution(student_actions), beta
         if torch.all(teacher_mask):
-            return teacher_actions, beta
+            return self._mask_env_actions_for_execution(teacher_actions), beta
         step_actions = student_actions.clone()
         step_actions[teacher_mask] = teacher_actions[teacher_mask]
-        return step_actions, beta
+        return self._mask_env_actions_for_execution(step_actions), beta
 
     def _mean_completed_metric(self, values):
         if not values:
