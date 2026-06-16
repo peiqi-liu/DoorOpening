@@ -106,17 +106,29 @@ class Dagger:
         arm_action_dim = len(self.ov_env._robot_arm_dof_idx)
         hand_action_dim = len(self.ov_env._robot_finger_dof_idx)
         arx_action_dim = len(self.ov_env._robot_arx_dof_idx)
-        if base_action_dim + arm_action_dim + hand_action_dim + arx_action_dim != self.num_actions:
-            raise ValueError(
-                "Action dimensions from base/arm/hand/arx do not match env action dim: "
-                f"{base_action_dim} + {arm_action_dim} + {hand_action_dim} + {arx_action_dim} != {self.num_actions}."
-            )
+        self.teacher_num_actions = base_action_dim + arm_action_dim + hand_action_dim + arx_action_dim
+        self.student_joint_ids = torch.cat(
+            (
+                self.ov_env._robot_base_dof_idx,
+                self.ov_env._robot_arm_dof_idx,
+                self.ov_env._robot_finger_dof_idx,
+            ),
+            dim=0,
+        )
+        full_target_joint_ids = torch.as_tensor(self.ov_env._robot_dof_idx, device=self.device, dtype=torch.long)
+        full_joint_id_to_target_pos = {
+            int(joint_id): pos for pos, joint_id in enumerate(full_target_joint_ids.tolist())
+        }
+        self.student_target_indices_in_env = torch.as_tensor(
+            [full_joint_id_to_target_pos[int(joint_id)] for joint_id in self.student_joint_ids.tolist()],
+            device=self.device,
+            dtype=torch.long,
+        )
         self.action_component_dims = OrderedDict(
             [
                 ("base", base_action_dim),
                 ("arm", arm_action_dim),
                 ("hand", hand_action_dim),
-                ("arx", arx_action_dim),
             ]
         )
         self.action_component_aliases = {
@@ -124,9 +136,6 @@ class Dagger:
             "arm": "arm",
             "hand": "hand",
             "finger": "hand",
-            "arx": "arx",
-            "camera": "arx",
-            "x5": "arx",
         }
         self.action_component_history_indices = self._build_action_component_history_indices()
         self.proprio_component_history_indices = self._build_proprio_component_history_indices()
@@ -276,7 +285,6 @@ class Dagger:
         self.temporal_push_pull_belief_history = None
         self.proprio_temporal_enabled = False
         self.proprio_temporal_obs_key = None
-        self.consume_arx_actions_without_commanding = False
         self.proprio_temporal_timestamps_ms = tuple()
         self.proprio_temporal_timestamps_s = tuple()
         self.proprio_temporal_fields = tuple()
@@ -372,7 +380,7 @@ class Dagger:
         self.teacher_allow_key_adjust = self.teacher_cfg.get("allow_key_adjust", True)
 
         teacher_model_config = {
-            "actions_num": self.num_actions,
+            "actions_num": self.teacher_num_actions,
             "input_shape": (int(self.ov_env.cfg.observation_space),),
             "num_seqs": self.num_envs,
             "value_size": 1,
@@ -467,17 +475,6 @@ class Dagger:
             getattr(self.student_model, "push_pull_detach_predicted_condition", True)
         )
         self.push_pull_condition_cfg = dict(getattr(self.student_model, "push_pull_condition_cfg", {}) or {})
-        self.consume_arx_actions_without_commanding = bool(
-            self.runtime_cfg.get(
-                "consume_arx_actions_without_commanding",
-                student_yaml_runtime_cfg.get("consume_arx_actions_without_commanding", False),
-            )
-        )
-        setattr(
-            self.ov_env,
-            "consume_arx_actions_without_commanding",
-            self.consume_arx_actions_without_commanding,
-        )
         self.proprio_temporal_enabled = bool(
             getattr(
                 self.student_model,
@@ -1357,7 +1354,7 @@ class Dagger:
         return loss
 
     def _build_action_component_history_indices(self):
-        target_joint_ids = torch.as_tensor(self.ov_env._robot_dof_idx, device=self.device, dtype=torch.long)
+        target_joint_ids = self.student_joint_ids.to(device=self.device, dtype=torch.long)
         joint_id_to_target_pos = {int(joint_id): pos for pos, joint_id in enumerate(target_joint_ids.tolist())}
 
         indices = OrderedDict()
@@ -1377,21 +1374,15 @@ class Dagger:
             device=self.device,
             dtype=torch.long,
         )
-        indices["arx"] = torch.as_tensor(
-            [joint_id_to_target_pos[int(joint_id)] for joint_id in self.ov_env._robot_arx_dof_idx],
-            device=self.device,
-            dtype=torch.long,
-        )
         return indices
 
     def _build_proprio_component_history_indices(self):
         return OrderedDict(
             [
-                ("full", torch.as_tensor(self.ov_env._robot_dof_idx, device=self.device, dtype=torch.long)),
+                ("full", self.student_joint_ids.to(device=self.device, dtype=torch.long)),
                 ("base", torch.as_tensor(self.ov_env._robot_base_dof_idx, device=self.device, dtype=torch.long)),
                 ("arm", torch.as_tensor(self.ov_env._robot_arm_dof_idx, device=self.device, dtype=torch.long)),
                 ("hand", torch.as_tensor(self.ov_env._robot_finger_dof_idx, device=self.device, dtype=torch.long)),
-                ("arx", torch.as_tensor(self.ov_env._robot_arx_dof_idx, device=self.device, dtype=torch.long)),
             ]
         )
 
@@ -1419,7 +1410,7 @@ class Dagger:
             if len(parts) != 2:
                 return None
             component = self.action_component_aliases.get(parts[0])
-            if component not in {"arm", "hand", "arx"}:
+            if component not in {"arm", "hand"}:
                 raise KeyError(
                     f"Unsupported temporal q state key {key}. "
                     "Raw base pose history is disabled; use base_vel_<milliseconds>ms instead."
@@ -1781,7 +1772,7 @@ class Dagger:
                 torch.as_tensor(offsets_s, dtype=torch.float32, device=self.device).view(1, -1) * 1000.0
             ).expand(self.num_envs, -1)
 
-        q_samples_control = q_samples_full[:, :, self.ov_env._robot_dof_idx]
+        q_samples_control = q_samples_full[:, :, self.student_joint_ids]
         target_err_samples = target_samples - q_samples_control
         if q_samples_full.ndim != 3 or target_samples.ndim != 3 or base_vel_samples.ndim != 3:
             raise RuntimeError("Temporal sample cache tensors must all be rank-3.")
@@ -2014,8 +2005,15 @@ class Dagger:
         return base_vector_env
 
     def _env_actions_to_student_actions(self, env_actions):
-        if env_actions.ndim != 2 or env_actions.shape[-1] != self.num_actions:
-            raise RuntimeError(f"Expected env action shape [N, {self.num_actions}], got {tuple(env_actions.shape)}.")
+        if env_actions.ndim != 2:
+            raise RuntimeError(f"Expected env action tensor to be rank-2, got shape {tuple(env_actions.shape)}.")
+        if env_actions.shape[-1] == self.teacher_num_actions:
+            env_actions = env_actions[:, self.student_target_indices_in_env]
+        elif env_actions.shape[-1] != self.num_actions:
+            raise RuntimeError(
+                f"Expected env action shape [N, {self.num_actions}] or [N, {self.teacher_num_actions}], "
+                f"got {tuple(env_actions.shape)}."
+            )
 
         student_actions = env_actions.clone()
         # Only the base action changes interface: env [wz, vx_w, vy_w] delta-action
@@ -2036,17 +2034,7 @@ class Dagger:
         # The env applies dt in _pre_physics_step when integrating delta actions.
         # Keep arm/hand untouched here; only rotate/scale the base velocity command.
         env_actions[:, :3] = self._robot_base_vector_to_env_frame(student_actions[:, :3]) / self.base_action_scale
-        env_actions = self._mask_env_actions_for_execution(env_actions)
         return env_actions.clamp(-1.0, 1.0)
-
-    def _mask_env_actions_for_execution(self, env_actions):
-        if env_actions.ndim != 2 or env_actions.shape[-1] != self.num_actions:
-            raise RuntimeError(f"Expected env action shape [N, {self.num_actions}], got {tuple(env_actions.shape)}.")
-        if not self.consume_arx_actions_without_commanding or self.action_component_dims["arx"] <= 0:
-            return env_actions
-        masked_env_actions = env_actions.clone()
-        masked_env_actions[:, self._env_arx_action_slice] = 0.0
-        return masked_env_actions
 
     def _get_student_base_velocity_vector(self):
         # joint_vel is already per-second in env/base-joint order [wz, vx_w, vy_w].
@@ -2064,6 +2052,10 @@ class Dagger:
         return base_vel
 
     def _get_implemented_action_vector(self):
+        full_pd_targets = self._get_teacher_prev_action_vector()
+        return full_pd_targets[:, self.student_target_indices_in_env]
+
+    def _get_teacher_prev_action_vector(self):
         # Temporal target features use the actual joint-position targets sent to
         # the PD controller, not the normalized delta policy actions.
         pd_targets = self.ov_env.applied_robot_dof_targets
@@ -2075,7 +2067,7 @@ class Dagger:
         if not self.temporal_derived_state_specs:
             return {}
 
-        q_t = q_pos[:, self.ov_env._robot_dof_idx]
+        q_t = q_pos[:, self.student_joint_ids]
         target_err = target_t - q_t
         required_offsets = self._merge_unique_offsets_s(
             {
@@ -2130,9 +2122,6 @@ class Dagger:
         elif actual_state_key == "q_hand":
             full_value = self._get_temporal_sample_from_cache(sample_cache, "q_full", timestamp_s)
             value = full_value[:, self.ov_env._robot_finger_dof_idx]
-        elif actual_state_key == "q_arx":
-            full_value = self._get_temporal_sample_from_cache(sample_cache, "q_full", timestamp_s)
-            value = full_value[:, self.ov_env._robot_arx_dof_idx]
         elif actual_state_key == "base_vel":
             value = self._get_temporal_sample_from_cache(sample_cache, "base_vel", timestamp_s)
         elif actual_state_key in {"target_err_arm", "tracking_err_arm"}:
@@ -2141,9 +2130,6 @@ class Dagger:
         elif actual_state_key in {"target_err_hand", "tracking_err_hand"}:
             full_value = self._get_temporal_sample_from_cache(sample_cache, "target_err", timestamp_s)
             value = full_value[:, self.action_component_history_indices["hand"]]
-        elif actual_state_key in {"target_err_arx", "tracking_err_arx"}:
-            full_value = self._get_temporal_sample_from_cache(sample_cache, "target_err", timestamp_s)
-            value = full_value[:, self.action_component_history_indices["arx"]]
         elif actual_state_key == "aux_handle_pos":
             value = self._get_temporal_sample_from_cache(sample_cache, "aux_handle_pos", timestamp_s)
         elif field_name == "push_pull_belief" or actual_state_key == self.push_pull_condition_obs_key:
@@ -3057,9 +3043,9 @@ class Dagger:
     def _get_teacher_actions(self, obs):
         if not self._has_teacher():
             raise RuntimeError("Teacher model is not initialized.")
-        latest_targets = self._get_implemented_action_vector()
+        latest_targets = self._get_teacher_prev_action_vector()
         if getattr(self, "multi_teacher_enabled", False):
-            teacher_actions = torch.zeros((self.num_envs, self.num_actions), dtype=torch.float32, device=self.device)
+            teacher_actions = torch.zeros((self.num_envs, self.teacher_num_actions), dtype=torch.float32, device=self.device)
             assigned_teacher_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
             for family_id, family_model in self.teacher_models_by_family_id.items():
                 env_ids = torch.nonzero(self.env_family_ids == int(family_id), as_tuple=False).squeeze(-1)
@@ -3081,10 +3067,11 @@ class Dagger:
                 )
                 missing_family_names = [DOOR_FAMILY_NAMES[int(family_id)] for family_id in missing_family_ids]
                 raise RuntimeError(f"Missing teacher model for door families: {missing_family_names}.")
+            teacher_env_actions = teacher_actions[:, self.student_target_indices_in_env]
             student_teacher_actions = self._env_actions_to_student_actions(teacher_actions)
             return {
                 "mus": student_teacher_actions,
-                "actions": teacher_actions,
+                "actions": teacher_env_actions,
             }
 
         batch_dict = {
@@ -3095,10 +3082,11 @@ class Dagger:
         with torch.no_grad():
             res_dict = self.teacher_model(batch_dict)
         teacher_actions = torch.clamp(res_dict["mus"], -1.0, 1.0)
+        teacher_env_actions = teacher_actions[:, self.student_target_indices_in_env]
         student_teacher_actions = self._env_actions_to_student_actions(teacher_actions)
         return {
             "mus": student_teacher_actions,
-            "actions": teacher_actions,
+            "actions": teacher_env_actions,
         }
 
     def _sync_timing_device(self):
@@ -3875,11 +3863,6 @@ class Dagger:
                     obs[key] = lagged_q_full[:, self.ov_env._robot_finger_dof_idx]
                 else:
                     obs[key] = q_pos[:, self.ov_env._robot_finger_dof_idx]
-            elif key == "q_arx":
-                if lag_active and lagged_q_full is not None:
-                    obs[key] = lagged_q_full[:, self.ov_env._robot_arx_dof_idx]
-                else:
-                    obs[key] = q_pos[:, self.ov_env._robot_arx_dof_idx]
             elif key == "base_vel":
                 obs[key] = lagged_base_vel if lag_active and lagged_base_vel is not None else base_vel
             elif key in self.temporal_derived_state_specs:
@@ -4057,16 +4040,16 @@ class Dagger:
 
     def _mix_actions(self, student_actions, teacher_actions, iteration):
         if self.play_policy or teacher_actions is None:
-            return self._mask_env_actions_for_execution(student_actions), 0.0
+            return student_actions, 0.0
         beta = self._get_teacher_forcing_beta(iteration)
         teacher_mask = self.teacher_forcing_env_mask
         if not torch.any(teacher_mask):
-            return self._mask_env_actions_for_execution(student_actions), beta
+            return student_actions, beta
         if torch.all(teacher_mask):
-            return self._mask_env_actions_for_execution(teacher_actions), beta
+            return teacher_actions, beta
         step_actions = student_actions.clone()
         step_actions[teacher_mask] = teacher_actions[teacher_mask]
-        return self._mask_env_actions_for_execution(step_actions), beta
+        return step_actions, beta
 
     def _mean_completed_metric(self, values):
         if not values:

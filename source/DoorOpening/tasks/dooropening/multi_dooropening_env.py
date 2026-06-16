@@ -133,8 +133,20 @@ class DooropeningEnv(DirectRLEnv):
         self._target_arm_slice = slice(self.num_base_joints, self.num_base_joints + self.num_arm_joints)
         self._target_finger_slice = slice(self._target_arm_slice.stop, self._target_arm_slice.stop + self.num_finger_joints)
         self._target_arx_slice = slice(self._target_finger_slice.stop, self.robot_dof_targets.shape[1])
-        self.consume_arx_actions_without_commanding = bool(
-            getattr(self.cfg, "consume_arx_actions_without_commanding", False)
+        self.num_policy_actions = int(self.cfg.action_space)
+        self.num_robot_actions = int(self.robot_dof_targets.shape[1])
+        expected_policy_actions = self.num_base_joints + self.num_arm_joints + self.num_finger_joints
+        if self.num_policy_actions != expected_policy_actions:
+            raise ValueError(
+                "Unexpected policy action dim for multi-door env. "
+                f"Expected base+arm+fingers = {expected_policy_actions}, got {self.num_policy_actions}."
+            )
+        self.fixed_arx_pose = True
+        self._policy_base_rot_slice = slice(0, 1)
+        self._policy_base_xy_slice = slice(1, self.num_base_joints)
+        self._policy_arm_slice = slice(self.num_base_joints, self.num_base_joints + self.num_arm_joints)
+        self._policy_finger_slice = slice(
+            self._policy_arm_slice.stop, self._policy_arm_slice.stop + self.num_finger_joints
         )
 
         # Loading all reward parameters
@@ -278,6 +290,11 @@ class DooropeningEnv(DirectRLEnv):
         )
         self._door_nominal_joint_stiffness = self.door.data.joint_stiffness.clone()
         self._door_nominal_joint_damping = self.door.data.joint_damping.clone()
+        self._door_handle_effort_limits = torch.full(
+            (self.num_envs, 1),
+            float(self.cfg.door_handle_effort_limit_sim),
+            device=self.device,
+        )
         self._dr_metrics_interval = max(int(self.cfg.dr_metrics_interval), 1)
         self._log_verbose_dr_metrics = bool(self.cfg.log_verbose_dr_metrics)
         self._init_viser_pointcloud_recording()
@@ -681,6 +698,15 @@ class DooropeningEnv(DirectRLEnv):
     def _current_event_param(self, term_name: str, param_name: str):
         return self.event_manager.get_term_cfg(term_name).params[param_name]
 
+    def _current_door_handle_effort_limit_range(self) -> tuple[float, float]:
+        if not self._adr_enabled:
+            effort = float(self.cfg.door_handle_effort_limit_sim)
+            return effort, effort
+        return (
+            float(self.dooropening_adr.get_custom_param_value("door_dynamics", "handle_effort_limit_min")),
+            float(self.dooropening_adr.get_custom_param_value("door_dynamics", "handle_effort_limit_max")),
+        )
+
     def _refresh_nominal_door_joint_gains(self, env_ids: torch.Tensor | None = None):
         if env_ids is None:
             self._door_nominal_joint_stiffness.copy_(self.door.data.joint_stiffness)
@@ -688,6 +714,26 @@ class DooropeningEnv(DirectRLEnv):
             return
         self._door_nominal_joint_stiffness[env_ids] = self.door.data.joint_stiffness[env_ids]
         self._door_nominal_joint_damping[env_ids] = self.door.data.joint_damping[env_ids]
+
+    def _sample_door_handle_effort_limits(self, env_ids: torch.Tensor):
+        effort_min, effort_max = self._current_door_handle_effort_limit_range()
+        if effort_max < effort_min:
+            raise ValueError(
+                f"Door handle effort ADR range must satisfy min <= max, got min={effort_min}, max={effort_max}."
+            )
+        if effort_max == effort_min:
+            self._door_handle_effort_limits[env_ids, 0] = effort_min
+            return
+        self._door_handle_effort_limits[env_ids, 0] = effort_min + (effort_max - effort_min) * torch.rand(
+            len(env_ids), device=self.device
+        )
+
+    def _apply_door_handle_effort_limits(self, env_ids: torch.Tensor):
+        self.door.write_joint_effort_limit_to_sim(
+            self._door_handle_effort_limits[env_ids],
+            joint_ids=[self._door_hinge_joint_idx],
+            env_ids=env_ids,
+        )
 
     def _compute_curriculum_progress(self, progress_total: float) -> float:
         progress_total = max(float(progress_total), 1.0)
@@ -774,6 +820,7 @@ class DooropeningEnv(DirectRLEnv):
         hinge_damping = self._current_event_param(
             "door_hinge_joint_stiffness_and_damping", "damping_distribution_params"
         )
+        handle_effort_min, handle_effort_max = self._current_door_handle_effort_limit_range()
 
         self.extras["dr/increment"] = float(self.dooropening_adr.increment_counter)
         self.extras["dr/robot_stiffness_min"] = float(robot_stiffness[0])
@@ -788,6 +835,8 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["dr/door_hinge_stiffness_max"] = float(hinge_stiffness[1])
         self.extras["dr/door_hinge_damping_min"] = float(hinge_damping[0])
         self.extras["dr/door_hinge_damping_max"] = float(hinge_damping[1])
+        self.extras["dr/door_handle_effort_limit_min"] = float(handle_effort_min)
+        self.extras["dr/door_handle_effort_limit_max"] = float(handle_effort_max)
 
         self.extras["dr_limit/spawn_arm_joint_pos_noise"] = self._current_custom_param("robot_spawn", "arm_joint_pos_noise")
         self.extras["dr_limit/spawn_finger_joint_pos_noise"] = self._current_custom_param(
@@ -805,6 +854,8 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["dr_limit/obs_finger_joint_vel_noise"] = self._current_custom_param(
             "robot_state_noise", "finger_joint_vel_noise"
         )
+        self.extras["dr_limit/door_handle_effort_limit_min"] = handle_effort_min
+        self.extras["dr_limit/door_handle_effort_limit_max"] = handle_effort_max
         self.extras["dr_limit/target_lag_alpha"] = self._current_custom_param("pd_targets", "target_lag_alpha")
 
         if not self._log_verbose_dr_metrics:
@@ -843,6 +894,9 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["dr_sample/door_hinge_damping_mean"] = hinge_nominal_damping.mean().item()
         self.extras["dr_sample/door_hinge_damping_min"] = hinge_nominal_damping.min().item()
         self.extras["dr_sample/door_hinge_damping_max"] = hinge_nominal_damping.max().item()
+        self.extras["dr_sample/door_handle_effort_limit_mean"] = self._door_handle_effort_limits.mean().item()
+        self.extras["dr_sample/door_handle_effort_limit_min"] = self._door_handle_effort_limits.min().item()
+        self.extras["dr_sample/door_handle_effort_limit_max"] = self._door_handle_effort_limits.max().item()
 
     def _update_adr_ranges(self):
         if not self._adr_enabled:
@@ -1012,9 +1066,6 @@ class DooropeningEnv(DirectRLEnv):
         arm_noise = self.robot_spawn_noise_widths["arm_joint_pos_noise"][env_ids] * (
             2.0 * torch.rand((len(env_ids), len(self._robot_arm_dof_idx)), device=self.device) - 1.0
         )
-        arx_noise = self.robot_spawn_noise_widths["arm_joint_pos_noise"][env_ids] * (
-            2.0 * torch.rand((len(env_ids), len(self._robot_arx_dof_idx)), device=self.device) - 1.0
-        )
         finger_noise = self.robot_spawn_noise_widths["finger_joint_pos_noise"][env_ids] * (
             2.0 * torch.rand((len(env_ids), len(self._robot_finger_dof_idx)), device=self.device) - 1.0
         )
@@ -1022,7 +1073,11 @@ class DooropeningEnv(DirectRLEnv):
         self.joint_pos[env_ids[:, None], self._robot_base_xy_dof_idx[None, :]] += base_xy_noise
         self.joint_pos[env_ids[:, None], self._robot_base_rot_dof_idx[None, :]] += base_rot_noise
         self.joint_pos[env_ids[:, None], self._robot_arm_dof_idx[None, :]] += arm_noise
-        self.joint_pos[env_ids[:, None], self._robot_arx_dof_idx[None, :]] += arx_noise
+        if not self.fixed_arx_pose:
+            arx_noise = self.robot_spawn_noise_widths["arm_joint_pos_noise"][env_ids] * (
+                2.0 * torch.rand((len(env_ids), len(self._robot_arx_dof_idx)), device=self.device) - 1.0
+            )
+            self.joint_pos[env_ids[:, None], self._robot_arx_dof_idx[None, :]] += arx_noise
         self.joint_pos[env_ids[:, None], self._robot_finger_dof_idx[None, :]] += finger_noise
 
         self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]] = torch.clamp(
@@ -1050,37 +1105,43 @@ class DooropeningEnv(DirectRLEnv):
         target_noise[:, self._target_finger_slice] = finger_target_noise * (
             2.0 * torch.rand_like(target_noise[:, self._target_finger_slice]) - 1.0
         )
-        target_noise[:, self._target_arx_slice] = arm_target_noise * (
-            2.0 * torch.rand_like(target_noise[:, self._target_arx_slice]) - 1.0
-        )
         return target_noise
 
     def _scale_actions(self, actions: torch.Tensor) -> torch.Tensor:
-        scaled_actions = actions.clamp(-1.0, 1.0)
-        scaled_actions[:, :self.num_base_joints] = scaled_actions[:, :self.num_base_joints] * self.cfg.base_action_scale
-        scaled_actions[:, self.num_base_joints:self.num_base_joints + self.num_arm_joints] = (
-            scaled_actions[:, self.num_base_joints:self.num_base_joints + self.num_arm_joints] * self.cfg.arm_action_scale
+        if actions.ndim != 2 or actions.shape[-1] != self.num_policy_actions:
+            raise RuntimeError(
+                f"Expected policy action shape [N, {self.num_policy_actions}], got {tuple(actions.shape)}."
+            )
+        clamped_actions = actions.clamp(-1.0, 1.0)
+        scaled_actions = torch.zeros(
+            (actions.shape[0], self.num_robot_actions),
+            device=actions.device,
+            dtype=actions.dtype,
+        )
+        scaled_actions[:, self._target_base_rot_slice.start : self._target_base_xy_slice.stop] = (
+            clamped_actions[:, self._policy_base_rot_slice.start : self._policy_base_xy_slice.stop]
+            * self.cfg.base_action_scale
+        )
+        scaled_actions[:, self._target_arm_slice] = (
+            clamped_actions[:, self._policy_arm_slice] * self.cfg.arm_action_scale
         )
         scaled_actions[:, self._target_finger_slice] = (
-            scaled_actions[:, self._target_finger_slice] * self.cfg.finger_action_scale
-        )
-        scaled_actions[:, self._target_arx_slice] = (
-            scaled_actions[:, self._target_arx_slice] * self.cfg.arx_action_scale
+            clamped_actions[:, self._policy_finger_slice] * self.cfg.finger_action_scale
         )
         return scaled_actions
 
-    def _freeze_arx_target_updates(self, target_tensor: torch.Tensor, reference_tensor: torch.Tensor) -> torch.Tensor:
-        if not self.consume_arx_actions_without_commanding or self.num_arx_joints <= 0:
+    def _pin_arx_targets_to_fixed_pose(self, target_tensor: torch.Tensor) -> torch.Tensor:
+        if not self.fixed_arx_pose or self.num_arx_joints <= 0:
             return target_tensor
-        frozen_targets = target_tensor.clone()
-        frozen_targets[:, self._target_arx_slice] = reference_tensor[:, self._target_arx_slice]
-        return frozen_targets
+        pinned_targets = target_tensor.clone()
+        pinned_targets[:, self._target_arx_slice] = self._robot_arx_tuck_joint_pos_target.to(target_tensor).unsqueeze(0)
+        return pinned_targets
 
     def _pre_physics_step(self, actions: torch.Tensor):
         # delta actions
         self.scaled_actions = self._scale_actions(actions)
         targets = self.robot_dof_targets + self.dt * self.scaled_actions
-        targets = self._freeze_arx_target_updates(targets, self.robot_dof_targets)
+        targets = self._pin_arx_targets_to_fixed_pose(targets)
         self.scene.sensors["contact_forces_door2"].update(self.cfg.sim_dt)
         self.scene.sensors["contact_forces_door_x5_base"].update(self.cfg.sim_dt)
         self.scene.sensors["contact_forces_door_x5_link1"].update(self.cfg.sim_dt)
@@ -1091,6 +1152,7 @@ class DooropeningEnv(DirectRLEnv):
         self.scene.sensors["contact_forces_door_x5_camera"].update(self.cfg.sim_dt)
 
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
+        self.robot_dof_targets[:] = self._pin_arx_targets_to_fixed_pose(self.robot_dof_targets)
         # Advance the reference once per RL/env step. IsaacLab will call _apply_action()
         # decimation times, so stepping here keeps replay duration tied to env dt instead
         # of being multiplied by decimation again.
@@ -1121,10 +1183,11 @@ class DooropeningEnv(DirectRLEnv):
             applied_targets = (1.0 - lag_alpha) * applied_targets + lag_alpha * self.applied_robot_dof_targets
         # Controller-side DR is applied on the position targets after action integration.
         applied_targets += self._get_policy_target_noise()
-        applied_targets = self._freeze_arx_target_updates(applied_targets, self.applied_robot_dof_targets)
+        applied_targets = self._pin_arx_targets_to_fixed_pose(applied_targets)
         self.applied_robot_dof_targets[:] = torch.clamp(
             applied_targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits
         )
+        self.applied_robot_dof_targets[:] = self._pin_arx_targets_to_fixed_pose(self.applied_robot_dof_targets)
         self.robot.set_joint_position_target(self.applied_robot_dof_targets, joint_ids=self._robot_dof_idx)
 
     def _build_observations(
@@ -1578,6 +1641,22 @@ class DooropeningEnv(DirectRLEnv):
             device=self.device,
             dtype=self.door_link_pos.dtype,
         )
+        self._override_reference_arx_pose_for_fixed_mode()
+
+    def _override_reference_arx_pose_for_fixed_mode(self):
+        if not self.fixed_arx_pose or self.num_arx_joints <= 0:
+            return
+        fixed_arx_pose = self._robot_arx_tuck_joint_pos_target.to(self.robot.data.joint_pos).unsqueeze(0).expand(
+            self.num_envs, -1
+        )
+        zero_arx_vel = torch.zeros_like(fixed_arx_pose)
+        self.ref_robot_arx_joint_pos = fixed_arx_pose
+        self.ref_robot_arx_joint_vel = zero_arx_vel
+        self.ref_robot_joint_pos[:, self.ref_arx_joint_idx] = fixed_arx_pose
+        self.ref_joint_vel[:, self.ref_arx_joint_idx] = zero_arx_vel
+        fixed_arx_pose_twist = fixed_arx_pose.unsqueeze(1).expand(-1, self.ref_robot_joint_pos_twist.shape[1], -1)
+        self.ref_robot_joint_pos_twist[:, :, self.ref_arx_joint_idx] = fixed_arx_pose_twist
+        self.ref_robot_arx_joint_pos_twist = fixed_arx_pose_twist
 
     def _get_intermediate_values(self):
         self.robot_key_body_pos = self.robot.data.body_pos_w[:, self._robot_key_body_idx]\
@@ -1696,6 +1775,7 @@ class DooropeningEnv(DirectRLEnv):
         self.ref_robot_body_lin_vel = ref_robot_body_lin_vel.index_select(1, ref_key_body_idx) / ref_motion_dt
         ref_key_body_idx = ref_key_body_idx.to(device=ref_robot_body_ang_vel.device)
         self.ref_robot_body_ang_vel = ref_robot_body_ang_vel.index_select(1, ref_key_body_idx) / ref_motion_dt
+        self._override_reference_arx_pose_for_fixed_mode()
 
     def _get_rewards(self) -> torch.Tensor:
         self._get_intermediate_values()
@@ -1940,6 +2020,11 @@ class DooropeningEnv(DirectRLEnv):
             self.joint_pos[env_ids] = self.robot.data.default_joint_pos[env_ids]
             self.joint_vel[env_ids] = self.robot.data.default_joint_vel[env_ids]
             self._apply_spawn_noise(env_ids)
+            if self.fixed_arx_pose and self.num_arx_joints > 0:
+                self.joint_pos[env_ids[:, None], self._robot_arx_dof_idx[None, :]] = (
+                    self._robot_arx_tuck_joint_pos_target.to(self.joint_pos).unsqueeze(0)
+                )
+                self.joint_vel[env_ids[:, None], self._robot_arx_dof_idx[None, :]] = 0.0
 
             self.robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
             self.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
@@ -1954,6 +2039,8 @@ class DooropeningEnv(DirectRLEnv):
             self.applied_robot_dof_targets[env_ids, :] = self.robot_dof_targets[env_ids, :]
             self.episode_reached_last_frame[env_ids] = False
             super()._reset_idx(env_ids)
+            self._sample_door_handle_effort_limits(env_ids)
+            self._apply_door_handle_effort_limits(env_ids)
             self._refresh_nominal_door_joint_gains(env_ids)
             return
 
@@ -1981,6 +2068,11 @@ class DooropeningEnv(DirectRLEnv):
         self.joint_vel[env_ids[:, None], self._robot_dof_idx[None, :]] = deep_mimic_initial_joint_vel.to(self.joint_vel)[..., self.ref_robot_dof_idx]
         self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]] = deep_mimic_initial_joint_pos.to(self.joint_pos)[..., self.ref_robot_dof_idx]
         self._apply_spawn_noise(env_ids)
+        if self.fixed_arx_pose and self.num_arx_joints > 0:
+            self.joint_pos[env_ids[:, None], self._robot_arx_dof_idx[None, :]] = (
+                self._robot_arx_tuck_joint_pos_target.to(self.joint_pos).unsqueeze(0)
+            )
+            self.joint_vel[env_ids[:, None], self._robot_arx_dof_idx[None, :]] = 0.0
 
         self.robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
@@ -1998,6 +2090,8 @@ class DooropeningEnv(DirectRLEnv):
         self.applied_robot_dof_targets[env_ids, :] = self.robot_dof_targets[env_ids, :]
         self.episode_reached_last_frame[env_ids] = False
         super()._reset_idx(env_ids)
+        self._sample_door_handle_effort_limits(env_ids)
+        self._apply_door_handle_effort_limits(env_ids)
         self._refresh_nominal_door_joint_gains(env_ids)
 
     def close(self):

@@ -5,7 +5,7 @@ import math
 from DoorOpening.utils.state_machine.api import compute_base_joint, solve_ik, get_hinge_pos, open_hand
 import torch
 from isaaclab.utils.math import quat_from_euler_xyz, quat_from_matrix, combine_frame_transforms, quat_mul, quat_inv
-from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES, DEFAULT_JOINT_POS, OPEN_FINGER_JOINT_VALUES, ROBOT_KEY_BODY_NAMES, DM_JOINT_NAMES
+from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES, DEFAULT_JOINT_POS, OPEN_FINGER_JOINT_VALUES, ROBOT_KEY_BODY_NAMES, DM_JOINT_NAMES, FRANKA_JOINT_NAMES
 import numpy as np
 import time
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT, DOOR_INITIAL_POS, DOOR_INITIAL_ROT
@@ -64,6 +64,26 @@ def _parse_joint_tensor(values, default_tensor, expected_len):
     return torch.tensor([float(v) for v in values], dtype=default_tensor.dtype, device=default_tensor.device)
 
 
+def _apply_named_joint_positions(target_tensor, joint_names, joint_values):
+    if not isinstance(joint_names, (list, tuple)) or not isinstance(joint_values, (list, tuple)):
+        return target_tensor, False
+    if len(joint_names) != len(joint_values):
+        return target_tensor, False
+
+    joint_index_by_name = {name: idx for idx, name in enumerate(FULL_JOINT_NAMES)}
+    target_tensor = target_tensor.clone()
+    applied_any = False
+
+    for joint_name, joint_value in zip(joint_names, joint_values):
+        joint_idx = joint_index_by_name.get(str(joint_name))
+        if joint_idx is None:
+            continue
+        target_tensor[joint_idx] = float(joint_value)
+        applied_any = True
+
+    return target_tensor, applied_any
+
+
 def _apply_initial_state_metadata(door_urdf_path, robot_initial_pose, door_initial_pose, robot_initial_q, door_initial_q):
     initial_state = _load_initial_state_metadata(door_urdf_path)
     if initial_state is None:
@@ -76,10 +96,37 @@ def _apply_initial_state_metadata(door_urdf_path, robot_initial_pose, door_initi
     if isinstance(robot_joint_pos, (list, tuple)) and len(robot_joint_pos) == len(robot_initial_q):
         robot_initial_q = _parse_joint_tensor(robot_joint_pos, robot_initial_q, len(robot_initial_q))
     else:
+        robot_joint_names = initial_state.get("robot_joint_names")
+        robot_initial_q, applied_robot_joint_pos = _apply_named_joint_positions(
+            robot_initial_q,
+            robot_joint_names,
+            robot_joint_pos,
+        )
+        if not applied_robot_joint_pos and isinstance(robot_joint_pos, (list, tuple)) and len(robot_joint_pos) == len(DM_JOINT_NAMES):
+            robot_initial_q, _ = _apply_named_joint_positions(
+                robot_initial_q,
+                DM_JOINT_NAMES,
+                robot_joint_pos,
+            )
+
         robot_base_joint_pos = initial_state.get("robot_base_joint_pos")
         if isinstance(robot_base_joint_pos, (list, tuple)) and len(robot_base_joint_pos) >= 3:
             robot_initial_q = robot_initial_q.clone()
             robot_initial_q[:3] = _parse_joint_tensor(robot_base_joint_pos[:3], robot_initial_q[:3], 3)
+
+    robot_franka_joint_pos = initial_state.get("robot_franka_joint_pos")
+    robot_franka_joint_names = initial_state.get("robot_franka_joint_names")
+    robot_initial_q, applied_franka_joint_pos = _apply_named_joint_positions(
+        robot_initial_q,
+        robot_franka_joint_names,
+        robot_franka_joint_pos,
+    )
+    if not applied_franka_joint_pos and isinstance(robot_franka_joint_pos, (list, tuple)) and len(robot_franka_joint_pos) == len(FRANKA_JOINT_NAMES):
+        robot_initial_q, _ = _apply_named_joint_positions(
+            robot_initial_q,
+            FRANKA_JOINT_NAMES,
+            robot_franka_joint_pos,
+        )
 
     door_joint_pos = initial_state.get("door_joint_pos")
     if isinstance(door_joint_pos, (list, tuple)) and len(door_joint_pos) == len(door_initial_q):

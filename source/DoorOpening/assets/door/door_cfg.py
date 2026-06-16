@@ -27,6 +27,8 @@ DOOR_SOLVER_VELOCITY_ITERS = 2
 DOOR_CONTACT_OFFSET = 0.015
 DOOR_REST_OFFSET = 0.002
 DOOR_MAX_DEPENETRATION_VELOCITY = 500.0
+DEFAULT_HANDLE_EFFORT_LIMIT_SIM = 100.0
+DEBUG_HANDLE_EFFORT_LIMIT_SIM = 4.0
 
 
 def load_meta_data(board_meta_data_paths: str, handle_meta_data_paths: str, device: str = "cuda" if torch.cuda.is_available() else "cpu"):
@@ -73,7 +75,7 @@ def create_initial_state():
         rot=DOOR_INITIAL_ROT
     )
 
-def create_actuators():
+def create_actuators(handle_effort_limit_sim: float = DEFAULT_HANDLE_EFFORT_LIMIT_SIM):
     # These are the base door gains before any reset-time domain randomization scales them.
     board_nominal_stiffness = 30.0
     board_nominal_damping = 10.0
@@ -88,7 +90,7 @@ def create_actuators():
         ),
         "joint_2": ImplicitActuatorCfg(
             joint_names_expr=["joint_2"],
-            effort_limit_sim = 100,
+            effort_limit_sim=handle_effort_limit_sim,
             stiffness=handle_nominal_stiffness,
             damping=handle_nominal_damping,
         ),
@@ -145,6 +147,7 @@ def create_door_cfg(
     asset_path: str,
     training_mode: bool = False,
     activate_contact_sensors: bool = True,
+    handle_effort_limit_sim: float = DEFAULT_HANDLE_EFFORT_LIMIT_SIM,
 ) -> ArticulationCfg:
     """Helper to create an ArticulationCfg from a URDF path."""
     return ArticulationCfg(
@@ -159,12 +162,12 @@ def create_door_cfg(
         #     activate_contact_sensors=True,
         # ),
         init_state=create_initial_state(),
-        actuators=create_actuators(),
+        actuators=create_actuators(handle_effort_limit_sim=handle_effort_limit_sim),
     )
 
 
 root_path = os.path.dirname(os.path.dirname(__file__))
-asset_base_folder = os.path.join(root_path, "door/ScratchDoors")
+asset_base_folder = os.path.join(root_path, "door/PartNetv5_plusplus")
 asset_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/mobility.urdf"), recursive=True))
 board_offsets = []
 board_bboxes = []
@@ -185,18 +188,31 @@ handle_offsets = torch.tensor(handle_offsets)
 
 motion_traj_paths = [os.path.join(os.path.dirname(asset_path), "traj.pkl") for asset_path in asset_paths]
 
-door_asset_path = asset_paths[2]
-board_offset = board_offsets[2]
-handle_offset = handle_offsets[2]
+door_asset_path = asset_paths[45]
+board_offset = board_offsets[45]
+handle_offset = handle_offsets[45]
 print("door_asset_path: ", door_asset_path)
 
-DOOR_CONFIG = create_door_cfg(door_asset_path, training_mode=False)
+DOOR_CONFIG = create_door_cfg(
+    door_asset_path,
+    training_mode=False,
+    handle_effort_limit_sim=DEBUG_HANDLE_EFFORT_LIMIT_SIM,
+)
 
 DOOR_CONFIGS = []
 for asset_path in asset_paths:
-    DOOR_CONFIGS.append(create_door_cfg(asset_path, training_mode=False))
+    DOOR_CONFIGS.append(
+        create_door_cfg(
+            asset_path,
+            training_mode=False,
+            handle_effort_limit_sim=DEBUG_HANDLE_EFFORT_LIMIT_SIM,
+        )
+    )
 
-def setup_doors(training_mode: bool = False):
+def setup_doors(
+    training_mode: bool = False,
+    handle_effort_limit_sim: float = DEFAULT_HANDLE_EFFORT_LIMIT_SIM,
+):
     """Load all door cfg"""
     door_urdf_configs = []
     for asset_path in asset_paths:
@@ -214,7 +230,7 @@ def setup_doors(training_mode: bool = False):
             activate_contact_sensors=False,
         ),
         init_state=create_initial_state(),
-        actuators=create_actuators(),
+        actuators=create_actuators(handle_effort_limit_sim=handle_effort_limit_sim),
     )
 
 ALL_DOOR_CONFIGS = setup_doors()

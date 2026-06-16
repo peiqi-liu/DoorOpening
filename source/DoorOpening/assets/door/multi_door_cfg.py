@@ -27,7 +27,8 @@ DOOR_SOLVER_POSITION_ITERS = 8
 DOOR_SOLVER_VELOCITY_ITERS = 2
 DOOR_CONTACT_OFFSET = 0.015
 DOOR_REST_OFFSET = 0.002
-DOOR_MAX_DEPENETRATION_VELOCITY = 150.0
+DOOR_MAX_DEPENETRATION_VELOCITY = 500.0
+DEFAULT_HANDLE_EFFORT_LIMIT_SIM = 100.0
 
 
 def load_meta_data(board_meta_data_paths: str, handle_meta_data_paths: str, device: str = "cuda" if torch.cuda.is_available() else "cpu"):
@@ -74,7 +75,7 @@ def create_initial_state():
         rot=DOOR_INITIAL_ROT
     )
 
-def create_actuators():
+def create_actuators(handle_effort_limit_sim: float = DEFAULT_HANDLE_EFFORT_LIMIT_SIM):
     # These are the base door gains before any reset-time domain randomization scales them.
     board_nominal_stiffness = 30.0
     board_nominal_damping = 10.0
@@ -89,7 +90,7 @@ def create_actuators():
         ),
         "joint_2": ImplicitActuatorCfg(
             joint_names_expr=["joint_2"],
-            effort_limit_sim = 100,
+            effort_limit_sim=handle_effort_limit_sim,
             stiffness=handle_nominal_stiffness,
             damping=handle_nominal_damping,
         ),
@@ -146,6 +147,7 @@ def create_door_cfg(
     asset_path: str,
     training_mode: bool = False,
     activate_contact_sensors: bool = True,
+    handle_effort_limit_sim: float = DEFAULT_HANDLE_EFFORT_LIMIT_SIM,
 ) -> ArticulationCfg:
     """Helper to create an ArticulationCfg from a URDF path."""
     return ArticulationCfg(
@@ -160,7 +162,7 @@ def create_door_cfg(
         #     activate_contact_sensors=True,
         # ),
         init_state=create_initial_state(),
-        actuators=create_actuators(),
+        actuators=create_actuators(handle_effort_limit_sim=handle_effort_limit_sim),
     )
 
 
@@ -338,7 +340,10 @@ DOOR_CONFIGS = []
 for asset_path in asset_paths:
     DOOR_CONFIGS.append(create_door_cfg(asset_path, training_mode=False))
 
-def setup_doors(training_mode: bool = False):
+def setup_doors(
+    training_mode: bool = False,
+    handle_effort_limit_sim: float = DEFAULT_HANDLE_EFFORT_LIMIT_SIM,
+):
     """Load all door cfg"""
     return ArticulationCfg(
         spawn=sim_utils.MultiAssetSpawnerCfg(
@@ -350,7 +355,7 @@ def setup_doors(training_mode: bool = False):
             activate_contact_sensors=False,
         ),
         init_state=create_initial_state(),
-        actuators=create_actuators(),
+        actuators=create_actuators(handle_effort_limit_sim=handle_effort_limit_sim),
     )
 
 ALL_DOOR_CONFIGS = setup_doors()

@@ -57,6 +57,26 @@ DEFAULT_START_BASE_SAMPLING = "paired"
 DEFAULT_START_BASE_RADIUS_M = 1.0
 DEFAULT_START_BASE_ANGLE_RANGE_DEG = 30.0
 DEFAULT_START_BASE_PAIR_SEED = 0
+DEFAULT_FRANKA_START_JOINT_NOISE_RAD = 0.2
+
+FRANKA_JOINT_NAMES = [
+    "panda_joint1",
+    "panda_joint2",
+    "panda_joint3",
+    "panda_joint4",
+    "panda_joint5",
+    "panda_joint6",
+    "panda_joint7",
+]
+FRANKA_DEFAULT_JOINT_POS = [
+    0.0,
+    -0.7853981633974483,
+    0.0,
+    -2.356194490192345,
+    0.0,
+    1.5707963267948966,
+    0.0,
+]
 
 DOOR_OPEN_LIMIT_RAD = 1.57
 HANDLE_OPEN_LIMIT_RAD = 1.57
@@ -304,6 +324,10 @@ def sample_initial_state(rng, variant_name, args):
     door_world_pose = {"pos": list(DOOR_INITIAL_POS), "rot": list(DOOR_INITIAL_ROT)}
     door_joint_pos = [0.0, 0.0]
     robot_base_joint_pos = [0.0, 0.0, 0.0]
+    robot_franka_joint_pos = [
+        default_value + rng.uniform(-DEFAULT_FRANKA_START_JOINT_NOISE_RAD, DEFAULT_FRANKA_START_JOINT_NOISE_RAD)
+        for default_value in FRANKA_DEFAULT_JOINT_POS
+    ]
     sampled_robot_world_pose = None
     sampled_approach_angle_rad = None
     pair_key = None
@@ -333,7 +357,11 @@ def sample_initial_state(rng, variant_name, args):
     return {
         "robot_world_pose": robot_world_pose,
         "door_world_pose": door_world_pose,
+        "robot_joint_names": ["base_x_joint", "base_y_joint", "base_rotation_joint"] + FRANKA_JOINT_NAMES,
+        "robot_joint_pos": robot_base_joint_pos + robot_franka_joint_pos,
         "robot_base_joint_pos": robot_base_joint_pos,
+        "robot_franka_joint_names": FRANKA_JOINT_NAMES,
+        "robot_franka_joint_pos": robot_franka_joint_pos,
         "door_joint_pos": door_joint_pos,
         "start_base_sampling": str(args.start_base_sampling),
         "start_base_radius_m": float(args.start_base_radius),

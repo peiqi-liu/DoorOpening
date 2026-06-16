@@ -120,6 +120,20 @@ parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy 
 parser.add_argument("--wandb-project-name", type=str, default=None, help="the wandb's project name")
 parser.add_argument("--wandb-entity", type=str, default=None, help="the entity (team) of wandb's project")
 parser.add_argument("--wandb-name", type=str, default=None, help="the name of wandb's run")
+parser.set_defaults(fixed_arx_pose=True)
+arx_pose_group = parser.add_mutually_exclusive_group()
+arx_pose_group.add_argument(
+    "--fixed-arx-pose",
+    dest="fixed_arx_pose",
+    action="store_true",
+    help="Keep the ARX/x5 joints in the fixed tucked pose while still preserving the original policy IO shapes.",
+)
+arx_pose_group.add_argument(
+    "--policy-controls-arx",
+    dest="fixed_arx_pose",
+    action="store_false",
+    help="Keep ARX/x5 joints in the RL policy action space for active perception experiments.",
+)
 parser.add_argument(
     "--door-families",
     "--door_families",
@@ -210,6 +224,20 @@ def _resolve_prewarm_door_configs(task_name: str):
     from DoorOpening.assets.door.door_cfg import ALL_DOOR_CONFIGS as door_configs
 
     return door_configs
+
+
+def _configure_policy_arx_mode(env_cfg) -> None:
+    if args_cli.fixed_arx_pose:
+        env_cfg.fixed_arx_pose = True
+        env_cfg.consume_arx_actions_without_commanding = True
+        print(
+            "[INFO] ARX joints stay in the fixed tucked pose; "
+            f"policy action dim remains {env_cfg.action_space} and ARX commands are consumed."
+        )
+    else:
+        env_cfg.fixed_arx_pose = False
+        env_cfg.consume_arx_actions_without_commanding = False
+        print(f"[INFO] RL policy also controls ARX joints (action dim {env_cfg.action_space}).")
 
 
 def _install_train_info_bridge():
@@ -372,6 +400,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    _configure_policy_arx_mode(env_cfg)
     # check for invalid combination of CPU device with distributed training
     if use_distributed and args_cli.device is not None and "cpu" in args_cli.device:
         raise ValueError(

@@ -1,9 +1,19 @@
 import argparse
+import hashlib
 import json
+import math
 import random
 import shutil
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SOURCE_ROOT = REPO_ROOT / "source"
+if str(SOURCE_ROOT) not in sys.path:
+    sys.path.insert(0, str(SOURCE_ROOT))
+
+from DoorOpening.constants.env_constants import DOOR_INITIAL_POS, DOOR_INITIAL_ROT, ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
 
 
 DEFAULT_PANEL_WIDTH_RANGE_M = (0.8, 1.1)
@@ -17,6 +27,30 @@ DEFAULT_HANDLE_EDGE_DISTANCE_RANGE_M = (0.05, 0.11)
 MIN_HANDLE_BOTTOM_CLEARANCE_M = 0.15
 MIN_HANDLE_TOP_CLEARANCE_M = 0.15
 MIN_HANDLE_EDGE_CLEARANCE_M = 0.02
+DEFAULT_START_BASE_SAMPLING = "paired"
+DEFAULT_START_BASE_RADIUS_M = 1.0
+DEFAULT_START_BASE_ANGLE_RANGE_DEG = 30.0
+DEFAULT_START_BASE_PAIR_SEED = 0
+DEFAULT_FRANKA_START_JOINT_NOISE_RAD = 0.2
+
+FRANKA_JOINT_NAMES = [
+    "panda_joint1",
+    "panda_joint2",
+    "panda_joint3",
+    "panda_joint4",
+    "panda_joint5",
+    "panda_joint6",
+    "panda_joint7",
+]
+FRANKA_DEFAULT_JOINT_POS = [
+    0.0,
+    -0.7853981633974483,
+    0.0,
+    -2.356194490192345,
+    0.0,
+    1.5707963267948966,
+    0.0,
+]
 
 def parse_args():
     repo_root = Path(__file__).resolve().parents[2]
@@ -41,6 +75,30 @@ def parse_args():
         default="pull",
         help="Choose whether the generated door opens as a pull door or a push door.",
     )
+    parser.add_argument(
+        "--start-base-sampling",
+        choices=("paired", "random", "none"),
+        default=DEFAULT_START_BASE_SAMPLING,
+        help="How to sample and store the initial mobile-base state in variant_meta.json.",
+    )
+    parser.add_argument(
+        "--start-base-radius",
+        type=float,
+        default=DEFAULT_START_BASE_RADIUS_M,
+        help="Radius in meters for the initial mobile-base waypoint around the door.",
+    )
+    parser.add_argument(
+        "--start-base-angle-range-deg",
+        type=float,
+        default=DEFAULT_START_BASE_ANGLE_RANGE_DEG,
+        help="Symmetric angle range in degrees for initial mobile-base waypoint sampling.",
+    )
+    parser.add_argument(
+        "--start-base-pair-seed",
+        type=int,
+        default=DEFAULT_START_BASE_PAIR_SEED,
+        help="Deterministic seed used to pair push/pull counterparts to the same initial base angle.",
+    )
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing output directory.")
     return parser.parse_args()
 
@@ -53,6 +111,41 @@ def parse_vector(text, default=(0.0, 0.0, 0.0)):
 
 def format_vector(values):
     return " ".join(f"{value:.6f}" for value in values)
+
+
+def wrap_to_pi(angle_rad):
+    return ((angle_rad + math.pi) % (2.0 * math.pi)) - math.pi
+
+
+def quat_xyzw_to_yaw(quat):
+    x, y, z, w = [float(v) for v in quat]
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    return math.atan2(siny_cosp, cosy_cosp)
+
+
+def stable_unit_interval(key):
+    digest = hashlib.blake2b(key.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, byteorder="big", signed=False) / float(1 << 64)
+
+
+def paired_start_angle(pair_key, seed, angle_range_deg):
+    angle_limit = math.radians(angle_range_deg)
+    unit = stable_unit_interval(f"dooropening-start-base-v1:{int(seed)}:{pair_key}")
+    return -angle_limit + 2.0 * angle_limit * unit
+
+
+def compute_base_joint_from_world_pose(base_world_pose, target_world_pose):
+    base_pos = base_world_pose["pos"]
+    base_yaw = quat_xyzw_to_yaw(base_world_pose["rot"])
+    target_pos = target_world_pose["pos"]
+    target_yaw = quat_xyzw_to_yaw(target_world_pose["rot"])
+    dx = float(target_pos[0]) - float(base_pos[0])
+    dy = float(target_pos[1]) - float(base_pos[1])
+    x_r = math.cos(base_yaw) * dx + math.sin(base_yaw) * dy
+    y_r = -math.sin(base_yaw) * dx + math.cos(base_yaw) * dy
+    theta_r = wrap_to_pi(target_yaw - base_yaw)
+    return [x_r, y_r, theta_r]
 
 
 def load_obj_bounds(mesh_path, bounds_cache):
@@ -521,6 +614,62 @@ def build_direction_pair_key(variant_name):
     return str(variant_name)
 
 
+def sample_initial_state(rng, variant_name, args):
+    robot_world_pose = {"pos": list(ROBOT_INITIAL_POS), "rot": list(ROBOT_INITIAL_ROT)}
+    door_world_pose = {"pos": list(DOOR_INITIAL_POS), "rot": list(DOOR_INITIAL_ROT)}
+    door_joint_pos = [0.0, 0.0]
+    robot_base_joint_pos = [0.0, 0.0, 0.0]
+    robot_franka_joint_pos = [
+        default_value + rng.uniform(-DEFAULT_FRANKA_START_JOINT_NOISE_RAD, DEFAULT_FRANKA_START_JOINT_NOISE_RAD)
+        for default_value in FRANKA_DEFAULT_JOINT_POS
+    ]
+    sampled_robot_world_pose = None
+    sampled_approach_angle_rad = None
+    pair_key = None
+
+    if args.start_base_sampling != "none":
+        if args.start_base_sampling == "paired":
+            pair_key = build_direction_pair_key(variant_name)
+            sampled_approach_angle_rad = paired_start_angle(
+                pair_key,
+                args.start_base_pair_seed,
+                args.start_base_angle_range_deg,
+            )
+        else:
+            angle_limit = math.radians(args.start_base_angle_range_deg)
+            sampled_approach_angle_rad = rng.uniform(-angle_limit, angle_limit)
+
+        sampled_robot_world_pose = {
+            "pos": [
+                float(DOOR_INITIAL_POS[0]) + float(args.start_base_radius) * math.cos(sampled_approach_angle_rad),
+                float(DOOR_INITIAL_POS[1]) + float(args.start_base_radius) * math.sin(sampled_approach_angle_rad),
+                float(ROBOT_INITIAL_POS[2]),
+            ],
+            "rot": list(ROBOT_INITIAL_ROT),
+        }
+        robot_base_joint_pos = compute_base_joint_from_world_pose(robot_world_pose, sampled_robot_world_pose)
+
+    return {
+        "robot_world_pose": robot_world_pose,
+        "door_world_pose": door_world_pose,
+        "robot_joint_names": ["base_x_joint", "base_y_joint", "base_rotation_joint"] + FRANKA_JOINT_NAMES,
+        "robot_joint_pos": robot_base_joint_pos + robot_franka_joint_pos,
+        "robot_base_joint_pos": robot_base_joint_pos,
+        "robot_franka_joint_names": FRANKA_JOINT_NAMES,
+        "robot_franka_joint_pos": robot_franka_joint_pos,
+        "door_joint_pos": door_joint_pos,
+        "start_base_sampling": str(args.start_base_sampling),
+        "start_base_radius_m": float(args.start_base_radius),
+        "start_base_angle_range_deg": float(args.start_base_angle_range_deg),
+        "start_base_pair_seed": int(args.start_base_pair_seed),
+        "start_base_pair_key": None if pair_key is None else str(pair_key),
+        "sampled_robot_world_pose": sampled_robot_world_pose,
+        "sampled_approach_angle_rad": (
+            None if sampled_approach_angle_rad is None else float(sampled_approach_angle_rad)
+        ),
+    }
+
+
 def generate_variants(args):
     rng = random.Random(args.seed)
     asset_root = args.asset_root.resolve()
@@ -544,6 +693,7 @@ def generate_variants(args):
             variant_dir = output_dir / variant_name
             variant_dir.mkdir(parents=True, exist_ok=False)
             root = ET.parse(source_urdf_path).getroot()
+            initial_state = sample_initial_state(rng, variant_name, args)
             source_props = get_door_properties(source_dir, root, bounds_cache)
             target_props = sample_target_properties(rng, source_props)
             target_props["flip_hinge_side"] = args.flip_hinge_side
@@ -581,6 +731,7 @@ def generate_variants(args):
                 "target_properties": target_props,
                 "actual_properties": actual_props,
                 "source_properties": source_props,
+                "initial_state": initial_state,
                 "robot_name": robot_name,
                 "robot_name_basis": "back_face_handle_side",
                 "handle_face": "back",

@@ -46,6 +46,49 @@ euler_angles = torch.tensor([-np.pi / 4, 0.0, 0])  # (roll, pitch, yaw) in radia
 POINTCLOUD_CAMERA_QUAT = quat_from_euler_xyz(euler_angles[0], euler_angles[1], euler_angles[2])
 POINTCLOUD_CAMERA_QUAT = tuple(POINTCLOUD_CAMERA_QUAT.tolist())
 
+
+def randomize_joint_effort_limits(
+    env,
+    env_ids: torch.Tensor | None,
+    asset_cfg: SceneEntityCfg,
+    effort_limit_distribution_params: tuple[float, float],
+    operation: str = "abs",
+    distribution: str = "uniform",
+):
+    """Randomize joint effort limits directly in PhysX for the selected articulation joints."""
+
+    if operation != "abs":
+        raise ValueError(f"randomize_joint_effort_limits only supports operation='abs', got {operation!r}.")
+    if distribution != "uniform":
+        raise ValueError(
+            f"randomize_joint_effort_limits only supports distribution='uniform', got {distribution!r}."
+        )
+
+    asset = env.scene[asset_cfg.name]
+    if env_ids is None:
+        env_ids = torch.arange(env.scene.num_envs, device=asset.device)
+    if len(env_ids) == 0:
+        return
+
+    joint_ids = asset_cfg.joint_ids
+    if joint_ids is None:
+        joint_ids = slice(None)
+    if isinstance(joint_ids, slice):
+        current_limits = asset.data.joint_effort_limits[env_ids, joint_ids]
+        num_joints = current_limits.shape[1]
+    else:
+        joint_ids = torch.as_tensor(joint_ids, device=asset.device, dtype=torch.long)
+        num_joints = int(joint_ids.numel())
+
+    low, high = float(effort_limit_distribution_params[0]), float(effort_limit_distribution_params[1])
+    if high < low:
+        raise ValueError(
+            "randomize_joint_effort_limits requires effort_limit_distribution_params[0] <= "
+            f"effort_limit_distribution_params[1], got {(low, high)}."
+        )
+    sampled_limits = low + (high - low) * torch.rand((len(env_ids), num_joints), device=asset.device)
+    asset.write_joint_effort_limit_to_sim(sampled_limits, joint_ids=joint_ids, env_ids=env_ids)
+
 @configclass
 class EventCfg:
     """Configuration for reset-time physics randomization."""
@@ -122,6 +165,17 @@ class EventCfg:
         },
     )
 
+    door_hinge_joint_effort_limit = EventTerm(
+        func=randomize_joint_effort_limits,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("door", joint_names="joint_2"),
+            "effort_limit_distribution_params": (1.0, 1.0),
+            "operation": "abs",
+            "distribution": "uniform",
+        },
+    )
+
 @configclass
 class DooropeningEnvCfg(DirectRLEnvCfg):
     sim_dt = 1/60
@@ -135,6 +189,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     asymmetric_obs = True
 
     viewer: ViewerCfg = ViewerCfg(eye=(1.5, -2.0, 1.0), lookat=(0.4, 0.0, 0.7), origin_type="env")
+    door_handle_effort_limit_range_nm = (1.0, 4.0)
+    door_handle_effort_limit_sim = door_handle_effort_limit_range_nm[0]
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
@@ -336,8 +392,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     door_cfg: ArticulationCfg = ALL_DOOR_CONFIGS.replace(prim_path="/World/envs/env_.*/Door")
 
     actuated_joints_num = len(arm_joints) + len(base_joints) + len(finger_joints) + len(arx_joints)
-    action_space = actuated_joints_num * 1
-    # action_space = len(arm_joints) + len(base_joints) + 4
+    # action_space = actuated_joints_num * 1
+    action_space = len(arm_joints) + len(base_joints) + len(finger_joints)
     # Per twist index we concatenate:
     # - future robot key-body positions: `len(robot_key_bodies) * 3`
     # - future robot key-body 6D rotations: `len(robot_key_bodies) * 6`
@@ -408,7 +464,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # arx_action_scale = 0.3
     base_action_scale = 1.0
     arm_action_scale = 0.6
-    finger_action_scale = 1.5
+    finger_action_scale = 0.5
     arx_action_scale = 0.6
 
     # Deep Mimic Reward Parameters
@@ -488,15 +544,18 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "stiffness_distribution_params": (10.0, 60.0),
             "damping_distribution_params": (0.03, 1.0),
         },
+        "door_hinge_joint_effort_limit": {
+            "effort_limit_distribution_params": door_handle_effort_limit_range_nm,
+        },
     }
 
     # These terms are sampled inside the env because they perturb reset state, observations, and controller targets.
     adr_custom_cfg_dict = {
         "robot_spawn": {
-            "base_xy_joint_pos_noise": (0.0, 0.01),
-            "base_rot_joint_pos_noise": (0.0, 0.03),
-            "arm_joint_pos_noise": (0.0, 0.03),
-            "finger_joint_pos_noise": (0.0, 0.05),
+            "base_xy_joint_pos_noise": (0.0, 0.1),
+            "base_rot_joint_pos_noise": (0.0, 0.05),
+            "arm_joint_pos_noise": (0.0, 0.15),
+            "finger_joint_pos_noise": (0.0, 0.1),
         },
         "robot_state_noise": {
             "base_xy_joint_pos_noise": (0.0, 0.003),
