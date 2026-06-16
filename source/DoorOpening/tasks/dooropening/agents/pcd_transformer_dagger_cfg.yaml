@@ -44,7 +44,7 @@ temporal_state_encoders:
     - q_arm
     - q_hand
     - target_err_arm
-    - push_pull_belief
+    # - push_pull_belief
     - target_err_hand
     - base_vel
     - aux_handle_pos
@@ -202,7 +202,7 @@ dagger:
     # Wall height follows the door panel bbox height in the ordered door-local height axis.
     face_jitter_m: 0.1  # Small noise added only on the snapped outer faces so the walls do not look perfectly planar.
   door_hole_aug:
-    enabled: false  # When enabled, drop points from link_1 to simulate a window/open hole in the door panel.
+    enabled: true # When enabled, drop points from link_1 to simulate a window/open hole in the door panel.
     env_prob: 0.35
     width_range_m: [0.12, 1.60]
     height_range_m: [0.18, 2.20]
