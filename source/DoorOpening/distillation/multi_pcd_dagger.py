@@ -2061,7 +2061,14 @@ class Dagger:
         pd_targets = self.ov_env.applied_robot_dof_targets
         if pd_targets.ndim != 2:
             raise RuntimeError(f"Expected PD target tensor to be rank-2, got shape {tuple(pd_targets.shape)}.")
-        return pd_targets
+        if pd_targets.shape[-1] == self.num_actions:
+            return pd_targets
+        if pd_targets.shape[-1] == self.teacher_num_actions:
+            return pd_targets[:, self.student_target_indices_in_env]
+        raise RuntimeError(
+            f"Unexpected PD target width {pd_targets.shape[-1]}; expected {self.num_actions} or "
+            f"{self.teacher_num_actions}."
+        )
 
     def _build_temporal_derived_state_values(self, q_pos, target_t, base_vel, sample_cache=None):
         if not self.temporal_derived_state_specs:

@@ -35,6 +35,7 @@ parser.add_argument("--video_interval", type=int, default=10000, help="Interval 
 parser.add_argument(
     "--viser",
     "--viser-raw",
+    "--viser-pt",
     "--viser_pt",
     dest="viser_pt",
     action="store_true",
@@ -43,6 +44,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--viser-raw-path",
+    "--viser-pt-path",
     "--viser_pt_path",
     dest="viser_pt_path",
     type=str,
@@ -51,6 +53,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--viser-env-id",
+    "--viser-pt-env-id",
     "--viser_pt_env_id",
     dest="viser_pt_env_id",
     type=int,
@@ -59,6 +62,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--viser-raw-interval",
+    "--viser-pt-interval",
     "--viser_pt_interval",
     dest="viser_pt_interval",
     type=int,
@@ -67,6 +71,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--viser-raw-save-interval",
+    "--viser-pt-save-interval",
     "--viser_pt_save_interval",
     dest="viser_pt_save_interval",
     type=int,
@@ -75,6 +80,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--viser-raw-max-frames",
+    "--viser-pt-max-frames",
     "--viser_pt_max_frames",
     dest="viser_pt_max_frames",
     type=int,
@@ -83,6 +89,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--viser-raw-max-points",
+    "--viser-pt-max-points",
     "--viser_pt_max_points",
     dest="viser_pt_max_points",
     type=int,
@@ -91,6 +98,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--viser-raw-robot-points",
+    "--viser-pt-robot-points",
     "--viser_pt_robot_points",
     dest="viser_pt_robot_points",
     type=int,
@@ -99,6 +107,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--viser-raw-door-points",
+    "--viser-pt-door-points",
     "--viser_pt_door_points",
     dest="viser_pt_door_points",
     type=int,
@@ -120,20 +129,6 @@ parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy 
 parser.add_argument("--wandb-project-name", type=str, default=None, help="the wandb's project name")
 parser.add_argument("--wandb-entity", type=str, default=None, help="the entity (team) of wandb's project")
 parser.add_argument("--wandb-name", type=str, default=None, help="the name of wandb's run")
-parser.set_defaults(fixed_arx_pose=True)
-arx_pose_group = parser.add_mutually_exclusive_group()
-arx_pose_group.add_argument(
-    "--fixed-arx-pose",
-    dest="fixed_arx_pose",
-    action="store_true",
-    help="Keep the ARX/x5 joints in the fixed tucked pose while still preserving the original policy IO shapes.",
-)
-arx_pose_group.add_argument(
-    "--policy-controls-arx",
-    dest="fixed_arx_pose",
-    action="store_false",
-    help="Keep ARX/x5 joints in the RL policy action space for active perception experiments.",
-)
 parser.add_argument(
     "--door-families",
     "--door_families",
@@ -227,17 +222,11 @@ def _resolve_prewarm_door_configs(task_name: str):
 
 
 def _configure_policy_arx_mode(env_cfg) -> None:
-    if args_cli.fixed_arx_pose:
-        env_cfg.fixed_arx_pose = True
-        env_cfg.consume_arx_actions_without_commanding = True
-        print(
-            "[INFO] ARX joints stay in the fixed tucked pose; "
-            f"policy action dim remains {env_cfg.action_space} and ARX commands are consumed."
-        )
-    else:
-        env_cfg.fixed_arx_pose = False
-        env_cfg.consume_arx_actions_without_commanding = False
-        print(f"[INFO] RL policy also controls ARX joints (action dim {env_cfg.action_space}).")
+    env_cfg.fixed_arx_pose = True
+    print(
+        "[INFO] ARX joints stay in the fixed tucked pose; "
+        f"policy action dim remains {env_cfg.action_space}."
+    )
 
 
 def _install_train_info_bridge():
@@ -564,13 +553,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             wandb.config.update({"env_cfg": env_cfg.to_dict()})
             wandb.config.update({"agent_cfg": agent_cfg})
 
-    if args_cli.checkpoint is not None:
-        runner.run({"train": True, "play": False, "sigma": train_sigma, "checkpoint": resume_path})
-    else:
-        runner.run({"train": True, "play": False, "sigma": train_sigma})
-
-    # close the simulator
-    env.close()
+    try:
+        if args_cli.checkpoint is not None:
+            runner.run({"train": True, "play": False, "sigma": train_sigma, "checkpoint": resume_path})
+        else:
+            runner.run({"train": True, "play": False, "sigma": train_sigma})
+    finally:
+        # Let the env flush any pending Viser replay chunk even on early shutdown.
+        env.close()
 
 
 if __name__ == "__main__":

@@ -324,6 +324,14 @@ def _sample_tracked_env_id(num_envs: int, default_env_id: int, random_env: bool)
     return max(0, min(int(default_env_id), num_envs - 1))
 
 
+def _configure_policy_arx_mode(env_cfg) -> None:
+    env_cfg.fixed_arx_pose = True
+    print(
+        "[INFO] ARX joints stay in the fixed tucked pose during playback; "
+        f"policy action dim remains {env_cfg.action_space}."
+    )
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: dict):
     """Play with RL-Games agent."""
@@ -341,6 +349,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    _configure_policy_arx_mode(env_cfg)
 
     # randomly sample a seed if seed = -1
     if args_cli.seed == -1:

@@ -141,7 +141,7 @@ class DooropeningEnv(DirectRLEnv):
                 "Unexpected policy action dim for multi-door env. "
                 f"Expected base+arm+fingers = {expected_policy_actions}, got {self.num_policy_actions}."
             )
-        self.fixed_arx_pose = True
+        self.fixed_arx_pose = bool(getattr(self.cfg, "fixed_arx_pose", True))
         self._policy_base_rot_slice = slice(0, 1)
         self._policy_base_xy_slice = slice(1, self.num_base_joints)
         self._policy_arm_slice = slice(self.num_base_joints, self.num_base_joints + self.num_arm_joints)
@@ -1137,6 +1137,17 @@ class DooropeningEnv(DirectRLEnv):
         pinned_targets[:, self._target_arx_slice] = self._robot_arx_tuck_joint_pos_target.to(target_tensor).unsqueeze(0)
         return pinned_targets
 
+    def _enforce_fixed_arx_joint_state(self):
+        if not self.fixed_arx_pose or self.num_arx_joints <= 0:
+            return
+        arx_joint_pos = self._robot_arx_tuck_joint_pos_target.to(self.joint_pos).unsqueeze(0).expand(self.num_envs, -1)
+        arx_joint_vel = torch.zeros_like(arx_joint_pos)
+        self.joint_pos[:, self._robot_arx_dof_idx] = arx_joint_pos
+        self.joint_vel[:, self._robot_arx_dof_idx] = arx_joint_vel
+        self.robot_dof_targets[:, self._target_arx_slice] = arx_joint_pos
+        self.applied_robot_dof_targets[:, self._target_arx_slice] = arx_joint_pos
+        self.robot.write_joint_state_to_sim(arx_joint_pos, arx_joint_vel, joint_ids=self._robot_arx_dof_idx)
+
     def _pre_physics_step(self, actions: torch.Tensor):
         # delta actions
         self.scaled_actions = self._scale_actions(actions)
@@ -1188,6 +1199,7 @@ class DooropeningEnv(DirectRLEnv):
             applied_targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits
         )
         self.applied_robot_dof_targets[:] = self._pin_arx_targets_to_fixed_pose(self.applied_robot_dof_targets)
+        self._enforce_fixed_arx_joint_state()
         self.robot.set_joint_position_target(self.applied_robot_dof_targets, joint_ids=self._robot_dof_idx)
 
     def _build_observations(
