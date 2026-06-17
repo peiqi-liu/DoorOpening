@@ -106,7 +106,7 @@ class Dagger:
         arm_action_dim = len(self.ov_env._robot_arm_dof_idx)
         hand_action_dim = len(self.ov_env._robot_finger_dof_idx)
         arx_action_dim = len(self.ov_env._robot_arx_dof_idx)
-        self.teacher_num_actions = base_action_dim + arm_action_dim + hand_action_dim + arx_action_dim
+        self.teacher_num_actions = base_action_dim + arm_action_dim + hand_action_dim
         self.student_joint_ids = torch.cat(
             (
                 self.ov_env._robot_base_dof_idx,
