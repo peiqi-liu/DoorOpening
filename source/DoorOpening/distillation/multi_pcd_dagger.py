@@ -105,7 +105,6 @@ class Dagger:
         base_action_dim = len(self.ov_env._robot_base_dof_idx)
         arm_action_dim = len(self.ov_env._robot_arm_dof_idx)
         hand_action_dim = len(self.ov_env._robot_finger_dof_idx)
-        arx_action_dim = len(self.ov_env._robot_arx_dof_idx)
         self.teacher_num_actions = base_action_dim + arm_action_dim + hand_action_dim
         self.student_joint_ids = torch.cat(
             (
@@ -139,10 +138,6 @@ class Dagger:
         }
         self.action_component_history_indices = self._build_action_component_history_indices()
         self.proprio_component_history_indices = self._build_proprio_component_history_indices()
-        self._env_arx_action_slice = slice(
-            base_action_dim + arm_action_dim + hand_action_dim,
-            base_action_dim + arm_action_dim + hand_action_dim + arx_action_dim,
-        )
         self.base_action_rot_local_idx = int(self.ov_env._robot_base_rot_local_idx[0].detach().cpu().item())
         self.base_action_xy_local_idx = [
             int(idx) for idx in self.ov_env._robot_base_xy_local_idx.detach().cpu().tolist()
@@ -2052,8 +2047,7 @@ class Dagger:
         return base_vel
 
     def _get_implemented_action_vector(self):
-        full_pd_targets = self._get_teacher_prev_action_vector()
-        return full_pd_targets[:, self.student_target_indices_in_env]
+        return self._get_teacher_prev_action_vector()
 
     def _get_teacher_prev_action_vector(self):
         # Temporal target features use the actual joint-position targets sent to
