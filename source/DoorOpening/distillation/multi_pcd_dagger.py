@@ -2002,11 +2002,9 @@ class Dagger:
     def _env_actions_to_student_actions(self, env_actions):
         if env_actions.ndim != 2:
             raise RuntimeError(f"Expected env action tensor to be rank-2, got shape {tuple(env_actions.shape)}.")
-        if env_actions.shape[-1] == self.teacher_num_actions:
-            env_actions = env_actions[:, self.student_target_indices_in_env]
-        elif env_actions.shape[-1] != self.num_actions:
+        if env_actions.shape[-1] != self.num_actions:
             raise RuntimeError(
-                f"Expected env action shape [N, {self.num_actions}] or [N, {self.teacher_num_actions}], "
+                f"Expected env action shape [N, {self.num_actions}], "
                 f"got {tuple(env_actions.shape)}."
             )
 
@@ -3069,11 +3067,10 @@ class Dagger:
                 )
                 missing_family_names = [DOOR_FAMILY_NAMES[int(family_id)] for family_id in missing_family_ids]
                 raise RuntimeError(f"Missing teacher model for door families: {missing_family_names}.")
-            teacher_env_actions = teacher_actions[:, self.student_target_indices_in_env]
             student_teacher_actions = self._env_actions_to_student_actions(teacher_actions)
             return {
                 "mus": student_teacher_actions,
-                "actions": teacher_env_actions,
+                "actions": teacher_actions,
             }
 
         batch_dict = {
@@ -3084,11 +3081,10 @@ class Dagger:
         with torch.no_grad():
             res_dict = self.teacher_model(batch_dict)
         teacher_actions = torch.clamp(res_dict["mus"], -1.0, 1.0)
-        teacher_env_actions = teacher_actions[:, self.student_target_indices_in_env]
         student_teacher_actions = self._env_actions_to_student_actions(teacher_actions)
         return {
             "mus": student_teacher_actions,
-            "actions": teacher_env_actions,
+            "actions": teacher_actions,
         }
 
     def _sync_timing_device(self):
