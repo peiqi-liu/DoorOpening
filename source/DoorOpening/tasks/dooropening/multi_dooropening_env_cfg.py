@@ -594,7 +594,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "base_rot_target_noise": (0.0, 0.005),
             "arm_target_noise": (0.0, 0.003),
             "finger_target_noise": (0.0, 0.005),
-            "target_lag_alpha": (0.0, 0.15),
+            "target_lag_alpha": (0.08, 0.2),
         },
     }
 

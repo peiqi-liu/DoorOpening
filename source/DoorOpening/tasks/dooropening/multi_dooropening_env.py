@@ -288,6 +288,7 @@ class DooropeningEnv(DirectRLEnv):
                 "finger_joint_pos_bias",
             ]
         )
+        self._lag_alpha_buf = torch.ones(self.num_envs, device=self.device)
         self._door_nominal_joint_stiffness = self.door.data.joint_stiffness.clone()
         self._door_nominal_joint_damping = self.door.data.joint_damping.clone()
         self._door_handle_effort_limits = torch.full(
@@ -856,7 +857,9 @@ class DooropeningEnv(DirectRLEnv):
         )
         self.extras["dr_limit/door_handle_effort_limit_min"] = handle_effort_min
         self.extras["dr_limit/door_handle_effort_limit_max"] = handle_effort_max
-        self.extras["dr_limit/target_lag_alpha"] = self._current_custom_param("pd_targets", "target_lag_alpha")
+        self.extras["dr_limit/target_lag_alpha_mean"] = self._lag_alpha_buf.mean().item()
+        self.extras["dr_limit/target_lag_alpha_min"] = self._lag_alpha_buf.min().item()
+        self.extras["dr_limit/target_lag_alpha_max"] = self._lag_alpha_buf.max().item()
 
         if not self._log_verbose_dr_metrics:
             return
@@ -945,6 +948,10 @@ class DooropeningEnv(DirectRLEnv):
             self.student_joint_pos_biases[key][env_ids, 0] = bias_limit * (
                 torch.rand(num_ids, device=self.device) - 0.5
             )
+
+        alpha_range = self.cfg.adr_custom_cfg_dict["pd_targets"]["target_lag_alpha"]
+        alpha_lo, alpha_hi = float(alpha_range[0]), float(alpha_range[1])
+        self._lag_alpha_buf[env_ids] = alpha_lo + (alpha_hi - alpha_lo) * torch.rand(num_ids, device=self.device)
 
     def _uniform_noise_from_buffers(
         self,
@@ -1164,6 +1171,13 @@ class DooropeningEnv(DirectRLEnv):
 
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
         self.robot_dof_targets[:] = self._pin_arx_targets_to_fixed_pose(self.robot_dof_targets)
+        # Apply lag filter once per policy step (paper convention: α·new + (1−α)·old,
+        # small α = more lag). _lag_alpha_buf is sampled per-env at reset from (0.08, 0.2).
+        lag_alpha = self._lag_alpha_buf.unsqueeze(-1)  # (N, 1) for broadcasting over joints
+        self.applied_robot_dof_targets[:] = (
+            lag_alpha * self.robot_dof_targets + (1.0 - lag_alpha) * self.applied_robot_dof_targets
+        )
+        self.applied_robot_dof_targets[:] = self._pin_arx_targets_to_fixed_pose(self.applied_robot_dof_targets)
         # Advance the reference once per RL/env step. IsaacLab will call _apply_action()
         # decimation times, so stepping here keeps replay duration tied to env dt instead
         # of being multiplied by decimation again.
@@ -1188,19 +1202,15 @@ class DooropeningEnv(DirectRLEnv):
             nominal_joint_stiffness=self._door_nominal_joint_stiffness,
             nominal_joint_damping=self._door_nominal_joint_damping,
         )
-        lag_alpha = self._current_custom_param("pd_targets", "target_lag_alpha")
-        applied_targets = self.robot_dof_targets.clone()
-        if lag_alpha > 0.0:
-            applied_targets = (1.0 - lag_alpha) * applied_targets + lag_alpha * self.applied_robot_dof_targets
-        # Controller-side DR is applied on the position targets after action integration.
+        # applied_robot_dof_targets already carries the lag-filtered target from _pre_physics_step.
+        # Add per-substep controller noise on top without polluting the lag history.
+        applied_targets = self.applied_robot_dof_targets.clone()
         applied_targets += self._get_policy_target_noise()
         applied_targets = self._pin_arx_targets_to_fixed_pose(applied_targets)
-        self.applied_robot_dof_targets[:] = torch.clamp(
-            applied_targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits
-        )
-        self.applied_robot_dof_targets[:] = self._pin_arx_targets_to_fixed_pose(self.applied_robot_dof_targets)
+        applied_targets = torch.clamp(applied_targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
+        applied_targets = self._pin_arx_targets_to_fixed_pose(applied_targets)
         self._enforce_fixed_arx_joint_state()
-        self.robot.set_joint_position_target(self.applied_robot_dof_targets, joint_ids=self._robot_dof_idx)
+        self.robot.set_joint_position_target(applied_targets, joint_ids=self._robot_dof_idx)
 
     def _build_observations(
         self,
