@@ -245,10 +245,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         'finger_joint_9',
         'finger_joint_10',
         'finger_joint_11',
-        'finger_joint_12',
-        'finger_joint_13',
-        'finger_joint_14',
-        'finger_joint_15',
+        # 'finger_joint_12',
+        # 'finger_joint_13',
+        # 'finger_joint_14',
+        # 'finger_joint_15',
     ]
 
     # finger_joints = [
