@@ -232,36 +232,36 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         'panda_joint7',
     ]
 
-    # finger_joints = [
-    #     'finger_joint_0',
-    #     'finger_joint_1',
-    #     'finger_joint_2',
-    #     'finger_joint_3',
-    #     'finger_joint_4',
-    #     'finger_joint_5',
-    #     'finger_joint_6',
-    #     'finger_joint_7',
-    #     'finger_joint_8',
-    #     'finger_joint_9',
-    #     'finger_joint_10',
-    #     'finger_joint_11',
-    #     'finger_joint_12',
-    #     'finger_joint_13',
-    #     'finger_joint_14',
-    #     'finger_joint_15',
-    # ]
-
     finger_joints = [
+        'finger_joint_0',
         'finger_joint_1',
         'finger_joint_2',
         'finger_joint_3',
+        'finger_joint_4',
         'finger_joint_5',
         'finger_joint_6',
         'finger_joint_7',
+        'finger_joint_8',
         'finger_joint_9',
         'finger_joint_10',
         'finger_joint_11',
+        'finger_joint_12',
+        'finger_joint_13',
+        'finger_joint_14',
+        'finger_joint_15',
     ]
+
+    # finger_joints = [
+    #     'finger_joint_1',
+    #     'finger_joint_2',
+    #     'finger_joint_3',
+    #     'finger_joint_5',
+    #     'finger_joint_6',
+    #     'finger_joint_7',
+    #     'finger_joint_9',
+    #     'finger_joint_10',
+    #     'finger_joint_11',
+    # ]
 
     arx_joints = CAMERA_JOINT_NAMES[:4]
 
@@ -458,13 +458,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=False)
 
-    # base_action_scale = 0.3
-    # arm_action_scale = 0.3
-    # finger_action_scale = 0.4
-    # arx_action_scale = 0.3
     base_action_scale = 1.0
     arm_action_scale = 0.6
-    finger_action_scale = 0.5
+    finger_action_scale = 1.5
     arx_action_scale = 0.6
 
     # Deep Mimic Reward Parameters
