@@ -12,6 +12,23 @@ import os
 import sys
 from distutils.util import strtobool
 
+# --- Hang diagnostics -------------------------------------------------------------------
+# A rank can stall inside Isaac Sim init (e.g. PhysX/CUDA GPU scene setup in sim.reset())
+# with no error. These hooks make a stuck rank self-report WHERE it is stuck:
+#   * `kill -USR1 <pid>` dumps the Python stack of every thread of that process on demand.
+#   * faulthandler.dump_traceback_later() (armed around gym.make() below) auto-dumps the
+#     stack if sim init does not finish within HANG_DUMP_SECONDS, even while the main thread
+#     is blocked in a native C call. Both write to stderr (the job's .err file).
+import faulthandler as _faulthandler
+import signal as _signal
+
+_HANG_DUMP_SECONDS = int(os.environ.get("HANG_DUMP_SECONDS", "300"))
+try:
+    _faulthandler.register(_signal.SIGUSR1, all_threads=True, chain=False)
+except Exception as _exc:  # pragma: no cover - best-effort diagnostics only
+    print(f"[WARN] could not register SIGUSR1 stack dumper: {_exc}")
+# ----------------------------------------------------------------------------------------
+
 from isaaclab.app import AppLauncher
 
 
@@ -129,6 +146,7 @@ parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy 
 parser.add_argument("--wandb-project-name", type=str, default=None, help="the wandb's project name")
 parser.add_argument("--wandb-entity", type=str, default=None, help="the entity (team) of wandb's project")
 parser.add_argument("--wandb-name", type=str, default=None, help="the name of wandb's run")
+parser.add_argument("--exp-name", type=str, default=None, help="experiment folder name (overrides full_experiment_name in agent config)")
 parser.add_argument(
     "--door-families",
     "--door_families",
@@ -166,9 +184,51 @@ if args_cli.video:
 # clear out sys.argv for Hydra
 sys.argv = [sys.argv[0]] + hydra_args
 
+# --- Correct the distributed CPU-thread budget (prevents PhysX physics-load deadlock) ----
+# IsaacLab's AppLauncher sizes the carb.tasking / USD-work(TBB) / OpenBLAS thread pools from
+# os.cpu_count() // WORLD_SIZE. But os.cpu_count() reports ALL node logical cores (e.g. 128),
+# ignoring the SLURM cpus-per-task cpuset. On a 15-CPU allocation that gives ~64 threads/rank
+# -> ~280 threads fighting for 15 CPUs -> a priority-inversion futex deadlock inside PhysX
+# force_load_physics_from_usd() (confirmed via live /proc: every worker thread in futex wait).
+# Patch os.cpu_count() to report the ACTUALLY-allocated CPU count so the pools are sized right.
+_ORIG_CPU_COUNT = os.cpu_count
+
+
+def _allocated_cpu_count():
+    for _env in ("ISAACLAB_ALLOCATED_CPUS", "SLURM_CPUS_PER_TASK", "SLURM_CPUS_ON_NODE"):
+        _v = os.environ.get(_env)
+        if _v and _v.isdigit() and int(_v) > 0:
+            return int(_v)
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except Exception:
+        return _ORIG_CPU_COUNT() or 1
+
+
+os.cpu_count = _allocated_cpu_count
+print(f"[INFO] os.cpu_count() patched: reporting {os.cpu_count()} allocated CPUs (node reports {_ORIG_CPU_COUNT()}) to size Isaac Sim thread pools.")
+
 # launch omniverse app
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
+
+# Disable UJITSO multi-process collision cooking. Its on-disk datastore + cooking-worker
+# subprocesses use file locking; when two distributed ranks cook collision geometry
+# concurrently against the same NFS-backed cache, PhysX wedges inside
+# force_load_physics_from_usd() (the proven deadlock frame). Forcing in-process cooking
+# removes the multi-process + disk-lock machinery at that exact step.
+try:
+    import carb as _carb
+
+    _carb_settings = _carb.settings.get_settings()
+    _carb_settings.set_bool("/physics/cooking/ujitsoCollisionCooking", False)
+    _carb_settings.set_int("/persistent/physics/cooking/ujitsoCookingMaxProcessCount", 0)
+    print(
+        "[INFO] Disabled UJITSO multiprocess collision cooking "
+        "(/physics/cooking/ujitsoCollisionCooking=False, ujitsoCookingMaxProcessCount=0)."
+    )
+except Exception as _exc:  # pragma: no cover - best-effort hardening only
+    print(f"[WARN] could not disable UJITSO cooking settings: {_exc}")
 
 """Rest everything follows."""
 
@@ -442,6 +502,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
     # specify directory for logging runs
     log_dir = agent_cfg["params"]["config"].get("full_experiment_name", datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
+    if args_cli.exp_name is not None:
+        log_dir = args_cli.exp_name
     base_experiment_name = log_dir
     if use_distributed:
         rank_tag = f"rank{global_rank:03d}_local{local_rank:03d}"
@@ -485,8 +547,69 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         verbose=True,
     )
 
+    # Serialize Isaac Sim init across local ranks so only one rank at a time runs
+    # gym.make()/sim.reset() (PhysX cooking via force_load_physics_from_usd). Concurrent
+    # cooking against the shared NFS cache is what deadlocks rank 0. Lower local ranks go
+    # first; each higher rank waits for the previous local rank's completion sentinel. The
+    # handshake is poll-based (os.path.exists) so it uses NO NFS advisory locks (the very
+    # thing that deadlocks). Sentinels are scoped per job+host to avoid stale-file matches.
+    import socket as _socket
+    import time as _time
+
+    _siminit_dir = "/workspace/DoorOpening/IsaacLab_tmp/.sim_init"
+    _siminit_token = f"{os.environ.get('SLURM_JOB_ID', 'nojob')}.{_socket.gethostname()}"
+
+    def _siminit_sentinel(lr):
+        return os.path.join(_siminit_dir, f"siminit.{_siminit_token}.local{lr:03d}.done")
+
+    if use_distributed and local_rank > 0:
+        os.makedirs(_siminit_dir, exist_ok=True)
+        _prev = _siminit_sentinel(local_rank - 1)
+        _wait_timeout = int(os.environ.get("SIM_INIT_WAIT_TIMEOUT", "1800"))
+        print(f"[INFO][rank {global_rank}] Serializing sim-init: waiting up to {_wait_timeout}s for local rank {local_rank - 1} sentinel ({_prev})...")
+        _t0 = _time.time()
+        while not os.path.exists(_prev):
+            if _time.time() - _t0 > _wait_timeout:
+                print(f"[WARNING][rank {global_rank}] Timed out after {_wait_timeout}s waiting for local rank {local_rank - 1} sim-init sentinel; proceeding anyway (rank may be hung — see its watchdog dump).")
+                break
+            _time.sleep(2.0)
+        else:
+            print(f"[INFO][rank {global_rank}] Local rank {local_rank - 1} finished sim-init; proceeding to gym.make().")
+
+    # Arm the hang watchdog: if Isaac Sim init below does not finish within HANG_DUMP_SECONDS,
+    # faulthandler dumps the stack of every thread to stderr (repeating) so a stuck rank shows
+    # exactly where it is wedged (e.g. PhysX/CUDA GPU init in sim.reset()) instead of hanging
+    # silently. Cancelled immediately after the env is created on a healthy rank.
+    print(f"[INFO][rank {global_rank}] Arming hang watchdog ({_HANG_DUMP_SECONDS}s) around gym.make(); pid={os.getpid()}.")
+    sys.stderr.flush()
+    _faulthandler.dump_traceback_later(_HANG_DUMP_SECONDS, repeat=True, file=sys.stderr)
+
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+
+    # Env created successfully — disarm the watchdog.
+    _faulthandler.cancel_dump_traceback_later()
+    print(f"[INFO][rank {global_rank}] gym.make() returned; hang watchdog disarmed.")
+
+    # Drop this local rank's completion sentinel so the next local rank may begin its sim-init.
+    if use_distributed:
+        try:
+            os.makedirs(_siminit_dir, exist_ok=True)
+            _mine = _siminit_sentinel(local_rank)
+            with open(_mine, "w") as _f:
+                _f.write(f"rank {global_rank} local {local_rank} pid {os.getpid()} sim-init done\n")
+            print(f"[INFO][rank {global_rank}] Wrote sim-init sentinel ({_mine}).")
+        except Exception as _exc:
+            print(f"[WARNING][rank {global_rank}] could not write sim-init sentinel: {_exc}")
+
+    # Barrier: wait for all ranks to finish Isaac Sim initialization before proceeding to
+    # rl-games setup. Without this, a fast rank reaches the NCCL broadcast inside
+    # "broadcasting parameters" while the slow rank is still in sim.reset(), causing an
+    # indefinite hang or TCPStore timeout on the slow rank.
+    if use_distributed and torch.distributed.is_initialized():
+        print(f"[INFO][rank {global_rank}] Waiting for all ranks to finish Isaac Sim init...")
+        torch.distributed.barrier()
+        print(f"[INFO][rank {global_rank}] All ranks ready — proceeding to rl-games setup.")
 
     # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv):
@@ -541,17 +664,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             raise ValueError("Weights and Biases entity must be specified for tracking.")
         import wandb
 
-        wandb.init(
-            project=wandb_project,
-            entity=args_cli.wandb_entity,
-            name=experiment_name,
-            sync_tensorboard=False,
-            monitor_gym=True,
-            save_code=True,
-        )
-        if not wandb.run.resumed:
-            wandb.config.update({"env_cfg": env_cfg.to_dict()})
-            wandb.config.update({"agent_cfg": agent_cfg})
+        try:
+            wandb.init(
+                project=wandb_project,
+                entity=args_cli.wandb_entity,
+                name=experiment_name,
+                sync_tensorboard=False,
+                monitor_gym=True,
+                save_code=True,
+            )
+            if not wandb.run.resumed:
+                wandb.config.update({"env_cfg": env_cfg.to_dict()})
+                wandb.config.update({"agent_cfg": agent_cfg})
+        except Exception as e:
+            print(f"[WARNING][rank 0] wandb.init() failed: {e}. Continuing without W&B tracking.")
 
     try:
         if args_cli.checkpoint is not None:

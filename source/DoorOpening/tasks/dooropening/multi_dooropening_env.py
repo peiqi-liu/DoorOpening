@@ -288,7 +288,17 @@ class DooropeningEnv(DirectRLEnv):
                 "finger_joint_pos_bias",
             ]
         )
-        self._lag_alpha_buf = torch.ones(self.num_envs, device=self.device)
+        # Action latency: the PD target applied on a step is the one computed `_action_latency_buf`
+        # env/control steps earlier. The per-env latency (in steps) is sampled at reset and ramps
+        # from 1 up to the ADR max. The history ring stores the most recent past targets, with
+        # index 0 = the target from the previous step (lag 1) and the last index = the oldest (lag max).
+        self._max_action_latency = max(
+            1, int(round(float(self.cfg.adr_custom_cfg_dict["action_latency"]["latency_steps"][1])))
+        )
+        self._action_latency_buf = torch.ones(self.num_envs, dtype=torch.long, device=self.device)
+        self._action_target_history = torch.zeros(
+            (self.num_envs, self._max_action_latency, self.num_robot_actions), device=self.device
+        )
         self._door_nominal_joint_stiffness = self.door.data.joint_stiffness.clone()
         self._door_nominal_joint_damping = self.door.data.joint_damping.clone()
         self._door_handle_effort_limits = torch.full(
@@ -708,6 +718,20 @@ class DooropeningEnv(DirectRLEnv):
         )
         return float(effort_limits[0]), float(effort_limits[1])
 
+    def _current_action_latency_bounds(self) -> tuple[int, int]:
+        """Current per-env action-latency sampling bounds, in env/control steps.
+
+        The lower bound is fixed at the configured starting latency; the upper bound ramps with
+        ADR from the starting latency up to the configured max. With ADR disabled the latency is
+        pinned to the starting value.
+        """
+        latency_range = self.cfg.adr_custom_cfg_dict["action_latency"]["latency_steps"]
+        min_lag = max(1, int(round(float(latency_range[0]))))
+        current_max = self._current_custom_param("action_latency", "latency_steps")
+        max_lag = max(min_lag, int(round(current_max)))
+        max_lag = min(max_lag, self._max_action_latency)
+        return min_lag, max_lag
+
     def _refresh_nominal_door_joint_gains(self, env_ids: torch.Tensor | None = None):
         if env_ids is None:
             self._door_nominal_joint_stiffness.copy_(self.door.data.joint_stiffness)
@@ -857,9 +881,10 @@ class DooropeningEnv(DirectRLEnv):
         )
         self.extras["dr_limit/door_handle_effort_limit_min"] = handle_effort_min
         self.extras["dr_limit/door_handle_effort_limit_max"] = handle_effort_max
-        self.extras["dr_limit/target_lag_alpha_mean"] = self._lag_alpha_buf.mean().item()
-        self.extras["dr_limit/target_lag_alpha_min"] = self._lag_alpha_buf.min().item()
-        self.extras["dr_limit/target_lag_alpha_max"] = self._lag_alpha_buf.max().item()
+        action_latency_min, action_latency_max = self._current_action_latency_bounds()
+        self.extras["dr_limit/action_latency_steps_min"] = float(action_latency_min)
+        self.extras["dr_limit/action_latency_steps_max"] = float(action_latency_max)
+        self.extras["dr_limit/action_latency_steps_mean"] = self._action_latency_buf.float().mean().item()
 
         if not self._log_verbose_dr_metrics:
             return
@@ -949,9 +974,10 @@ class DooropeningEnv(DirectRLEnv):
                 torch.rand(num_ids, device=self.device) - 0.5
             )
 
-        alpha_range = self.cfg.adr_custom_cfg_dict["pd_targets"]["target_lag_alpha"]
-        alpha_lo, alpha_hi = float(alpha_range[0]), float(alpha_range[1])
-        self._lag_alpha_buf[env_ids] = alpha_lo + (alpha_hi - alpha_lo) * torch.rand(num_ids, device=self.device)
+        min_lag, max_lag = self._current_action_latency_bounds()
+        self._action_latency_buf[env_ids] = torch.randint(
+            min_lag, max_lag + 1, (num_ids,), device=self.device
+        )
 
     def _uniform_noise_from_buffers(
         self,
@@ -1155,6 +1181,22 @@ class DooropeningEnv(DirectRLEnv):
         self.applied_robot_dof_targets[:, self._target_arx_slice] = arx_joint_pos
         self.robot.write_joint_state_to_sim(arx_joint_pos, arx_joint_vel, joint_ids=self._robot_arx_dof_idx)
 
+    def _apply_action_latency(self, new_targets: torch.Tensor) -> torch.Tensor:
+        """Return the target to apply this step after a per-env action delay, then record the new one.
+
+        ``_action_target_history[:, k]`` holds the target computed ``k + 1`` steps ago, so the target
+        applied for an env with latency ``L`` is ``_action_target_history[:, L - 1]``. After reading it
+        out, the freshly computed ``new_targets`` is pushed to the front of the history and the oldest
+        entry is dropped.
+        """
+        lag_idx = (self._action_latency_buf - 1).clamp(0, self._max_action_latency - 1)
+        env_idx = torch.arange(self.num_envs, device=self.device)
+        applied = self._action_target_history[env_idx, lag_idx]
+        self._action_target_history = torch.cat(
+            [new_targets.unsqueeze(1), self._action_target_history[:, :-1]], dim=1
+        )
+        return applied
+
     def _pre_physics_step(self, actions: torch.Tensor):
         # delta actions
         self.scaled_actions = self._scale_actions(actions)
@@ -1171,12 +1213,10 @@ class DooropeningEnv(DirectRLEnv):
 
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
         self.robot_dof_targets[:] = self._pin_arx_targets_to_fixed_pose(self.robot_dof_targets)
-        # Apply lag filter once per policy step (paper convention: α·new + (1−α)·old,
-        # small α = more lag). _lag_alpha_buf is sampled per-env at reset from (0.08, 0.2).
-        lag_alpha = self._lag_alpha_buf.unsqueeze(-1)  # (N, 1) for broadcasting over joints
-        self.applied_robot_dof_targets[:] = (
-            lag_alpha * self.robot_dof_targets + (1.0 - lag_alpha) * self.applied_robot_dof_targets
-        )
+        # Action latency: apply the target the policy produced `_action_latency_buf` env steps ago
+        # (sampled per-env at reset, ramping from 1 step up to the ADR max). This replaces the old
+        # EMA lag filter with a true delayed-action model of the real robot's control pipeline.
+        self.applied_robot_dof_targets[:] = self._apply_action_latency(self.robot_dof_targets)
         self.applied_robot_dof_targets[:] = self._pin_arx_targets_to_fixed_pose(self.applied_robot_dof_targets)
         # Advance the reference once per RL/env step. IsaacLab will call _apply_action()
         # decimation times, so stepping here keeps replay duration tied to env dt instead
@@ -2059,6 +2099,7 @@ class DooropeningEnv(DirectRLEnv):
 
             self.robot_dof_targets[env_ids, :] = self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]]
             self.applied_robot_dof_targets[env_ids, :] = self.robot_dof_targets[env_ids, :]
+            self._action_target_history[env_ids] = self.robot_dof_targets[env_ids].unsqueeze(1)
             self.episode_reached_last_frame[env_ids] = False
             super()._reset_idx(env_ids)
             self._sample_door_handle_effort_limits(env_ids)
@@ -2110,6 +2151,7 @@ class DooropeningEnv(DirectRLEnv):
         # self.last_actions[env_ids] = 0.0
         self.robot_dof_targets[env_ids, :] = self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]]
         self.applied_robot_dof_targets[env_ids, :] = self.robot_dof_targets[env_ids, :]
+        self._action_target_history[env_ids] = self.robot_dof_targets[env_ids].unsqueeze(1)
         self.episode_reached_last_frame[env_ids] = False
         super()._reset_idx(env_ids)
         self._sample_door_handle_effort_limits(env_ids)

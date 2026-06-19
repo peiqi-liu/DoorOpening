@@ -590,7 +590,14 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "base_rot_target_noise": (0.0, 0.005),
             "arm_target_noise": (0.0, 0.003),
             "finger_target_noise": (0.0, 0.005),
-            "target_lag_alpha": (0.08, 0.2),
+        },
+        # Action latency (in env/control steps; env dt = sim_dt * decimation = 1/30 s).
+        # The PD target applied on a given step is the one the policy produced `latency` steps
+        # earlier. ADR ramps the upper bound from 1 step up to 4 steps (~4/30 s ≈ 133 ms); the
+        # lower bound stays at 1, so latency is sampled uniformly in [1, current_max] per env at
+        # each reset. Index [0] is the starting/minimum latency, index [1] the max at full ADR.
+        "action_latency": {
+            "latency_steps": (1, 3),
         },
     }
 
