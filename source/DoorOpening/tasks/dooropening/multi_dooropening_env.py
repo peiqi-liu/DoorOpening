@@ -27,7 +27,7 @@ from DoorOpening.tasks.dooropening.dooropening_adr import DoorOpeningADR
 from DoorOpening.tasks.dooropening.multi_dooropening_env_cfg import DooropeningEnvCfg
 from DoorOpening.assets.glorbot.glorbot_cfg import glorbot_urdf_path
 from isaaclab.sensors import Camera, ContactSensor
-from DoorOpening.constants.robot_constants import CAMERA_JOINT_DEFAULT_VALUES, FULL_JOINT_NAMES, ROBOT_KEY_BODY_NAMES
+from DoorOpening.constants.robot_constants import CAMERA_JOINT_DEFAULT_VALUES, CAMERA_JOINT_NAMES, FULL_JOINT_NAMES, ROBOT_KEY_BODY_NAMES
 from DoorOpening.tasks.dooropening.contact_force_utils import DOOR_FRAME_FILTER_INDEX, get_filtered_contact_force_w
 from DoorOpening.utils.pose_utils import world_to_local
 from isaaclab.utils.math import quat_conjugate, quat_apply, quat_mul
@@ -102,6 +102,25 @@ class DooropeningEnv(DirectRLEnv):
         self.ref_arm_joint_idx = [FULL_JOINT_NAMES.index(name) for name in arm_joint_names]
         self.ref_finger_joint_idx = [FULL_JOINT_NAMES.index(name) for name in finger_joint_names]
         self.ref_arx_joint_idx = [FULL_JOINT_NAMES.index(name) for name in arx_joint_names]
+
+        # Camera (x5) joints that are NOT in the policy-tracked arx set (arx_joints covers only the
+        # first few x5 joints). These are never actuated or observed, so the articulation only
+        # PD-holds them compliantly -> they sag/oscillate under base motion and contact, swinging
+        # the wrist-mounted camera. We hold them rigidly at their default pose every step (see
+        # _enforce_fixed_camera_joint_state). They stay fully OUT of the action/observation
+        # accounting, so action_space, observation_space and teacher/student dims are unchanged.
+        extra_camera_joint_names = [name for name in CAMERA_JOINT_NAMES if name not in self.cfg.arx_joints]
+        self.num_extra_camera_joints = len(extra_camera_joint_names)
+        if self.num_extra_camera_joints > 0:
+            extra_camera_idx, extra_camera_resolved_names = self.robot.find_joints(extra_camera_joint_names)
+            self._robot_extra_camera_dof_idx = torch.tensor(extra_camera_idx, device=self.device)
+            self._robot_extra_camera_default_pos = torch.tensor(
+                [float(CAMERA_JOINT_DEFAULT_VALUES[name]) for name in extra_camera_resolved_names],
+                device=self.device,
+            )
+        else:
+            self._robot_extra_camera_dof_idx = torch.empty(0, dtype=torch.long, device=self.device)
+            self._robot_extra_camera_default_pos = torch.empty(0, device=self.device)
 
         self._robot_base_link_idx, self.robot_base_link_name = self.robot.find_bodies(self.cfg.base_link_name)
         self._door_body_idx, self.door_body_names = self.door.find_bodies(self.cfg.door_body_names)
@@ -1181,6 +1200,19 @@ class DooropeningEnv(DirectRLEnv):
         self.applied_robot_dof_targets[:, self._target_arx_slice] = arx_joint_pos
         self.robot.write_joint_state_to_sim(arx_joint_pos, arx_joint_vel, joint_ids=self._robot_arx_dof_idx)
 
+    def _enforce_fixed_camera_joint_state(self):
+        # Hold the non-arx camera (x5) joints rigidly at their default pose so the wrist-mounted
+        # camera viewpoint stays steady. These joints are outside the policy action/observation
+        # accounting, so this never touches joint actuation commanding for the policy.
+        if not self.fixed_arx_pose or self.num_extra_camera_joints <= 0:
+            return
+        cam_joint_pos = self._robot_extra_camera_default_pos.to(self.joint_pos).unsqueeze(0).expand(self.num_envs, -1)
+        cam_joint_vel = torch.zeros_like(cam_joint_pos)
+        self.joint_pos[:, self._robot_extra_camera_dof_idx] = cam_joint_pos
+        self.joint_vel[:, self._robot_extra_camera_dof_idx] = cam_joint_vel
+        self.robot.write_joint_state_to_sim(cam_joint_pos, cam_joint_vel, joint_ids=self._robot_extra_camera_dof_idx)
+        self.robot.set_joint_position_target(cam_joint_pos, joint_ids=self._robot_extra_camera_dof_idx)
+
     def _apply_action_latency(self, new_targets: torch.Tensor) -> torch.Tensor:
         """Return the target to apply this step after a per-env action delay, then record the new one.
 
@@ -1250,6 +1282,7 @@ class DooropeningEnv(DirectRLEnv):
         applied_targets = torch.clamp(applied_targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
         applied_targets = self._pin_arx_targets_to_fixed_pose(applied_targets)
         self._enforce_fixed_arx_joint_state()
+        self._enforce_fixed_camera_joint_state()
         self.robot.set_joint_position_target(applied_targets, joint_ids=self._robot_dof_idx)
 
     def _build_observations(
@@ -2087,6 +2120,11 @@ class DooropeningEnv(DirectRLEnv):
                     self._robot_arx_tuck_joint_pos_target.to(self.joint_pos).unsqueeze(0)
                 )
                 self.joint_vel[env_ids[:, None], self._robot_arx_dof_idx[None, :]] = 0.0
+            if self.fixed_arx_pose and self.num_extra_camera_joints > 0:
+                self.joint_pos[env_ids[:, None], self._robot_extra_camera_dof_idx[None, :]] = (
+                    self._robot_extra_camera_default_pos.to(self.joint_pos).unsqueeze(0)
+                )
+                self.joint_vel[env_ids[:, None], self._robot_extra_camera_dof_idx[None, :]] = 0.0
 
             self.robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
             self.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
@@ -2136,6 +2174,11 @@ class DooropeningEnv(DirectRLEnv):
                 self._robot_arx_tuck_joint_pos_target.to(self.joint_pos).unsqueeze(0)
             )
             self.joint_vel[env_ids[:, None], self._robot_arx_dof_idx[None, :]] = 0.0
+        if self.fixed_arx_pose and self.num_extra_camera_joints > 0:
+            self.joint_pos[env_ids[:, None], self._robot_extra_camera_dof_idx[None, :]] = (
+                self._robot_extra_camera_default_pos.to(self.joint_pos).unsqueeze(0)
+            )
+            self.joint_vel[env_ids[:, None], self._robot_extra_camera_dof_idx[None, :]] = 0.0
 
         self.robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)

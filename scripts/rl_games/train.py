@@ -195,14 +195,23 @@ _ORIG_CPU_COUNT = os.cpu_count
 
 
 def _allocated_cpu_count():
+    # 1) Explicit allocation hints: present only on HPC/SLURM or containers (where
+    #    os.cpu_count() overcounts). Absent on a normal workstation -> fall through.
     for _env in ("ISAACLAB_ALLOCATED_CPUS", "SLURM_CPUS_PER_TASK", "SLURM_CPUS_ON_NODE"):
         _v = os.environ.get(_env)
         if _v and _v.isdigit() and int(_v) > 0:
             return int(_v)
-    try:
-        return max(1, len(os.sched_getaffinity(0)))
-    except Exception:
-        return _ORIG_CPU_COUNT() or 1
+    # 2) Linux cpuset affinity: correct on bare-metal/non-HPC and honors cgroup/Docker limits.
+    _getaffinity = getattr(os, "sched_getaffinity", None)
+    if _getaffinity is not None:
+        try:
+            _n = len(_getaffinity(0))
+            if _n > 0:
+                return _n
+        except OSError:
+            pass
+    # 3) Last resort (e.g. macOS/Windows, where sched_getaffinity is missing): full core count.
+    return _ORIG_CPU_COUNT() or 1
 
 
 os.cpu_count = _allocated_cpu_count
