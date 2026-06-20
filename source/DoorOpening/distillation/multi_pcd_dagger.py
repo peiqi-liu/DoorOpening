@@ -330,6 +330,18 @@ class Dagger:
         self.push_pull_condition_enabled = False
         self.push_pull_condition_obs_key = "push_pull_cond"
         self.push_pull_condition_source = "oracle"
+        # Independent, additive left/right (handle_side) oracle one-hot conditioning. Coexists with
+        # push/pull; oracle-only (no predicted source) and no temporal history input.
+        self.left_right_condition_enabled = False
+        self.left_right_condition_obs_key = "left_right_cond"
+        self.left_right_family_one_hot = None
+        self.latest_fraction_left = 0.0
+        self.latest_fraction_right = 0.0
+        # How aux_handle_pos is seeded at the first rollout step after each reset:
+        # "zeros" -> seed the aux feedback buffer with zeros; "ground_truth" -> seed with the
+        # sim handle pose. After the first step the predicted aux overwrites the buffer either way.
+        self.aux_handle_init_source = "zeros"
+        self.aux_handle_init_noise_m = None
         self.push_pull_detach_predicted_condition = True
         self.push_pull_family_one_hot = None
         self.push_pull_condition_buffer = None
@@ -475,6 +487,12 @@ class Dagger:
             getattr(self.student_model, "push_pull_detach_predicted_condition", True)
         )
         self.push_pull_condition_cfg = dict(getattr(self.student_model, "push_pull_condition_cfg", {}) or {})
+        self.left_right_condition_enabled = bool(
+            getattr(self.student_model, "left_right_condition_enabled", False)
+        )
+        self.left_right_condition_obs_key = str(
+            getattr(self.student_model, "left_right_condition_obs_key", "left_right_cond")
+        )
         self.proprio_temporal_enabled = bool(
             getattr(
                 self.student_model,
@@ -587,7 +605,9 @@ class Dagger:
         self.state_encoders_keys = tuple(
             key
             for key in all_state_encoder_keys
-            if key not in self.proprio_temporal_covered_state_keys and key != self.push_pull_condition_obs_key
+            if key not in self.proprio_temporal_covered_state_keys
+            and key != self.push_pull_condition_obs_key
+            and key != self.left_right_condition_obs_key
         )
         self.pcd_encoders_keys = tuple(
             key
@@ -656,6 +676,32 @@ class Dagger:
             raise ValueError("Aux prediction requires at least one enabled aux_* state encoder.")
         self.aux_feedback_to_policy = self.has_aux_input and self.has_aux_prediction and bool(
             self.runtime_cfg.get("aux_feedback_to_policy", True)
+        )
+        self.aux_handle_init_source = str(
+            self.runtime_cfg.get("aux_handle_init_source", "zeros")
+        ).lower()
+        allowed_aux_handle_init = {"zeros", "ground_truth"}
+        if self.aux_handle_init_source not in allowed_aux_handle_init:
+            raise ValueError(
+                f"dagger.aux_handle_init_source must be one of {sorted(allowed_aux_handle_init)}, "
+                f"got '{self.aux_handle_init_source}'."
+            )
+        if self.aux_handle_init_source == "ground_truth":
+            # Seeding the buffer with sim GT only matters on the first step after a reset, and only
+            # if that buffer is actually fed to the policy (it is overwritten by predictions afterwards).
+            if not self.has_aux_input:
+                raise ValueError(
+                    "dagger.aux_handle_init_source='ground_truth' requires an enabled aux_* state encoder."
+                )
+            if not self.aux_feedback_to_policy:
+                raise ValueError(
+                    "dagger.aux_handle_init_source='ground_truth' requires aux_feedback_to_policy=true; "
+                    "otherwise the policy never sees the seeded handle pose."
+                )
+        # Per-axis uniform +/- noise (meters) on the GT handle-pose seed, so the first step never sees
+        # a perfectly accurate pose. Applied only to the input seed, never to the aux regression target.
+        self.aux_handle_init_noise_m = self._parse_aux_handle_init_noise(
+            self.runtime_cfg.get("aux_handle_init_noise_m", 0.0)
         )
         self.aux_buffer = None
         if self.has_aux_input:
@@ -858,14 +904,18 @@ class Dagger:
 
     def _init_push_pull_semantics_and_targets(self):
         self.push_pull_family_one_hot = None
+        self.left_right_family_one_hot = None
         self.mode_family_direction_ids = None
         self.latest_fraction_push = 0.0
         self.latest_fraction_pull = 0.0
-        if not (
+        self.latest_fraction_left = 0.0
+        self.latest_fraction_right = 0.0
+        push_pull_needed = (
             self.push_pull_condition_enabled
             or self.push_pull_condition_perturb_enabled
             or self.mode_prediction_enabled
-        ):
+        )
+        if not (push_pull_needed or self.left_right_condition_enabled):
             return
 
         if self.mode_prediction_enabled and self.num_modes != 2:
@@ -874,44 +924,83 @@ class Dagger:
             )
 
         self.mode_family_semantics = self._load_family_mode_semantics()
-        direction_name_to_id = {"pull": 0, "push": 1}
+
+        if push_pull_needed:
+            direction_name_to_id = {"pull": 0, "push": 1}
+            family_one_hot = torch.zeros(
+                (len(DOOR_FAMILY_NAMES), 2),
+                dtype=torch.float32,
+                device=self.device,
+            )
+            if self.mode_prediction_enabled:
+                self.mode_family_direction_ids = torch.full(
+                    (len(DOOR_FAMILY_NAMES),),
+                    -1,
+                    dtype=torch.long,
+                    device=self.device,
+                )
+
+            missing_semantics = []
+            for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
+                _, opening_direction = self.mode_family_semantics.get(family_name, (None, None))
+                if opening_direction == "push":
+                    family_one_hot[family_id] = torch.tensor(
+                        [1.0, 0.0], dtype=torch.float32, device=self.device
+                    )
+                    if self.mode_family_direction_ids is not None:
+                        self.mode_family_direction_ids[family_id] = direction_name_to_id[opening_direction]
+                elif opening_direction == "pull":
+                    family_one_hot[family_id] = torch.tensor(
+                        [0.0, 1.0], dtype=torch.float32, device=self.device
+                    )
+                    if self.mode_family_direction_ids is not None:
+                        self.mode_family_direction_ids[family_id] = direction_name_to_id[opening_direction]
+                else:
+                    missing_semantics.append(family_name)
+
+            if missing_semantics:
+                raise RuntimeError(
+                    "Could not infer push/pull semantics for active door families: "
+                    f"{missing_semantics}."
+                )
+            self.push_pull_family_one_hot = family_one_hot
+
+        if self.left_right_condition_enabled:
+            self.left_right_family_one_hot = self._build_family_left_right_one_hot()
+
+    def _build_family_left_right_one_hot(self):
+        # Per-family oracle one-hot from handle_side metadata: index 0 = left, index 1 = right.
+        # (min -> left, max -> right via the alias map in _load_family_mode_semantics.)
         family_one_hot = torch.zeros(
             (len(DOOR_FAMILY_NAMES), 2),
             dtype=torch.float32,
             device=self.device,
         )
-        if self.mode_prediction_enabled:
-            self.mode_family_direction_ids = torch.full(
-                (len(DOOR_FAMILY_NAMES),),
-                -1,
-                dtype=torch.long,
-                device=self.device,
-            )
-
         missing_semantics = []
         for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
-            _, opening_direction = self.mode_family_semantics.get(family_name, (None, None))
-            if opening_direction == "push":
-                family_one_hot[family_id] = torch.tensor(
-                    [1.0, 0.0], dtype=torch.float32, device=self.device
-                )
-                if self.mode_family_direction_ids is not None:
-                    self.mode_family_direction_ids[family_id] = direction_name_to_id[opening_direction]
-            elif opening_direction == "pull":
-                family_one_hot[family_id] = torch.tensor(
-                    [0.0, 1.0], dtype=torch.float32, device=self.device
-                )
-                if self.mode_family_direction_ids is not None:
-                    self.mode_family_direction_ids[family_id] = direction_name_to_id[opening_direction]
+            handle_side, _ = self.mode_family_semantics.get(family_name, (None, None))
+            if handle_side == "left":
+                family_one_hot[family_id, 0] = 1.0
+            elif handle_side == "right":
+                family_one_hot[family_id, 1] = 1.0
             else:
                 missing_semantics.append(family_name)
-
         if missing_semantics:
             raise RuntimeError(
-                "Could not infer push/pull semantics for active door families: "
+                "Could not infer left/right (handle_side) semantics for active door families: "
                 f"{missing_semantics}."
             )
-        self.push_pull_family_one_hot = family_one_hot
+        return family_one_hot
+
+    def _build_gt_left_right_condition(self):
+        if self.left_right_family_one_hot is None:
+            raise RuntimeError("Left/right condition targets are not initialized.")
+        if self.env_family_ids.ndim != 1 or self.env_family_ids.shape[0] != self.num_envs:
+            raise RuntimeError(
+                f"Expected env_family_ids shape [{self.num_envs}], got {tuple(self.env_family_ids.shape)}."
+            )
+        left_right_cond = self.left_right_family_one_hot[self.env_family_ids.long()]
+        return left_right_cond.to(device=self.device, dtype=torch.float32)
 
     def _build_gt_push_pull_condition(self):
         if self.push_pull_family_one_hot is None:
@@ -1923,7 +2012,7 @@ class Dagger:
         target = self._get_implemented_action_vector().detach()
         base_vel = self._get_student_base_velocity_vector().detach()
         timestamp = self._get_current_time_s()
-        aux_handle = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
+        aux_handle = self._build_seed_temporal_aux_handle()
         push_pull_belief = self._build_initial_temporal_push_pull_belief()
         self._validate_temporal_history_buffer_shape("temporal_aux_handle_history", self.temporal_aux_handle_history, 3)
         self._validate_temporal_history_buffer_shape(
@@ -2262,15 +2351,73 @@ class Dagger:
     def _get_aux_target(self, current_abs_aux):
         return current_abs_aux
 
+    def _parse_aux_handle_init_noise(self, raw):
+        # Scalar bound (meters) on the total Euclidean error of the GT handle-pose seed.
+        # Returns a non-negative float, or None when noise is disabled (zero).
+        if raw is None:
+            return None
+        value = float(raw)
+        if value < 0.0:
+            raise ValueError("dagger.aux_handle_init_noise_m must be non-negative.")
+        if value == 0.0:
+            return None
+        return value
+
+    def _apply_aux_handle_init_noise(self, handle_pos):
+        # Fresh per-env noise: a random direction (uniform on the unit sphere) scaled by a magnitude
+        # in [0, bound], so the total Euclidean error of the seed is at most aux_handle_init_noise_m.
+        if self.aux_handle_init_noise_m is None or handle_pos is None:
+            return handle_pos
+        direction = torch.randn_like(handle_pos)
+        direction = direction / direction.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+        magnitude = torch.rand(
+            handle_pos.shape[:-1] + (1,), dtype=handle_pos.dtype, device=handle_pos.device
+        ) * self.aux_handle_init_noise_m
+        return handle_pos + direction * magnitude
+
+    def _build_seed_aux_buffer_values(self):
+        # Value the aux feedback buffer is reset to at the first rollout step after each reset.
+        # "zeros": classic behavior. "ground_truth": the (noised) sim handle pose, fed only on that
+        # first step (predictions overwrite the buffer afterwards, so all later steps stay predicted).
+        if self.aux_handle_init_source == "ground_truth":
+            aux_values = self._get_aux_state_values()
+            if "aux_handle_pos" in aux_values:
+                aux_values = OrderedDict(aux_values)
+                aux_values["aux_handle_pos"] = self._apply_aux_handle_init_noise(
+                    aux_values["aux_handle_pos"]
+                )
+            seed = self._stack_aux_state_values(aux_values)
+            if seed is None:
+                raise RuntimeError(
+                    "aux_handle_init_source='ground_truth' could not build a sim aux seed vector."
+                )
+            return seed.to(device=self.device, dtype=torch.float32)
+        return torch.zeros((self.num_envs, self.aux_input_dim), dtype=torch.float32, device=self.device)
+
+    def _build_seed_temporal_aux_handle(self):
+        # Mirror the aux feedback buffer seed for the temporal aux_handle_pos history window so the
+        # first post-reset step is consistent regardless of whether the temporal field is consumed.
+        if (
+            self.aux_handle_init_source == "ground_truth"
+            and self.has_aux_input
+            and "aux_handle_pos" in self.aux_state_specs
+        ):
+            value = self._get_aux_state_values().get("aux_handle_pos")
+            if value is not None:
+                value = self._apply_aux_handle_init_noise(value)
+                return value.to(device=self.device, dtype=torch.float32)
+        return torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
+
     def _seed_aux_buffer(self, env_ids=None):
         if self.aux_buffer is None:
             return
+        seed = self._build_seed_aux_buffer_values()
         if env_ids is None:
-            self.aux_buffer.zero_()
+            self.aux_buffer[:] = seed
             return
         if env_ids.numel() == 0:
             return
-        self.aux_buffer[env_ids] = 0.0
+        self.aux_buffer[env_ids] = seed[env_ids]
 
     def _init_pointcloud_assets(self):
         asset_index_by_dir = {
@@ -3967,6 +4114,12 @@ class Dagger:
                 )
             obs[self.push_pull_condition_obs_key] = push_pull_cond
 
+        if self.left_right_condition_enabled:
+            left_right_cond = self._build_gt_left_right_condition()
+            self.latest_fraction_left = float(left_right_cond[:, 0].mean().detach().cpu().item())
+            self.latest_fraction_right = float(left_right_cond[:, 1].mean().detach().cpu().item())
+            obs[self.left_right_condition_obs_key] = left_right_cond
+
         if self.proprio_temporal_enabled:
             if self.proprio_temporal_obs_key is None:
                 raise RuntimeError("temporal_state_encoders are enabled but no observation key is configured.")
@@ -4299,6 +4452,9 @@ class Dagger:
                     print("Push/Pull Pred Acc:", self.latest_push_pull_pred_acc)
                 print("Push/Pull Perturbed To Push Count:", self.latest_push_pull_perturb_to_push_count)
                 print("Push/Pull Perturbed To Pull Count:", self.latest_push_pull_perturb_to_pull_count)
+            if self.left_right_condition_enabled:
+                print("Fraction Left:", self.latest_fraction_left)
+                print("Fraction Right:", self.latest_fraction_right)
             print("Temporal Aux Handle Enabled:", bool(self.temporal_aux_handle_enabled))
             print("Temporal Push/Pull Belief Enabled:", bool(self.temporal_push_pull_belief_enabled))
             if self.temporal_push_pull_belief_enabled:
@@ -4384,6 +4540,9 @@ class Dagger:
                 metrics["stats/push_pull_pred_acc"] = self.latest_push_pull_pred_acc
             metrics["stats/push_pull_perturb_to_push_count"] = self.latest_push_pull_perturb_to_push_count
             metrics["stats/push_pull_perturb_to_pull_count"] = self.latest_push_pull_perturb_to_pull_count
+        if self.left_right_condition_enabled:
+            metrics["stats/fraction_left"] = self.latest_fraction_left
+            metrics["stats/fraction_right"] = self.latest_fraction_right
         if episode_reward is not None:
             metrics["stats/episode_reward"] = episode_reward
         if episode_length is not None:

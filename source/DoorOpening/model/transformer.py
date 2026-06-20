@@ -419,6 +419,7 @@ class PCDTransformer(BaseModel):
         temporal_state_encoders=None,
         proprio_temporal_encoder=None,
         push_pull_condition=None,
+        left_right_condition=None,
     ):
         super().__init__(
             normalize_state=normalize_state,
@@ -479,6 +480,24 @@ class PCDTransformer(BaseModel):
             self._configure_push_pull_condition_state_encoder()
         elif explicit_push_pull_cfg:
             self.state_encoders_cfg.pop(self.push_pull_condition_obs_key, None)
+        # Independent, additive left/right (handle_side) oracle one-hot conditioning. Mirrors the
+        # push/pull one-hot channel, but has no predicted source and no temporal history input.
+        explicit_left_right_cfg = left_right_condition is not None
+        self.left_right_condition_cfg = dict(left_right_condition or {})
+        self.left_right_condition_obs_key = str(
+            self.left_right_condition_cfg.get("obs_key", "left_right_cond")
+        )
+        state_encoder_has_left_right = (
+            self.left_right_condition_obs_key in self.state_encoders_cfg
+            and bool(self.state_encoders_cfg[self.left_right_condition_obs_key].get("use_state", False))
+        )
+        self.left_right_condition_enabled = bool(
+            self.left_right_condition_cfg.get("enabled", False)
+        ) or (not explicit_left_right_cfg and state_encoder_has_left_right)
+        if self.left_right_condition_enabled:
+            self._configure_left_right_condition_state_encoder()
+        elif explicit_left_right_cfg:
+            self.state_encoders_cfg.pop(self.left_right_condition_obs_key, None)
         self.mode_prediction_cfg = mode_prediction or {}
         self.mode_prediction_enabled = bool(self.mode_prediction_cfg.get("enabled", False))
         self.num_modes = int(self.mode_prediction_cfg.get("num_modes", 4))
@@ -638,6 +657,46 @@ class PCDTransformer(BaseModel):
         encoder_cfg.setdefault(
             "use_layer_norm",
             bool(self.push_pull_condition_cfg.get("use_layer_norm", False)),
+        )
+
+    def _configure_left_right_condition_state_encoder(self):
+        input_dim = int(self.left_right_condition_cfg.get("input_dim", 2))
+        if input_dim != 2:
+            raise ValueError("left_right_condition.input_dim must be 2.")
+
+        encoder_cfg = self.state_encoders_cfg.get(self.left_right_condition_obs_key)
+        if encoder_cfg is None:
+            self.state_encoders_cfg[self.left_right_condition_obs_key] = {
+                "input_dim": 2,
+                "hidden_dims": list(
+                    self.left_right_condition_cfg.get("hidden_dims", [64, self.hidden_dim])
+                ),
+                "dropout": float(self.left_right_condition_cfg.get("dropout", 0.0)),
+                "use_state": True,
+                "activation": self.left_right_condition_cfg.get("activation", "relu"),
+                "use_layer_norm": bool(self.left_right_condition_cfg.get("use_layer_norm", False)),
+            }
+            return
+
+        if int(encoder_cfg.get("input_dim", -1)) != 2:
+            raise ValueError(
+                f"State encoder '{self.left_right_condition_obs_key}' must have input_dim=2 "
+                "when left_right_condition is enabled."
+            )
+        if not bool(encoder_cfg.get("use_state", False)):
+            raise ValueError(
+                f"State encoder '{self.left_right_condition_obs_key}' must set use_state=true "
+                "when left_right_condition is enabled."
+            )
+        encoder_cfg.setdefault(
+            "hidden_dims",
+            list(self.left_right_condition_cfg.get("hidden_dims", [64, self.hidden_dim])),
+        )
+        encoder_cfg.setdefault("dropout", float(self.left_right_condition_cfg.get("dropout", 0.0)))
+        encoder_cfg.setdefault("activation", self.left_right_condition_cfg.get("activation", "relu"))
+        encoder_cfg.setdefault(
+            "use_layer_norm",
+            bool(self.left_right_condition_cfg.get("use_layer_norm", False)),
         )
 
     def load_checkpoint(self, checkpoint_path):
@@ -936,6 +995,11 @@ class PCDTransformer(BaseModel):
                             f"{self.push_pull_condition_obs_key} is required when "
                             "push_pull_condition is enabled."
                         )
+                    if self.left_right_condition_enabled and key == self.left_right_condition_obs_key:
+                        raise RuntimeError(
+                            f"{self.left_right_condition_obs_key} is required when "
+                            "left_right_condition is enabled."
+                        )
                     raise RuntimeError(f"Observation is missing '{key}'.")
                 if self.push_pull_condition_enabled and key == self.push_pull_condition_obs_key:
                     condition = obs_dict[key]
@@ -943,6 +1007,13 @@ class PCDTransformer(BaseModel):
                         raise RuntimeError(
                             f"{self.push_pull_condition_obs_key} must have shape [B, 2] when "
                             "push_pull_condition is enabled."
+                        )
+                if self.left_right_condition_enabled and key == self.left_right_condition_obs_key:
+                    condition = obs_dict[key]
+                    if not isinstance(condition, torch.Tensor) or condition.ndim != 2 or condition.shape[-1] != 2:
+                        raise RuntimeError(
+                            f"{self.left_right_condition_obs_key} must have shape [B, 2] when "
+                            "left_right_condition is enabled."
                         )
                 tokens = self.encoders[key](obs_dict[key])
                 if len(tokens.shape) == 2:

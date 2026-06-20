@@ -27,6 +27,17 @@ push_pull_condition:
   dropout: 0.0
   use_layer_norm: true
 
+left_right_condition:
+  # Additive oracle one-hot for handle side (left/right), independent of push/pull. Oracle only
+  # (no predicted source) and no temporal history input. Flip enabled to true to turn it on; it
+  # auto-creates its own state encoder under obs_key from the hidden_dims below.
+  enabled: true
+  obs_key: left_right_cond
+  input_dim: 2
+  hidden_dims: [64, 256]
+  dropout: 0.0
+  use_layer_norm: true
+
 scene_door_num_points: 30000  # GT door/model points cached in the scene before any sensor rendering.
 local_pcd_range: [1.2, 0.25, 0.25]
 x_direction_cutoff: -0.5
@@ -137,6 +148,8 @@ dagger:
   teacher_forcing_transition_iters: 18000
   teacher_forcing_min_beta: 0.0
   aux_feedback_to_policy: true  # When false, aux input stays zero instead of feeding back predictions.
+  aux_handle_init_source: zeros  # First-step handle-pose seed: "zeros" or "ground_truth". With "ground_truth" the sim handle pose is fed only on the first step after each reset; predictions take over from step 1. Requires aux_feedback_to_policy: true.
+  aux_handle_init_noise_m: 0.10  # Bound (m) on the TOTAL Euclidean error of the ground_truth handle-pose seed: random direction scaled by a magnitude in [0, this]. 0 = exact GT. Input seed only, never the aux target.
   prediction_training:
     loss_window_start: 40
     loss_window_end: 100
