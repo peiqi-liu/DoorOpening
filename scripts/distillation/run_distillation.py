@@ -7,6 +7,19 @@ import sys
 import types
 from distutils.util import strtobool
 
+# --- Hang diagnostics -------------------------------------------------------------------
+# A rank can stall inside Isaac Sim init (e.g. PhysX/CUDA GPU scene setup in sim.reset())
+# with no error. `kill -USR1 <pid>` dumps the Python stack of every thread of that process
+# on demand (writes to stderr / the job's .err file). Passive; changes no runtime behavior.
+import faulthandler as _faulthandler
+import signal as _signal
+
+try:
+    _faulthandler.register(_signal.SIGUSR1, all_threads=True, chain=False)
+except Exception as _exc:  # pragma: no cover - best-effort diagnostics only
+    print(f"[WARN] could not register SIGUSR1 stack dumper: {_exc}")
+# ----------------------------------------------------------------------------------------
+
 import yaml
 from isaaclab.app import AppLauncher
 
@@ -148,6 +161,40 @@ if args_cli.video or pointcloud_source == "depth":
 
 # clear out sys.argv for Hydra
 sys.argv = [sys.argv[0]] + hydra_args
+
+# --- Correct the distributed CPU-thread budget (prevents PhysX physics-load deadlock) ----
+# IsaacLab's AppLauncher sizes the carb.tasking / USD-work(TBB) / OpenBLAS thread pools from
+# os.cpu_count() // WORLD_SIZE. But os.cpu_count() reports ALL node logical cores (e.g. 128),
+# ignoring the SLURM cpus-per-task cpuset. On a 15-CPU allocation that gives ~64 threads/rank
+# -> ~280 threads fighting for 15 CPUs -> a priority-inversion futex deadlock inside PhysX
+# force_load_physics_from_usd() (confirmed via live /proc: every worker thread in futex wait).
+# Patch os.cpu_count() to report the ACTUALLY-allocated CPU count so the pools are sized right.
+_ORIG_CPU_COUNT = os.cpu_count
+
+
+def _allocated_cpu_count():
+    # 1) Explicit allocation hints: present only on HPC/SLURM or containers (where
+    #    os.cpu_count() overcounts). Absent on a normal workstation -> fall through.
+    for _env in ("ISAACLAB_ALLOCATED_CPUS", "SLURM_CPUS_PER_TASK", "SLURM_CPUS_ON_NODE"):
+        _v = os.environ.get(_env)
+        if _v and _v.isdigit() and int(_v) > 0:
+            return int(_v)
+    # 2) Linux cpuset affinity: correct on bare-metal/non-HPC and honors cgroup/Docker limits.
+    _getaffinity = getattr(os, "sched_getaffinity", None)
+    if _getaffinity is not None:
+        try:
+            _n = len(_getaffinity(0))
+            if _n > 0:
+                return _n
+        except OSError:
+            pass
+    # 3) Last resort (e.g. macOS/Windows, where sched_getaffinity is missing): full core count.
+    return _ORIG_CPU_COUNT() or 1
+
+
+os.cpu_count = _allocated_cpu_count
+print(f"[INFO] os.cpu_count() patched: reporting {os.cpu_count()} allocated CPUs (node reports {_ORIG_CPU_COUNT()}) to size Isaac Sim thread pools.")
+
 # launch omniverse app
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app

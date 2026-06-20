@@ -5,7 +5,7 @@ dropout: 0.0
 normalize_state: True
 normalize_action: True
 action_space: "absolute"
-action_dim: 19
+action_dim: 22
 aux_weight: 0.1
 mode_prediction:
   enabled: false
@@ -85,7 +85,7 @@ state_encoders_cfg:
     dropout: 0.0
     use_state: true
   q_hand:
-    input_dim: 9
+    input_dim: 12
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
@@ -111,7 +111,7 @@ state_encoders_cfg:
     dropout: 0.0
     use_state: true
   target_err_hand:
-    input_dim: 9
+    input_dim: 12
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
