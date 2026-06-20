@@ -22,7 +22,6 @@ from distutils.util import strtobool
 import faulthandler as _faulthandler
 import signal as _signal
 
-_HANG_DUMP_SECONDS = int(os.environ.get("HANG_DUMP_SECONDS", "300"))
 try:
     _faulthandler.register(_signal.SIGUSR1, all_threads=True, chain=False)
 except Exception as _exc:  # pragma: no cover - best-effort diagnostics only
@@ -554,9 +553,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # handshake is poll-based (os.path.exists) so it uses NO NFS advisory locks (the very
     # thing that deadlocks). Sentinels are scoped per job+host to avoid stale-file matches.
     import socket as _socket
+    import tempfile as _tempfile
     import time as _time
 
-    _siminit_dir = "/workspace/DoorOpening/IsaacLab_tmp/.sim_init"
+    _siminit_dir = os.environ.get(
+        "SIM_INIT_DIR",
+        os.path.join(_tempfile.gettempdir(), "DoorOpening_sim_init"),
+    )
     _siminit_token = f"{os.environ.get('SLURM_JOB_ID', 'nojob')}.{_socket.gethostname()}"
 
     def _siminit_sentinel(lr):
@@ -576,20 +579,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         else:
             print(f"[INFO][rank {global_rank}] Local rank {local_rank - 1} finished sim-init; proceeding to gym.make().")
 
-    # Arm the hang watchdog: if Isaac Sim init below does not finish within HANG_DUMP_SECONDS,
-    # faulthandler dumps the stack of every thread to stderr (repeating) so a stuck rank shows
-    # exactly where it is wedged (e.g. PhysX/CUDA GPU init in sim.reset()) instead of hanging
-    # silently. Cancelled immediately after the env is created on a healthy rank.
-    print(f"[INFO][rank {global_rank}] Arming hang watchdog ({_HANG_DUMP_SECONDS}s) around gym.make(); pid={os.getpid()}.")
-    sys.stderr.flush()
-    _faulthandler.dump_traceback_later(_HANG_DUMP_SECONDS, repeat=True, file=sys.stderr)
-
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
-
-    # Env created successfully — disarm the watchdog.
-    _faulthandler.cancel_dump_traceback_later()
-    print(f"[INFO][rank {global_rank}] gym.make() returned; hang watchdog disarmed.")
 
     # Drop this local rank's completion sentinel so the next local rank may begin its sim-init.
     if use_distributed:

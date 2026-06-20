@@ -415,6 +415,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     play_env = env.unwrapped
     play_env.ref_motion_lib.reset_from_start = True
     play_env.early_stopping = args_cli.enable_early_stopping
+    play_env.common_step_counter = int(play_env.adr_reset_progress_total)
     print(f"[INFO] Play early stopping enabled: {play_env.early_stopping}")
 
     pointcloud_camera_state = None

@@ -479,6 +479,7 @@ def state_machine_offline_right_pull_door(
 
     palm_target_pos = board_pos.clone()
     # palm_target_pos[:, 0] += push_contact_x_offset
+    palm_target_pos[:, 1] += 0.05
     palm_target_pos[:, 2] += push_contact_z_offset
     palm_target_pose = _make_pose(palm_target_pos, push_palm_rot)
 
@@ -829,7 +830,7 @@ def state_machine_offline_left_pull_door(
     )
     safe_open_hand_q = open_hand(1.0).to(q_robot.device)
     push_palm_rot = get_rotation_quat(0.0, 0.0, math.pi / 2, device)
-    retreat_local_x = 0.10
+    retreat_local_x = 0.18
     retreat_local_y = -0.42
     retreat_z_lift = 0.04
     push_contact_x_offset = -0.3
