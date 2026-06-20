@@ -438,6 +438,40 @@ def backproject_depth_to_world_from_pose(
 
 
 @torch.no_grad()
+def build_depth_blur_kernel2d(kernel_px: int, sigma_px: float, device, dtype):
+    """Separable Gaussian (box if sigma<=0) blur kernel for a depth image, returned as ((1,1,k,k), pad)."""
+    k = int(kernel_px)
+    if k % 2 == 0:
+        k += 1
+    coords = torch.arange(k, device=device, dtype=dtype) - (k - 1) / 2.0
+    if sigma_px and sigma_px > 0.0:
+        ker1d = torch.exp(-0.5 * (coords / float(sigma_px)) ** 2)
+    else:
+        ker1d = torch.ones(k, device=device, dtype=dtype)
+    ker1d = ker1d / ker1d.sum()
+    ker2d = (ker1d[:, None] * ker1d[None, :]).reshape(1, 1, k, k)
+    return ker2d, k // 2
+
+
+@torch.no_grad()
+def apply_depth_spatial_blur(depth: torch.Tensor, kernel2d: torch.Tensor, pad: int):
+    """Edge-bleeding normalized blur of a depth image (invalid pixels are +inf).
+
+    Mimics the RealSense SDK spatial filter: each valid pixel becomes a weighted average of its
+    valid neighbours, so the handle silhouette rounds off and depth bleeds across the handle/door
+    boundary (spatially-correlated smoothing, unlike per-point scalar jitter). Pixels with no valid
+    neighbour, and originally-invalid pixels, are left untouched.
+    """
+    valid = torch.isfinite(depth)
+    w = valid.to(depth.dtype)
+    depth_filled = torch.where(valid, depth, torch.zeros_like(depth))
+    num = F.conv2d((depth_filled * w).unsqueeze(1), kernel2d, padding=pad).squeeze(1)
+    den = F.conv2d(w.unsqueeze(1), kernel2d, padding=pad).squeeze(1)
+    blurred = num / den.clamp_min(1e-6)
+    return torch.where(valid & (den > 1e-6), blurred, depth)
+
+
+@torch.no_grad()
 def render_points_to_world_grid_from_pose(
     pcd: torch.Tensor,
     camera_pose: torch.Tensor,
@@ -446,6 +480,8 @@ def render_points_to_world_grid_from_pose(
     clip_mode: str = "post",
     jitter_std_m: float = 0.0,
     jitter_mode: str = "xyz",
+    blur_kernel_px: int = 0,
+    blur_sigma_px: float = 0.0,
 ):
     depth, intr = rasterize_depth_zbuffer_from_pose(
         pcd,
@@ -454,6 +490,10 @@ def render_points_to_world_grid_from_pose(
         inflate_px=inflate_px,
         clip_mode=clip_mode,
     )
+    # Spatial blur of the depth image before unprojection (mimics the RealSense SDK spatial filter).
+    if int(blur_kernel_px) > 1:
+        kernel2d, pad = build_depth_blur_kernel2d(blur_kernel_px, blur_sigma_px, depth.device, depth.dtype)
+        depth = apply_depth_spatial_blur(depth, kernel2d, pad)
     pcd_world, valid = backproject_depth_to_world_from_pose(depth, camera_pose, intr)
 
     if jitter_std_m > 0.0:
@@ -481,6 +521,8 @@ def get_compiled_renderer_fixed_shapes(
     clip_mode: str = "post",
     jitter_mode: str = "xyz",
     compile_mode: str = "max-autotune",
+    blur_kernel_px: int = 0,
+    blur_sigma_px: float = 0.0,
 ):
     if jitter_mode.lower() != "xyz":
         raise ValueError("Compiled renderer supports jitter_mode='xyz' only.")
@@ -500,7 +542,8 @@ def get_compiled_renderer_fixed_shapes(
         intrinsics_key = tuple(float(v) for v in torch.as_tensor(intrinsics).reshape(-1).tolist())
 
     def _get_or_build(device, dtype):
-        key = (H, W, near_m, far_val, int(inflate_px), clip_mode, jitter_mode, compile_mode, intrinsics_key, device, dtype)
+        key = (H, W, near_m, far_val, int(inflate_px), clip_mode, jitter_mode, compile_mode,
+               int(blur_kernel_px), float(blur_sigma_px), intrinsics_key, device, dtype)
         if key in _compiled_cache:
             return _compiled_cache[key]
 
@@ -509,6 +552,10 @@ def get_compiled_renderer_fixed_shapes(
         PAD = (int(inflate_px), int(inflate_px), int(inflate_px), int(inflate_px))
         k = int(2 * inflate_px + 1)
         KERNEL = (k, k)
+        if int(blur_kernel_px) > 1:
+            BLUR_KERNEL2D, BLUR_PAD = build_depth_blur_kernel2d(blur_kernel_px, blur_sigma_px, device, dtype)
+        else:
+            BLUR_KERNEL2D, BLUR_PAD = None, 0
 
         @torch.no_grad()
         def _compiled_fn(pcd: torch.Tensor, camera_pose: torch.Tensor, jitter_std: torch.Tensor):
@@ -551,6 +598,9 @@ def get_compiled_renderer_fixed_shapes(
 
             depth = torch.where(depth >= near_m, depth, inf)
             depth = torch.where(depth <= far_val, depth, inf)
+
+            if BLUR_KERNEL2D is not None:
+                depth = apply_depth_spatial_blur(depth, BLUR_KERNEL2D, BLUR_PAD)
 
             u = u_base.expand(B, H, W)
             v = v_base.expand(B, H, W)
@@ -598,6 +648,8 @@ def simulate_depth_cam_render_from_pose(
     jitter_mode: str = "xyz",
     use_compile: bool = True,
     compile_mode: str = "max-autotune",
+    blur_kernel_px: int = 0,
+    blur_sigma_px: float = 0.0,
 ):
     if cam_spec_dict is None:
         raise ValueError("cam_spec_dict must be provided and must contain H/W/intrinsics/near_m/far_m.")
@@ -612,6 +664,8 @@ def simulate_depth_cam_render_from_pose(
             clip_mode=clip_mode,
             jitter_mode=jitter_mode,
             compile_mode=compile_mode,
+            blur_kernel_px=blur_kernel_px,
+            blur_sigma_px=blur_sigma_px,
         )
         _, pcd_world, _ = renderer(pcd, camera_pose, jitter_std_m)
     else:
@@ -623,6 +677,8 @@ def simulate_depth_cam_render_from_pose(
             clip_mode=clip_mode,
             jitter_std_m=jitter_std_m,
             jitter_mode=jitter_mode,
+            blur_kernel_px=blur_kernel_px,
+            blur_sigma_px=blur_sigma_px,
         )
 
     rendered_pcd = pcd_world.view(batch_size, -1, 3)

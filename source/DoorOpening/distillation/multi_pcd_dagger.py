@@ -17,7 +17,7 @@ try:
 except ImportError:
     wandb = None
 
-from isaaclab.utils.math import quat_apply
+from isaaclab.utils.math import quat_apply, quat_mul
 from rl_games.algos_torch import torch_ext
 from rl_games.algos_torch.model_builder import ModelBuilder
 
@@ -186,6 +186,11 @@ class Dagger:
         self.depth_cam_render_clip_mode = str(self.depth_cam_render_cfg.get("clip_mode", "post"))
         self.depth_cam_render_jitter_mode = str(self.depth_cam_render_cfg.get("jitter_mode", "xyz"))
         self.depth_cam_render_use_compile = bool(self.depth_cam_render_cfg.get("use_compile", True))
+        # Spatial blur of the rendered depth image before unprojection, to emulate the RealSense
+        # SDK spatial filter (handle edges blur into the door surface instead of staying mesh-crisp).
+        # 0/1 = disabled. Kernel is in depth-image pixels; sigma<=0 falls back to a box blur.
+        self.depth_cam_render_blur_kernel_px = int(self.depth_cam_render_cfg.get("blur_kernel_px", 0))
+        self.depth_cam_render_blur_sigma_px = float(self.depth_cam_render_cfg.get("blur_sigma_px", 0.0))
         self.lidar_render_cfg = self.runtime_cfg.get("lidar_render", {})
         self.lidar_num_points = self.lidar_render_cfg.get("num_points")
         self.lidar_num_azimuth = int(self.lidar_render_cfg.get("num_azimuth", 512))
@@ -2495,10 +2500,20 @@ class Dagger:
 
         self.robot_camera_body_idx = None
         self.sampler_camera_spec = None
+        self._camera_mount_offset_quat_wxyz = None
 
         if self.pointcloud_source in {"sampler", "depth", "both"}:
             self.robot_camera_body_idx = int(self.ov_env.robot.find_bodies("x5_camera_link")[0][0])
             self.sampler_camera_spec = self._build_sampler_camera_spec()
+            # The real depth sensor is the `cam` prim mounted on x5_camera_link via the CameraCfg
+            # offset rotation (a -45deg roll that compensates for the 45deg-tilted realsense bracket
+            # on the ARX x5 wrist). The x5_camera_link frame itself is NOT the optical frame. The
+            # simulated renderer must apply the same mount offset, otherwise the rendered cloud is
+            # rolled 45deg vs the real camera. Read it straight from the env cfg so it stays in sync.
+            camera_mount_rot = tuple(self.ov_env.cfg.pointcloud_camera_cfg.offset.rot)  # (w, x, y, z)
+            self._camera_mount_offset_quat_wxyz = torch.tensor(
+                camera_mount_rot, device=self.device, dtype=torch.float32
+            )
 
         self.robot_lidar_body_idx = None
         if self.pointcloud_source in {"lidar", "both"}:
@@ -3141,8 +3156,16 @@ class Dagger:
     def _get_sampler_camera_pose(self):
         camera_link_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_camera_body_idx]
         camera_link_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_camera_body_idx]
-        # The sampler render currently uses the camera-link pose directly.
-        return torch.cat([camera_link_pos_w, camera_link_quat_w[:, [1, 2, 3, 0]]], dim=-1)
+        # Apply the same camera mount offset as the real CameraCfg sensor (the -45deg roll that
+        # compensates for the 45deg-tilted realsense bracket). Composed in the link's local frame
+        # (world = link ⊗ offset), matching how IsaacLab mounts the camera prim on x5_camera_link.
+        # The offset pos is zero, so the optical center stays at the link origin.
+        if self._camera_mount_offset_quat_wxyz is not None:
+            offset = self._camera_mount_offset_quat_wxyz.unsqueeze(0).expand(camera_link_quat_w.shape[0], -1)
+            camera_quat_w = quat_mul(camera_link_quat_w, offset)
+        else:
+            camera_quat_w = camera_link_quat_w
+        return torch.cat([camera_link_pos_w, camera_quat_w[:, [1, 2, 3, 0]]], dim=-1)
 
     def _get_lidar_pose(self):
         lidar_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_lidar_body_idx]
@@ -3568,6 +3591,8 @@ class Dagger:
             clip_mode=self.depth_cam_render_clip_mode,
             jitter_mode=self.depth_cam_render_jitter_mode,
             use_compile=self.depth_cam_render_use_compile,
+            blur_kernel_px=self.depth_cam_render_blur_kernel_px,
+            blur_sigma_px=self.depth_cam_render_blur_sigma_px,
         )
         scene_pointcloud_base = world_to_local(rendered_pcd_world, robot_base_pos_w, robot_base_quat_w)
         return scene_pointcloud_base
@@ -3602,6 +3627,8 @@ class Dagger:
             clip_mode=self.depth_cam_render_clip_mode,
             jitter_mode=self.depth_cam_render_jitter_mode,
             use_compile=self.depth_cam_render_use_compile,
+            blur_kernel_px=self.depth_cam_render_blur_kernel_px,
+            blur_sigma_px=self.depth_cam_render_blur_sigma_px,
         )
         depth_pcd_base = world_to_local(rendered_depth_pcd_world, robot_base_pos_w, robot_base_quat_w)
         lidar_pcd_base = self._render_lidar_scene_pointcloud_base(
@@ -3621,28 +3648,89 @@ class Dagger:
             if self.pointcloud_source in {"sampler", "depth"}:
                 depth_pcd_base = self._filter_robot_points_base(self._sample_scene_obs_pointcloud_base_depth())
                 self._viser_cached_sensor_obs_pcd_base["robot_depth_cam_obs"] = depth_pcd_base
-                scene_obs_pcd_base = depth_pcd_base
+                scene_obs_pcd_sources = [depth_pcd_base]
             elif self.pointcloud_source == "lidar":
                 lidar_pcd_base = self._filter_robot_points_base(self._sample_scene_obs_pointcloud_base_lidar())
                 self._viser_cached_sensor_obs_pcd_base["robot_lidar_obs"] = lidar_pcd_base
-                scene_obs_pcd_base = lidar_pcd_base
+                scene_obs_pcd_sources = [lidar_pcd_base]
             else:
                 depth_pcd_base, lidar_pcd_base = self._sample_scene_obs_pointcloud_base_both()
                 depth_pcd_base = self._filter_robot_points_base(depth_pcd_base)
                 lidar_pcd_base = self._filter_robot_points_base(lidar_pcd_base)
                 self._viser_cached_sensor_obs_pcd_base["robot_lidar_obs"] = lidar_pcd_base
                 self._viser_cached_sensor_obs_pcd_base["robot_depth_cam_obs"] = depth_pcd_base
-                scene_obs_pcd_base = torch.cat([depth_pcd_base, lidar_pcd_base], dim=1)
-            return scene_obs_pcd_base
+                # Keep the realsense (dense, narrow FoV) and lidar (sparse, wide FoV) clouds
+                # SEPARATE. Concatenating then sampling a fixed budget biases toward the denser
+                # realsense and can drop the sparse-but-critical lidar handle points. Each local
+                # crop instead draws an equal share from each source (see _build_local_pcd).
+                scene_obs_pcd_sources = [depth_pcd_base, lidar_pcd_base]
+            return scene_obs_pcd_sources
         finally:
             self._current_door_hole_aug_metadata = None
 
-    def _build_local_pcd(self, scene_obs_pcd_base, palm_pos_base, robot_pcd_base=None):
+    @staticmethod
+    def _split_point_budget(total, num_parts):
+        # Split `total` points into `num_parts` near-equal integer chunks (extras go to the first
+        # chunks), e.g. 2500 over 2 sources -> [1250, 1250], 1001 -> [501, 500].
+        total = int(total)
+        num_parts = max(1, int(num_parts))
+        base = total // num_parts
+        remainder = total - base * num_parts
+        return [base + (1 if i < remainder else 0) for i in range(num_parts)]
+
+    def _crop_local_pcd_balanced(
+        self,
+        scene_obs_pcd_sources,
+        *,
+        local_range,
+        num_local_points,
+        is_cylindrical,
+        crop_center,
+        x_direction_cutoff,
+        log_name,
+    ):
+        # Crop each sensor source independently with an equal slice of the point budget, then
+        # concatenate. Total point count equals the single-cloud crop, so the policy input size is
+        # unchanged. With a single source this is identical to a plain crop_local_pcd call.
+        if len(scene_obs_pcd_sources) == 1:
+            crop, _ = crop_local_pcd(
+                scene_obs_pcd_sources[0],
+                local_range=local_range,
+                num_local_points=num_local_points,
+                is_cylindrical=is_cylindrical,
+                crop_center=crop_center,
+                x_direction_cutoff=x_direction_cutoff,
+                log_name=log_name,
+            )
+            return crop
+        per_source_counts = self._split_point_budget(num_local_points, len(scene_obs_pcd_sources))
+        crops = []
+        for src_idx, (src_pcd, src_count) in enumerate(zip(scene_obs_pcd_sources, per_source_counts)):
+            if src_count <= 0:
+                continue
+            crop, _ = crop_local_pcd(
+                src_pcd,
+                local_range=local_range,
+                num_local_points=src_count,
+                is_cylindrical=is_cylindrical,
+                crop_center=crop_center,
+                x_direction_cutoff=x_direction_cutoff,
+                log_name=f"{log_name}_src{src_idx}",
+            )
+            crops.append(crop)
+        return torch.cat(crops, dim=1)
+
+    def _build_local_pcd(self, scene_obs_pcd_sources, palm_pos_base, robot_pcd_base=None):
+        # Accept either a single cloud or a list of per-sensor clouds (e.g. [realsense, lidar] when
+        # pointcloud_source="both"). Each crop draws an equal share from every source so the denser
+        # sensor cannot dominate the policy cloud.
+        if torch.is_tensor(scene_obs_pcd_sources):
+            scene_obs_pcd_sources = [scene_obs_pcd_sources]
         pcd_parts = []
 
         if self.local_pcd_points[0] > 0:
-            base_crop, _ = crop_local_pcd(
-                scene_obs_pcd_base,
+            base_crop = self._crop_local_pcd_balanced(
+                scene_obs_pcd_sources,
                 local_range=self.local_pcd_range[0],
                 num_local_points=self.local_pcd_points[0],
                 is_cylindrical=True,
@@ -3653,8 +3741,8 @@ class Dagger:
             pcd_parts.append(base_crop)
 
         if self.local_pcd_points[1] > 0:
-            palm_crop, _ = crop_local_pcd(
-                scene_obs_pcd_base,
+            palm_crop = self._crop_local_pcd_balanced(
+                scene_obs_pcd_sources,
                 local_range=self.local_pcd_range[1],
                 num_local_points=self.local_pcd_points[1],
                 is_cylindrical=False,
@@ -3778,7 +3866,7 @@ class Dagger:
         self.latest_student_proprio_vector = q_pos.detach().clone()
 
         palm_pos_base = world_to_local(palm_pos_w, robot_base_pos_w, robot_base_quat_w).squeeze(1)
-        scene_obs_pcd_base = self._sample_scene_obs_pointcloud_base()
+        scene_obs_pcd_sources = self._sample_scene_obs_pointcloud_base()
         robot_pcd_base = (
             self._sample_robot_pointcloud_base_sampler() if self.append_robot_model_to_policy_cloud else None
         )
@@ -3887,7 +3975,7 @@ class Dagger:
         for key in self.pcd_encoders_keys:
             if key == "local_pcd_t":
                 obs[key] = self._build_local_pcd(
-                    scene_obs_pcd_base,
+                    scene_obs_pcd_sources,
                     palm_pos_base,
                     robot_pcd_base=robot_pcd_base,
                 )
