@@ -126,8 +126,13 @@ def update_variant_meta(dst_dir: Path, src_dir: Path):
     with open(meta_path, "r", encoding="utf-8") as f:
         meta = json.load(f)
 
-    target_props = meta.setdefault("target_properties", {})
-    target_props["opening_direction"] = "push"
+    # Negating joint_1 physically turns the pull source into a push door, so every recorded
+    # opening_direction must say "push". Updating only target_properties (as before) left
+    # actual_properties/source_properties at "pull", and the consumer reads actual_properties
+    # first -- which is what mislabeled the copied push families.
+    for props_key in ("target_properties", "actual_properties", "source_properties"):
+        props = meta.setdefault(props_key, {})
+        props["opening_direction"] = "push"
 
     if isinstance(src_meta, dict) and "initial_state" in src_meta:
         # Keep the exact sampled initial state from the pull asset so the
