@@ -109,7 +109,12 @@ class SensorsSceneCfg(InteractiveSceneCfg):
         height=480,
         width=640,
         data_types=["rgb"],
-        spawn=sim_utils.PinholeCameraCfg(focal_length=8.0, clipping_range=(0.1, 20.0)),
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=8.0,
+            horizontal_aperture=14.7128,  # D435: fov_x=85.2 deg
+            vertical_aperture=8.8689,     # D435: fov_y=58.0 deg
+            clipping_range=(0.3, 3.0),
+        ),
         offset=CameraCfg.OffsetCfg(pos=(0.0, 0.0, 0.0), rot=CAMERA_QUAT, convention="world"),
     )
 

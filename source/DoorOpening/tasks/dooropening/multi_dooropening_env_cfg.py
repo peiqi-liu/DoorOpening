@@ -344,7 +344,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         data_types=pointcloud_camera_data_types,
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=8.0,
-            clipping_range=(0.1, 20.0),
+            horizontal_aperture=14.7128,  # D435: fov_x=85.2 deg
+            vertical_aperture=8.8689,     # D435: fov_y=58.0 deg
+            clipping_range=(0.3, 3.0),
         ),
         offset=CameraCfg.OffsetCfg(pos=(0.0, 0.0, 0.0), rot=POINTCLOUD_CAMERA_QUAT, convention="world"),
     )
