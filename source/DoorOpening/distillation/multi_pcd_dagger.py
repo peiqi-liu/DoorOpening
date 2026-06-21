@@ -17,7 +17,7 @@ try:
 except ImportError:
     wandb = None
 
-from isaaclab.utils.math import quat_apply
+from isaaclab.utils.math import quat_apply, quat_mul
 from rl_games.algos_torch import torch_ext
 from rl_games.algos_torch.model_builder import ModelBuilder
 
@@ -53,28 +53,9 @@ from DoorOpening.utils.viser_pt import (
     prepare_world_points_from_local,
 )
 
-
-def adjust_state_dict_keys(checkpoint_state_dict, model_state_dict):
-    adjusted_state_dict = {}
-    for key, value in checkpoint_state_dict.items():
-        if key in model_state_dict:
-            adjusted_state_dict[key] = value
-            continue
-
-        parts = key.split(".")
-        parts.insert(2, "_orig_mod")
-        key_with_orig_mod = ".".join(parts)
-        if key_with_orig_mod in model_state_dict:
-            adjusted_state_dict[key_with_orig_mod] = value
-            continue
-
-        key_no_orig_mod = key.replace("_orig_mod.", "")
-        if key_no_orig_mod in model_state_dict:
-            adjusted_state_dict[key_no_orig_mod] = value
-            continue
-
-        adjusted_state_dict[key] = value
-    return adjusted_state_dict
+from DoorOpening.distillation._dagger_viser import ViserDebugMixin
+from DoorOpening.distillation._dagger_checkpoint import CheckpointMixin
+from DoorOpening.distillation._dagger_logging import LoggingMixin
 
 
 def clip_teacher_obs(obs: torch.Tensor, clip_obs: float) -> torch.Tensor:
@@ -83,7 +64,7 @@ def clip_teacher_obs(obs: torch.Tensor, clip_obs: float) -> torch.Tensor:
     return obs
 
 
-class Dagger:
+class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
     def __init__(self, env, config, summaries_dir, nn_dir):
         self.world_size = int(os.environ.get("WORLD_SIZE", "1"))
         self.rank = int(os.environ.get("RANK", "0"))
@@ -186,6 +167,11 @@ class Dagger:
         self.depth_cam_render_clip_mode = str(self.depth_cam_render_cfg.get("clip_mode", "post"))
         self.depth_cam_render_jitter_mode = str(self.depth_cam_render_cfg.get("jitter_mode", "xyz"))
         self.depth_cam_render_use_compile = bool(self.depth_cam_render_cfg.get("use_compile", True))
+        # Spatial blur of the rendered depth image before unprojection, to emulate the RealSense
+        # SDK spatial filter (handle edges blur into the door surface instead of staying mesh-crisp).
+        # 0/1 = disabled. Kernel is in depth-image pixels; sigma<=0 falls back to a box blur.
+        self.depth_cam_render_blur_kernel_px = int(self.depth_cam_render_cfg.get("blur_kernel_px", 0))
+        self.depth_cam_render_blur_sigma_px = float(self.depth_cam_render_cfg.get("blur_sigma_px", 0.0))
         self.lidar_render_cfg = self.runtime_cfg.get("lidar_render", {})
         self.lidar_num_points = self.lidar_render_cfg.get("num_points")
         self.lidar_num_azimuth = int(self.lidar_render_cfg.get("num_azimuth", 512))
@@ -325,6 +311,18 @@ class Dagger:
         self.push_pull_condition_enabled = False
         self.push_pull_condition_obs_key = "push_pull_cond"
         self.push_pull_condition_source = "oracle"
+        # Independent, additive left/right (handle_side) oracle one-hot conditioning. Coexists with
+        # push/pull; oracle-only (no predicted source) and no temporal history input.
+        self.left_right_condition_enabled = False
+        self.left_right_condition_obs_key = "left_right_cond"
+        self.left_right_family_one_hot = None
+        self.latest_fraction_left = 0.0
+        self.latest_fraction_right = 0.0
+        # How aux_handle_pos is seeded at the first rollout step after each reset:
+        # "zeros" -> seed the aux feedback buffer with zeros; "ground_truth" -> seed with the
+        # sim handle pose. After the first step the predicted aux overwrites the buffer either way.
+        self.aux_handle_init_source = "zeros"
+        self.aux_handle_init_noise_m = None
         self.push_pull_detach_predicted_condition = True
         self.push_pull_family_one_hot = None
         self.push_pull_condition_buffer = None
@@ -470,6 +468,12 @@ class Dagger:
             getattr(self.student_model, "push_pull_detach_predicted_condition", True)
         )
         self.push_pull_condition_cfg = dict(getattr(self.student_model, "push_pull_condition_cfg", {}) or {})
+        self.left_right_condition_enabled = bool(
+            getattr(self.student_model, "left_right_condition_enabled", False)
+        )
+        self.left_right_condition_obs_key = str(
+            getattr(self.student_model, "left_right_condition_obs_key", "left_right_cond")
+        )
         self.proprio_temporal_enabled = bool(
             getattr(
                 self.student_model,
@@ -582,7 +586,9 @@ class Dagger:
         self.state_encoders_keys = tuple(
             key
             for key in all_state_encoder_keys
-            if key not in self.proprio_temporal_covered_state_keys and key != self.push_pull_condition_obs_key
+            if key not in self.proprio_temporal_covered_state_keys
+            and key != self.push_pull_condition_obs_key
+            and key != self.left_right_condition_obs_key
         )
         self.pcd_encoders_keys = tuple(
             key
@@ -651,6 +657,32 @@ class Dagger:
             raise ValueError("Aux prediction requires at least one enabled aux_* state encoder.")
         self.aux_feedback_to_policy = self.has_aux_input and self.has_aux_prediction and bool(
             self.runtime_cfg.get("aux_feedback_to_policy", True)
+        )
+        self.aux_handle_init_source = str(
+            self.runtime_cfg.get("aux_handle_init_source", "zeros")
+        ).lower()
+        allowed_aux_handle_init = {"zeros", "ground_truth"}
+        if self.aux_handle_init_source not in allowed_aux_handle_init:
+            raise ValueError(
+                f"dagger.aux_handle_init_source must be one of {sorted(allowed_aux_handle_init)}, "
+                f"got '{self.aux_handle_init_source}'."
+            )
+        if self.aux_handle_init_source == "ground_truth":
+            # Seeding the buffer with sim GT only matters on the first step after a reset, and only
+            # if that buffer is actually fed to the policy (it is overwritten by predictions afterwards).
+            if not self.has_aux_input:
+                raise ValueError(
+                    "dagger.aux_handle_init_source='ground_truth' requires an enabled aux_* state encoder."
+                )
+            if not self.aux_feedback_to_policy:
+                raise ValueError(
+                    "dagger.aux_handle_init_source='ground_truth' requires aux_feedback_to_policy=true; "
+                    "otherwise the policy never sees the seeded handle pose."
+                )
+        # Per-axis uniform +/- noise (meters) on the GT handle-pose seed, so the first step never sees
+        # a perfectly accurate pose. Applied only to the input seed, never to the aux regression target.
+        self.aux_handle_init_noise_m = self._parse_aux_handle_init_noise(
+            self.runtime_cfg.get("aux_handle_init_noise_m", 0.0)
         )
         self.aux_buffer = None
         if self.has_aux_input:
@@ -853,14 +885,18 @@ class Dagger:
 
     def _init_push_pull_semantics_and_targets(self):
         self.push_pull_family_one_hot = None
+        self.left_right_family_one_hot = None
         self.mode_family_direction_ids = None
         self.latest_fraction_push = 0.0
         self.latest_fraction_pull = 0.0
-        if not (
+        self.latest_fraction_left = 0.0
+        self.latest_fraction_right = 0.0
+        push_pull_needed = (
             self.push_pull_condition_enabled
             or self.push_pull_condition_perturb_enabled
             or self.mode_prediction_enabled
-        ):
+        )
+        if not (push_pull_needed or self.left_right_condition_enabled):
             return
 
         if self.mode_prediction_enabled and self.num_modes != 2:
@@ -869,44 +905,83 @@ class Dagger:
             )
 
         self.mode_family_semantics = self._load_family_mode_semantics()
-        direction_name_to_id = {"pull": 0, "push": 1}
+
+        if push_pull_needed:
+            direction_name_to_id = {"pull": 0, "push": 1}
+            family_one_hot = torch.zeros(
+                (len(DOOR_FAMILY_NAMES), 2),
+                dtype=torch.float32,
+                device=self.device,
+            )
+            if self.mode_prediction_enabled:
+                self.mode_family_direction_ids = torch.full(
+                    (len(DOOR_FAMILY_NAMES),),
+                    -1,
+                    dtype=torch.long,
+                    device=self.device,
+                )
+
+            missing_semantics = []
+            for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
+                _, opening_direction = self.mode_family_semantics.get(family_name, (None, None))
+                if opening_direction == "push":
+                    family_one_hot[family_id] = torch.tensor(
+                        [1.0, 0.0], dtype=torch.float32, device=self.device
+                    )
+                    if self.mode_family_direction_ids is not None:
+                        self.mode_family_direction_ids[family_id] = direction_name_to_id[opening_direction]
+                elif opening_direction == "pull":
+                    family_one_hot[family_id] = torch.tensor(
+                        [0.0, 1.0], dtype=torch.float32, device=self.device
+                    )
+                    if self.mode_family_direction_ids is not None:
+                        self.mode_family_direction_ids[family_id] = direction_name_to_id[opening_direction]
+                else:
+                    missing_semantics.append(family_name)
+
+            if missing_semantics:
+                raise RuntimeError(
+                    "Could not infer push/pull semantics for active door families: "
+                    f"{missing_semantics}."
+                )
+            self.push_pull_family_one_hot = family_one_hot
+
+        if self.left_right_condition_enabled:
+            self.left_right_family_one_hot = self._build_family_left_right_one_hot()
+
+    def _build_family_left_right_one_hot(self):
+        # Per-family oracle one-hot from handle_side metadata: index 0 = left, index 1 = right.
+        # (min -> left, max -> right via the alias map in _load_family_mode_semantics.)
         family_one_hot = torch.zeros(
             (len(DOOR_FAMILY_NAMES), 2),
             dtype=torch.float32,
             device=self.device,
         )
-        if self.mode_prediction_enabled:
-            self.mode_family_direction_ids = torch.full(
-                (len(DOOR_FAMILY_NAMES),),
-                -1,
-                dtype=torch.long,
-                device=self.device,
-            )
-
         missing_semantics = []
         for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
-            _, opening_direction = self.mode_family_semantics.get(family_name, (None, None))
-            if opening_direction == "push":
-                family_one_hot[family_id] = torch.tensor(
-                    [1.0, 0.0], dtype=torch.float32, device=self.device
-                )
-                if self.mode_family_direction_ids is not None:
-                    self.mode_family_direction_ids[family_id] = direction_name_to_id[opening_direction]
-            elif opening_direction == "pull":
-                family_one_hot[family_id] = torch.tensor(
-                    [0.0, 1.0], dtype=torch.float32, device=self.device
-                )
-                if self.mode_family_direction_ids is not None:
-                    self.mode_family_direction_ids[family_id] = direction_name_to_id[opening_direction]
+            handle_side, _ = self.mode_family_semantics.get(family_name, (None, None))
+            if handle_side == "left":
+                family_one_hot[family_id, 0] = 1.0
+            elif handle_side == "right":
+                family_one_hot[family_id, 1] = 1.0
             else:
                 missing_semantics.append(family_name)
-
         if missing_semantics:
             raise RuntimeError(
-                "Could not infer push/pull semantics for active door families: "
+                "Could not infer left/right (handle_side) semantics for active door families: "
                 f"{missing_semantics}."
             )
-        self.push_pull_family_one_hot = family_one_hot
+        return family_one_hot
+
+    def _build_gt_left_right_condition(self):
+        if self.left_right_family_one_hot is None:
+            raise RuntimeError("Left/right condition targets are not initialized.")
+        if self.env_family_ids.ndim != 1 or self.env_family_ids.shape[0] != self.num_envs:
+            raise RuntimeError(
+                f"Expected env_family_ids shape [{self.num_envs}], got {tuple(self.env_family_ids.shape)}."
+            )
+        left_right_cond = self.left_right_family_one_hot[self.env_family_ids.long()]
+        return left_right_cond.to(device=self.device, dtype=torch.float32)
 
     def _build_gt_push_pull_condition(self):
         if self.push_pull_family_one_hot is None:
@@ -1918,7 +1993,7 @@ class Dagger:
         target = self._get_implemented_action_vector().detach()
         base_vel = self._get_student_base_velocity_vector().detach()
         timestamp = self._get_current_time_s()
-        aux_handle = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
+        aux_handle = self._build_seed_temporal_aux_handle()
         push_pull_belief = self._build_initial_temporal_push_pull_belief()
         self._validate_temporal_history_buffer_shape("temporal_aux_handle_history", self.temporal_aux_handle_history, 3)
         self._validate_temporal_history_buffer_shape(
@@ -2257,15 +2332,73 @@ class Dagger:
     def _get_aux_target(self, current_abs_aux):
         return current_abs_aux
 
+    def _parse_aux_handle_init_noise(self, raw):
+        # Scalar bound (meters) on the total Euclidean error of the GT handle-pose seed.
+        # Returns a non-negative float, or None when noise is disabled (zero).
+        if raw is None:
+            return None
+        value = float(raw)
+        if value < 0.0:
+            raise ValueError("dagger.aux_handle_init_noise_m must be non-negative.")
+        if value == 0.0:
+            return None
+        return value
+
+    def _apply_aux_handle_init_noise(self, handle_pos):
+        # Fresh per-env noise: a random direction (uniform on the unit sphere) scaled by a magnitude
+        # in [0, bound], so the total Euclidean error of the seed is at most aux_handle_init_noise_m.
+        if self.aux_handle_init_noise_m is None or handle_pos is None:
+            return handle_pos
+        direction = torch.randn_like(handle_pos)
+        direction = direction / direction.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+        magnitude = torch.rand(
+            handle_pos.shape[:-1] + (1,), dtype=handle_pos.dtype, device=handle_pos.device
+        ) * self.aux_handle_init_noise_m
+        return handle_pos + direction * magnitude
+
+    def _build_seed_aux_buffer_values(self):
+        # Value the aux feedback buffer is reset to at the first rollout step after each reset.
+        # "zeros": classic behavior. "ground_truth": the (noised) sim handle pose, fed only on that
+        # first step (predictions overwrite the buffer afterwards, so all later steps stay predicted).
+        if self.aux_handle_init_source == "ground_truth":
+            aux_values = self._get_aux_state_values()
+            if "aux_handle_pos" in aux_values:
+                aux_values = OrderedDict(aux_values)
+                aux_values["aux_handle_pos"] = self._apply_aux_handle_init_noise(
+                    aux_values["aux_handle_pos"]
+                )
+            seed = self._stack_aux_state_values(aux_values)
+            if seed is None:
+                raise RuntimeError(
+                    "aux_handle_init_source='ground_truth' could not build a sim aux seed vector."
+                )
+            return seed.to(device=self.device, dtype=torch.float32)
+        return torch.zeros((self.num_envs, self.aux_input_dim), dtype=torch.float32, device=self.device)
+
+    def _build_seed_temporal_aux_handle(self):
+        # Mirror the aux feedback buffer seed for the temporal aux_handle_pos history window so the
+        # first post-reset step is consistent regardless of whether the temporal field is consumed.
+        if (
+            self.aux_handle_init_source == "ground_truth"
+            and self.has_aux_input
+            and "aux_handle_pos" in self.aux_state_specs
+        ):
+            value = self._get_aux_state_values().get("aux_handle_pos")
+            if value is not None:
+                value = self._apply_aux_handle_init_noise(value)
+                return value.to(device=self.device, dtype=torch.float32)
+        return torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
+
     def _seed_aux_buffer(self, env_ids=None):
         if self.aux_buffer is None:
             return
+        seed = self._build_seed_aux_buffer_values()
         if env_ids is None:
-            self.aux_buffer.zero_()
+            self.aux_buffer[:] = seed
             return
         if env_ids.numel() == 0:
             return
-        self.aux_buffer[env_ids] = 0.0
+        self.aux_buffer[env_ids] = seed[env_ids]
 
     def _init_pointcloud_assets(self):
         asset_index_by_dir = {
@@ -2495,10 +2628,20 @@ class Dagger:
 
         self.robot_camera_body_idx = None
         self.sampler_camera_spec = None
+        self._camera_mount_offset_quat_wxyz = None
 
         if self.pointcloud_source in {"sampler", "depth", "both"}:
             self.robot_camera_body_idx = int(self.ov_env.robot.find_bodies("x5_camera_link")[0][0])
             self.sampler_camera_spec = self._build_sampler_camera_spec()
+            # The real depth sensor is the `cam` prim mounted on x5_camera_link via the CameraCfg
+            # offset rotation (a -45deg roll that compensates for the 45deg-tilted realsense bracket
+            # on the ARX x5 wrist). The x5_camera_link frame itself is NOT the optical frame. The
+            # simulated renderer must apply the same mount offset, otherwise the rendered cloud is
+            # rolled 45deg vs the real camera. Read it straight from the env cfg so it stays in sync.
+            camera_mount_rot = tuple(self.ov_env.cfg.pointcloud_camera_cfg.offset.rot)  # (w, x, y, z)
+            self._camera_mount_offset_quat_wxyz = torch.tensor(
+                camera_mount_rot, device=self.device, dtype=torch.float32
+            )
 
         self.robot_lidar_body_idx = None
         if self.pointcloud_source in {"lidar", "both"}:
@@ -2548,461 +2691,6 @@ class Dagger:
                 "[INFO] Train/validation env split from asset suffix rule: "
                 f"train={self.global_train_num_envs}, validation={self.global_validation_num_envs}"
             )
-
-    def _init_viser_debug_tools(self):
-        """Initialize optional raw replay capture state used for point-cloud debugging."""
-        self._viser_cached_ground_truth_pcd_world = None
-        self._viser_cached_sensor_obs_pcd_base = OrderedDict()
-        self._viser_pending_debug_frame = None
-        self._viser_raw_streams = OrderedDict()
-
-        # Keep replay outputs next to checkpoints by default so a run's artifacts stay together.
-        default_record_dir = Path(self.nn_dir).parent if self.nn_dir is not None else Path(os.getcwd())
-        configured_raw_path = self.viser_raw_cfg.get("path", self.viser_raw_cfg.get("raw_path"))
-        if configured_raw_path is None:
-            self.viser_raw_path = str(default_record_dir / "viser_replay.pt")
-        else:
-            configured_raw_path = Path(str(configured_raw_path))
-            if not configured_raw_path.is_absolute():
-                configured_raw_path = default_record_dir / configured_raw_path
-            self.viser_raw_path = str(configured_raw_path)
-
-        sim_cfg = getattr(self.ov_env.cfg, "sim", None)
-        sim_dt = getattr(sim_cfg, "dt", None)
-        self.viser_sim_dt = float(sim_dt) if sim_dt is not None else 1.0 / 30.0
-        self.viser_env_step_dt = max(float(getattr(self.ov_env, "dt", self.viser_sim_dt)), 1e-6)
-        if not self.viser_raw_enabled:
-            return
-        if self.viser_raw_max_points <= 0:
-            raise ValueError("viser.raw.max_points must be positive when raw Viser capture is enabled.")
-
-        raw_dir = os.path.dirname(self.viser_raw_path)
-        if raw_dir:
-            os.makedirs(raw_dir, exist_ok=True)
-        self._init_viser_raw_streams()
-
-    def _init_viser_raw_streams(self):
-        """Select one random env per door family for multi-door replay export."""
-        self._viser_raw_streams = OrderedDict()
-        for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
-            self._viser_raw_streams[family_name] = {
-                "family_id": int(family_id),
-                "family_name": family_name,
-                "env_id": None,
-                "frames": [],
-                "frame_count": 0,
-                "chunk_index": 0,
-                "latest_iteration": None,
-                "resample_env_each_chunk": True,
-            }
-            self._resample_viser_raw_stream_env(self._viser_raw_streams[family_name])
-
-        if not self._viser_raw_streams:
-            self._viser_raw_streams["env"] = {
-                "family_id": None,
-                "family_name": "env",
-                "env_id": None,
-                "frames": [],
-                "frame_count": 0,
-                "chunk_index": 0,
-                "latest_iteration": None,
-                "resample_env_each_chunk": True,
-            }
-            self._resample_viser_raw_stream_env(self._viser_raw_streams["env"])
-
-    def _sample_random_env_id_for_family(self, family_id=None):
-        if self.num_envs <= 0:
-            return 0
-        if family_id is None:
-            return int(torch.randint(self.num_envs, (1,), device=self.device).detach().cpu().item())
-        matching_envs = self.family_env_ids.get(int(family_id))
-        if matching_envs is None:
-            matching_envs = torch.nonzero(self.env_family_ids == int(family_id), as_tuple=False).squeeze(-1)
-        if matching_envs.numel() == 0:
-            return int(torch.randint(self.num_envs, (1,), device=self.device).detach().cpu().item())
-        env_offset = int(torch.randint(matching_envs.numel(), (1,), device=self.device).detach().cpu().item())
-        return int(matching_envs[env_offset].detach().cpu().item())
-
-    def _resample_viser_raw_stream_env(self, stream):
-        family_id = stream.get("family_id")
-        stream["env_id"] = self._sample_random_env_id_for_family(family_id=family_id)
-
-    def _viser_stream_env_ids(self):
-        return [int(stream["env_id"]) for stream in self._viser_raw_streams.values()]
-
-    def _select_viser_ground_truth_points(self, pointcloud_world):
-        if not self.viser_raw_enabled or pointcloud_world is None:
-            return None
-        return {
-            int(env_id): prepare_pointcloud(
-                pointcloud_world,
-                env_id=int(env_id),
-                max_points=self.viser_raw_max_points,
-            )
-            for env_id in self._viser_stream_env_ids()
-        }
-
-    def _viser_raw_pointcloud_stream_specs(self):
-        streams = [
-            {
-                "name": "ground_truth",
-                "label": "GT",
-                "color": (120, 120, 120),
-                "point_size_scale": 1.0,
-            }
-        ]
-        if self.pointcloud_source in {"lidar", "both"}:
-            streams.append(
-                {
-                    "name": "robot_lidar_obs",
-                    "label": "Robot Lidar Obs",
-                    "color": (255, 140, 0),
-                    "point_size_scale": 1.0,
-                }
-            )
-        if self.pointcloud_source in {"sampler", "depth", "both"}:
-            streams.append(
-                {
-                    "name": "robot_depth_cam_obs",
-                    "label": "Robot Depth Cam Obs",
-                    "color": (79, 195, 247),
-                    "point_size_scale": 1.0,
-                }
-            )
-        streams.append(
-            {
-                "name": "policy_input",
-                "label": "Policy Input",
-                "color": (0, 170, 120),
-                "point_size_scale": 1.0,
-            }
-        )
-        return streams
-
-    def _build_viser_raw_payload(self, stream):
-        frame_dt = float(self.viser_env_step_dt * self.viser_raw_capture_interval)
-        return {
-            "format": "dooropening_viser_replay_v1",
-            "pointcloud_frame": "world",
-            "pointcloud_source": self.pointcloud_source,
-            "pointcloud_streams": self._viser_raw_pointcloud_stream_specs(),
-            "sim_dt": float(self.viser_sim_dt),
-            "decimation": int(getattr(self.ov_env.cfg, "decimation", 1)),
-            "env_step_dt": float(self.viser_env_step_dt),
-            "env_step_fps": 1.0 / float(self.viser_env_step_dt),
-            "frame_dt": frame_dt,
-            "frame_fps": 1.0 / frame_dt,
-            "pointcloud_sensor_dt": frame_dt,
-            "pointcloud_sensor_fps": 1.0 / frame_dt,
-            "frames": stream["frames"],
-        }
-
-    def _trim_viser_raw_frames(self, stream):
-        if self.viser_raw_max_frames > 0 and len(stream["frames"]) > self.viser_raw_max_frames:
-            stream["frames"] = stream["frames"][-self.viser_raw_max_frames :]
-        stream["frame_count"] = len(stream["frames"])
-
-    def _maybe_flush_viser_raw_snapshot(self, iteration):
-        if not self.viser_raw_enabled or self.rank != 0:
-            return
-        if self.viser_raw_save_interval <= 0:
-            return
-        if (int(iteration) + 1) % self.viser_raw_save_interval != 0:
-            return
-        for stream in self._viser_raw_streams.values():
-            self._flush_viser_raw_stream(
-                stream,
-                chunk_complete=True,
-                reason=f"save_interval {self.viser_raw_save_interval} reached at iteration {int(iteration)}",
-            )
-
-    def _flush_viser_raw_recording(self, chunk_complete, reason):
-        if not self.viser_raw_enabled or self.rank != 0:
-            return
-        for stream in self._viser_raw_streams.values():
-            self._flush_viser_raw_stream(stream, chunk_complete=chunk_complete, reason=reason)
-
-    def _flush_viser_raw_stream(self, stream, chunk_complete, reason):
-        if not self.viser_raw_enabled or self.rank != 0:
-            return
-        if stream["frame_count"] <= 0:
-            return
-
-        latest_iteration = int(stream["latest_iteration"])
-        record_tag = f"{stream['family_name']}_chunk_{stream['chunk_index']:04d}_iter_{latest_iteration}"
-        payload = self._build_viser_raw_payload(stream)
-        torch.save(payload, self._format_iterated_record_path(self.viser_raw_path, record_tag))
-
-        if self.rank == 0:
-            status = "complete" if chunk_complete else "partial"
-            print(
-                "Saved {} Viser raw chunk {} for {} env {} with {} frames ({}).".format(
-                    status,
-                    stream["chunk_index"],
-                    stream["family_name"],
-                    stream["env_id"],
-                    stream["frame_count"],
-                    reason,
-                )
-            )
-
-        stream["frames"] = []
-        stream["frame_count"] = 0
-        stream["latest_iteration"] = None
-        if bool(stream.get("resample_env_each_chunk", False)):
-            self._resample_viser_raw_stream_env(stream)
-
-    def _prepare_viser_world_points_from_local(
-        self,
-        pointcloud_local,
-        base_pos_w,
-        base_quat_w,
-        env_id,
-        max_points,
-        drop_zero_rows=False,
-    ):
-        """Convert a base-frame point cloud for one env into world coordinates for raw replay output."""
-        return prepare_world_points_from_local(
-            pointcloud_local,
-            base_pos_w,
-            base_quat_w,
-            env_id=int(env_id),
-            max_points=max_points,
-            drop_zero_rows=drop_zero_rows,
-        )
-
-    def _prepare_viser_points(self, pointcloud, env_id, max_points, drop_zero_rows=False):
-        """Extract one env's point cloud, sanitize it, and downsample it on CPU for replay export."""
-        return prepare_pointcloud(
-            pointcloud,
-            env_id=int(env_id),
-            max_points=max_points,
-            drop_zero_rows=drop_zero_rows,
-        )
-
-    def _format_iterated_record_path(self, path_str, iteration):
-        """Append a record-specific suffix to replay filenames so each saved capture gets its own file."""
-        return format_iterated_record_path(path_str, iteration)
-
-    def _maybe_update_viser_debug(
-        self,
-        iteration,
-        robot_base_pos_w,
-        robot_base_quat_w,
-        ground_truth_pcd_world,
-        sensor_obs_pcd_base_by_name,
-        policy_input_pcd_base,
-        aux_prediction=None,
-    ):
-        """Append one replay frame for each selected multi-door family env."""
-        if not self.viser_raw_enabled:
-            return
-        if int(iteration) % self.viser_raw_capture_interval != 0:
-            # Save cadence is iteration-based, not capture-based. Still check whether an
-            # existing chunk should flush on iterations where we intentionally skip capture.
-            self._maybe_flush_viser_raw_snapshot(iteration)
-            return
-
-        for stream in self._viser_raw_streams.values():
-            env_id = int(stream["env_id"])
-            if stream["frame_count"] == 0:
-                stream["chunk_index"] += 1
-            stream["latest_iteration"] = int(iteration)
-
-            selected_ground_truth = None
-            if isinstance(ground_truth_pcd_world, dict):
-                selected_ground_truth = ground_truth_pcd_world.get(env_id)
-            else:
-                selected_ground_truth = ground_truth_pcd_world
-
-            ground_truth_points_world = self._prepare_viser_points(
-                selected_ground_truth,
-                env_id,
-                self.viser_raw_max_points,
-            ).to(dtype=torch.float16)
-
-            pointclouds = {
-                "ground_truth": ground_truth_points_world,
-            }
-            for name, pointcloud_base in (sensor_obs_pcd_base_by_name or {}).items():
-                if pointcloud_base is None:
-                    continue
-                pointclouds[name] = self._prepare_viser_world_points_from_local(
-                    pointcloud_base,
-                    robot_base_pos_w,
-                    robot_base_quat_w,
-                    env_id,
-                    self.viser_raw_max_points,
-                    drop_zero_rows=True,
-                ).to(dtype=torch.float16)
-
-            policy_input_points_world = None
-            if policy_input_pcd_base is not None:
-                policy_input_points_world = self._prepare_viser_world_points_from_local(
-                    policy_input_pcd_base,
-                    robot_base_pos_w,
-                    robot_base_quat_w,
-                    env_id,
-                    self.viser_raw_max_points,
-                    drop_zero_rows=True,
-                ).to(dtype=torch.float16)
-            pointclouds["policy_input"] = policy_input_points_world
-
-            aux_prediction_base = (
-                None
-                if aux_prediction is None
-                else self._aux_to_2d(aux_prediction)[env_id].detach().cpu().to(dtype=torch.float32)
-            )
-            frame_record = {
-                "pointclouds": pointclouds,
-            }
-            if aux_prediction_base is not None:
-                frame_record["aux_prediction"] = aux_prediction_base
-                frame_record["robot_base_pos_w"] = robot_base_pos_w[env_id].detach().cpu().to(dtype=torch.float32)
-                frame_record["robot_base_quat_w"] = robot_base_quat_w[env_id].detach().cpu().to(dtype=torch.float32)
-            stream["frames"].append(frame_record)
-            self._trim_viser_raw_frames(stream)
-        self._maybe_flush_viser_raw_snapshot(iteration)
-
-    def _close_viser_debug_tools(self):
-        """Flush any in-progress raw replay chunk on shutdown."""
-        self._flush_viser_raw_recording(chunk_complete=False, reason="shutdown")
-
-    def _extract_model_state(self, weights):
-        if isinstance(weights, dict):
-            if "model" in weights:
-                return weights["model"], weights
-            if "state_dict" in weights:
-                return weights["state_dict"], weights
-            if "model_state_dict" in weights:
-                return weights["model_state_dict"], weights
-        return weights, None
-
-    def _load_checkpoint_state(self, ckpt):
-        try:
-            return torch_ext.load_checkpoint(ckpt)
-        except Exception:
-            return torch.load(ckpt, map_location="cpu")
-
-    def set_teacher_weights(self, ckpt, model=None, strict=True, allow_adjust=True):
-        if model is None:
-            model = self.teacher_model
-        if model is None:
-            raise RuntimeError("Teacher model is not initialized.")
-        weights = self._load_checkpoint_state(ckpt)
-        state_dict, meta = self._extract_model_state(weights)
-        if allow_adjust:
-            state_dict = adjust_state_dict_keys(state_dict, model.state_dict())
-        model.load_state_dict(state_dict, strict=strict)
-        if meta is not None and "running_mean_std" in meta:
-            model.running_mean_std.load_state_dict(meta["running_mean_std"])
-
-    def load_student_weights(self, ckpt):
-        weights = torch.load(ckpt, map_location="cpu")
-        state_dict, _ = self._extract_model_state(weights)
-        state_dict = strip_prefix_from_state_dict(state_dict)
-        self.student_model.load_state_dict(state_dict, strict=False)
-        if isinstance(weights, dict):
-            if "optimizer_state_dict" in weights and not self.play_policy and self.resume_optimizer_state:
-                try:
-                    self.optimizer.load_state_dict(weights["optimizer_state_dict"])
-                except Exception as exc:
-                    if self.rank == 0:
-                        print(f"Warning: failed to load optimizer state from '{ckpt}': {exc}")
-            elif "optimizer_state_dict" in weights and not self.play_policy and self.rank == 0:
-                print(f"Skipping optimizer state restore from '{ckpt}' per runtime config.")
-            if "frame" in weights:
-                self.frame = int(weights["frame"])
-            if "epoch" in weights:
-                self.epoch_num = int(weights["epoch"])
-            if "student_update_steps" in weights:
-                self.student_update_steps = int(weights["student_update_steps"])
-
-            resume_iteration = weights.get("iteration")
-            if resume_iteration is None:
-                saved_num_envs = int(weights.get("num_envs_at_save", self.num_envs))
-                if saved_num_envs <= 0:
-                    saved_num_envs = int(self.num_envs)
-                resume_iteration = self.frame // max(1, saved_num_envs)
-            if resume_iteration is None and "student_update_steps" in weights:
-                resume_iteration = int(weights["student_update_steps"])
-            self.resume_iteration = int(resume_iteration)
-            self._resumed_from_student_ckpt = True
-
-            curriculum_step_count = weights.get("curriculum_step_count")
-            if curriculum_step_count is None:
-                curriculum_step_count = self.resume_iteration
-
-            # Curriculum/reset scheduling in DooropeningEnv uses common_step_counter.
-            if hasattr(self.ov_env, "common_step_counter"):
-                self.ov_env.common_step_counter = int(curriculum_step_count)
-            if hasattr(self.ov_env, "set_train_info"):
-                self.ov_env.set_train_info(int(self.frame))
-            elif hasattr(self.ov_env, "_rlgames_env_frames"):
-                self.ov_env._rlgames_env_frames = int(self.frame)
-            self._restore_lr_scheduler_state(weights)
-
-        print(f"Loaded student checkpoint: {ckpt}")
-        if self.rank == 0 and self._resumed_from_student_ckpt:
-            print(
-                "Resuming student training state from checkpoint: "
-                f"iteration={self.resume_iteration}, curriculum_step_count={int(curriculum_step_count)}, frame={self.frame}, "
-                f"student_update_steps={self.student_update_steps}"
-            )
-        elif self.rank == 0 and self.play_policy:
-            print("Loaded student weights for policy evaluation; optimizer and curriculum state were ignored.")
-
-    def _apply_optimizer_runtime_overrides(self):
-        for param_group in self.optimizer.param_groups:
-            param_group["weight_decay"] = float(self.weight_decay)
-
-    def _build_lr_scheduler(self):
-        return torch.optim.lr_scheduler.LambdaLR(
-            self.optimizer,
-            lr_lambda=self._get_lr_schedule_factor,
-        )
-
-    def _get_lr_schedule_factor(self, scheduler_step):
-        decay_iters = max(1, int(self.lr_decay_iters))
-        min_factor = 0.0 if self.lr <= 0.0 else float(self.min_lr / self.lr)
-        progress = min(max(int(scheduler_step) + 1, 0), decay_iters) / decay_iters
-        if self.lr_schedule == "linear":
-            return float(1.0 + (min_factor - 1.0) * progress)
-        if self.lr_schedule == "cosine":
-            cosine_factor = 0.5 * (1.0 + math.cos(math.pi * progress))
-            return float(min_factor + (1.0 - min_factor) * cosine_factor)
-        raise ValueError(f"Unsupported lr_schedule '{self.lr_schedule}'.")
-
-    def _restore_lr_scheduler_state(self, checkpoint):
-        if self.lr_scheduler is None:
-            return
-        scheduler_state = checkpoint.get("lr_scheduler_state_dict") if isinstance(checkpoint, dict) else None
-        if scheduler_state is not None:
-            try:
-                self.lr_scheduler.load_state_dict(scheduler_state)
-                restored_lrs = list(getattr(self.lr_scheduler, "_last_lr", []))
-                if restored_lrs:
-                    for param_group, restored_lr in zip(self.optimizer.param_groups, restored_lrs):
-                        param_group["lr"] = float(restored_lr)
-                return
-            except Exception as exc:
-                if self.rank == 0:
-                    print(f"Warning: failed to load LR scheduler state from checkpoint: {exc}")
-
-        # Older checkpoints may not include scheduler state. Reconstruct the
-        # scheduler position from the number of completed optimizer updates.
-        resume_updates = max(0, int(self.student_update_steps))
-        self.lr_scheduler.last_epoch = resume_updates - 1
-        self.lr_scheduler._step_count = max(1, resume_updates)
-        current_lr = float(self.lr) * float(self._get_lr_schedule_factor(self.lr_scheduler.last_epoch))
-        for param_group in self.optimizer.param_groups:
-            param_group["lr"] = current_lr
-        self.lr_scheduler._last_lr = [float(param_group["lr"]) for param_group in self.optimizer.param_groups]
-
-    def _get_current_learning_rate(self):
-        if getattr(self, "optimizer", None) is None or not self.optimizer.param_groups:
-            return float(self.lr)
-        return float(self.optimizer.param_groups[0]["lr"])
 
     def _force_full_curriculum_state(self):
         target_step = max(
@@ -3141,8 +2829,16 @@ class Dagger:
     def _get_sampler_camera_pose(self):
         camera_link_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_camera_body_idx]
         camera_link_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_camera_body_idx]
-        # The sampler render currently uses the camera-link pose directly.
-        return torch.cat([camera_link_pos_w, camera_link_quat_w[:, [1, 2, 3, 0]]], dim=-1)
+        # Apply the same camera mount offset as the real CameraCfg sensor (the -45deg roll that
+        # compensates for the 45deg-tilted realsense bracket). Composed in the link's local frame
+        # (world = link ⊗ offset), matching how IsaacLab mounts the camera prim on x5_camera_link.
+        # The offset pos is zero, so the optical center stays at the link origin.
+        if self._camera_mount_offset_quat_wxyz is not None:
+            offset = self._camera_mount_offset_quat_wxyz.unsqueeze(0).expand(camera_link_quat_w.shape[0], -1)
+            camera_quat_w = quat_mul(camera_link_quat_w, offset)
+        else:
+            camera_quat_w = camera_link_quat_w
+        return torch.cat([camera_link_pos_w, camera_quat_w[:, [1, 2, 3, 0]]], dim=-1)
 
     def _get_lidar_pose(self):
         lidar_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_lidar_body_idx]
@@ -3568,6 +3264,8 @@ class Dagger:
             clip_mode=self.depth_cam_render_clip_mode,
             jitter_mode=self.depth_cam_render_jitter_mode,
             use_compile=self.depth_cam_render_use_compile,
+            blur_kernel_px=self.depth_cam_render_blur_kernel_px,
+            blur_sigma_px=self.depth_cam_render_blur_sigma_px,
         )
         scene_pointcloud_base = world_to_local(rendered_pcd_world, robot_base_pos_w, robot_base_quat_w)
         return scene_pointcloud_base
@@ -3602,6 +3300,8 @@ class Dagger:
             clip_mode=self.depth_cam_render_clip_mode,
             jitter_mode=self.depth_cam_render_jitter_mode,
             use_compile=self.depth_cam_render_use_compile,
+            blur_kernel_px=self.depth_cam_render_blur_kernel_px,
+            blur_sigma_px=self.depth_cam_render_blur_sigma_px,
         )
         depth_pcd_base = world_to_local(rendered_depth_pcd_world, robot_base_pos_w, robot_base_quat_w)
         lidar_pcd_base = self._render_lidar_scene_pointcloud_base(
@@ -3621,28 +3321,89 @@ class Dagger:
             if self.pointcloud_source in {"sampler", "depth"}:
                 depth_pcd_base = self._filter_robot_points_base(self._sample_scene_obs_pointcloud_base_depth())
                 self._viser_cached_sensor_obs_pcd_base["robot_depth_cam_obs"] = depth_pcd_base
-                scene_obs_pcd_base = depth_pcd_base
+                scene_obs_pcd_sources = [depth_pcd_base]
             elif self.pointcloud_source == "lidar":
                 lidar_pcd_base = self._filter_robot_points_base(self._sample_scene_obs_pointcloud_base_lidar())
                 self._viser_cached_sensor_obs_pcd_base["robot_lidar_obs"] = lidar_pcd_base
-                scene_obs_pcd_base = lidar_pcd_base
+                scene_obs_pcd_sources = [lidar_pcd_base]
             else:
                 depth_pcd_base, lidar_pcd_base = self._sample_scene_obs_pointcloud_base_both()
                 depth_pcd_base = self._filter_robot_points_base(depth_pcd_base)
                 lidar_pcd_base = self._filter_robot_points_base(lidar_pcd_base)
                 self._viser_cached_sensor_obs_pcd_base["robot_lidar_obs"] = lidar_pcd_base
                 self._viser_cached_sensor_obs_pcd_base["robot_depth_cam_obs"] = depth_pcd_base
-                scene_obs_pcd_base = torch.cat([depth_pcd_base, lidar_pcd_base], dim=1)
-            return scene_obs_pcd_base
+                # Keep the realsense (dense, narrow FoV) and lidar (sparse, wide FoV) clouds
+                # SEPARATE. Concatenating then sampling a fixed budget biases toward the denser
+                # realsense and can drop the sparse-but-critical lidar handle points. Each local
+                # crop instead draws an equal share from each source (see _build_local_pcd).
+                scene_obs_pcd_sources = [depth_pcd_base, lidar_pcd_base]
+            return scene_obs_pcd_sources
         finally:
             self._current_door_hole_aug_metadata = None
 
-    def _build_local_pcd(self, scene_obs_pcd_base, palm_pos_base, robot_pcd_base=None):
+    @staticmethod
+    def _split_point_budget(total, num_parts):
+        # Split `total` points into `num_parts` near-equal integer chunks (extras go to the first
+        # chunks), e.g. 2500 over 2 sources -> [1250, 1250], 1001 -> [501, 500].
+        total = int(total)
+        num_parts = max(1, int(num_parts))
+        base = total // num_parts
+        remainder = total - base * num_parts
+        return [base + (1 if i < remainder else 0) for i in range(num_parts)]
+
+    def _crop_local_pcd_balanced(
+        self,
+        scene_obs_pcd_sources,
+        *,
+        local_range,
+        num_local_points,
+        is_cylindrical,
+        crop_center,
+        x_direction_cutoff,
+        log_name,
+    ):
+        # Crop each sensor source independently with an equal slice of the point budget, then
+        # concatenate. Total point count equals the single-cloud crop, so the policy input size is
+        # unchanged. With a single source this is identical to a plain crop_local_pcd call.
+        if len(scene_obs_pcd_sources) == 1:
+            crop, _ = crop_local_pcd(
+                scene_obs_pcd_sources[0],
+                local_range=local_range,
+                num_local_points=num_local_points,
+                is_cylindrical=is_cylindrical,
+                crop_center=crop_center,
+                x_direction_cutoff=x_direction_cutoff,
+                log_name=log_name,
+            )
+            return crop
+        per_source_counts = self._split_point_budget(num_local_points, len(scene_obs_pcd_sources))
+        crops = []
+        for src_idx, (src_pcd, src_count) in enumerate(zip(scene_obs_pcd_sources, per_source_counts)):
+            if src_count <= 0:
+                continue
+            crop, _ = crop_local_pcd(
+                src_pcd,
+                local_range=local_range,
+                num_local_points=src_count,
+                is_cylindrical=is_cylindrical,
+                crop_center=crop_center,
+                x_direction_cutoff=x_direction_cutoff,
+                log_name=f"{log_name}_src{src_idx}",
+            )
+            crops.append(crop)
+        return torch.cat(crops, dim=1)
+
+    def _build_local_pcd(self, scene_obs_pcd_sources, palm_pos_base, robot_pcd_base=None):
+        # Accept either a single cloud or a list of per-sensor clouds (e.g. [realsense, lidar] when
+        # pointcloud_source="both"). Each crop draws an equal share from every source so the denser
+        # sensor cannot dominate the policy cloud.
+        if torch.is_tensor(scene_obs_pcd_sources):
+            scene_obs_pcd_sources = [scene_obs_pcd_sources]
         pcd_parts = []
 
         if self.local_pcd_points[0] > 0:
-            base_crop, _ = crop_local_pcd(
-                scene_obs_pcd_base,
+            base_crop = self._crop_local_pcd_balanced(
+                scene_obs_pcd_sources,
                 local_range=self.local_pcd_range[0],
                 num_local_points=self.local_pcd_points[0],
                 is_cylindrical=True,
@@ -3653,8 +3414,8 @@ class Dagger:
             pcd_parts.append(base_crop)
 
         if self.local_pcd_points[1] > 0:
-            palm_crop, _ = crop_local_pcd(
-                scene_obs_pcd_base,
+            palm_crop = self._crop_local_pcd_balanced(
+                scene_obs_pcd_sources,
                 local_range=self.local_pcd_range[1],
                 num_local_points=self.local_pcd_points[1],
                 is_cylindrical=False,
@@ -3684,84 +3445,6 @@ class Dagger:
             raise ValueError("Student config requested local_pcd_t but no local point counts were configured.")
         return torch.cat(pcd_parts, dim=1)
 
-    def _init_wandb(self, summaries_dir):
-        summaries_path = pathlib.Path(summaries_dir).resolve()
-        summaries_path.mkdir(parents=True, exist_ok=True)
-
-        api_key = self.wandb_cfg.get("api_key") or os.getenv("WANDB_API_KEY")
-        configured_project = self.wandb_cfg.get("project") or os.getenv("WANDB_PROJECT")
-        entity = self.wandb_cfg.get("entity") or os.getenv("WANDB_ENTITY")
-        name = self.wandb_cfg.get("name") or os.getenv("WANDB_NAME")
-        mode = self.wandb_cfg.get("mode") or os.getenv("WANDB_MODE")
-        if mode is None:
-            mode = "online" if (api_key or configured_project or entity or name) else "offline"
-
-        if api_key and mode == "online":
-            wandb.login(key=api_key)
-
-        project = configured_project or "dooropening-pcd-dagger"
-        notes = self.wandb_cfg.get("notes") or os.getenv("WANDB_NOTES")
-        group = self.wandb_cfg.get("group") or os.getenv("WANDB_GROUP")
-        job_type = self.wandb_cfg.get("job_type") or os.getenv("WANDB_JOB_TYPE") or "distillation"
-        tags = self.wandb_cfg.get("tags") or os.getenv("WANDB_TAGS")
-        if isinstance(tags, str):
-            tags = [tag.strip() for tag in tags.split(",") if tag.strip()]
-
-        init_kwargs = {
-            "project": project,
-            "dir": str(summaries_path),
-            "config": self.config,
-            "job_type": job_type,
-        }
-        if entity:
-            init_kwargs["entity"] = entity
-        if name:
-            init_kwargs["name"] = name
-        if notes:
-            init_kwargs["notes"] = notes
-        if group:
-            init_kwargs["group"] = group
-        if mode:
-            init_kwargs["mode"] = mode
-        if tags:
-            init_kwargs["tags"] = tags
-
-        self.wandb_run = wandb.init(**init_kwargs)
-
-    def _wandb_log(self, metrics, step):
-        if not self.use_wandb or self.wandb_run is None or not metrics:
-            return
-        wandb.log(metrics, step=step)
-
-    def _to_loggable_scalar(self, value):
-        if isinstance(value, (bool, int, float)):
-            return float(value)
-        if isinstance(value, torch.Tensor) and value.numel() == 1:
-            return float(value.detach().cpu().item())
-        return None
-
-    def _update_logged_env_metrics(self, extras):
-        if not isinstance(extras, dict):
-            return
-
-        metrics = {}
-        for key, value in extras.items():
-            if not any(key.startswith(prefix) for prefix in self.logged_env_metric_prefixes):
-                continue
-            scalar_value = self._to_loggable_scalar(value)
-            if scalar_value is None:
-                continue
-            metrics[key] = scalar_value
-
-        if metrics:
-            self.latest_env_log_metrics.update(metrics)
-
-    def _finish_wandb(self):
-        if self.wandb_run is None:
-            return
-        wandb.finish()
-        self.wandb_run = None
-
     def _get_global_batch_size(self, local_batch_size):
         batch_size = torch.tensor(int(local_batch_size), dtype=torch.int64, device=self.device)
         if self.use_ddp:
@@ -3778,7 +3461,7 @@ class Dagger:
         self.latest_student_proprio_vector = q_pos.detach().clone()
 
         palm_pos_base = world_to_local(palm_pos_w, robot_base_pos_w, robot_base_quat_w).squeeze(1)
-        scene_obs_pcd_base = self._sample_scene_obs_pointcloud_base()
+        scene_obs_pcd_sources = self._sample_scene_obs_pointcloud_base()
         robot_pcd_base = (
             self._sample_robot_pointcloud_base_sampler() if self.append_robot_model_to_policy_cloud else None
         )
@@ -3879,6 +3562,12 @@ class Dagger:
                 )
             obs[self.push_pull_condition_obs_key] = push_pull_cond
 
+        if self.left_right_condition_enabled:
+            left_right_cond = self._build_gt_left_right_condition()
+            self.latest_fraction_left = float(left_right_cond[:, 0].mean().detach().cpu().item())
+            self.latest_fraction_right = float(left_right_cond[:, 1].mean().detach().cpu().item())
+            obs[self.left_right_condition_obs_key] = left_right_cond
+
         if self.proprio_temporal_enabled:
             if self.proprio_temporal_obs_key is None:
                 raise RuntimeError("temporal_state_encoders are enabled but no observation key is configured.")
@@ -3887,7 +3576,7 @@ class Dagger:
         for key in self.pcd_encoders_keys:
             if key == "local_pcd_t":
                 obs[key] = self._build_local_pcd(
-                    scene_obs_pcd_base,
+                    scene_obs_pcd_sources,
                     palm_pos_base,
                     robot_pcd_base=robot_pcd_base,
                 )
@@ -4048,287 +3737,6 @@ class Dagger:
         step_actions = student_actions.clone()
         step_actions[teacher_mask] = teacher_actions[teacher_mask]
         return step_actions, beta
-
-    def _mean_completed_metric(self, values):
-        if not values:
-            return None
-        return float(sum(values) / len(values))
-
-    def _update_completed_episode_metrics(self, done_mask, timed_out):
-        if done_mask.numel() == 0:
-            return
-
-        episode_rewards = self.current_rewards[done_mask, 0].detach().cpu().tolist()
-        episode_lengths = self.current_lengths[done_mask].detach().cpu().tolist()
-        episode_success_tensor = timed_out[done_mask].to(dtype=torch.float32)
-
-        self.completed_rewards.extend(float(value) for value in episode_rewards)
-        self.completed_lengths.extend(float(value) for value in episode_lengths)
-        self.interval_success_count[done_mask] += episode_success_tensor.to(device=self.device)
-        self.interval_completed_count[done_mask] += 1.0
-
-    def _clear_interval_success_rates(self):
-        self.interval_success_count.zero_()
-        self.interval_completed_count.zero_()
-
-    def _get_global_success_rate_for_mask(self, split_mask, global_target):
-        split_mask = split_mask.to(device=self.device, dtype=torch.bool)
-        valid_mask = (self.interval_completed_count > 0) & split_mask
-        per_env_success_rate = torch.zeros_like(self.interval_success_count)
-        per_env_success_rate[valid_mask] = (
-            self.interval_success_count[valid_mask] / self.interval_completed_count[valid_mask]
-        )
-
-        stats = torch.zeros(2, dtype=torch.float64, device=self.device)
-        stats[0] = float(per_env_success_rate[valid_mask].sum().detach().cpu().item())
-        stats[1] = float(valid_mask.sum().detach().cpu().item())
-        if self.use_ddp:
-            dist.all_reduce(stats, op=dist.ReduceOp.SUM)
-        if stats[1] <= 0:
-            return None, False
-
-        is_ready = bool(stats[1].detach().cpu().item() >= global_target)
-        if not is_ready:
-            return None, False
-        return float((stats[0] / stats[1]).detach().cpu().item()), True
-
-    def _get_global_success_rates(self):
-        num_families = len(DOOR_FAMILY_NAMES)
-        stats = torch.zeros((1 + num_families, 2), dtype=torch.float64, device=self.device)
-
-        valid_mask = (self.interval_completed_count > 0) & self.train_env_mask
-        per_env_success_rate = torch.zeros_like(self.interval_success_count)
-        per_env_success_rate[valid_mask] = (
-            self.interval_success_count[valid_mask] / self.interval_completed_count[valid_mask]
-        )
-        stats[0, 0] = float(per_env_success_rate[valid_mask].sum().detach().cpu().item())
-        stats[0, 1] = float(valid_mask.sum().detach().cpu().item())
-        for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
-            family_mask = valid_mask & (self.env_family_ids == int(family_id))
-            stats[family_id + 1, 0] = float(per_env_success_rate[family_mask].sum().detach().cpu().item())
-            stats[family_id + 1, 1] = float(family_mask.sum().detach().cpu().item())
-
-        if self.use_ddp:
-            dist.all_reduce(stats, op=dist.ReduceOp.SUM)
-
-        is_ready = bool(stats[0, 1].detach().cpu().item() >= self.global_train_num_envs)
-        success_rate = None
-        if is_ready and stats[0, 1] > 0:
-            success_rate = float((stats[0, 0] / stats[0, 1]).detach().cpu().item())
-
-        family_success_rates = {}
-        for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
-            count = stats[family_id + 1, 1]
-            if is_ready and count > 0:
-                family_success_rates[family_name] = float(
-                    (stats[family_id + 1, 0] / count).detach().cpu().item()
-                )
-            else:
-                family_success_rates[family_name] = None
-        validation_success_rate, validation_ready = self._get_global_success_rate_for_mask(
-            self.validation_env_mask,
-            self.global_validation_num_envs,
-        )
-        return success_rate, family_success_rates, validation_success_rate, is_ready, validation_ready
-
-    def _log(
-        self,
-        iteration,
-        train_total_loss,
-        train_action_loss,
-        train_aux_loss,
-        train_mode_loss,
-        train_force_loss,
-        validation_total_loss,
-        validation_action_loss,
-        teacher_forcing_beta,
-    ):
-        if iteration % self.log_interval != 0:
-            return
-        episode_reward = self._mean_completed_metric(self.completed_rewards)
-        episode_length = self._mean_completed_metric(self.completed_lengths)
-        env_step_dt = max(float(getattr(self.ov_env, "dt", 0.0)), 1e-6)
-        episode_length_seconds = episode_length * env_step_dt if episode_length is not None else None
-        success_rate = None
-        family_success_rates = {}
-        validation_success_rate = None
-        success_rate_ready = False
-        validation_success_rate_ready = False
-        if iteration > 0:
-            (
-                success_rate,
-                family_success_rates,
-                validation_success_rate,
-                success_rate_ready,
-                validation_success_rate_ready,
-            ) = self._get_global_success_rates()
-        teacher_env_fraction = self._get_teacher_forcing_env_fraction()
-        student_env_fraction = 1.0 - teacher_env_fraction
-        iteration_time_ms = self._consume_timing_means()
-
-        if self.rank == 0:
-            print("=" * 10)
-            print("ITERATION:", iteration)
-            print("Train Total Loss:", float(train_total_loss.detach().cpu()))
-            print("Train Action Loss:", float(train_action_loss.detach().cpu()))
-            if train_aux_loss is not None:
-                print("Train Aux Loss:", float(train_aux_loss.detach().cpu()))
-            if train_mode_loss is not None:
-                print("Train Direction Loss:", float(train_mode_loss.detach().cpu()))
-            if train_force_loss is not None:
-                print("Train Force Loss:", float(train_force_loss.detach().cpu()))
-                if self.latest_force_angle_deg is not None:
-                    print("Force Angle Deg:", self.latest_force_angle_deg)
-            if validation_total_loss is not None:
-                print("Validation Total Loss:", float(validation_total_loss.detach().cpu()))
-            if validation_action_loss is not None:
-                print("Validation Action Loss:", float(validation_action_loss.detach().cpu()))
-            if self.latest_mode_direction_acc is not None:
-                print("Direction Acc:", self.latest_mode_direction_acc)
-            if self.mode_prediction_loss_enabled:
-                print("Direction Window Acc:", self.latest_dir_window_acc)
-                print("Direction Window Balanced Acc:", self.latest_dir_window_balanced_acc)
-                print("Direction Window Push Acc:", self.latest_dir_window_push_acc)
-                print("Direction Window Pull Acc:", self.latest_dir_window_pull_acc)
-                print("Direction Window Num Push Labels:", self.latest_dir_window_num_push_labels)
-                print("Direction Window Num Pull Labels:", self.latest_dir_window_num_pull_labels)
-                print("Direction Window Num Push Preds:", self.latest_dir_window_num_push_preds)
-                print("Direction Window Num Pull Preds:", self.latest_dir_window_num_pull_preds)
-            if self.force_prediction_enabled:
-                print("Filtered Handle Force Norm Mean:", self.latest_filtered_handle_force_norm_mean)
-                print("Filtered Handle Force Norm Max:", self.latest_filtered_handle_force_norm_max)
-            if self.observation_lag_enabled:
-                print("Obs Lag Enabled:", bool(self.latest_obs_lag_enabled))
-                print("Obs Lag Mean (ms):", self.latest_obs_lag_mean_ms)
-                print("Obs Lag Min (ms):", self.latest_obs_lag_min_ms)
-                print("Obs Lag Max (ms):", self.latest_obs_lag_max_ms)
-            if self.push_pull_condition_enabled:
-                print("Push/Pull Condition Source:", self.latest_push_pull_condition_source)
-                print("Fraction Push:", self.latest_fraction_push)
-                print("Fraction Pull:", self.latest_fraction_pull)
-                print("Push/Pull Pred Entropy:", self.latest_push_pull_pred_entropy)
-                if self.latest_push_pull_pred_acc is not None:
-                    print("Push/Pull Pred Acc:", self.latest_push_pull_pred_acc)
-                print("Push/Pull Perturbed To Push Count:", self.latest_push_pull_perturb_to_push_count)
-                print("Push/Pull Perturbed To Pull Count:", self.latest_push_pull_perturb_to_pull_count)
-            print("Temporal Aux Handle Enabled:", bool(self.temporal_aux_handle_enabled))
-            print("Temporal Push/Pull Belief Enabled:", bool(self.temporal_push_pull_belief_enabled))
-            if self.temporal_push_pull_belief_enabled:
-                print("Push/Pull Belief Hist Entropy Now:", self.latest_push_pull_belief_hist_entropy_now)
-                print("Push/Pull Belief Hist Entropy Mean:", self.latest_push_pull_belief_hist_entropy_mean)
-            print("Teacher Forcing Beta:", teacher_forcing_beta)
-            print("Teacher Rollout Env Fraction:", teacher_env_fraction)
-            print("Student Rollout Env Fraction:", student_env_fraction)
-            print("Student Update Steps:", self.student_update_steps)
-            print("Learning Rate:", self._get_current_learning_rate())
-            print("Last Local Update Batch Size:", self.last_local_update_batch_size)
-            print("Last Global Update Batch Size:", self.last_global_update_batch_size)
-            if episode_reward is not None:
-                print("Episode Reward:", episode_reward)
-            if episode_length is not None:
-                print("Episode Length:", episode_length)
-            if episode_length_seconds is not None:
-                print("Episode Length (s):", episode_length_seconds)
-            if success_rate is not None:
-                print("Train Success Rate:", success_rate)
-            if validation_success_rate is not None:
-                print("Validation Success Rate:", validation_success_rate)
-            for family_name, family_success_rate in family_success_rates.items():
-                if family_success_rate is not None:
-                    print(f"Train Success Rate/{family_name}:", family_success_rate)
-            if iteration_time_ms is not None:
-                print("Iteration Time (ms):", iteration_time_ms)
-            # for key, value in sorted(self.latest_env_log_metrics.items()):
-            #     print(f"{key}:", value)
-
-        metrics = {
-            "loss/total": float(train_total_loss.detach().cpu()),
-            "loss/action": float(train_action_loss.detach().cpu()),
-            "dist/world_size": self.world_size,
-            "dist/update_steps": self.student_update_steps,
-            "dist/last_local_update_batch_size": self.last_local_update_batch_size,
-            "dist/last_global_update_batch_size": self.last_global_update_batch_size,
-            "schedule/learning_rate": self._get_current_learning_rate(),
-        }
-        if train_aux_loss is not None:
-            metrics["loss/aux"] = float(train_aux_loss.detach().cpu())
-        if train_mode_loss is not None:
-            metrics["loss/direction"] = float(train_mode_loss.detach().cpu())
-        if train_force_loss is not None:
-            metrics["loss/force"] = float(train_force_loss.detach().cpu())
-            if self.latest_force_angle_deg is not None:
-                metrics["stats/force_angle_deg"] = self.latest_force_angle_deg
-        if validation_total_loss is not None:
-            metrics["loss/val_total"] = float(validation_total_loss.detach().cpu())
-        if validation_action_loss is not None:
-            metrics["loss/val_action"] = float(validation_action_loss.detach().cpu())
-        if self.latest_mode_direction_acc is not None:
-            metrics["stats/dir_acc"] = self.latest_mode_direction_acc
-        if self.mode_prediction_loss_enabled:
-            metrics["stats/dir_window_acc"] = self.latest_dir_window_acc
-            metrics["stats/dir_window_balanced_acc"] = self.latest_dir_window_balanced_acc
-            metrics["stats/dir_window_push_acc"] = self.latest_dir_window_push_acc
-            metrics["stats/dir_window_pull_acc"] = self.latest_dir_window_pull_acc
-            metrics["stats/dir_window_num_push_labels"] = self.latest_dir_window_num_push_labels
-            metrics["stats/dir_window_num_pull_labels"] = self.latest_dir_window_num_pull_labels
-            metrics["stats/dir_window_num_push_preds"] = self.latest_dir_window_num_push_preds
-            metrics["stats/dir_window_num_pull_preds"] = self.latest_dir_window_num_pull_preds
-        if self.force_prediction_enabled:
-            metrics["stats/filtered_handle_force_norm_mean"] = self.latest_filtered_handle_force_norm_mean
-            metrics["stats/filtered_handle_force_norm_max"] = self.latest_filtered_handle_force_norm_max
-        if self.observation_lag_enabled:
-            metrics["timestamp/obs_lag_enabled"] = self.latest_obs_lag_enabled
-            metrics["timestamp/obs_lag_mean_ms"] = self.latest_obs_lag_mean_ms
-            metrics["timestamp/obs_lag_min_ms"] = self.latest_obs_lag_min_ms
-            metrics["timestamp/obs_lag_max_ms"] = self.latest_obs_lag_max_ms
-            for timestamp_ms, mean_age_ms in self.latest_obs_lag_effective_age_ms_by_timestamp.items():
-                metrics[f"timestamp/obs_lag_effective_age_{timestamp_ms}ms"] = mean_age_ms
-        metrics["stats/temporal_aux_handle_enabled"] = float(self.temporal_aux_handle_enabled)
-        metrics["stats/temporal_push_pull_belief_enabled"] = float(self.temporal_push_pull_belief_enabled)
-        metrics["stats/push_pull_belief_hist_entropy_now"] = self.latest_push_pull_belief_hist_entropy_now
-        metrics["stats/push_pull_belief_hist_entropy_mean"] = self.latest_push_pull_belief_hist_entropy_mean
-        if self.push_pull_condition_enabled:
-            metrics["stats/push_pull_condition_source"] = self.latest_push_pull_condition_source
-            metrics["stats/fraction_push"] = self.latest_fraction_push
-            metrics["stats/fraction_pull"] = self.latest_fraction_pull
-            metrics["stats/push_pull_pred_entropy"] = self.latest_push_pull_pred_entropy
-            if self.latest_push_pull_pred_acc is not None:
-                metrics["stats/push_pull_pred_acc"] = self.latest_push_pull_pred_acc
-            metrics["stats/push_pull_perturb_to_push_count"] = self.latest_push_pull_perturb_to_push_count
-            metrics["stats/push_pull_perturb_to_pull_count"] = self.latest_push_pull_perturb_to_pull_count
-        if episode_reward is not None:
-            metrics["stats/episode_reward"] = episode_reward
-        if episode_length is not None:
-            metrics["stats/episode_length"] = episode_length
-        if episode_length_seconds is not None:
-            metrics["stats/episode_length_seconds"] = episode_length_seconds
-        if success_rate is not None:
-            metrics["success/success_rate"] = success_rate
-        if validation_success_rate is not None:
-            metrics["success/validation_success_rate"] = validation_success_rate
-        for family_name, family_success_rate in family_success_rates.items():
-            if family_success_rate is not None:
-                metrics[f"success/success_rate/{family_name}"] = family_success_rate
-        if teacher_forcing_beta is not None:
-            metrics["schedule/teacher_forcing_beta"] = teacher_forcing_beta
-        metrics["schedule/teacher_rollout_env_fraction"] = teacher_env_fraction
-        metrics["schedule/student_rollout_env_fraction"] = student_env_fraction
-        if iteration_time_ms is not None:
-            metrics["timing/iteration_ms"] = iteration_time_ms
-        if self.latest_door_hole_aug_stats:
-            for key, value in self.latest_door_hole_aug_stats.items():
-                metrics[key] = value
-        if self.latest_env_log_metrics:
-            for key, value in self.latest_env_log_metrics.items():
-                if key == "stats/success_rate" or key.startswith("stats/success_rate/"):
-                    continue
-                metrics[key] = value
-        self._wandb_log(metrics, step=iteration)
-        should_clear_success_rates = success_rate_ready and (
-            self.global_validation_num_envs <= 0 or validation_success_rate_ready
-        )
-        if should_clear_success_rates:
-            self._clear_interval_success_rates()
 
     def distill(self):
         if not self.play_policy and not self._has_teacher():
