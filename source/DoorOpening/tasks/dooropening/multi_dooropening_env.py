@@ -16,6 +16,7 @@ from DoorOpening.assets.door.multi_door_cfg import (
     asset_paths as door_asset_paths,
     asset_family_ids,
     board_offsets,
+    closed_handle_offsets_base,
     configure_multi_door_assets_for_rank,
     edit_door_articulation,
     get_multi_door_asset_start_index,
@@ -233,6 +234,12 @@ class DooropeningEnv(DirectRLEnv):
             )
         self.handle_offsets = handle_offsets.to(self.device)[self.env_asset_indices]
         self.board_offsets = board_offsets.to(self.device)[self.env_asset_indices]
+        # Closed-door (joints=0) handle center per env, in the door "base" link frame. Precomputed
+        # from the URDF (fix_base => static geometry), so the closed-handle anchor needs no sim
+        # capture; see get_closed_handle_position_in_base_frame().
+        self.closed_handle_pos_door_base = closed_handle_offsets_base.to(
+            device=self.device, dtype=torch.float32
+        )[self.env_asset_indices]
         self.use_motion_ref = bool(getattr(self.cfg, "use_motion_ref", True))
         env_to_file_map = self.env_asset_indices.detach().cpu().tolist()
         if self.use_motion_ref:
@@ -1683,6 +1690,30 @@ class DooropeningEnv(DirectRLEnv):
         ).squeeze(1)
 
         return handle_center_pos_base
+
+    def get_closed_handle_position_in_base_frame(self) -> torch.Tensor:
+        """Closed-door (joints=0) handle position expressed in the CURRENT robot base frame.
+
+        Simulates a one-shot SAM3 detection of the closed handle in the world, re-expressed in the
+        robot base frame as the base moves. The closed-handle position in the door "base" link frame
+        is a precomputed URDF constant (``self.closed_handle_pos_door_base``); we compose it with the
+        runtime door-base world pose (static, since fix_base) and transform into the robot base
+        frame. No simulation capture needed. Shape (num_envs, 3).
+        """
+        door_base_pos_w = self.door.data.body_pos_w[:, self._door_base_link_idx]
+        door_base_quat_w = self.door.data.body_quat_w[:, self._door_base_link_idx]
+        handle_center_pos_w = (
+            quat_apply(door_base_quat_w.float(), self.closed_handle_pos_door_base.float())
+            + door_base_pos_w
+        )
+
+        robot_base_pos_w = self.robot.data.body_pos_w[:, self._robot_base_body_link_idx]
+        robot_base_quat_w = self.robot.data.body_quat_w[:, self._robot_base_body_link_idx]
+        return world_to_local(
+            handle_center_pos_w.unsqueeze(1),
+            robot_base_pos_w,
+            robot_base_quat_w,
+        ).squeeze(1)
 
     def _set_current_state_as_reference(self):
         """Populate reference tensors without loading demonstration trajectories."""

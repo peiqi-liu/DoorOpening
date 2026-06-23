@@ -253,6 +253,12 @@ class ViserDebugMixin:
         """Append a record-specific suffix to replay filenames so each saved capture gets its own file."""
         return format_iterated_record_path(path_str, iteration)
 
+    def _is_viser_capture_iteration(self, iteration):
+        # Mirrors the capture gate in _maybe_update_viser_debug so callers can avoid composing a
+        # ground-truth cloud on iterations that would be skipped anyway.
+        interval = max(1, int(self.viser_raw_capture_interval))
+        return int(iteration) % interval == 0
+
     def _maybe_update_viser_debug(
         self,
         iteration,

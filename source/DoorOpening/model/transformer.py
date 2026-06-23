@@ -520,6 +520,12 @@ class PCDTransformer(BaseModel):
         ]
         self.aux_output_dim = sum(int(self.state_encoders_cfg[key]["input_dim"]) for key in self.aux_state_keys)
         self.aux_memory_allowlist = ["local_pcd_t", *self.aux_state_keys]
+        # Whether the architecture has any point-cloud encoder. When there is none (state-only
+        # policy), the aux query cannot rely on the point cloud to localize the handle, so it is
+        # allowed to attend to ALL encoder memory (proprio/target-err history, conditions, anchor).
+        self._has_pcd_encoder = any(
+            bool(cfg.get("use_pcd", False)) for cfg in self.pcd_encoders_cfg.values()
+        )
         self.aux_prediction_mode = str(aux_prediction_mode).lower()
         if self.aux_prediction_mode not in ["absolute", "delta"]:
             raise ValueError(f"aux_prediction_mode must be 'absolute' or 'delta', got {aux_prediction_mode}")
@@ -932,11 +938,14 @@ class PCDTransformer(BaseModel):
 
         if self.aux_prediction:
             # Aux query is index 0; action queries are index [action_query_start:action_query_end].
-            # For cross-attention, allow aux query to read only from the allowlist.
-            memory_mask[self.aux_query_idx, :] = True
-            for key in self.aux_memory_allowlist:
-                if key in token_ranges:
-                    memory_mask[self.aux_query_idx, token_ranges[key]] = False
+            # With a point cloud, restrict aux cross-attention to the allowlist (cloud + aux anchor).
+            # Without any point cloud, let the aux query read all encoder memory so it can infer the
+            # actual handle pose from proprio/target-err history.
+            if self._has_pcd_encoder:
+                memory_mask[self.aux_query_idx, :] = True
+                for key in self.aux_memory_allowlist:
+                    if key in token_ranges:
+                        memory_mask[self.aux_query_idx, token_ranges[key]] = False
 
             # For decoder self-attention, block aux query from reading non-aux queries.
             if num_queries > 1:

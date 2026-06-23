@@ -146,11 +146,22 @@ def compute_exact_door_keypoints(urdf_path):
         vertices = mesh_2.vertices
         distances = np.linalg.norm(vertices, axis=1)
         furthest_vertex = vertices[np.argmax(distances)]
-        
+
         keypoints["link_2"] = [
             [0.0, 0.0, 0.0],
             furthest_vertex.tolist()
         ]
+
+        # Handle center (mean of the two link_2 keypoints) expressed in the door "base" frame at the
+        # CLOSED pose (all joints = 0). Because the door is fix_base, this is a static per-asset
+        # constant; composing it with the runtime door-base world pose yields the closed-handle pose
+        # without any simulation capture. joint_2 (child=link_2) origin maps link_2 -> link_1.
+        joint_2 = find_joint_by_child(root, "link_2")
+        board_to_handle_closed = origin_to_transform(None if joint_2 is None else joint_2.find("origin"))
+        base_to_handle_closed = base_to_board_closed @ board_to_handle_closed
+        handle_center_local = (np.array([0.0, 0.0, 0.0], dtype=np.float64) + furthest_vertex) / 2.0
+        handle_center_base = transform_points(handle_center_local[None, :], base_to_handle_closed)[0]
+        keypoints["link_2_center_base"] = handle_center_base.tolist()
 
     return keypoints
 

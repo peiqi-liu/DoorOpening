@@ -680,6 +680,32 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.aux_handle_init_noise_m = self._parse_aux_handle_init_noise(
             self.runtime_cfg.get("aux_handle_init_noise_m", 0.0)
         )
+        # Aux handle input mode:
+        #   "recurrent"        -> legacy: policy input = previous step's aux prediction (aux_buffer).
+        #   "closed_door_base" -> policy input = the closed-door (door joint=0) handle pose expressed
+        #                         in the CURRENT robot base frame + fresh per-step noise. The aux
+        #                         prediction head is still trained on the ACTUAL-joint handle pose,
+        #                         but its output is never fed back (non-recurrent).
+        self.aux_handle_input_mode = str(
+            self.runtime_cfg.get("aux_handle_input_mode", "recurrent")
+        ).lower()
+        allowed_aux_handle_input_modes = {"recurrent", "closed_door_base"}
+        if self.aux_handle_input_mode not in allowed_aux_handle_input_modes:
+            raise ValueError(
+                f"dagger.aux_handle_input_mode must be one of {sorted(allowed_aux_handle_input_modes)}, "
+                f"got '{self.aux_handle_input_mode}'."
+            )
+        if self.aux_handle_input_mode == "closed_door_base":
+            if not self.has_aux_input or "aux_handle_pos" not in self.aux_state_specs:
+                raise ValueError(
+                    "dagger.aux_handle_input_mode='closed_door_base' requires an enabled aux_handle_pos "
+                    "state encoder."
+                )
+            if not callable(getattr(self.ov_env, "get_closed_handle_position_in_base_frame", None)):
+                raise RuntimeError(
+                    "dagger.aux_handle_input_mode='closed_door_base' requires the environment to expose "
+                    "get_closed_handle_position_in_base_frame()."
+                )
         self.aux_buffer = None
         if self.has_aux_input:
             self.aux_buffer = torch.zeros((self.num_envs, self.aux_input_dim), dtype=torch.float32, device=self.device)
@@ -2297,6 +2323,28 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             "for aux handle position prediction."
         )
 
+    def _get_closed_handle_position_base(self):
+        # Closed-door (door joint=0) handle position in the CURRENT robot base frame. Simulates a
+        # one-shot SAM3 detection of the closed handle, re-expressed in the base frame as it moves.
+        getter = getattr(self.ov_env, "get_closed_handle_position_in_base_frame", None)
+        if callable(getter):
+            return getter()
+        raise RuntimeError(
+            "Expected environment to expose get_closed_handle_position_in_base_frame() "
+            "for closed_door_base aux handle input."
+        )
+
+    def _build_closed_door_aux_input_vector(self):
+        # Non-recurrent aux input: the closed-door handle anchor in the current base frame with fresh
+        # per-step noise. Never derived from the aux prediction.
+        closed_handle_base = self._get_closed_handle_position_base()
+        aux_values = OrderedDict()
+        aux_values["aux_handle_pos"] = self._apply_aux_handle_init_noise(closed_handle_base)
+        aux_input_vector = self._stack_aux_state_values(aux_values)
+        if aux_input_vector is None:
+            raise RuntimeError("closed_door_base aux input could not be assembled.")
+        return aux_input_vector.to(device=self.device, dtype=torch.float32)
+
     def _get_aux_state_values(self):
         if not self.has_aux_input:
             return OrderedDict()
@@ -3430,17 +3478,28 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
 
         self.latest_student_proprio_vector = q_pos.detach().clone()
 
-        palm_pos_base = world_to_local(palm_pos_w, robot_base_pos_w, robot_base_quat_w).squeeze(1)
-        scene_obs_pcd_sources = self._sample_scene_obs_pointcloud_base()
-        robot_pcd_base = (
-            self._sample_robot_pointcloud_base_sampler() if self.append_robot_model_to_policy_cloud else None
-        )
+        # Point cloud is optional: skip all (expensive) cloud sampling when the student has no pcd
+        # encoders configured (state-only policy).
+        has_pcd = bool(self.pcd_encoders_keys)
+        if has_pcd:
+            palm_pos_base = world_to_local(palm_pos_w, robot_base_pos_w, robot_base_quat_w).squeeze(1)
+            scene_obs_pcd_sources = self._sample_scene_obs_pointcloud_base()
+            robot_pcd_base = (
+                self._sample_robot_pointcloud_base_sampler() if self.append_robot_model_to_policy_cloud else None
+            )
+        else:
+            palm_pos_base = None
+            scene_obs_pcd_sources = None
+            robot_pcd_base = None
         target_t = self._get_implemented_action_vector()
         need_aux_target_vector = self.has_aux_input and (not self.play_policy and self.has_aux_prediction)
         aux_target_vector = (
             self._stack_aux_state_values(self._get_aux_state_values()) if need_aux_target_vector else None
         )
-        if self.has_aux_input and self.aux_feedback_to_policy:
+        if self.has_aux_input and self.aux_handle_input_mode == "closed_door_base":
+            # Non-recurrent closed-door handle anchor (current base frame + fresh per-step noise).
+            aux_input_vector = self._build_closed_door_aux_input_vector()
+        elif self.has_aux_input and self.aux_feedback_to_policy:
             if self.aux_buffer is None:
                 raise RuntimeError("Aux feedback requested but aux_buffer is not initialized.")
             aux_input_vector = self.aux_buffer.clone()
@@ -3553,7 +3612,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             else:
                 raise KeyError(f"Unsupported student pointcloud key '{key}' in config.")
 
-        if self.viser_raw_enabled:
+        if self.viser_raw_enabled and has_pcd:
             self._viser_pending_debug_frame = {
                 "iteration": iteration,
                 "robot_base_pos_w": robot_base_pos_w,
@@ -3564,6 +3623,21 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             }
             self._viser_cached_ground_truth_pcd_world = None
             self._viser_cached_sensor_obs_pcd_base = OrderedDict()
+        elif self.viser_raw_enabled and self._is_viser_capture_iteration(iteration):
+            # State-only policy (no sensor cloud fed to the policy): still show the ground-truth
+            # scene cloud in Viser, but compose it from cached link clouds ONLY on capture
+            # iterations -- no per-step depth/lidar rendering.
+            gt_scene_pcd_world = self._sample_scene_pointcloud_world_cached(
+                hole_metadata=getattr(self, "_current_door_hole_aug_metadata", None)
+            )
+            self._viser_pending_debug_frame = {
+                "iteration": iteration,
+                "robot_base_pos_w": robot_base_pos_w,
+                "robot_base_quat_w": robot_base_quat_w,
+                "ground_truth_pcd_world": self._select_viser_ground_truth_points(gt_scene_pcd_world),
+                "sensor_obs_pcd_base_by_name": None,
+                "policy_input_pcd_base": None,
+            }
 
         self.latest_aux_input_vector = None if aux_input_vector is None else aux_input_vector.detach().clone()
         self.latest_aux_target_vector = None if aux_target_vector is None else aux_target_vector.detach().clone()
@@ -3745,7 +3819,10 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 aux_prediction_for_replay = None
                 if self.has_aux_prediction:
                     aux_prediction_for_replay = self._decode_aux_prediction(student_output["aux"].detach())
-                    self.aux_buffer[:] = aux_prediction_for_replay
+                    # Recurrent feedback only: in closed_door_base mode the aux input is the fixed
+                    # closed-door anchor, so the prediction is never fed back into the buffer.
+                    if self.aux_handle_input_mode != "closed_door_base":
+                        self.aux_buffer[:] = aux_prediction_for_replay
 
                 if self.viser_raw_enabled and self._viser_pending_debug_frame is not None:
                     self._maybe_update_viser_debug(

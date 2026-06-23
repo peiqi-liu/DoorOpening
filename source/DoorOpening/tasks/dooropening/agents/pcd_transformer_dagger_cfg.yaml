@@ -58,7 +58,8 @@ temporal_state_encoders:
     # - push_pull_belief
     - target_err_hand
     - base_vel
-    - aux_handle_pos
+    # aux_handle_pos is intentionally NOT in the temporal stack: the handle anchor is a
+    # standalone, non-recurrent closed-door pose (see dagger.aux_handle_input_mode).
   hidden_dims: [128, 256]
   output_dim: 256
   activation: elu
@@ -82,12 +83,9 @@ observation_lag:
   per_timestamp: true
   clamp_to_available_history: true
 
-pcd_encoders_cfg:
-  local_pcd_t:
-    type: "pointnet"
-    num_output_tokens: 128
-    num_points: [2500, 1000, 0]  # Policy crop counts [base_crop, palm_crop, (robot slot)]. For pointcloud_source="both" each crop is split evenly across realsense+lidar (e.g. 2500 -> 1250 realsense + 1250 lidar). Robot model points are configured below.
-    use_pcd: true
+# Point cloud removed for this branch: the policy is state-only
+# (initial handle anchor + proprio/target-err history + push/pull + left/right).
+pcd_encoders_cfg: {}
 
 state_encoders_cfg:
   q_arm:
@@ -147,9 +145,16 @@ dagger:
   teacher_forcing_warmup_iters: 2000
   teacher_forcing_transition_iters: 18000
   teacher_forcing_min_beta: 0.0
-  aux_feedback_to_policy: true  # When false, aux input stays zero instead of feeding back predictions.
-  aux_handle_init_source: ground_truth  # First-step handle-pose seed: "zeros" or "ground_truth". With "ground_truth" the sim handle pose is fed only on the first step after each reset; predictions take over from step 1. Requires aux_feedback_to_policy: true.
-  aux_handle_init_noise_m: 0.10  # Bound (m) on the TOTAL Euclidean error of the ground_truth handle-pose seed: random direction scaled by a magnitude in [0, this]. 0 = exact GT. Input seed only, never the aux target.
+  # Aux handle input mode:
+  #   "recurrent"        -> legacy: policy input = previous step's aux prediction (fed back).
+  #   "closed_door_base" -> policy input = the closed-door (door joint=0) handle pose, expressed in
+  #                         the CURRENT robot base frame, + fresh per-step noise. Non-recurrent: the
+  #                         aux prediction head is still trained (target = handle at the ACTUAL door
+  #                         joint angle) but its output is NEVER fed back as the next-step input.
+  aux_handle_input_mode: closed_door_base
+  aux_feedback_to_policy: true  # Legacy recurrent feedback. Ignored when aux_handle_input_mode=closed_door_base.
+  aux_handle_init_source: zeros  # Unused in closed_door_base mode (no recurrent seed).
+  aux_handle_init_noise_m: 0.10  # Bound (m) on the TOTAL Euclidean per-step Euclidean error added to the closed-door handle anchor.
   prediction_training:
     loss_window_start: 40
     loss_window_end: 100

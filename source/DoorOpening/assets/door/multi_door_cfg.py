@@ -220,6 +220,9 @@ board_offsets = []
 board_bboxes = []
 board_bboxes_link1 = []
 handle_offsets = []
+# Closed-door (joints=0) handle center per asset, expressed in the door "base" link frame. Static
+# because the door is fix_base; used as the SAM3-style initial handle anchor without sim capture.
+closed_handle_offsets_base = []
 
 for asset_path in asset_paths:
     keypoints = compute_exact_door_keypoints(asset_path)
@@ -227,11 +230,13 @@ for asset_path in asset_paths:
     board_bboxes.append(keypoints["link_1_bbox_base"])
     board_bboxes_link1.append(keypoints["link_1_bbox_link1"])
     handle_offsets.append(keypoints["link_2"])
+    closed_handle_offsets_base.append(keypoints["link_2_center_base"])
 
 board_offsets = torch.tensor(board_offsets)
 board_bboxes = torch.tensor(board_bboxes)
 board_bboxes_link1 = torch.tensor(board_bboxes_link1)
 handle_offsets = torch.tensor(handle_offsets)
+closed_handle_offsets_base = torch.tensor(closed_handle_offsets_base)
 asset_family_ids = torch.tensor(asset_family_ids, dtype=torch.long)
 
 motion_traj_paths = [os.path.join(os.path.dirname(asset_path), "traj.pkl") for asset_path in asset_paths]
