@@ -70,14 +70,6 @@ class CheckpointMixin:
         state_dict = strip_prefix_from_state_dict(state_dict)
         self.student_model.load_state_dict(state_dict, strict=False)
         if isinstance(weights, dict):
-            if "optimizer_state_dict" in weights and not self.play_policy and self.resume_optimizer_state:
-                try:
-                    self.optimizer.load_state_dict(weights["optimizer_state_dict"])
-                except Exception as exc:
-                    if self.rank == 0:
-                        print(f"Warning: failed to load optimizer state from '{ckpt}': {exc}")
-            elif "optimizer_state_dict" in weights and not self.play_policy and self.rank == 0:
-                print(f"Skipping optimizer state restore from '{ckpt}' per runtime config.")
             if "frame" in weights:
                 self.frame = int(weights["frame"])
             if "epoch" in weights:
@@ -107,7 +99,25 @@ class CheckpointMixin:
                 self.ov_env.set_train_info(int(self.frame))
             elif hasattr(self.ov_env, "_rlgames_env_frames"):
                 self.ov_env._rlgames_env_frames = int(self.frame)
-            self._restore_lr_scheduler_state(weights)
+
+            # A training resume must continue BOTH the optimizer (Adam moments) and the
+            # LR schedule from the checkpoint; only policy evaluation ignores them.
+            if not self.play_policy:
+                if "optimizer_state_dict" in weights:
+                    try:
+                        self.optimizer.load_state_dict(weights["optimizer_state_dict"])
+                    except Exception as exc:
+                        if self.rank == 0:
+                            print(
+                                f"Warning: failed to load optimizer state from '{ckpt}'; "
+                                f"optimizer will start fresh: {exc}"
+                            )
+                elif self.rank == 0:
+                    print(
+                        f"Warning: checkpoint '{ckpt}' has no optimizer state; "
+                        "optimizer starts fresh (Adam moments reset)."
+                    )
+                self._restore_lr_scheduler_state(weights)
 
         print(f"Loaded student checkpoint: {ckpt}")
         if self.rank == 0 and self._resumed_from_student_ckpt:

@@ -26,9 +26,6 @@ from isaaclab.app import AppLauncher
 
 SCRIPT_ROOT = pathlib.Path(__file__).resolve().parents[2]
 DEFAULT_STUDENT_CFG = SCRIPT_ROOT / "source" / "DoorOpening" / "tasks" / "dooropening" / "agents" / "pcd_transformer_dagger_cfg.yaml"
-DEFAULT_FINETUNE_STUDENT_CFG = (
-    SCRIPT_ROOT / "source" / "DoorOpening" / "tasks" / "dooropening" / "agents" / "pcd_transformer_dagger_finetune_cfg.yaml"
-)
 
 
 def _resolve_student_cfg_path(path_value, default_path):
@@ -165,12 +162,6 @@ parser.add_argument("--teacher-partnetv5", "--teacher_partnetv5", dest="teacher_
 parser.add_argument("--teacher-partnetv6", "--teacher_partnetv6", dest="teacher_partnetv6", type=str, default=None, help="Teacher checkpoint for PartNetv6.")
 parser.add_argument("--teacher-partnetv7", "--teacher_partnetv7", dest="teacher_partnetv7", type=str, default=None, help="Teacher checkpoint for PartNetv7.")
 parser.add_argument("--teacher-partnetv8", "--teacher_partnetv8", dest="teacher_partnetv8", type=str, default=None, help="Teacher checkpoint for PartNetv8.")
-parser.add_argument(
-    "--finetune",
-    action="store_true",
-    default=False,
-    help="Resume supervised distillation from a student checkpoint with finetune-oriented defaults.",
-)
 # parser.add_argument("--data_aug", action="store_true", default=False, help="Whether to use data augmentation for student")
 parser.add_argument("--student_cfg", type=str, default=None, help="Student config YAML to use.")
 parser.add_argument("--student_ckpt", type=str, default=None, help="Student checkpoint to resume from.")
@@ -230,8 +221,7 @@ parser.add_argument(
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
-default_student_cfg_path = DEFAULT_FINETUNE_STUDENT_CFG if args_cli.finetune else DEFAULT_STUDENT_CFG
-student_cfg_path = _resolve_student_cfg_path(args_cli.student_cfg, default_student_cfg_path)
+student_cfg_path = _resolve_student_cfg_path(args_cli.student_cfg, DEFAULT_STUDENT_CFG)
 student_dagger_defaults = _load_student_dagger_defaults(student_cfg_path)
 selected_door_families = _normalize_family_selection(
     args_cli.door_families if args_cli.door_families is not None else student_dagger_defaults.get("door_families")
@@ -499,11 +489,9 @@ def main(env_cfg, agent_cfg: dict):
     # but keeps single-teacher fallback for smoke tests and old checkpoints.
     multi_teacher_ckpts, teacher_ckpt = resolve_multi_teacher_checkpoints()
     student_ckpt = resolve_checkpoint(args_cli.student_ckpt)
-    if args_cli.finetune and student_ckpt is None:
-        raise ValueError("--finetune requires --student_ckpt so the student can resume from a trained checkpoint.")
 
     train_dir = "runs"
-    default_wandb_project = "DoorOpening-Distillation-Finetune" if args_cli.finetune else "DoorOpening-Distillation"
+    default_wandb_project = "DoorOpening-Distillation"
     base_experiment_name = default_wandb_project + datetime.now().strftime("_%Y-%m-%d-%H-%M-%S")
     rank_tag = f"rank{rank:03d}_local{local_rank:03d}"
     experiment_name = f"{base_experiment_name}_{rank_tag}" if use_distributed else base_experiment_name

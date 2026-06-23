@@ -139,8 +139,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.grad_clip = float(self.runtime_cfg.get("grad_clip", 1.0))
         self.num_iters = int(self.runtime_cfg.get("num_iters", 1_000_000))
         self.lr_decay_iters = int(self.runtime_cfg.get("lr_decay_iters", 100_000))
-        self.resume_optimizer_state = bool(self.runtime_cfg.get("resume_optimizer_state", True))
-        self.force_full_curriculum = bool(self.runtime_cfg.get("force_full_curriculum", False))
         self.teacher_forcing_warmup_iters = int(self.runtime_cfg.get("teacher_forcing_warmup_iters", 0))
         self.teacher_forcing_transition_iters = int(
             self.runtime_cfg.get(
@@ -575,8 +573,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         if student_ckpt is not None:
             self.load_student_weights(student_ckpt)
         self._apply_optimizer_runtime_overrides()
-        if self.force_full_curriculum:
-            self._force_full_curriculum_state()
 
         all_state_encoder_keys = tuple(
             key
@@ -2690,32 +2686,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             print(
                 "[INFO] Train/validation env split from asset suffix rule: "
                 f"train={self.global_train_num_envs}, validation={self.global_validation_num_envs}"
-            )
-
-    def _force_full_curriculum_state(self):
-        target_step = max(
-            float(getattr(self.ov_env, "reset_progress_total", 0.0)),
-            float(getattr(self.ov_env, "adr_reset_progress_total", 0.0)),
-            1.0,
-        )
-        target_step_int = int(target_step)
-        if target_step_int < target_step:
-            target_step_int += 1
-
-        if hasattr(self.ov_env, "common_step_counter"):
-            current_step = int(getattr(self.ov_env, "common_step_counter", 0))
-            self.ov_env.common_step_counter = max(current_step, target_step_int)
-
-        dooropening_adr = getattr(self.ov_env, "dooropening_adr", None)
-        ov_cfg = getattr(self.ov_env, "cfg", None)
-        if dooropening_adr is not None and ov_cfg is not None and hasattr(ov_cfg, "num_adr_increments"):
-            dooropening_adr.set_num_increments(int(ov_cfg.num_adr_increments))
-
-        if self.rank == 0:
-            print(
-                "[INFO] Forced finetune curriculum to full range: "
-                f"common_step_counter={getattr(self.ov_env, 'common_step_counter', None)}, "
-                f"adr_increment={getattr(dooropening_adr, 'increment_counter', None)}"
             )
 
     def _has_teacher(self):

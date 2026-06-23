@@ -148,7 +148,7 @@ dagger:
   teacher_forcing_transition_iters: 18000
   teacher_forcing_min_beta: 0.0
   aux_feedback_to_policy: true  # When false, aux input stays zero instead of feeding back predictions.
-  aux_handle_init_source: zeros  # First-step handle-pose seed: "zeros" or "ground_truth". With "ground_truth" the sim handle pose is fed only on the first step after each reset; predictions take over from step 1. Requires aux_feedback_to_policy: true.
+  aux_handle_init_source: ground_truth  # First-step handle-pose seed: "zeros" or "ground_truth". With "ground_truth" the sim handle pose is fed only on the first step after each reset; predictions take over from step 1. Requires aux_feedback_to_policy: true.
   aux_handle_init_noise_m: 0.10  # Bound (m) on the TOTAL Euclidean error of the ground_truth handle-pose seed: random direction scaled by a magnitude in [0, this]. 0 = exact GT. Input seed only, never the aux target.
   prediction_training:
     loss_window_start: 40
@@ -174,7 +174,7 @@ dagger:
   save_interval: 5000
   reset_progress_total: 50000
   adr_reset_progress_total: 10000
-  pointcloud_source: "both"
+  pointcloud_source: "depth"
   scene_robot_num_points: 30000  # GT robot/model points concatenated into the renderable scene cloud.
   append_robot_model_to_policy_cloud: true
   robot_model_policy_points: 2000  # Robot model points appended to the policy input after the depth/lidar crops.
