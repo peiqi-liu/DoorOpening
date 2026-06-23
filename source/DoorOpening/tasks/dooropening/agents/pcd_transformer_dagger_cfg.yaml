@@ -48,15 +48,16 @@ temporal_obs:
   command_delay_s: [0.0, 0.0]
 
 temporal_state_encoders:
-  enabled: true
+  # Ablation branch: proprio history removed. Only current-step q_arm/q_hand/base_vel and the
+  # current aux_handle_pos feedback are fed (as standalone state encoders below). Re-enable to
+  # restore the temporal stack. (fields list kept consistent with the remaining state encoders.)
+  enabled: false
   timestamps_ms: [0, 300, 600, 900]
   # timestamps_ms: [0, 400, 800, 1200, 1600, 2000, 2400, 2800]
   fields:
     - q_arm
     - q_hand
-    - target_err_arm
     # - push_pull_belief
-    - target_err_hand
     - base_vel
     - aux_handle_pos
   hidden_dims: [128, 256]
@@ -116,16 +117,6 @@ state_encoders_cfg:
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  target_err_arm:
-    input_dim: 7
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  target_err_hand:
-    input_dim: 12
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
 
 transformer_cfg:
   type: "encoder_decoder"
@@ -174,7 +165,7 @@ dagger:
   save_interval: 5000
   reset_progress_total: 50000
   adr_reset_progress_total: 10000
-  pointcloud_source: "depth"
+  pointcloud_source: "lidar"
   scene_robot_num_points: 30000  # GT robot/model points concatenated into the renderable scene cloud.
   append_robot_model_to_policy_cloud: true
   robot_model_policy_points: 2000  # Robot model points appended to the policy input after the depth/lidar crops.
