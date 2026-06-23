@@ -344,7 +344,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         data_types=pointcloud_camera_data_types,
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=8.0,
-            clipping_range=(0.1, 20.0),
+            horizontal_aperture=14.7128,  # D435: fov_x=85.2 deg
+            vertical_aperture=8.8689,     # D435: fov_y=58.0 deg
+            clipping_range=(0.3, 3.0),
         ),
         offset=CameraCfg.OffsetCfg(pos=(0.0, 0.0, 0.0), rot=POINTCLOUD_CAMERA_QUAT, convention="world"),
     )
@@ -593,7 +595,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         },
         # Action latency (in env/control steps; env dt = sim_dt * decimation = 1/30 s).
         # The PD target applied on a given step is the one the policy produced `latency` steps
-        # earlier. ADR ramps the upper bound from 1 step up to 4 steps (~4/30 s ≈ 133 ms); the
+        # earlier. ADR ramps the upper bound from 1 step up to 3 steps (~3/30 s ≈ 100 ms); the
         # lower bound stays at 1, so latency is sampled uniformly in [1, current_max] per env at
         # each reset. Index [0] is the starting/minimum latency, index [1] the max at full ADR.
         "action_latency": {
