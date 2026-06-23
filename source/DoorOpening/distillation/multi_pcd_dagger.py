@@ -3833,6 +3833,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                         sensor_obs_pcd_base_by_name=self._viser_pending_debug_frame["sensor_obs_pcd_base_by_name"],
                         policy_input_pcd_base=self._viser_pending_debug_frame["policy_input_pcd_base"],
                         aux_prediction=aux_prediction_for_replay,
+                        aux_input=self.latest_aux_input_vector,
                     )
                     self._viser_pending_debug_frame = None
 

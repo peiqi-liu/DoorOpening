@@ -1122,6 +1122,7 @@ def main(env_cfg, agent_cfg: dict):
                         sensor_obs_pcd_base_by_name=sensor_obs_pcd_base_by_name,
                         policy_input_pcd_base=pending_debug_frame["policy_input_pcd_base"],
                         aux_prediction=aux_prediction_for_replay,
+                        aux_input=dagger.latest_aux_input_vector,
                     )
                     dagger._viser_pending_debug_frame = None
 

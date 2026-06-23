@@ -213,8 +213,29 @@ def _first_nonempty_cloud(frames: list[dict], streams: list[dict]) -> np.ndarray
     return np.zeros((0, 3), dtype=np.float32)
 
 
+def _aux_input_world_points(frame: dict) -> np.ndarray:
+    aux_input = _to_numpy_vector(frame.get("aux_input"))
+    if aux_input is None or aux_input.size != 3:
+        return np.zeros((0, 3), dtype=np.float32)
+
+    robot_base_pos_w = _to_numpy_vector(frame.get("robot_base_pos_w"))
+    robot_base_quat_w = _to_numpy_vector(frame.get("robot_base_quat_w"))
+    if robot_base_pos_w is None or robot_base_pos_w.size != 3:
+        return np.zeros((0, 3), dtype=np.float32)
+    if robot_base_quat_w is None or robot_base_quat_w.size != 4:
+        return np.zeros((0, 3), dtype=np.float32)
+
+    aux_base_points = aux_input.reshape(1, 3)
+    aux_world_points = _quat_rotate_points(robot_base_quat_w, aux_base_points) + robot_base_pos_w.reshape(1, 3)
+    return aux_world_points.astype(np.float32, copy=False)
+
+
 def _has_aux_prediction(frames: list[dict]) -> bool:
     return any(_to_numpy_vector(frame.get("aux_prediction")) is not None for frame in frames)
+
+
+def _has_aux_input(frames: list[dict]) -> bool:
+    return any(_to_numpy_vector(frame.get("aux_input")) is not None for frame in frames)
 
 
 def _positive_float(value: object) -> float | None:
@@ -278,6 +299,7 @@ def main() -> None:
         raise SystemExit("Replay payload has no point-cloud streams matching the requested filters.")
     hidden_clouds = set(args.hide_clouds)
     has_aux_prediction = _has_aux_prediction(frames)
+    has_aux_input = _has_aux_input(frames)
 
     payload_fps, payload_fps_source = _infer_payload_fps(payload)
     initial_fps = float(args.fps) if args.fps is not None else payload_fps
@@ -315,6 +337,15 @@ def main() -> None:
             point_size=args.point_size * 3.0,
         )
 
+    aux_input_handle = None
+    if has_aux_input:
+        aux_input_handle = server.scene.add_point_cloud(
+            "/aux_input",
+            points=np.zeros((0, 3), dtype=np.float32),
+            colors=(0, 220, 180),
+            point_size=args.point_size * 3.0,
+        )
+
     with server.gui.add_folder("Playback"):
         play = server.gui.add_checkbox("Play", initial_value=not args.start_paused)
         loop = server.gui.add_checkbox("Loop", initial_value=True)
@@ -332,7 +363,10 @@ def main() -> None:
             )
         show_aux = None
         if has_aux_prediction:
-            show_aux = server.gui.add_checkbox("Show Aux Prediction", initial_value=True)
+            show_aux = server.gui.add_checkbox("Show Aux Prediction (output)", initial_value=True)
+        show_aux_input = None
+        if has_aux_input:
+            show_aux_input = server.gui.add_checkbox("Show Aux Input (to network)", initial_value=True)
 
     def _apply_frame(frame_idx: int) -> None:
         frame = frames[frame_idx]
@@ -343,6 +377,9 @@ def main() -> None:
         if aux_handle is not None and show_aux is not None:
             aux_points = _aux_prediction_world_points(frame)
             aux_handle.points = aux_points if show_aux.value else np.zeros((0, 3), dtype=np.float32)
+        if aux_input_handle is not None and show_aux_input is not None:
+            aux_input_points = _aux_input_world_points(frame)
+            aux_input_handle.points = aux_input_points if show_aux_input.value else np.zeros((0, 3), dtype=np.float32)
 
     @frame_slider.on_update
     def _(_event):
@@ -363,6 +400,11 @@ def main() -> None:
 
     if show_aux is not None:
         @show_aux.on_update
+        def _(_event):
+            _apply_frame(int(frame_slider.value))
+
+    if show_aux_input is not None:
+        @show_aux_input.on_update
         def _(_event):
             _apply_frame(int(frame_slider.value))
 

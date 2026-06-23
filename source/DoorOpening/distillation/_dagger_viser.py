@@ -268,6 +268,7 @@ class ViserDebugMixin:
         sensor_obs_pcd_base_by_name,
         policy_input_pcd_base,
         aux_prediction=None,
+        aux_input=None,
     ):
         """Append one replay frame for each selected multi-door family env."""
         if not self.viser_raw_enabled:
@@ -328,13 +329,21 @@ class ViserDebugMixin:
                 if aux_prediction is None
                 else self._aux_to_2d(aux_prediction)[env_id].detach().cpu().to(dtype=torch.float32)
             )
+            aux_input_base = (
+                None
+                if aux_input is None
+                else self._aux_to_2d(aux_input)[env_id].detach().cpu().to(dtype=torch.float32)
+            )
             frame_record = {
                 "pointclouds": pointclouds,
             }
-            if aux_prediction_base is not None:
-                frame_record["aux_prediction"] = aux_prediction_base
+            if aux_prediction_base is not None or aux_input_base is not None:
                 frame_record["robot_base_pos_w"] = robot_base_pos_w[env_id].detach().cpu().to(dtype=torch.float32)
                 frame_record["robot_base_quat_w"] = robot_base_quat_w[env_id].detach().cpu().to(dtype=torch.float32)
+            if aux_prediction_base is not None:
+                frame_record["aux_prediction"] = aux_prediction_base
+            if aux_input_base is not None:
+                frame_record["aux_input"] = aux_input_base
             stream["frames"].append(frame_record)
             self._trim_viser_raw_frames(stream)
         self._maybe_flush_viser_raw_snapshot(iteration)
