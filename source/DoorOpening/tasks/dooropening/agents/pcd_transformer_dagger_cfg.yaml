@@ -49,8 +49,8 @@ temporal_obs:
 
 temporal_state_encoders:
   enabled: true
-  timestamps_ms: [0, 300, 600, 900]
-  # timestamps_ms: [0, 400, 800, 1200, 1600, 2000, 2400, 2800]
+  # timestamps_ms: [0, 300, 600, 900]
+  timestamps_ms: [0, 400, 800, 1200, 1600, 2000, 2400, 2800]
   fields:
     - q_arm
     - q_hand
@@ -154,7 +154,10 @@ dagger:
   aux_handle_input_mode: closed_door_base
   aux_feedback_to_policy: true  # Legacy recurrent feedback. Ignored when aux_handle_input_mode=closed_door_base.
   aux_handle_init_source: zeros  # Unused in closed_door_base mode (no recurrent seed).
-  aux_handle_init_noise_m: 0.10  # Bound (m) on the TOTAL Euclidean per-step Euclidean error added to the closed-door handle anchor.
+  # Detector-error model on the handle-pose INPUT (never the regression target). Both are isotropic
+  # random-direction offsets bounded by their TOTAL Euclidean magnitude (m).
+  aux_handle_init_noise_m: 0.1  # Fresh per-step jitter (frame-to-frame noise).
+  aux_handle_init_bias_m: 0.08   # Per-episode constant offset, redrawn at each reset (systematic bias).
   prediction_training:
     loss_window_start: 40
     loss_window_end: 100
