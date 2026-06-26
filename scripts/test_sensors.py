@@ -590,6 +590,7 @@ def main():
     sim.reset()
     # Now we are ready!
     print("[INFO]: Setup complete...")
+    print("[FINGER ORDER]", list(scene["robot"].find_joints([f"finger_joint_{i}" for i in range(12)])[1]))
     # Run the simulator
     run_simulator(sim, scene)
 
