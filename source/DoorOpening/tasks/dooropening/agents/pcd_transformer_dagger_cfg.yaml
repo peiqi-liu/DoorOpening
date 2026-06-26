@@ -12,9 +12,9 @@ mode_prediction:
   num_modes: 2  # Push/pull discriminator only.
   weight: 0.01
   return_latent: true
-force_prediction:
-  enabled: false
-  output_dim: 3
+door_joint_prediction:
+  enabled: true
+  output_dim: 2  # Must equal the number of dagger.door_joint_training.joints below.
   weight: 0.01
 
 push_pull_condition:
@@ -58,6 +58,7 @@ temporal_state_encoders:
     # - push_pull_belief
     - target_err_hand
     - base_vel
+    - aux_handle_pos
     # aux_handle_pos is intentionally NOT in the temporal stack: the handle anchor is a
     # standalone, non-recurrent closed-door pose (see dagger.aux_handle_input_mode).
   hidden_dims: [128, 256]
@@ -162,11 +163,11 @@ dagger:
     loss_window_start: 40
     loss_window_end: 100
     outside_window_weight: 0.25
-  force_training:
-    sensor_name: "contact_forces_door2"
-    target_frame: "base"  # Predict forces in robot-base coordinates so the target matches the policy's main reference frame.
-    loss_type: "direction_contrastive"
-    contrastive_temperature: 0.1
+  door_joint_training:
+    # Door joints the aux head regresses, in output order. "hinge" = joint_2 (door swing angle),
+    # "latch" = joint_1 (handle/latch rotation). Targets are the raw joint angles in radians.
+    joints: ["hinge", "latch"]
+    loss_type: "mse"  # 'mse' or 'smooth_l1' regression on the raw joint angles (rad).
   door_geometry_aug:
     enabled: false
     env_prob: 1.0

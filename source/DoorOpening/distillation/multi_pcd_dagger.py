@@ -29,7 +29,6 @@ from DoorOpening.assets.door.multi_door_cfg import board_bboxes_link1 as door_bo
 from DoorOpening.assets.door.multi_door_cfg import motion_family_ids, motion_traj_paths
 from DoorOpening.assets.glorbot.glorbot_cfg import glorbot_urdf_path
 from DoorOpening.model.transformer import PCDTransformer, strip_prefix_from_state_dict
-from DoorOpening.tasks.dooropening.contact_force_utils import get_filtered_contact_force_w
 from DoorOpening.utils.camera_utils import (
     build_pinhole_intrinsics,
     crop_local_pcd,
@@ -543,15 +542,15 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.mode_prediction_enabled = bool(getattr(self.student_model, "mode_prediction_enabled", False))
         self.mode_weight = float(getattr(self.student_model, "mode_weight", 0.0))
         self.num_modes = int(getattr(self.student_model, "num_modes", 4))
-        self.force_prediction_enabled = bool(getattr(self.student_model, "force_prediction_enabled", False))
-        self.force_prediction_weight = float(getattr(self.student_model, "force_prediction_weight", 0.0))
-        self.force_output_dim = int(getattr(self.student_model, "force_output_dim", 0))
+        self.door_joint_prediction_enabled = bool(getattr(self.student_model, "door_joint_prediction_enabled", False))
+        self.door_joint_prediction_weight = float(getattr(self.student_model, "door_joint_prediction_weight", 0.0))
+        self.door_joint_output_dim = int(getattr(self.student_model, "door_joint_output_dim", 0))
         if self.student_model.action_head.out_features != self.num_actions:
             raise ValueError(
                 f"Student action_dim ({self.student_model.action_head.out_features}) "
                 f"does not match env action dim ({self.num_actions})."
         )
-        self._init_force_prediction_training_state()
+        self._init_door_joint_prediction_training_state()
         self._init_prediction_training_state()
         self._init_mode_prediction_training_state()
         self._init_push_pull_condition_runtime_state(student_yaml_runtime_cfg)
@@ -785,26 +784,43 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         if not 0.0 <= self.direction_loss_outside_window_weight <= 1.0:
             raise ValueError("prediction_training.outside_window_weight must be in [0, 1].")
 
-    def _init_force_prediction_training_state(self):
-        cfg = dict(self.runtime_cfg.get("force_training", {}) or {})
-        self.force_prediction_sensor_name = str(cfg.get("sensor_name", "contact_forces_door2"))
-        self.force_prediction_target_frame = str(cfg.get("target_frame", "base")).lower()
-        if self.force_prediction_target_frame not in {"base", "world"}:
+    def _init_door_joint_prediction_training_state(self):
+        cfg = dict(self.runtime_cfg.get("door_joint_training", {}) or {})
+        # Which door joints the aux head regresses, in output order. "hinge" = joint_2 (door swing
+        # angle), "latch" = joint_1 (handle/latch rotation). Targets are the raw joint angles (rad).
+        joint_name_to_env_idx = {
+            "hinge": int(self.ov_env._door_hinge_joint_idx),
+            "latch": int(self.ov_env._door_board_joint_idx),
+        }
+        joint_names = list(cfg.get("joints", ["hinge", "latch"]))
+        if not joint_names:
+            raise ValueError("door_joint_training.joints must list at least one joint.")
+        unknown = [name for name in joint_names if name not in joint_name_to_env_idx]
+        if unknown:
             raise ValueError(
-                "force_prediction.target_frame must be one of ['base', 'world']."
+                f"door_joint_training.joints contains unknown joints {unknown}; "
+                f"valid options are {sorted(joint_name_to_env_idx)}."
             )
-        self.force_prediction_loss_type = str(cfg.get("loss_type", "direction_contrastive")).lower()
-        if self.force_prediction_loss_type not in {"mse", "smooth_l1", "direction_contrastive"}:
+        self.door_joint_prediction_joint_names = joint_names
+        self.door_joint_prediction_joint_idx = torch.as_tensor(
+            [joint_name_to_env_idx[name] for name in joint_names],
+            device=self.device,
+            dtype=torch.long,
+        )
+        self.door_joint_prediction_loss_type = str(cfg.get("loss_type", "mse")).lower()
+        if self.door_joint_prediction_loss_type not in {"mse", "smooth_l1"}:
             raise ValueError(
-                "force_prediction.loss_type must be one of ['mse', 'smooth_l1', 'direction_contrastive']."
+                "door_joint_training.loss_type must be one of ['mse', 'smooth_l1']."
             )
-        self.force_prediction_contrastive_temperature = float(cfg.get("contrastive_temperature", 0.1))
-        if self.force_prediction_contrastive_temperature <= 0.0:
-            raise ValueError("force_prediction.contrastive_temperature must be positive.")
+        if self.door_joint_prediction_enabled and self.door_joint_output_dim != len(joint_names):
+            raise ValueError(
+                f"door_joint_prediction.output_dim ({self.door_joint_output_dim}) must match the "
+                f"number of door_joint_training.joints ({len(joint_names)})."
+            )
 
-        self.latest_force_angle_deg = None
-        self.latest_filtered_handle_force_norm_mean = 0.0
-        self.latest_filtered_handle_force_norm_max = 0.0
+        # Per-joint mean absolute error (rad), one entry per predicted joint; None until first update.
+        self.latest_door_joint_abs_err = None
+        self.latest_door_joint_target_mean = None
 
     def _init_observation_lag_state(self):
         cfg = dict(self.observation_lag_cfg or {})
@@ -1171,35 +1187,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.latest_fraction_pull = float(perturbed[:, 1].mean().detach().cpu().item())
         return perturbed
 
-    def _get_contact_sensor_force_tensor_world(self, sensor_name, env_mask=None, update_metrics=True):
-        scene = getattr(self.ov_env, "scene", None)
-        sensors = None if scene is None else getattr(scene, "sensors", None)
-        if sensors is None or sensor_name not in sensors:
-            raise RuntimeError(f"Contact sensor '{sensor_name}' is required but not available.")
-        # force_matrix_w gives filtered contact force between Door/link_2 and robot hand links.
-        # net_forces_w is intentionally not used because it is the total contact force on the handle body.
-        force_world = get_filtered_contact_force_w(
-            sensors[sensor_name],
-            expected_num_envs=self.num_envs,
-        )
-        if force_world.ndim != 2 or force_world.shape[-1] != 3:
-            raise RuntimeError(
-                f"Expected filtered contact force shape [N, 3], got {tuple(force_world.shape)}"
-            )
-        if env_mask is not None:
-            env_mask = env_mask.to(device=force_world.device, dtype=torch.bool)
-            force_world = force_world[env_mask]
-        force_norm = torch.linalg.vector_norm(force_world, dim=-1)
-        if update_metrics:
-            self.latest_filtered_handle_force_norm_mean = float(force_norm.mean().detach().cpu().item())
-            self.latest_filtered_handle_force_norm_max = float(force_norm.max().detach().cpu().item())
-        return force_world.to(device=self.device, dtype=torch.float32)
-
-    def _aggregate_contact_force_tensor(self, contact_forces):
-        if contact_forces.ndim == 2:
-            return contact_forces
-        return contact_forces.reshape(contact_forces.shape[0], -1, 3).sum(dim=1)
-
     def _get_rollout_step_ids(self):
         rollout_step_ids = getattr(self.ov_env, "episode_length_buf", None)
         if rollout_step_ids is None:
@@ -1373,91 +1360,66 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 self.latest_mode_direction_acc = None
         return direction_loss
 
-    def _get_force_prediction_target_raw(self, env_mask=None, update_metrics=True):
-        contact_forces = self._get_contact_sensor_force_tensor_world(
-            self.force_prediction_sensor_name,
-            env_mask=env_mask,
-            update_metrics=update_metrics,
-        )
-        force_world = self._aggregate_contact_force_tensor(contact_forces)
-        if force_world.ndim != 2 or force_world.shape[-1] != 3:
-            raise RuntimeError(
-                f"Expected force prediction target shape [N, 3], got {tuple(force_world.shape)}"
-            )
-        if self.force_prediction_target_frame == "world":
-            return force_world
-        robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
+    def _get_door_joint_prediction_target_raw(self, env_mask=None, update_metrics=True):
+        door_joint_pos = self.ov_env.door.data.joint_pos[:, self.door_joint_prediction_joint_idx]
         if env_mask is not None:
-            robot_base_quat_w = robot_base_quat_w[env_mask]
-        return world_to_local(force_world.unsqueeze(1), None, robot_base_quat_w).squeeze(1)
+            env_mask = env_mask.to(device=door_joint_pos.device, dtype=torch.bool)
+            door_joint_pos = door_joint_pos[env_mask]
+        door_joint_pos = door_joint_pos.to(device=self.device, dtype=torch.float32)
+        if door_joint_pos.ndim != 2 or door_joint_pos.shape[-1] != len(self.door_joint_prediction_joint_names):
+            raise RuntimeError(
+                f"Expected door joint target shape [N, {len(self.door_joint_prediction_joint_names)}], "
+                f"got {tuple(door_joint_pos.shape)}"
+            )
+        if update_metrics:
+            self.latest_door_joint_target_mean = door_joint_pos.mean(dim=0).detach().cpu().tolist()
+        return door_joint_pos
 
-    def _normalize_force_direction(self, force_tensor):
-        force_mag = torch.linalg.vector_norm(force_tensor, dim=-1, keepdim=True)
-        return force_tensor / force_mag.clamp_min(1.0e-6)
-
-    def _compute_force_prediction_loss(self, force_pred, env_mask=None, update_metrics=True):
-        if not self.force_prediction_enabled:
+    def _compute_door_joint_prediction_loss(self, door_joint_pred, env_mask=None, update_metrics=True):
+        if not self.door_joint_prediction_enabled:
             return None
 
-        if env_mask is not None and force_pred.shape[0] == self.num_envs:
+        if env_mask is not None and door_joint_pred.shape[0] == self.num_envs:
             env_mask = env_mask.to(device=self.device, dtype=torch.bool)
-            force_pred = force_pred[env_mask]
-        force_target_raw = self._get_force_prediction_target_raw(env_mask=env_mask, update_metrics=update_metrics)
-        if force_pred.ndim == 3:
-            force_pred = force_pred[:, 0, :]
-        if force_pred.shape[-1] != force_target_raw.shape[-1]:
+            door_joint_pred = door_joint_pred[env_mask]
+        target = self._get_door_joint_prediction_target_raw(env_mask=env_mask, update_metrics=update_metrics)
+        if door_joint_pred.ndim == 3:
+            door_joint_pred = door_joint_pred[:, 0, :]
+        if door_joint_pred.shape[-1] != target.shape[-1]:
             raise RuntimeError(
-                f"Force prediction head output dim ({force_pred.shape[-1]}) does not match target dim ({force_target_raw.shape[-1]})."
+                f"Door joint prediction head output dim ({door_joint_pred.shape[-1]}) does not match "
+                f"target dim ({target.shape[-1]})."
             )
 
+        # Build the active-rollout mask on the FULL env tensors (max_trial_steps is num_envs-sized),
+        # then slice down to the student subset. Slicing rollout_step_ids before the comparison would
+        # break broadcasting against the full-size max_trial_steps.
         rollout_step_ids = self._get_rollout_step_ids()
+        valid_mask = self._get_active_rollout_mask(rollout_step_ids)
         if env_mask is not None:
+            env_mask = env_mask.to(device=self.device, dtype=torch.bool)
             rollout_step_ids = rollout_step_ids[env_mask]
-        active_mask = self._get_active_rollout_mask(rollout_step_ids)
-        valid_mask = active_mask
+            valid_mask = valid_mask[env_mask]
         if not torch.any(valid_mask):
-            loss = force_pred.mean() * 0.0
+            loss = door_joint_pred.mean() * 0.0
             if update_metrics:
-                self.latest_force_angle_deg = None
+                self.latest_door_joint_abs_err = None
             return loss
         step_weights = self._get_direction_step_weights(rollout_step_ids[valid_mask])
 
-        target_dir = self._normalize_force_direction(force_target_raw)
-        pred_dir = self._normalize_force_direction(force_pred)
-
-        if self.force_prediction_loss_type == "direction_contrastive":
-            pred_dir_valid = pred_dir[valid_mask]
-            target_dir_valid = target_dir[valid_mask]
-            cosine_valid = torch.nn.functional.cosine_similarity(pred_dir_valid, target_dir_valid, dim=-1, eps=1.0e-8)
-
-            if pred_dir_valid.shape[0] >= 2:
-                logits = pred_dir_valid @ target_dir_valid.T
-                logits = logits / self.force_prediction_contrastive_temperature
-                labels = torch.arange(pred_dir_valid.shape[0], device=self.device)
-                row_loss = torch.nn.functional.cross_entropy(logits, labels, reduction="none")
-                col_loss = torch.nn.functional.cross_entropy(logits.T, labels, reduction="none")
-                weighted_row_loss = (row_loss * step_weights).sum() / step_weights.sum().clamp_min(1.0e-6)
-                weighted_col_loss = (col_loss * step_weights).sum() / step_weights.sum().clamp_min(1.0e-6)
-                loss = 0.5 * (weighted_row_loss + weighted_col_loss)
-            else:
-                loss = ((1.0 - cosine_valid) * step_weights).sum() / step_weights.sum().clamp_min(1.0e-6)
-
-            angle_deg = torch.rad2deg(torch.acos(cosine_valid.clamp(-1.0 + 1.0e-6, 1.0 - 1.0e-6)))
-            if update_metrics:
-                self.latest_force_angle_deg = float(angle_deg.mean().detach().cpu().item())
+        if self.door_joint_prediction_loss_type == "smooth_l1":
+            per_env_loss = torch.nn.functional.smooth_l1_loss(
+                door_joint_pred, target, reduction="none"
+            ).mean(dim=-1)
         else:
-            if self.force_prediction_loss_type == "smooth_l1":
-                per_env_loss = torch.nn.functional.smooth_l1_loss(
-                    force_pred, force_target_raw, reduction="none"
-                ).mean(dim=-1)
-            else:
-                per_env_loss = torch.nn.functional.mse_loss(force_pred, force_target_raw, reduction="none").mean(dim=-1)
-            loss = (per_env_loss[valid_mask] * step_weights).sum() / step_weights.sum().clamp_min(1.0e-6)
+            per_env_loss = torch.nn.functional.mse_loss(
+                door_joint_pred, target, reduction="none"
+            ).mean(dim=-1)
+        loss = (per_env_loss[valid_mask] * step_weights).sum() / step_weights.sum().clamp_min(1.0e-6)
 
-            cosine_all = torch.nn.functional.cosine_similarity(pred_dir, target_dir, dim=-1, eps=1.0e-8)
-            angle_deg = torch.rad2deg(torch.acos(cosine_all.clamp(-1.0 + 1.0e-6, 1.0 - 1.0e-6)))
-            if update_metrics:
-                self.latest_force_angle_deg = float(angle_deg[valid_mask].mean().detach().cpu().item())
+        if update_metrics:
+            abs_err = (door_joint_pred - target).abs()[valid_mask]
+            self.latest_door_joint_abs_err = abs_err.mean(dim=0).detach().cpu().tolist()
 
         return loss
 
@@ -3735,7 +3697,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         action_loss = loss.get("action", total_loss)
         aux_loss = loss.get("aux")
         mode_loss = None
-        force_loss = None
+        door_joint_loss = None
         if self.mode_prediction_enabled:
             if "mode_logits" not in student_output:
                 raise RuntimeError("Mode prediction is enabled, but student output does not contain 'mode_logits'.")
@@ -3745,16 +3707,16 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 update_metrics=update_metrics,
             )
             total_loss = total_loss + self.mode_weight * mode_loss
-        if self.force_prediction_enabled:
-            if "force" not in student_output:
-                raise RuntimeError("Force prediction is enabled, but student output does not contain 'force'.")
-            force_loss = self._compute_force_prediction_loss(
-                student_output["force"],
+        if self.door_joint_prediction_enabled:
+            if "door_joint" not in student_output:
+                raise RuntimeError("Door joint prediction is enabled, but student output does not contain 'door_joint'.")
+            door_joint_loss = self._compute_door_joint_prediction_loss(
+                student_output["door_joint"],
                 env_mask=env_mask,
                 update_metrics=update_metrics,
             )
-            total_loss = total_loss + self.force_prediction_weight * force_loss
-        return total_loss, action_loss, aux_loss, mode_loss, force_loss
+            total_loss = total_loss + self.door_joint_prediction_weight * door_joint_loss
+        return total_loss, action_loss, aux_loss, mode_loss, door_joint_loss
 
     def _get_teacher_forcing_beta(self, iteration):
         if self.play_policy or not self._has_teacher():
@@ -3889,7 +3851,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 train_action_loss = None
                 train_aux_loss = None
                 train_mode_loss = None
-                train_force_loss = None
+                train_door_joint_loss = None
                 validation_total_loss = None
                 validation_action_loss = None
 
@@ -3901,7 +3863,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                         if self.latest_aux_target_vector is None:
                             raise RuntimeError("Expected the latest auxiliary target vector while aux prediction is enabled.")
                         aux_target = self._get_aux_target(self.latest_aux_target_vector)
-                    train_total_loss, train_action_loss, train_aux_loss, train_mode_loss, train_force_loss = self._compute_student_loss(
+                    train_total_loss, train_action_loss, train_aux_loss, train_mode_loss, train_door_joint_loss = self._compute_student_loss(
                         student_output,
                         teacher_output["mus"],
                         aux_target=aux_target,
@@ -3972,7 +3934,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                         train_action_loss,
                         train_aux_loss,
                         train_mode_loss,
-                        train_force_loss,
+                        train_door_joint_loss,
                         validation_total_loss,
                         validation_action_loss,
                         teacher_forcing_beta,
