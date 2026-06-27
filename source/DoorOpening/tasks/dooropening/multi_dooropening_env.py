@@ -52,7 +52,7 @@ class DooropeningEnv(DirectRLEnv):
         self.num_arx_joints = len(self.cfg.arx_joints)
 
         actuated_joints = self.cfg.base_joints + self.cfg.arm_joints + self.cfg.finger_joints + self.cfg.arx_joints
-        self._robot_dof_idx, joint_names = self.robot.find_joints(actuated_joints)
+        self._robot_dof_idx, joint_names = self.robot.find_joints(actuated_joints, preserve_order=True)
         self._robot_dof_idx = torch.tensor(self._robot_dof_idx, device=self.device)
         self.ref_robot_dof_idx = torch.tensor([FULL_JOINT_NAMES.index(name) for name in joint_names], device=self.device)
 
@@ -72,10 +72,10 @@ class DooropeningEnv(DirectRLEnv):
             dtype=torch.long,
         )
 
-        self._robot_base_dof_idx, base_joint_names = self.robot.find_joints(self.cfg.base_joints)
-        self._robot_arm_dof_idx, arm_joint_names = self.robot.find_joints(self.cfg.arm_joints)
-        self._robot_finger_dof_idx, finger_joint_names = self.robot.find_joints(self.cfg.finger_joints)
-        self._robot_arx_dof_idx, arx_joint_names = self.robot.find_joints(self.cfg.arx_joints)
+        self._robot_base_dof_idx, base_joint_names = self.robot.find_joints(self.cfg.base_joints, preserve_order=True)
+        self._robot_arm_dof_idx, arm_joint_names = self.robot.find_joints(self.cfg.arm_joints, preserve_order=True)
+        self._robot_finger_dof_idx, finger_joint_names = self.robot.find_joints(self.cfg.finger_joints, preserve_order=True)
+        self._robot_arx_dof_idx, arx_joint_names = self.robot.find_joints(self.cfg.arx_joints, preserve_order=True)
         self._robot_base_dof_idx = torch.tensor(self._robot_base_dof_idx, device=self.device)
         self._robot_arm_dof_idx = torch.tensor(self._robot_arm_dof_idx, device=self.device)
         self._robot_finger_dof_idx = torch.tensor(self._robot_finger_dof_idx, device=self.device)
