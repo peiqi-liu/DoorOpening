@@ -12,9 +12,9 @@ mode_prediction:
   num_modes: 2  # Push/pull discriminator only.
   weight: 0.01
   return_latent: true
-force_prediction:
-  enabled: false
-  output_dim: 3
+door_joint_prediction:
+  enabled: true
+  output_dim: 2  # Must equal the number of dagger.door_joint_training.joints below.
   weight: 0.01
 
 push_pull_condition:
@@ -49,8 +49,8 @@ temporal_obs:
 
 temporal_state_encoders:
   enabled: true
-  timestamps_ms: [0, 300, 600, 900]
-  # timestamps_ms: [0, 400, 800, 1200, 1600, 2000, 2400, 2800]
+  # timestamps_ms: [0, 300, 600, 900]
+  timestamps_ms: [0, 400, 800, 1200, 1600, 2000, 2400, 2800]
   fields:
     - q_arm
     - q_hand
@@ -58,6 +58,7 @@ temporal_state_encoders:
     # - push_pull_belief
     - target_err_hand
     - base_vel
+    - aux_handle_pos
     # aux_handle_pos is intentionally NOT in the temporal stack: the handle anchor is a
     # standalone, non-recurrent closed-door pose (see dagger.aux_handle_input_mode).
   hidden_dims: [128, 256]
@@ -154,16 +155,19 @@ dagger:
   aux_handle_input_mode: closed_door_base
   aux_feedback_to_policy: true  # Legacy recurrent feedback. Ignored when aux_handle_input_mode=closed_door_base.
   aux_handle_init_source: zeros  # Unused in closed_door_base mode (no recurrent seed).
-  aux_handle_init_noise_m: 0.10  # Bound (m) on the TOTAL Euclidean per-step Euclidean error added to the closed-door handle anchor.
+  # Detector-error model on the handle-pose INPUT (never the regression target). Both are isotropic
+  # random-direction offsets bounded by their TOTAL Euclidean magnitude (m).
+  aux_handle_init_noise_m: 0.1  # Fresh per-step jitter (frame-to-frame noise).
+  aux_handle_init_bias_m: 0.08   # Per-episode constant offset, redrawn at each reset (systematic bias).
   prediction_training:
     loss_window_start: 40
     loss_window_end: 100
     outside_window_weight: 0.25
-  force_training:
-    sensor_name: "contact_forces_door2"
-    target_frame: "base"  # Predict forces in robot-base coordinates so the target matches the policy's main reference frame.
-    loss_type: "direction_contrastive"
-    contrastive_temperature: 0.1
+  door_joint_training:
+    # Door joints the aux head regresses, in output order. "hinge" = joint_2 (door swing angle),
+    # "latch" = joint_1 (handle/latch rotation). Targets are the raw joint angles in radians.
+    joints: ["hinge", "latch"]
+    loss_type: "mse"  # 'mse' or 'smooth_l1' regression on the raw joint angles (rad).
   door_geometry_aug:
     enabled: false
     env_prob: 1.0

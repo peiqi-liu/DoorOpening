@@ -186,7 +186,7 @@ class LoggingMixin:
         train_action_loss,
         train_aux_loss,
         train_mode_loss,
-        train_force_loss,
+        train_door_joint_loss,
         validation_total_loss,
         validation_action_loss,
         teacher_forcing_beta,
@@ -223,10 +223,10 @@ class LoggingMixin:
                 print("Train Aux Loss:", float(train_aux_loss.detach().cpu()))
             if train_mode_loss is not None:
                 print("Train Direction Loss:", float(train_mode_loss.detach().cpu()))
-            if train_force_loss is not None:
-                print("Train Force Loss:", float(train_force_loss.detach().cpu()))
-                if self.latest_force_angle_deg is not None:
-                    print("Force Angle Deg:", self.latest_force_angle_deg)
+            if train_door_joint_loss is not None:
+                print("Train Door Joint Loss:", float(train_door_joint_loss.detach().cpu()))
+                if self.latest_door_joint_abs_err is not None:
+                    print("Door Joint Abs Err (rad):", self.latest_door_joint_abs_err)
             if validation_total_loss is not None:
                 print("Validation Total Loss:", float(validation_total_loss.detach().cpu()))
             if validation_action_loss is not None:
@@ -242,9 +242,8 @@ class LoggingMixin:
                 print("Direction Window Num Pull Labels:", self.latest_dir_window_num_pull_labels)
                 print("Direction Window Num Push Preds:", self.latest_dir_window_num_push_preds)
                 print("Direction Window Num Pull Preds:", self.latest_dir_window_num_pull_preds)
-            if self.force_prediction_enabled:
-                print("Filtered Handle Force Norm Mean:", self.latest_filtered_handle_force_norm_mean)
-                print("Filtered Handle Force Norm Max:", self.latest_filtered_handle_force_norm_max)
+            if self.door_joint_prediction_enabled:
+                print("Door Joint Target Mean (rad):", self.latest_door_joint_target_mean)
             if self.observation_lag_enabled:
                 print("Obs Lag Enabled:", bool(self.latest_obs_lag_enabled))
                 print("Obs Lag Mean (ms):", self.latest_obs_lag_mean_ms)
@@ -305,10 +304,11 @@ class LoggingMixin:
             metrics["loss/aux"] = float(train_aux_loss.detach().cpu())
         if train_mode_loss is not None:
             metrics["loss/direction"] = float(train_mode_loss.detach().cpu())
-        if train_force_loss is not None:
-            metrics["loss/force"] = float(train_force_loss.detach().cpu())
-            if self.latest_force_angle_deg is not None:
-                metrics["stats/force_angle_deg"] = self.latest_force_angle_deg
+        if train_door_joint_loss is not None:
+            metrics["loss/door_joint"] = float(train_door_joint_loss.detach().cpu())
+            if self.latest_door_joint_abs_err is not None:
+                for name, err in zip(self.door_joint_prediction_joint_names, self.latest_door_joint_abs_err):
+                    metrics[f"stats/door_joint_abs_err_{name}"] = err
         if validation_total_loss is not None:
             metrics["loss/val_total"] = float(validation_total_loss.detach().cpu())
         if validation_action_loss is not None:
@@ -324,9 +324,10 @@ class LoggingMixin:
             metrics["stats/dir_window_num_pull_labels"] = self.latest_dir_window_num_pull_labels
             metrics["stats/dir_window_num_push_preds"] = self.latest_dir_window_num_push_preds
             metrics["stats/dir_window_num_pull_preds"] = self.latest_dir_window_num_pull_preds
-        if self.force_prediction_enabled:
-            metrics["stats/filtered_handle_force_norm_mean"] = self.latest_filtered_handle_force_norm_mean
-            metrics["stats/filtered_handle_force_norm_max"] = self.latest_filtered_handle_force_norm_max
+        if self.door_joint_prediction_enabled:
+            if self.latest_door_joint_target_mean is not None:
+                for name, val in zip(self.door_joint_prediction_joint_names, self.latest_door_joint_target_mean):
+                    metrics[f"stats/door_joint_target_mean_{name}"] = val
         if self.observation_lag_enabled:
             metrics["timestamp/obs_lag_enabled"] = self.latest_obs_lag_enabled
             metrics["timestamp/obs_lag_mean_ms"] = self.latest_obs_lag_mean_ms
