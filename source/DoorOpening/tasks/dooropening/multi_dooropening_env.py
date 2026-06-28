@@ -29,7 +29,11 @@ from DoorOpening.tasks.dooropening.multi_dooropening_env_cfg import DooropeningE
 from DoorOpening.assets.glorbot.glorbot_cfg import glorbot_urdf_path
 from isaaclab.sensors import Camera, ContactSensor
 from DoorOpening.constants.robot_constants import CAMERA_JOINT_DEFAULT_VALUES, CAMERA_JOINT_NAMES, FULL_JOINT_NAMES, ROBOT_KEY_BODY_NAMES
-from DoorOpening.tasks.dooropening.contact_force_utils import DOOR_FRAME_FILTER_INDEX, get_filtered_contact_force_w
+from DoorOpening.tasks.dooropening.contact_force_utils import (
+    DOOR_FRAME_FILTER_INDEX,
+    get_filtered_contact_force_w,
+    get_self_contact_body_force_norm,
+)
 from DoorOpening.utils.pose_utils import world_to_local
 from isaaclab.utils.math import quat_conjugate, quat_apply, quat_mul
 from DoorOpening.utils.quat_utils import quat_to_6d
@@ -198,6 +202,7 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_body_ang_vel_w = self.cfg.robot_body_ang_vel_w
         self.joint_limit_penalty_w = self.cfg.joint_limit_penalty_w
         self.joint_limit_penalty_margin_ratio = self.cfg.joint_limit_penalty_margin_ratio
+        self.self_collision_penalty_w = self.cfg.self_collision_penalty_w
 
         self.reset_key_body_pos_delta_min = self.cfg.reset_key_body_pos_delta_min
         self.reset_key_body_quat_delta_min = self.cfg.reset_key_body_quat_delta_min
@@ -365,6 +370,37 @@ class DooropeningEnv(DirectRLEnv):
 
     def _get_x5_body_frame_contact_force_norm(self) -> torch.Tensor:
         return self._get_x5_body_contact_force_norm(filter_indices=(DOOR_FRAME_FILTER_INDEX,))
+
+    def _get_self_collision_body_count(self) -> torch.Tensor:
+        """Number of robot links in self-collision, per env (fine-grained, per-link).
+
+        This is the r_contact term in r = r_target - lambda_l*r_limit - lambda_c*r_contact.
+        We count the main self-collision links (franka arm + LEAP hand + x5 arm) whose net
+        self-contact force with any other non-adjacent link exceeds the threshold, plus the
+        Franka flange (panda_link7) when a finger has folded back onto it. The flange is
+        scored by a separate sensor filtered to the distal finger links only, so the
+        permanent palm_lower<->flange contact (present even at a neutral finger pose) is
+        never counted -- only a finger actually folding back registers.
+        """
+        threshold = self.cfg.self_collision_force_threshold
+        force_norm = get_self_contact_body_force_norm(
+            self.scene.sensors["contact_forces_self_collision"],
+            expected_num_envs=self.num_envs,
+        )
+        count = (force_norm > threshold).sum(dim=-1)
+        flange_force_norm = get_self_contact_body_force_norm(
+            self.scene.sensors["contact_forces_flange_self_collision"],
+            expected_num_envs=self.num_envs,
+        )
+        flange_unsafe = flange_force_norm > threshold
+        count = count + flange_unsafe.sum(dim=-1)
+        # Watch this separately: it should sit near 0 (fingers point away from the flange)
+        # and only rise when a finger actually folds back. A constant floor would mean a
+        # structural pair is leaking in and the flange filter needs trimming.
+        self.extras["stats/flange_finger_contact_frac"] = (
+            flange_unsafe.any(dim=-1).float().mean().detach().cpu().item()
+        )
+        return count.to(dtype=force_norm.dtype)
 
     def set_train_info(self, env_frames: int, algo=None, **kwargs):
         self._rlgames_env_frames = int(env_frames)
@@ -717,6 +753,8 @@ class DooropeningEnv(DirectRLEnv):
         self.scene.sensors["contact_forces_door_x5_link4"] = ContactSensor(self.cfg.contact_forces_door_x5_link4)
         self.scene.sensors["contact_forces_door_x5_link5"] = ContactSensor(self.cfg.contact_forces_door_x5_link5)
         self.scene.sensors["contact_forces_door_x5_camera"] = ContactSensor(self.cfg.contact_forces_door_x5_camera)
+        self.scene.sensors["contact_forces_self_collision"] = ContactSensor(self.cfg.contact_forces_self_collision)
+        self.scene.sensors["contact_forces_flange_self_collision"] = ContactSensor(self.cfg.contact_forces_flange_self_collision)
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)    
@@ -1249,6 +1287,8 @@ class DooropeningEnv(DirectRLEnv):
         self.scene.sensors["contact_forces_door_x5_link4"].update(self.cfg.sim_dt)
         self.scene.sensors["contact_forces_door_x5_link5"].update(self.cfg.sim_dt)
         self.scene.sensors["contact_forces_door_x5_camera"].update(self.cfg.sim_dt)
+        self.scene.sensors["contact_forces_self_collision"].update(self.cfg.sim_dt)
+        self.scene.sensors["contact_forces_flange_self_collision"].update(self.cfg.sim_dt)
 
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
         self.robot_dof_targets[:] = self._pin_arx_targets_to_fixed_pose(self.robot_dof_targets)
@@ -1977,6 +2017,14 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["stats/x5_frame_contact_force_norm_mean"] = float(x5_frame_force_norm.mean().detach().cpu().item())
         self.extras["stats/x5_frame_contact_force_norm_max"] = float(x5_frame_force_norm.max().detach().cpu().item())
 
+        # Self-collision penalty r_contact: count of end-effector (B_ee) bodies whose
+        # self-contact force exceeds the threshold, scaled by lambda_c.
+        self_collision_body_count = self._get_self_collision_body_count()
+        weighted_self_collision_penalty = self.self_collision_penalty_w * self_collision_body_count
+        self.extras["error/self_collision_penalty"] = weighted_self_collision_penalty.mean().item()
+        self.extras["stats/self_collision_body_count_mean"] = self_collision_body_count.mean().item()
+        self.extras["stats/self_collision_body_count_max"] = self_collision_body_count.max().item()
+
         deep_mimic_reward = compute_deep_mimic_rewards(
             robot_key_body_pos = self.robot_key_body_pos, 
             robot_key_body_quat = self.robot_key_body_quat, 
@@ -2070,7 +2118,13 @@ class DooropeningEnv(DirectRLEnv):
         is_killed = self.reset_terminated
         termination_penalty = self.termination_penalty
         
-        final_reward = deep_mimic_reward + weighted_arx_tuck_reward + total_alive_reward - weighted_joint_limit_penalty
+        final_reward = (
+            deep_mimic_reward
+            + weighted_arx_tuck_reward
+            + total_alive_reward
+            - weighted_joint_limit_penalty
+            - weighted_self_collision_penalty
+        )
         final_reward = torch.where(is_killed, final_reward + termination_penalty, final_reward)
 
         return final_reward

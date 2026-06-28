@@ -17,7 +17,11 @@ from DoorOpening.constants.robot_constants import (
 )
 from DoorOpening.tasks.dooropening.contact_force_utils import (
     DOOR_BODY_CONTACT_FILTER_PRIM_PATHS,
+    FLANGE_CONTACT_PRIM_PATH,
+    FLANGE_SELF_COLLISION_FILTER_PRIM_PATHS,
     HANDLE_CONTACT_FILTER_PRIM_PATHS,
+    SELF_COLLISION_CONTACT_PRIM_PATH,
+    SELF_COLLISION_FILTER_PRIM_PATHS,
     X5_BODY_NAMES,
 )
 from isaaclab.assets import ArticulationCfg
@@ -321,8 +325,32 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         debug_vis=False,
         filter_prim_paths_expr=list(DOOR_BODY_CONTACT_FILTER_PRIM_PATHS),
     )
+    # Self-collision sensor: the fine-grained per-link self-collision set (franka arm +
+    # LEAP hand + x5 arm) filtered against itself. force_matrix_w[n, b] aggregates the
+    # self-contact on link b from every other (non-adjacent) link, which we
+    # threshold-count into the self-collision penalty r_contact.
+    contact_forces_self_collision = ContactSensorCfg(
+        prim_path=SELF_COLLISION_CONTACT_PRIM_PATH,
+        update_period=0.0,
+        history_length=1,
+        debug_vis=False,
+        filter_prim_paths_expr=list(SELF_COLLISION_FILTER_PRIM_PATHS),
+    )
+    # Flange self-collision sensor: catches a finger folding back onto the Franka flange
+    # (panda_link7) while structurally excluding the permanent palm_lower<->flange contact
+    # (the flange is filtered to the distal finger links only, never palm_lower).
+    contact_forces_flange_self_collision = ContactSensorCfg(
+        prim_path=FLANGE_CONTACT_PRIM_PATH,
+        update_period=0.0,
+        history_length=1,
+        debug_vis=False,
+        filter_prim_paths_expr=list(FLANGE_SELF_COLLISION_FILTER_PRIM_PATHS),
+    )
     handle_contact_force_threshold = 1.0
     x5_body_contact_force_threshold = 1.5
+    # Self-collision penalty (r_contact): per step we count the self-collision links whose
+    # net self-contact force exceeds this threshold, then scale by self_collision_penalty_w.
+    self_collision_force_threshold = 1.0
 
     # Pointcloud render mode:
     # - "none": no on-robot pointcloud camera sensor (default).
@@ -480,6 +508,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_body_ang_vel_w = 0.5
     joint_limit_penalty_w = 40.0
     joint_limit_penalty_margin_ratio = 0.05
+    # lambda_c in r = r_target - lambda_l*r_limit - lambda_s*r_smooth - lambda_c*r_contact
+    self_collision_penalty_w = 1.0
 
     robot_body_quat_scale = 1.0
     robot_key_body_pos_scale = 3.0
