@@ -48,13 +48,15 @@ GLORBOT_CONFIG = ArticulationCfg(
         usd_dir=glorbot_usd_dir,
         usd_file_name=glorbot_usd_file_name,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            disable_gravity=True,
             max_depenetration_velocity=ROBOT_MAX_DEPENETRATION_VELOCITY,
             solver_position_iteration_count=ROBOT_SOLVER_POSITION_ITERS,
             solver_velocity_iteration_count=ROBOT_SOLVER_VELOCITY_ITERS,
         ),
         force_usd_conversion=should_force_usd_conversion(),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-            enabled_self_collisions=False,
+            # enabled_self_collisions=False,
+            enabled_self_collisions=True,
             solver_position_iteration_count=ROBOT_SOLVER_POSITION_ITERS,
             solver_velocity_iteration_count=ROBOT_SOLVER_VELOCITY_ITERS,
         ),
@@ -86,22 +88,22 @@ GLORBOT_CONFIG = ArticulationCfg(
         "base": ImplicitActuatorCfg(
             joint_names_expr=["base_.*"],
             effort_limit_sim=1000.0,
-            stiffness=1000,
-            damping=200,
+            stiffness=10000,
+            damping=1000,
         ),
         "panda_shoulder": ImplicitActuatorCfg(
             joint_names_expr=["panda_joint[1-4]"],
-            effort_limit_sim=5200.0,
+            effort_limit_sim=50.0,
             velocity_limit_sim=2.175,
-            stiffness=1100.0,
-            damping=80.0,
+            stiffness=600.0,
+            damping=100.0,
         ),
         "panda_forearm": ImplicitActuatorCfg(
             joint_names_expr=["panda_joint[5-7]"],
-            effort_limit_sim=720.0,
+            effort_limit_sim=190.0,
             velocity_limit_sim=2.61,
-            stiffness=1000.0,
-            damping=80.0,
+            stiffness=600.0,
+            damping=100.0,
         ),
         "x5_arm": ImplicitActuatorCfg(
             joint_names_expr=["x5_joint[1-6]"],
@@ -112,9 +114,9 @@ GLORBOT_CONFIG = ArticulationCfg(
         ),
         "finger": ImplicitActuatorCfg(
             joint_names_expr=["finger_joint_.*"],
-            effort_limit_sim=250,
-            stiffness=600,
-            damping=120,
+            effort_limit_sim=1.0,
+            stiffness=60,
+            damping=1,
         ),
     }
 )
