@@ -508,7 +508,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_body_ang_vel_w = 0.5
     joint_limit_penalty_w = 40.0
     joint_limit_penalty_margin_ratio = 0.05
-    # lambda_c in r = r_target - lambda_l*r_limit - lambda_s*r_smooth - lambda_c*r_contact
+    # lambda_c in r = r_target - lambda_l*r_limit - lambda_c*r_contact
     self_collision_penalty_w = 1.0
 
     robot_body_quat_scale = 1.0
