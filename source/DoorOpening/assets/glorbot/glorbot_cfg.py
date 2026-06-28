@@ -115,8 +115,8 @@ GLORBOT_CONFIG = ArticulationCfg(
         "finger": ImplicitActuatorCfg(
             joint_names_expr=["finger_joint_.*"],
             effort_limit_sim=1.0,
-            stiffness=60,
-            damping=1,
+            stiffness=600,
+            damping=40,
         ),
     }
 )
