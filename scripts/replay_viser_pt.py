@@ -342,6 +342,23 @@ def _first_nonempty_cloud(frames: list[dict], streams: list[dict]) -> np.ndarray
     return np.zeros((0, 3), dtype=np.float32)
 
 
+def _aux_input_world_points(frame: dict) -> np.ndarray:
+    aux_input = _to_numpy_vector(frame.get("aux_input"))
+    if aux_input is None or aux_input.size != 3:
+        return np.zeros((0, 3), dtype=np.float32)
+
+    robot_base_pos_w = _to_numpy_vector(frame.get("robot_base_pos_w"))
+    robot_base_quat_w = _to_numpy_vector(frame.get("robot_base_quat_w"))
+    if robot_base_pos_w is None or robot_base_pos_w.size != 3:
+        return np.zeros((0, 3), dtype=np.float32)
+    if robot_base_quat_w is None or robot_base_quat_w.size != 4:
+        return np.zeros((0, 3), dtype=np.float32)
+
+    aux_base_points = aux_input.reshape(1, 3)
+    aux_world_points = _quat_rotate_points(robot_base_quat_w, aux_base_points) + robot_base_pos_w.reshape(1, 3)
+    return aux_world_points.astype(np.float32, copy=False)
+
+
 def _has_aux_prediction(frames: list[dict]) -> bool:
     return any(_to_numpy_vector(frame.get("aux_prediction")) is not None for frame in frames)
 
@@ -499,7 +516,10 @@ def main() -> None:
             )
         show_aux = None
         if has_aux_prediction:
-            show_aux = server.gui.add_checkbox("Show Aux Prediction", initial_value=True)
+            show_aux = server.gui.add_checkbox("Show Aux Prediction (output)", initial_value=True)
+        show_aux_input = None
+        if has_aux_input:
+            show_aux_input = server.gui.add_checkbox("Show Aux Input (to network)", initial_value=True)
 
     show_robot = None
     robot_source = None

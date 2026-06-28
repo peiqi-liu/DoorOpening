@@ -207,6 +207,17 @@ parser.add_argument(
     default=5.0,
     help="Polling interval while waiting for shared URDF preconversion.",
 )
+parser.add_argument(
+    "--save_replay",
+    type=str,
+    default=None,
+    metavar="PATH",
+    help=(
+        "Save a .pt replay file to PATH containing joint_pos, joint_vel, actions, and "
+        "applied_targets for every env at every step, in rollout order. "
+        "Load with torch.load(path) to get a dict with keys 'runs', 'joint_names', 'num_envs'."
+    ),
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 
@@ -898,6 +909,10 @@ def main(env_cfg, agent_cfg: dict):
     base_env.early_stopping = False
     _patch_no_auto_resets(base_env)
     _print_family_summary(base_env)
+    try:
+        _replay_joint_names = list(base_env.robot.data.joint_names)
+    except Exception:
+        _replay_joint_names = None
 
     if args_cli.video:
         video_folder = args_cli.video_folder or os.path.join(experiment_dir, "videos", "eval_multi_distillation")
@@ -1025,6 +1040,7 @@ def main(env_cfg, agent_cfg: dict):
     total_active_count = 0
     completed_runs = 0
     num_eval_runs = max(1, int(args_cli.num_eval_runs))
+    replay_runs = [] if args_cli.save_replay else None
 
     for run_index in range(1, num_eval_runs + 1):
         if not simulation_app.is_running():
@@ -1042,6 +1058,12 @@ def main(env_cfg, agent_cfg: dict):
             _reset_dagger_rollout_state(dagger)
         if mode_tracker is not None:
             mode_tracker.reset_run()
+        if replay_runs is not None:
+            _run_joint_pos: list = []
+            _run_joint_vel: list = []
+            _run_actions: list = []
+            _run_applied_targets: list = []
+            _run_active: list = []
 
         active = torch.ones(base_env.num_envs, dtype=torch.bool, device=base_env.device)
         timed_out = torch.zeros_like(active)
@@ -1083,8 +1105,25 @@ def main(env_cfg, agent_cfg: dict):
                 acting_mask = active.clone()
                 last_action_loss = _compute_eval_action_loss(dagger, obs, student_output, acting_mask)
                 actions[~active.to(device=actions.device)] = 0.0
+                if replay_runs is not None:
+                    # Save BASE-FRAME (robot-frame) actions so deployment applies them
+                    # directly (clamp + real-world scale, no world->robot rotation). The
+                    # `actions` stepped into the env are env-frame [wz, vx_w, vy_w]; the base
+                    # channels here are [vx_robot, vy_robot, wz]. Arm/hand channels are identical
+                    # between the two conventions.
+                    if args_cli.use_teacher:
+                        replay_actions = dagger._env_actions_to_student_actions(actions)
+                    else:
+                        replay_actions = student_output["action"][:, 0, :].clone()
+                    replay_actions[~active.to(device=replay_actions.device)] = 0.0
+                    _run_joint_pos.append(base_env.robot.data.joint_pos.detach().cpu().clone())
+                    _run_joint_vel.append(base_env.robot.data.joint_vel.detach().cpu().clone())
+                    _run_actions.append(replay_actions.detach().cpu().clone())
+                    _run_active.append(active.detach().cpu().clone())
                 obs, _, _, _, _ = env.step(actions)
                 frozen_state.restore()
+                if replay_runs is not None:
+                    _run_applied_targets.append(base_env.applied_robot_dof_targets.detach().cpu().clone())
                 if mode_tracker is not None:
                     current_contact = _get_measured_mode_contact_mask(dagger)
 
@@ -1122,6 +1161,7 @@ def main(env_cfg, agent_cfg: dict):
                         sensor_obs_pcd_base_by_name=sensor_obs_pcd_base_by_name,
                         policy_input_pcd_base=pending_debug_frame["policy_input_pcd_base"],
                         aux_prediction=aux_prediction_for_replay,
+                        aux_input=dagger.latest_aux_input_vector,
                     )
                     dagger._viser_pending_debug_frame = None
 
@@ -1155,6 +1195,16 @@ def main(env_cfg, agent_cfg: dict):
             ):
                 _print_progress(run_index, step, active, timed_out, drifted, last_metrics, action_loss=last_action_loss)
                 _print_mode_progress(run_index, step, mode_tracker, mode_step_summary)
+
+        if replay_runs is not None and _run_joint_pos:
+            replay_runs.append({
+                "run_index": run_index,
+                "joint_pos": torch.stack(_run_joint_pos),       # [T, num_envs, num_joints]
+                "joint_vel": torch.stack(_run_joint_vel),       # [T, num_envs, num_joints]
+                "actions": torch.stack(_run_actions),           # [T, num_envs, action_dim]
+                "applied_targets": torch.stack(_run_applied_targets),  # [T, num_envs, num_dof]
+                "active_mask": torch.stack(_run_active),        # [T, num_envs] bool
+            })
 
         active_count = int(active.sum().detach().cpu().item())
         timeout_count = int(timed_out.sum().detach().cpu().item())
@@ -1192,6 +1242,26 @@ def main(env_cfg, agent_cfg: dict):
             f"runs={completed_runs} {mode_tracker.format_stats(mode_tracker.total_stats)} "
             f"preds={mode_tracker.format_pred_counts(mode_tracker.total_pred_counts)}"
         )
+    if args_cli.save_replay and replay_runs:
+        replay_path = pathlib.Path(args_cli.save_replay).expanduser()
+        if replay_path.is_dir():
+            replay_path = replay_path / "replay.pt"
+        replay_path = str(replay_path)
+        torch.save(
+            {
+                "runs": replay_runs,
+                "joint_names": _replay_joint_names,
+                "num_envs": int(base_env.num_envs),
+            },
+            replay_path,
+        )
+        print(f"[INFO] Replay saved to {replay_path}")
+        print(
+            "[INFO] Replay layout: runs[i]['joint_pos'] shape = [T, num_envs, num_joints], "
+            "runs[i]['applied_targets'] shape = [T, num_envs, num_dof]. "
+            "Use runs[i]['active_mask'] to filter envs that were still tracking at each step."
+        )
+
     dagger._close_viser_debug_tools()
     env.close()
 
