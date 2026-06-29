@@ -56,7 +56,7 @@ from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
 from isaaclab.utils import configclass
 
-from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, DEFAULT_JOINT_POS
+from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, DEFAULT_JOINT_POS, disable_collision_scope_instancing
 from DoorOpening.assets.door.door_cfg import DOOR_CONFIG, edit_door_articulation
 
 from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES
@@ -353,6 +353,10 @@ def main():
     # Design scene
     scene_cfg = SensorsSceneCfg(num_envs=args_cli.num_envs, env_spacing=2.0)
     scene = InteractiveScene(scene_cfg)
+    # De-instance the robot's `collisions` scopes so the collider debug viz (green overlay)
+    # renders them; the URDF->USD converter marks them instanceable and the GUI skips
+    # instanced colliders (make_instanceable=False in the converter cfg does not change this).
+    disable_collision_scope_instancing()  # default expr "/World/envs/env_.*/Robot"
     # Play the simulator
     sim.reset()
     print("material properties: ", scene["robot"].root_physx_view.get_material_properties())
