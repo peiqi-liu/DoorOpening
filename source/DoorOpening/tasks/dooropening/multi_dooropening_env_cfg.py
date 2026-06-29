@@ -462,7 +462,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # - future reference motion summary at twist indices
     #   => currently disabled in _build_observations(), so not counted in observation_space
     proprioception_observation_space = actuated_joints_num * 3
-    joint_reference_error_observation_space = len(base_joints) + len(arm_joints)
+    joint_reference_error_observation_space = len(finger_joints)
     key_body_error_observation_space = len(robot_key_bodies) * 3
     robot_pose_observation_space = (len(robot_key_bodies) - 1) * (3 + 6)
     base_velocity_observation_space = 6
@@ -472,6 +472,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     observation_space = (
         proprioception_observation_space
+        # + joint_reference_error_observation_space
         + key_body_error_observation_space
         + robot_pose_observation_space
         + base_velocity_observation_space
@@ -486,7 +487,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=False)
 
-    base_action_scale = 1.0
+    base_action_scale = 0.6
     arm_action_scale = 0.6
     finger_action_scale = 1.5
     arx_action_scale = 0.6
@@ -496,7 +497,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_key_body_pos_w = 2.0
     robot_base_joint_pos_w = 3.0
     robot_arm_joint_pos_w = 3.0
-    robot_finger_joint_pos_w = 1.5
+    robot_finger_joint_pos_w = 1.0
     robot_arx_joint_pos_w = 5.0
     robot_arx_tuck_joint_pos_w = 2.0
     robot_base_joint_vel_w = 1.0

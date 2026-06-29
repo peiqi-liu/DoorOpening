@@ -34,7 +34,7 @@ from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL
 
 ROBOT_SOLVER_POSITION_ITERS = 8
 ROBOT_SOLVER_VELOCITY_ITERS = 2
-ROBOT_CONTACT_OFFSET = 0.01
+ROBOT_CONTACT_OFFSET = 0.005
 ROBOT_REST_OFFSET = 0.001
 ROBOT_MAX_DEPENETRATION_VELOCITY = 500.0
 
@@ -89,7 +89,7 @@ GLORBOT_CONFIG = ArticulationCfg(
             joint_names_expr=["base_.*"],
             effort_limit_sim=1000.0,
             stiffness=10000,
-            damping=1000,
+            damping=3000,
         ),
         "panda_shoulder": ImplicitActuatorCfg(
             joint_names_expr=["panda_joint[1-4]"],

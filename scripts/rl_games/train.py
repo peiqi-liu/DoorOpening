@@ -565,7 +565,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     import socket as _socket
     import time as _time
 
-    _siminit_dir = "/workspace/DoorOpening/IsaacLab_tmp/.sim_init"
+    _siminit_dir = os.environ.get("SIM_INIT_DIR", "/tmp/DoorOpening/.sim_init")
     _siminit_token = f"{os.environ.get('SLURM_JOB_ID', 'nojob')}.{_socket.gethostname()}"
 
     def _siminit_sentinel(lr):

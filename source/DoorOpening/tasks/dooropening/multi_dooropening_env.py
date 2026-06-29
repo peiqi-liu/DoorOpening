@@ -1481,13 +1481,16 @@ class DooropeningEnv(DirectRLEnv):
         #     dim=-1,
         # )
 
+        # policy_joint_ref_err = (
+        #     self.ref_robot_finger_joint_pos - policy_joint_pos[:, self._target_finger_slice]
+        # ).unsqueeze(dim=1)
+
         policy_obs = torch.cat(
             (
                 policy_joint_pos.unsqueeze(dim=1),
                 policy_joint_vel.unsqueeze(dim=1),
                 self.robot_dof_targets.unsqueeze(dim = 1),
-                # policy_base_joint_ref_err,
-                # policy_arm_joint_ref_err,
+                # policy_joint_ref_err,
                 policy_key_pos_err,
                 policy_robot_key_body_pos_local.reshape(self.num_envs, 1, -1),
                 policy_robot_key_body_euler.reshape(self.num_envs, 1, -1),
@@ -1502,13 +1505,16 @@ class DooropeningEnv(DirectRLEnv):
             dim=-1,
         )
 
+        # clean_joint_ref_err = (
+        #     self.ref_robot_finger_joint_pos - clean_joint_pos[:, self._target_finger_slice]
+        # ).unsqueeze(dim=1)
+
         critic_obs = torch.cat(
             (
                 clean_joint_pos.unsqueeze(dim=1),
                 clean_joint_vel.unsqueeze(dim=1),
                 self.robot_dof_targets.unsqueeze(dim=1),
-                # clean_base_joint_ref_err,
-                # clean_arm_joint_ref_err,
+                # clean_joint_ref_err,
                 key_pos_err,
                 robot_key_body_pos.reshape(self.num_envs, 1, -1),
                 robot_key_body_euler.reshape(self.num_envs, 1, -1),

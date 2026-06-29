@@ -5,7 +5,7 @@ import torch
 from isaaclab.utils.math import quat_from_euler_xyz
 
 from DoorOpening.constants.robot_constants import FRANKA_DEFAULT_JOINT_POS, FRANKA_JOINT_NAMES, CAMERA_JOINT_DEFAULT_VALUES, CAMERA_JOINT_VALUES_WHEN_SEARCHING_HINGE, CAMERA_JOINT_VALUES_WHEN_OBSERVING_LEFT
-from DoorOpening.utils.state_machine.api import get_board_edge, get_hinge_pos, open_hand, solve_ik
+from DoorOpening.utils.state_machine.api import compute_base_joint, get_board_edge, get_hinge_pos, open_hand, solve_ik
 
 HandleSide = Literal["right", "left"]
 
@@ -132,6 +132,7 @@ def state_machine_offline_push_right_door(
 
     base_target_rot = robot_initial_pose[:, 3:].to(device).clone()
     default_palm_rot = get_rotation_quat(math.pi, math.pi, math.pi, device)
+    push_palm_rot = get_rotation_quat(0.0, 0.0, -math.pi / 2, device)
     safe_open_hand_q = open_hand(1.0).to(q_robot.device)
     franka_default_q = torch.tensor(
         [FRANKA_DEFAULT_JOINT_POS[name] for name in FRANKA_JOINT_NAMES],
@@ -176,14 +177,14 @@ def state_machine_offline_push_right_door(
     ).to(device)
 
     base_target_pos = handle_pos.clone()
-    base_target_pos[:, 0] += 0.55
+    base_target_pos[:, 0] += 0.6
     base_target_pos[:, 1] += -0.3
     base_target_pose = _make_pose(base_target_pos, base_target_rot)
 
     palm_target_pos = handle_pos.clone()
-    palm_target_pos[:, 0] += 0.3
-    palm_target_pos[:, 1] += 0.05
-    palm_target_pos[:, 2] += 0.25
+    palm_target_pos[:, 0] += 0.40
+    palm_target_pos[:, 1] += -0.20
+    palm_target_pos[:, 2] += 0.2
     palm_target_pose = _make_pose(palm_target_pos, default_palm_rot)
 
     q_robot[:10] = solve_ik(
@@ -268,9 +269,8 @@ def state_machine_offline_push_right_door(
     # Step 4: Open the door farther while holding the handle and keeping base clearance
     # -------------------------
     push_theta_start = 0.20
-    push_theta_stop = 0.70
+    push_theta_stop = 1.50
     push_theta_step = 0.10
-    hold_palm_rot_roll_base = math.pi
 
     for theta in torch.arange(
         push_theta_start,
@@ -305,13 +305,16 @@ def state_machine_offline_push_right_door(
         palm_target_pos[:, 0] += palm_dx
         palm_target_pos[:, 1] += palm_dy
         palm_target_pos[:, 2] += 0.08
-        hold_palm_rot = get_rotation_quat(
-            hold_palm_rot_roll_base + 0.9 * theta.item(),
-            math.pi * 4 / 5,
-            math.pi + 0.10,
-            device,
-        )
-        palm_target_pose = _make_pose(palm_target_pos, hold_palm_rot)
+        if theta > 0.4:
+            hold_palm_rot = get_rotation_quat(
+                -math.pi / 2,
+                math.pi / 2,
+                -math.pi / 2 - theta.item(),
+                device,
+            )
+            palm_target_pose = _make_pose(palm_target_pos, hold_palm_rot)
+        else:
+            palm_target_pose[:, :3] = palm_target_pos
 
         q_robot[:10] = solve_ik(
             robot_urdf_path,
@@ -320,7 +323,8 @@ def state_machine_offline_push_right_door(
             base_pose=base_target_pose,
             robot_initial_pose=robot_initial_pose,
         )[0]
-        q_robot[10:26] = open_hand(0.7).to(q_robot.device)
+        if theta > 0.4:
+            q_robot[10:26] = safe_open_hand_q
 
         _append_state(
             robot_traj,
@@ -334,19 +338,29 @@ def state_machine_offline_push_right_door(
     key_idx_in_key_indices.append(len(robot_traj) - 1)
 
     # -------------------------
-    # Step 5: Retract the arm slightly before switching from handle to board
+    # Step 4.5: Base moves forward; arm IK keeps EE at handle world position.
+    # We pin the base joints directly THEN solve IK with base_pose=None so the
+    # IK cannot pull the base back while trying to reach the handle.
     # -------------------------
-    handoff_retract_palm_pose = palm_target_pose.clone()
-    handoff_retract_palm_pose[:, 0] += 0.12
-    handoff_retract_palm_pose[:, 2] += 0.04
+    door_center_pos = door_initial_pose[:, :3].to(device).clone()
+    release_fwd_base_pos = door_center_pos.clone()
+    release_fwd_base_pos[:, 0] += -0.8
+    release_fwd_base_pos[:, 1] += 0.05
+    release_fwd_base_pose = _make_pose(release_fwd_base_pos, base_target_rot)
+
+    new_base_joints = compute_base_joint(
+        robot_initial_pose[..., :3], robot_initial_pose[..., 3:], release_fwd_base_pose
+    ).squeeze()
+    q_robot[:3] = new_base_joints
 
     q_robot[:10] = solve_ik(
         robot_urdf_path,
         q_robot[:10],
-        palm_pose=handoff_retract_palm_pose,
+        palm_pose=palm_target_pose,
         base_pose=None,
         robot_initial_pose=robot_initial_pose,
     )[0]
+    q_robot[:3] = new_base_joints  # re-pin base in case IK drifted it
     q_robot[10:26] = safe_open_hand_q
 
     _append_state(
@@ -359,103 +373,46 @@ def state_machine_offline_push_right_door(
     )
 
     # -------------------------
-    # Step 6: Push the board open while traversing through the doorway
+    # Step 5: Traverse through the doorway with arm still extended
     # -------------------------
-    board_push_theta_step = 0.10
-    door_center_pos = door_initial_pose[:, :3].to(device).clone()
+    # traverse_mid_base_pos = door_center_pos.clone()
+    # traverse_mid_base_pos[:, 0] += -0.8
+    # traverse_mid_base_pos[:, 1] += 0.15
+    # traverse_mid_base_pose = _make_pose(traverse_mid_base_pos, base_target_rot)
 
-    # In this stage, the robot is moving forward while holding the door open
-    board_push_base_start_pos = base_target_pos.clone()
-    board_push_base_end_pos = door_center_pos.clone()
-    traverse_mid_base_x = -0.8
-    traverse_mid_base_y = 0.15
-    board_push_base_end_pos[:, 0] += traverse_mid_base_x
-    board_push_base_end_pos[:, 1] += traverse_mid_base_y
+    # q_door = torch.tensor([push_theta_stop, 0.0], device=device)
+    # q_robot[:10] = solve_ik(
+    #     robot_urdf_path,
+    #     q_robot[:10],
+    #     palm_pose=None,
+    #     base_pose=traverse_mid_base_pose,
+    #     robot_initial_pose=robot_initial_pose,
+    # )[0]
+    # q_robot[10:26] = safe_open_hand_q
 
-    q_robot[10:26] = safe_open_hand_q
-
-    # Starting from the last stage's door joint stop, keep opening until fully open
-    board_push_theta_start = push_theta_stop + 0.4
-    board_push_theta_stop = 1.50
-    for theta in torch.arange(
-        board_push_theta_start,
-        board_push_theta_stop + 1e-6,
-        board_push_theta_step,
-        device=device,
-    ):
-        q_door = torch.tensor([theta.item(), 0.0], device=device)
-
-        # Board contact pos gave me the edge of the the door panel, I need to offset it a bit to make sure the palm center is at a good position
-        board_contact_pos = get_board_edge(
-            door_urdf_path,
-            door_initial_pose,
-            q_door.unsqueeze(0),
-        ).to(device)
-        board_push_contact_x_offset = 0.0
-        board_push_contact_y_offset = -0.03
-        board_push_contact_z_offset = 0.15
-        palm_target_pos = board_contact_pos.clone()
-        palm_target_pos[:, 0] += board_push_contact_x_offset
-        palm_target_pos[:, 1] += board_push_contact_y_offset
-        palm_target_pos[:, 2] += board_push_contact_z_offset
-        board_push_palm_roll = -math.pi / 2 + theta.item()
-        board_push_palm_rot = get_rotation_quat(
-            board_push_palm_roll,
-            0.0,
-            - 1.5,
-            device,
-        )
-        palm_target_pose = _make_pose(palm_target_pos, board_push_palm_rot)
-
-        progress = (theta.item() - board_push_theta_start) / max(
-            board_push_theta_stop - board_push_theta_start,
-            1e-6,
-        )
-        base_target_pos = (
-            board_push_base_start_pos
-            + progress * (board_push_base_end_pos - board_push_base_start_pos)
-        )
-        base_target_pose = _make_pose(base_target_pos, base_target_rot)
-
-        q_robot[:10] = solve_ik(
-            robot_urdf_path,
-            q_robot[:10],
-            palm_pose=palm_target_pose,
-            base_pose=base_target_pose,
-            robot_initial_pose=robot_initial_pose,
-        )[0]
-        q_robot[10:26] = safe_open_hand_q
-
-        _append_state(
-            robot_traj,
-            door_traj,
-            key_idx_in_key_indices,
-            q_robot,
-            q_door,
-            mark_keyframe=False,
-        )
-
-    key_idx_in_key_indices.append(len(robot_traj) - 1)
+    # _append_state(
+    #     robot_traj,
+    #     door_traj,
+    #     key_idx_in_key_indices,
+    #     q_robot,
+    #     q_door,
+    #     mark_keyframe=True,
+    # )
 
     # -------------------------
-    # Step 7: Finish traversing while the door closes and the arm tucks
+    # Step 6: Finish traversing and tuck arm
     # -------------------------
-    close_base_start_pos = board_push_base_end_pos.clone()
-    close_base_end_pos = door_center_pos.clone()
-
-    traverse_far_base_x = -1.5
-    traverse_far_base_y = 0.25
-    close_base_end_pos[:, 0] += traverse_far_base_x
-    close_base_end_pos[:, 1] += traverse_far_base_y
+    traverse_far_base_pos = door_center_pos.clone()
+    traverse_far_base_pos[:, 0] += -1.5
+    traverse_far_base_pos[:, 1] += 0.25
+    traverse_far_base_pose = _make_pose(traverse_far_base_pos, base_target_rot)
 
     q_door = torch.tensor([0.0, 0.0], device=device)
-    base_target_pose = _make_pose(close_base_end_pos, base_target_rot)
-
     q_robot[:10] = solve_ik(
         robot_urdf_path,
         q_robot[:10],
         palm_pose=None,
-        base_pose=base_target_pose,
+        base_pose=traverse_far_base_pose,
         robot_initial_pose=robot_initial_pose,
     )[0]
     q_robot[3:10] = franka_default_q
@@ -497,6 +454,7 @@ def state_machine_offline_push_left_door(
 
     base_target_rot = robot_initial_pose[:, 3:].to(device).clone()
     default_palm_rot = get_rotation_quat(math.pi, math.pi, math.pi, device)
+    push_palm_rot = get_rotation_quat(0.0, 0.0, -math.pi / 2, device)
     safe_open_hand_q = open_hand(1.0).to(q_robot.device)
     franka_default_q = torch.tensor(
         [FRANKA_DEFAULT_JOINT_POS[name] for name in FRANKA_JOINT_NAMES],
@@ -542,12 +500,12 @@ def state_machine_offline_push_left_door(
 
     base_target_pos = handle_pos.clone()
     base_target_pos[:, 0] += 0.55
-    base_target_pos[:, 1] += 0.2
+    base_target_pos[:, 1] += 0.30
     base_target_pose = _make_pose(base_target_pos, base_target_rot)
 
     palm_target_pos = handle_pos.clone()
-    palm_target_pos[:, 0] += 0.25
-    palm_target_pos[:, 1] += 0.03
+    palm_target_pos[:, 0] += 0.35
+    palm_target_pos[:, 1] += 0.15
     palm_target_pos[:, 2] += 0.25
     palm_target_pose = _make_pose(palm_target_pos, default_palm_rot)
 
@@ -633,10 +591,9 @@ def state_machine_offline_push_left_door(
     # Step 4: Open the door farther while holding the handle and keeping base clearance
     # -------------------------
     push_theta_start = 0.20
-    push_theta_stop = 0.70
+    push_theta_stop = 1.50
     push_theta_step = 0.10
-    hold_palm_rot_roll_base = math.pi
-    
+
     # Retract active perception arms to safe range
     q_robot[-6:] = torch.tensor(list(CAMERA_JOINT_DEFAULT_VALUES.values()))
 
@@ -673,13 +630,17 @@ def state_machine_offline_push_left_door(
         palm_target_pos[:, 0] += palm_dx
         palm_target_pos[:, 1] += palm_dy
         palm_target_pos[:, 2] += 0.08
-        hold_palm_rot = get_rotation_quat(
-            hold_palm_rot_roll_base - 0.9 * theta.item(),
-            math.pi * 4 / 5,
-            math.pi - 0.10,
-            device,
-        )
-        palm_target_pose = _make_pose(palm_target_pos, hold_palm_rot)
+        if theta > 0.4:
+            hold_palm_rot = get_rotation_quat(
+                -math.pi / 2,
+                math.pi / 2,
+                -math.pi / 2 + theta.item(),
+                device,
+            )
+        
+            palm_target_pose = _make_pose(palm_target_pos, hold_palm_rot)
+        else:
+            palm_target_pose[:, :3] = palm_target_pos
 
         q_robot[:10] = solve_ik(
             robot_urdf_path,
@@ -688,7 +649,8 @@ def state_machine_offline_push_left_door(
             base_pose=base_target_pose,
             robot_initial_pose=robot_initial_pose,
         )[0]
-        q_robot[10:26] = open_hand(0.7).to(q_robot.device)
+        if theta > 0.4:
+            q_robot[10:26] = safe_open_hand_q
 
         _append_state(
             robot_traj,
@@ -702,19 +664,27 @@ def state_machine_offline_push_left_door(
     key_idx_in_key_indices.append(len(robot_traj) - 1)
 
     # -------------------------
-    # Step 5: Retract the arm slightly before switching from handle to board
+    # Step 4.5: Base moves forward while EE stays fixed at handle world position
     # -------------------------
-    handoff_retract_palm_pose = palm_target_pose.clone()
-    handoff_retract_palm_pose[:, 0] += 0.12
-    handoff_retract_palm_pose[:, 2] += 0.04
+    door_center_pos = door_initial_pose[:, :3].to(device).clone()
+    release_fwd_base_pos = door_center_pos.clone()
+    release_fwd_base_pos[:, 0] += -0.8
+    release_fwd_base_pos[:, 1] += -0.05
+    release_fwd_base_pose = _make_pose(release_fwd_base_pos, base_target_rot)
+
+    new_base_joints = compute_base_joint(
+        robot_initial_pose[..., :3], robot_initial_pose[..., 3:], release_fwd_base_pose
+    ).squeeze()
+    q_robot[:3] = new_base_joints
 
     q_robot[:10] = solve_ik(
         robot_urdf_path,
         q_robot[:10],
-        palm_pose=handoff_retract_palm_pose,
+        palm_pose=palm_target_pose,
         base_pose=None,
         robot_initial_pose=robot_initial_pose,
     )[0]
+    q_robot[:3] = new_base_joints  # re-pin base in case IK drifted it
     q_robot[10:26] = safe_open_hand_q
 
     _append_state(
@@ -727,103 +697,19 @@ def state_machine_offline_push_left_door(
     )
 
     # -------------------------
-    # Step 6: Push the board open while traversing through the doorway
+    # Step 6: Finish traversing and tuck arm
     # -------------------------
-    board_push_theta_step = 0.10
-    door_center_pos = door_initial_pose[:, :3].to(device).clone()
-
-    # In this stage, the robot is moving forward while holding the door open
-    board_push_base_start_pos = base_target_pos.clone()
-    board_push_base_end_pos = door_center_pos.clone()
-    traverse_mid_base_x = -0.8
-    traverse_mid_base_y = -0.15
-    board_push_base_end_pos[:, 0] += traverse_mid_base_x
-    board_push_base_end_pos[:, 1] += traverse_mid_base_y
-
-    q_robot[10:26] = safe_open_hand_q
-
-    # Starting from the last stage's door joint stop, keep opening until fully open
-    board_push_theta_start = push_theta_stop + 0.4
-    board_push_theta_stop = 1.50
-    for theta in torch.arange(
-        board_push_theta_start,
-        board_push_theta_stop + 1e-6,
-        board_push_theta_step,
-        device=device,
-    ):
-        q_door = torch.tensor([theta.item(), 0.0], device=device)
-
-        # Board contact pos gave me the edge of the the door panel, I need to offset it a bit to make sure the palm center is at a good position
-        board_contact_pos = get_board_edge(
-            door_urdf_path,
-            door_initial_pose,
-            q_door.unsqueeze(0),
-        ).to(device)
-        board_push_contact_x_offset = 0.0
-        board_push_contact_y_offset = -0.03
-        board_push_contact_z_offset = 0.15
-        palm_target_pos = board_contact_pos.clone()
-        palm_target_pos[:, 0] += board_push_contact_x_offset
-        palm_target_pos[:, 1] += board_push_contact_y_offset
-        palm_target_pos[:, 2] += board_push_contact_z_offset
-        board_push_palm_roll = -(-math.pi / 2 + theta.item())
-        board_push_palm_rot = get_rotation_quat(
-            board_push_palm_roll,
-            0.0,
-            1.5,
-            device,
-        )
-        palm_target_pose = _make_pose(palm_target_pos, board_push_palm_rot)
-
-        progress = (theta.item() - board_push_theta_start) / max(
-            board_push_theta_stop - board_push_theta_start,
-            1e-6,
-        )
-        base_target_pos = (
-            board_push_base_start_pos
-            + progress * (board_push_base_end_pos - board_push_base_start_pos)
-        )
-        base_target_pose = _make_pose(base_target_pos, base_target_rot)
-
-        q_robot[:10] = solve_ik(
-            robot_urdf_path,
-            q_robot[:10],
-            palm_pose=palm_target_pose,
-            base_pose=base_target_pose,
-            robot_initial_pose=robot_initial_pose,
-        )[0]
-        q_robot[10:26] = safe_open_hand_q
-
-        _append_state(
-            robot_traj,
-            door_traj,
-            key_idx_in_key_indices,
-            q_robot,
-            q_door,
-            mark_keyframe=False,
-        )
-
-    key_idx_in_key_indices.append(len(robot_traj) - 1)
-
-    # -------------------------
-    # Step 7: Finish traversing while the door closes and the arm tucks
-    # -------------------------
-    close_base_start_pos = board_push_base_end_pos.clone()
-    close_base_end_pos = door_center_pos.clone()
-
-    traverse_far_base_x = -1.5
-    traverse_far_base_y = -0.25
-    close_base_end_pos[:, 0] += traverse_far_base_x
-    close_base_end_pos[:, 1] += traverse_far_base_y
+    traverse_far_base_pos = door_center_pos.clone()
+    traverse_far_base_pos[:, 0] += -1.5
+    traverse_far_base_pos[:, 1] += -0.25
+    traverse_far_base_pose = _make_pose(traverse_far_base_pos, base_target_rot)
 
     q_door = torch.tensor([0.0, 0.0], device=device)
-    base_target_pose = _make_pose(close_base_end_pos, base_target_rot)
-
     q_robot[:10] = solve_ik(
         robot_urdf_path,
         q_robot[:10],
         palm_pose=None,
-        base_pose=base_target_pose,
+        base_pose=traverse_far_base_pose,
         robot_initial_pose=robot_initial_pose,
     )[0]
     q_robot[3:10] = franka_default_q
