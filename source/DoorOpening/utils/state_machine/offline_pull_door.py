@@ -137,11 +137,13 @@ def state_machine_offline_right_pull_door(
         q_door.unsqueeze(0),
     ).to(device)
 
-    pregrasp_base_x_offset = 0.55
+    # Unified with the push-right planner so pregrasp/grasp base + palm offsets match
+    # (keeps the base off the side wall, like the push planner).
+    pregrasp_base_x_offset = 0.6
     pregrasp_base_y_offset = -0.30
-    pregrasp_palm_x_offset = 0.25
-    pregrasp_palm_y_offset = -0.1
-    pregrasp_palm_z_offset = 0.25
+    pregrasp_palm_x_offset = 0.40
+    pregrasp_palm_y_offset = -0.20
+    pregrasp_palm_z_offset = 0.2
 
     base_target_pos = handle_pos.clone()
     base_target_pos[:, 0] += pregrasp_base_x_offset
@@ -176,8 +178,9 @@ def state_machine_offline_right_pull_door(
     # -------------------------
     # Step 2: Move to grasp
     # -------------------------
+    # Unified with the push-right planner so grasp palm<->handle offsets match.
     grasp_palm_x_offset = 0.05
-    grasp_palm_y_offset = -0.08
+    grasp_palm_y_offset = -0.07
     grasp_palm_z_offset = 0.08
     grasp_open_ratio = 0.70
 
@@ -328,7 +331,9 @@ def state_machine_offline_right_pull_door(
     _, _, robot_initial_yaw = euler_xyz_from_quat(base_target_rot)
 
     release_base_x_delta_1 = -0.12
-    release_base_y = 0.15
+    # Blocking pose pulled in close to the open door leaf in Y (was 0.15; +y moved away from
+    # the leaf, so go -y) so the base panel sits right against the opened panel.
+    release_base_y = -0.10
     release_palm_x_delta = 0.25
     release_palm_y_delta = -0.1
     release_base_x_delta_2 = -0.18
@@ -619,10 +624,12 @@ def state_machine_offline_left_pull_door(
         q_door.unsqueeze(0),
     ).to(device)
 
+    # Unified with the push-left planner so pregrasp/grasp base + palm offsets match
+    # (keeps the base off the side wall, like the push planner).
     pregrasp_base_x_offset = 0.55
-    pregrasp_base_y_offset = 0.2
-    pregrasp_palm_x_offset = 0.25
-    pregrasp_palm_y_offset = 0.03
+    pregrasp_base_y_offset = 0.30
+    pregrasp_palm_x_offset = 0.35
+    pregrasp_palm_y_offset = 0.15
     pregrasp_palm_z_offset = 0.25
 
     base_target_pos = handle_pos.clone()
@@ -813,7 +820,9 @@ def state_machine_offline_left_pull_door(
     _, _, robot_initial_yaw = euler_xyz_from_quat(base_target_rot)
 
     release_base_x_delta_1 = -0.12
-    release_base_y = -0.25
+    # Blocking pose pulled in close to the open door leaf in Y (was -0.25; -y moved away from
+    # the leaf, so go +y) so the base panel sits right against the opened panel.
+    release_base_y = 0.0
     release_palm_x_delta = 0.3
     release_palm_y_delta = 0.0
     release_base_x_delta_2 = -0.18

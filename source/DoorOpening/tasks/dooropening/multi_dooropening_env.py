@@ -198,6 +198,8 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_arm_joint_vel_w = self.cfg.robot_arm_joint_vel_w
         self.robot_finger_joint_vel_w = self.cfg.robot_finger_joint_vel_w
         self.hinge_contact_reward_w = self.cfg.hinge_contact_reward_w
+        self.panel_contact_penalty_w = self.cfg.panel_contact_penalty_w
+        self.base_door_contact_penalty_w = self.cfg.base_door_contact_penalty_w
         self.robot_body_lin_vel_w = self.cfg.robot_body_lin_vel_w
         self.robot_body_ang_vel_w = self.cfg.robot_body_ang_vel_w
         self.joint_limit_penalty_w = self.cfg.joint_limit_penalty_w
@@ -372,15 +374,13 @@ class DooropeningEnv(DirectRLEnv):
         return self._get_x5_body_contact_force_norm(filter_indices=(DOOR_FRAME_FILTER_INDEX,))
 
     def _get_self_collision_body_count(self) -> torch.Tensor:
-        """Number of robot links in self-collision, per env (fine-grained, per-link).
+        """Number of non-finger robot links in self-collision, per env (fine-grained, per-link).
 
         This is the r_contact term in r = r_target - lambda_l*r_limit - lambda_c*r_contact.
-        We count the main self-collision links (franka arm + LEAP hand + x5 arm) whose net
-        self-contact force with any other non-adjacent link exceeds the threshold, plus the
-        Franka flange (panda_link7) when a finger has folded back onto it. The flange is
-        scored by a separate sensor filtered to the distal finger links only, so the
-        permanent palm_lower<->flange contact (present even at a neutral finger pose) is
-        never counted -- only a finger actually folding back registers.
+        We count the franka arm, x5/arx camera arm, and mobile-base chassis links whose net
+        self-contact force with any other non-adjacent link exceeds the threshold. The LEAP
+        hand is intentionally excluded (finger self-collision drove finger poses conservative),
+        so the old finger<->flange sensor is no longer used.
         """
         threshold = self.cfg.self_collision_force_threshold
         force_norm = get_self_contact_body_force_norm(
@@ -388,18 +388,6 @@ class DooropeningEnv(DirectRLEnv):
             expected_num_envs=self.num_envs,
         )
         count = (force_norm > threshold).sum(dim=-1)
-        flange_force_norm = get_self_contact_body_force_norm(
-            self.scene.sensors["contact_forces_flange_self_collision"],
-            expected_num_envs=self.num_envs,
-        )
-        flange_unsafe = flange_force_norm > threshold
-        count = count + flange_unsafe.sum(dim=-1)
-        # Watch this separately: it should sit near 0 (fingers point away from the flange)
-        # and only rise when a finger actually folds back. A constant floor would mean a
-        # structural pair is leaking in and the flange filter needs trimming.
-        self.extras["stats/flange_finger_contact_frac"] = (
-            flange_unsafe.any(dim=-1).float().mean().detach().cpu().item()
-        )
         return count.to(dtype=force_norm.dtype)
 
     def set_train_info(self, env_frames: int, algo=None, **kwargs):
@@ -746,6 +734,8 @@ class DooropeningEnv(DirectRLEnv):
             self.pointcloud_camera = Camera(self.cfg.pointcloud_camera_cfg)
             self.scene.sensors["pointcloud_camera"] = self.pointcloud_camera
         self.scene.sensors["contact_forces_door2"] = ContactSensor(self.cfg.contact_forces_door2)
+        self.scene.sensors["contact_forces_door_panel"] = ContactSensor(self.cfg.contact_forces_door_panel)
+        self.scene.sensors["contact_forces_base_door"] = ContactSensor(self.cfg.contact_forces_base_door)
         self.scene.sensors["contact_forces_door_x5_base"] = ContactSensor(self.cfg.contact_forces_door_x5_base)
         self.scene.sensors["contact_forces_door_x5_link1"] = ContactSensor(self.cfg.contact_forces_door_x5_link1)
         self.scene.sensors["contact_forces_door_x5_link2"] = ContactSensor(self.cfg.contact_forces_door_x5_link2)
@@ -753,8 +743,9 @@ class DooropeningEnv(DirectRLEnv):
         self.scene.sensors["contact_forces_door_x5_link4"] = ContactSensor(self.cfg.contact_forces_door_x5_link4)
         self.scene.sensors["contact_forces_door_x5_link5"] = ContactSensor(self.cfg.contact_forces_door_x5_link5)
         self.scene.sensors["contact_forces_door_x5_camera"] = ContactSensor(self.cfg.contact_forces_door_x5_camera)
+        # Self-collision penalty over the franka arm, x5/arx arm, and mobile-base chassis.
+        # The LEAP hand is excluded so finger poses stay free; the finger<->flange sensor is dropped.
         self.scene.sensors["contact_forces_self_collision"] = ContactSensor(self.cfg.contact_forces_self_collision)
-        self.scene.sensors["contact_forces_flange_self_collision"] = ContactSensor(self.cfg.contact_forces_flange_self_collision)
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)    
@@ -866,20 +857,20 @@ class DooropeningEnv(DirectRLEnv):
                 family_name = DOOR_FAMILY_NAMES[int(family_id)]
                 self.completed_successes_by_family[family_name].append(float(value))
 
-        self.extras["stats/active_success_rate"] = self.episode_reached_last_frame.float().mean().item()
+        self.extras["success/active_success_rate"] = self.episode_reached_last_frame.float().mean().item()
         success_rate = self._mean_completed_metric(self.completed_successes)
         if success_rate is not None:
-            self.extras["stats/success_rate"] = success_rate
+            self.extras["success/success_rate"] = success_rate
 
         for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
             family_mask = self.env_family_ids == int(family_id)
             if family_mask.any():
-                self.extras[f"stats/family_active_success_rate/{family_name}"] = (
+                self.extras[f"success/family_active_success_rate/{family_name}"] = (
                     self.episode_reached_last_frame[family_mask].float().mean().item()
                 )
             family_success_rate = self._mean_completed_metric(self.completed_successes_by_family[family_name])
             if family_success_rate is not None:
-                self.extras[f"stats/family_success_rate/{family_name}"] = family_success_rate
+                self.extras[f"success/family_success_rate/{family_name}"] = family_success_rate
 
     def _log_dr_metrics(self):
         step_count = self._get_curriculum_step_count()
@@ -1287,8 +1278,9 @@ class DooropeningEnv(DirectRLEnv):
         self.scene.sensors["contact_forces_door_x5_link4"].update(self.cfg.sim_dt)
         self.scene.sensors["contact_forces_door_x5_link5"].update(self.cfg.sim_dt)
         self.scene.sensors["contact_forces_door_x5_camera"].update(self.cfg.sim_dt)
+        self.scene.sensors["contact_forces_door_panel"].update(self.cfg.sim_dt)
+        self.scene.sensors["contact_forces_base_door"].update(self.cfg.sim_dt)
         self.scene.sensors["contact_forces_self_collision"].update(self.cfg.sim_dt)
-        self.scene.sensors["contact_forces_flange_self_collision"].update(self.cfg.sim_dt)
 
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
         self.robot_dof_targets[:] = self._pin_arx_targets_to_fixed_pose(self.robot_dof_targets)
@@ -1788,6 +1780,7 @@ class DooropeningEnv(DirectRLEnv):
         self.ref_robot_arx_joint_vel = ref_joint_vel[:, self.ref_arx_joint_idx]
         self.ref_door_joint_pos = self.door_joint_pos.clone()
         self.ref_hinge_contact_mask = torch.zeros(self.num_envs, device=self.device, dtype=self.door_joint_pos.dtype)
+        self.ref_panel_contact_mask = torch.zeros(self.num_envs, device=self.device, dtype=self.door_joint_pos.dtype)
         self.ref_robot_body_lin_vel = self.robot_body_lin_vel
         self.ref_robot_body_ang_vel = self.robot_body_ang_vel
 
@@ -1935,6 +1928,7 @@ class DooropeningEnv(DirectRLEnv):
         self.ref_robot_arx_joint_vel = self.ref_joint_vel[:, self.ref_arx_joint_idx]
         self.ref_door_joint_pos = self.ref_motion_lib.get_door_joint_pos()
         self.ref_hinge_contact_mask = self.ref_motion_lib.get_hinge_contact_mask()
+        self.ref_panel_contact_mask = self.ref_motion_lib.get_panel_contact_mask()
         self.ref_door_body_pos_twist = self.ref_motion_lib.get_door_body_pos_twist()
         ref_motion_dt = max(float(self.ref_motion_lib.frame_dt), 1e-6)
         ref_robot_body_lin_vel = self.ref_motion_lib.get_robot_body_lin_vel()
@@ -2008,28 +2002,53 @@ class DooropeningEnv(DirectRLEnv):
         )
         handle_force_norm = torch.linalg.vector_norm(contact_forces_door2, dim=-1)
         self.extras["stats/filtered_handle_force_norm_mean"] = float(handle_force_norm.mean().detach().cpu().item())
-        self.extras["stats/filtered_handle_force_norm_max"] = float(handle_force_norm.max().detach().cpu().item())
-        self.extras["stats/filtered_handle_contact_frac"] = float(
-            (handle_force_norm > self.cfg.handle_contact_force_threshold).float().mean().detach().cpu().item()
-        )
         x5_body_force_norm = self._get_x5_body_contact_force_norm()
         unsafe_x5_body_contact = x5_body_force_norm > self.cfg.x5_body_contact_force_threshold
-        x5_frame_force_norm = self._get_x5_body_frame_contact_force_norm()
-        self.extras["stats/x5_body_contact_force_norm_mean"] = float(x5_body_force_norm.mean().detach().cpu().item())
         self.extras["stats/x5_body_contact_force_norm_max"] = float(x5_body_force_norm.max().detach().cpu().item())
         self.extras["stats/x5_body_unsafe_contact_frac"] = float(
             unsafe_x5_body_contact.float().mean().detach().cpu().item()
         )
-        self.extras["stats/x5_frame_contact_force_norm_mean"] = float(x5_frame_force_norm.mean().detach().cpu().item())
-        self.extras["stats/x5_frame_contact_force_norm_max"] = float(x5_frame_force_norm.max().detach().cpu().item())
 
-        # Self-collision penalty r_contact: count of end-effector (B_ee) bodies whose
-        # self-contact force exceeds the threshold, scaled by lambda_c.
+        # Self-collision penalty over non-finger links (franka arm + x5/arx arm + base chassis).
+        # The LEAP hand is excluded so finger poses are not driven conservative.
         self_collision_body_count = self._get_self_collision_body_count()
         weighted_self_collision_penalty = self.self_collision_penalty_w * self_collision_body_count
         self.extras["error/self_collision_penalty"] = weighted_self_collision_penalty.mean().item()
         self.extras["stats/self_collision_body_count_mean"] = self_collision_body_count.mean().item()
-        self.extras["stats/self_collision_body_count_max"] = self_collision_body_count.max().item()
+
+        # Finger<->panel contact penalty: penalize LEAP-finger contact on the door panel
+        # (Door/link_1) while panel_contact_mask is on (fingers should grip the handle, not
+        # the panel). The mask is 0 wherever pressing the panel is the intended task
+        # (the whole push trajectory, and the pull push-panel/hold steps), so no penalty there.
+        contact_forces_door_panel = self._get_filtered_contact_force_w(
+            self.scene.sensors["contact_forces_door_panel"],
+            expected_num_envs=self.num_envs,
+        )
+        panel_force_norm = torch.linalg.vector_norm(contact_forces_door_panel, dim=-1)
+        panel_contact = (panel_force_norm > self.cfg.panel_contact_force_threshold).to(dtype=panel_force_norm.dtype)
+        weighted_panel_contact_penalty = (
+            self.panel_contact_penalty_w * self.ref_panel_contact_mask.squeeze() * panel_contact
+        )
+        self.extras["error/panel_contact_penalty"] = weighted_panel_contact_penalty.mean().item()
+        self.extras["stats/panel_contact_force_norm_mean"] = float(panel_force_norm.mean().detach().cpu().item())
+        self.extras["stats/panel_contact_force_norm_max"] = float(panel_force_norm.max().detach().cpu().item())
+        self.extras["stats/panel_contact_frac"] = float(
+            (panel_contact * self.ref_panel_contact_mask.squeeze()).mean().detach().cpu().item()
+        )
+
+        # Base<->door contact penalty: only the front base face may touch the door. Count the
+        # non-front faces (back/left/right) whose contact force with any door body exceeds the
+        # threshold and penalize per face in contact.
+        base_door_force_norm = get_self_contact_body_force_norm(
+            self.scene.sensors["contact_forces_base_door"],
+            expected_num_envs=self.num_envs,
+        )
+        base_door_contact_count = (base_door_force_norm > self.cfg.base_door_contact_force_threshold).sum(dim=-1)
+        weighted_base_door_contact_penalty = self.base_door_contact_penalty_w * base_door_contact_count.to(dtype=base_door_force_norm.dtype)
+        self.extras["error/base_door_contact_penalty"] = weighted_base_door_contact_penalty.mean().item()
+        self.extras["stats/base_door_contact_frac"] = float(
+            (base_door_contact_count > 0).float().mean().detach().cpu().item()
+        )
 
         deep_mimic_reward = compute_deep_mimic_rewards(
             robot_key_body_pos = self.robot_key_body_pos, 
@@ -2102,8 +2121,6 @@ class DooropeningEnv(DirectRLEnv):
         arx_tuck_reward = torch.exp(-self.robot_arx_tuck_joint_pos_scale * arx_tuck_joint_pos_err)
         weighted_arx_tuck_reward = self.robot_arx_tuck_joint_pos_w * arx_tuck_reward
         self.extras["reward/arx_tuck_reward"] = weighted_arx_tuck_reward.mean().item()
-        self.extras["stats/arx_tuck_joint_pos_err_mean"] = arx_tuck_joint_pos_err.mean().item()
-        self.extras["stats/arx_tuck_joint_pos_err_max"] = arx_tuck_joint_pos_err.max().item()
         weighted_joint_limit_penalty = self.joint_limit_penalty_w * joint_limit_penalty
         self.extras["error/joint_limit_penalty"] = weighted_joint_limit_penalty.reshape(self.num_envs, -1).mean().item()
         self.extras["stats/joint_limit_active_fraction"] = (
@@ -2129,7 +2146,9 @@ class DooropeningEnv(DirectRLEnv):
             + weighted_arx_tuck_reward
             + total_alive_reward
             - weighted_joint_limit_penalty
+            - weighted_panel_contact_penalty
             - weighted_self_collision_penalty
+            - weighted_base_door_contact_penalty
         )
         final_reward = torch.where(is_killed, final_reward + termination_penalty, final_reward)
 
@@ -2156,8 +2175,6 @@ class DooropeningEnv(DirectRLEnv):
         reset_door_joint_pos_delta = reset_door_joint_pos_delta ** 2
         x5_body_force_norm = self._get_x5_body_contact_force_norm()
         unsafe_x5_body_contact = x5_body_force_norm > self.cfg.x5_body_contact_force_threshold
-        arx_joint_pos_diff = hinge_angle_diff(self.ref_robot_arx_joint_pos, self.robot_arx_joint_pos).abs()
-        self.extras["stats/arx_joint_pos_diff_max"] = float(arx_joint_pos_diff.max().detach().cpu().item())
         # key_body_pos_err, key_body_quat_err, door_err, root_pos_err, root_rot_err, arm_joint_pos_err, finger_joint_pos_err, base_joint_vel_err, arm_joint_vel_err, finger_joint_vel_err, door_pos_err = compute_tracking_error(
         key_body_pos_err, key_body_quat_err, door_err, base_joint_pos_err, arm_joint_pos_err, finger_joint_pos_err, arx_joint_pos_err, base_joint_vel_err, arm_joint_vel_err, finger_joint_vel_err = compute_tracking_error(
             robot_key_body_pos = self.robot_reset_key_body_pos,

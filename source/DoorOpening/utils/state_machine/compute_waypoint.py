@@ -988,12 +988,28 @@ def play_and_save_traj(
     # for i in torch.arange(0, robot_body_pos_traj.shape[0], 100):
     #     print(i, robot_body_pos_traj[i], robot_body_quat_traj[i])
 
-    mask = torch.zeros(len(robot_traj), dtype=torch.int8)
-    if planner_opening_direction == "push" and len(key_indices) > 4:
-        mask[key_indices[2]:key_indices[4]] = 1
-    else:
-        # Contact with hinge should happen between keyframe 2 and 4
-        mask[key_indices[1]:key_indices[3]] = 1
+    # ---- Contact masks (time-gated reward shaping) ----
+    # Keyframe layout (both planners): 0=start, 1=pregrasp, 2=grasp, 3=rotate-hinge,
+    # 4=open/pull-end, 5=base-forward (push) / blocking-pose (pull). Pull additionally
+    # has 6=retract-arm, 7-8=push-panel-open, 9-10=traverse.
+    #
+    # hinge_contact_mask: ENCOURAGE palm<->handle contact while the hand actually works
+    # the handle, i.e. keyframes 2..5 for both directions:
+    #   pull: rotate handle (3) -> pull open (4) -> move base to blocking pose (5)
+    #   push: rotate handle (3) -> open door (4) -> base forward (4.5)
+    hinge_contact_mask = torch.zeros(len(robot_traj), dtype=torch.int8)
+    if len(key_indices) > 5:
+        hinge_contact_mask[key_indices[2]:key_indices[5]] = 1
+
+    # panel_contact_mask: PENALIZE finger<->panel (Door/link_1) contact. The fingers
+    # should grip the handle, never slap the panel -- except where pushing the panel is
+    # the intended task:
+    #   push: pushing the door drives the hand onto the panel by design -> never penalize.
+    #   pull: penalize everywhere up to step 7 (keyframe 6); steps 7-8 push the panel open
+    #         and hold the door while restoring yaw + moving forward, so contact is allowed.
+    panel_contact_mask = torch.zeros(len(robot_traj), dtype=torch.int8)
+    if planner_opening_direction != "push" and len(key_indices) > 6:
+        panel_contact_mask[:key_indices[6]] = 1
 
     data = {
         "handle_side": planner_handle_side,
@@ -1005,7 +1021,8 @@ def play_and_save_traj(
         "robot_joint_pos_traj": robot_traj,
         "robot_joint_vel_traj": robot_traj_d,
         # "key_indices": torch.tensor(key_indices, dtype=torch.int32)[key_idx_in_key_indices]
-        "hinge_contact_mask": mask,
+        "hinge_contact_mask": hinge_contact_mask,
+        "panel_contact_mask": panel_contact_mask,
         "key_indices": key_indices,
         "robot_body_pos_twist": robot_body_pos_twist,
         "door_body_pos_traj": door_body_pos_traj
