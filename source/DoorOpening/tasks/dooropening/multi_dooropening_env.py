@@ -200,6 +200,7 @@ class DooropeningEnv(DirectRLEnv):
         self.hinge_contact_reward_w = self.cfg.hinge_contact_reward_w
         self.panel_contact_penalty_w = self.cfg.panel_contact_penalty_w
         self.base_door_contact_penalty_w = self.cfg.base_door_contact_penalty_w
+        self.x5_door_contact_penalty_w = self.cfg.x5_door_contact_penalty_w
         self.robot_body_lin_vel_w = self.cfg.robot_body_lin_vel_w
         self.robot_body_ang_vel_w = self.cfg.robot_body_ang_vel_w
         self.joint_limit_penalty_w = self.cfg.joint_limit_penalty_w
@@ -2008,6 +2009,10 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["stats/x5_body_unsafe_contact_frac"] = float(
             unsafe_x5_body_contact.float().mean().detach().cpu().item()
         )
+        # x5/arx camera arm <-> door contact penalty (frame/panel/handle). Harsh: the slender
+        # camera arm striking the door is a serious real-world failure.
+        weighted_x5_door_contact_penalty = self.x5_door_contact_penalty_w * unsafe_x5_body_contact.to(dtype=x5_body_force_norm.dtype)
+        self.extras["error/x5_door_contact_penalty"] = weighted_x5_door_contact_penalty.mean().item()
 
         # Self-collision penalty over non-finger links (franka arm + x5/arx arm + base chassis).
         # The LEAP hand is excluded so finger poses are not driven conservative.
@@ -2149,6 +2154,7 @@ class DooropeningEnv(DirectRLEnv):
             - weighted_panel_contact_penalty
             - weighted_self_collision_penalty
             - weighted_base_door_contact_penalty
+            - weighted_x5_door_contact_penalty
         )
         final_reward = torch.where(is_killed, final_reward + termination_penalty, final_reward)
 

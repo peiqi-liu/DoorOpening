@@ -331,9 +331,8 @@ def state_machine_offline_right_pull_door(
     _, _, robot_initial_yaw = euler_xyz_from_quat(base_target_rot)
 
     release_base_x_delta_1 = -0.12
-    # Blocking pose pulled in close to the open door leaf in Y (was 0.15; +y moved away from
-    # the leaf, so go -y) so the base panel sits right against the opened panel.
-    release_base_y = -0.10
+    # Blocking pose Y: -y approaches the open leaf, +y backs away. Extra margin off the leaf.
+    release_base_y = 0.25
     release_palm_x_delta = 0.25
     release_palm_y_delta = -0.1
     release_base_x_delta_2 = -0.18
@@ -820,9 +819,8 @@ def state_machine_offline_left_pull_door(
     _, _, robot_initial_yaw = euler_xyz_from_quat(base_target_rot)
 
     release_base_x_delta_1 = -0.12
-    # Blocking pose pulled in close to the open door leaf in Y (was -0.25; -y moved away from
-    # the leaf, so go +y) so the base panel sits right against the opened panel.
-    release_base_y = 0.0
+    # Blocking pose Y: +y approaches the open leaf, -y backs away. Kept a margin off the leaf.
+    release_base_y = -0.20
     release_palm_x_delta = 0.3
     release_palm_y_delta = 0.0
     release_base_x_delta_2 = -0.18

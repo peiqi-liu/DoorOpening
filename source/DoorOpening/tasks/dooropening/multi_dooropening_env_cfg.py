@@ -539,8 +539,12 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     self_collision_penalty_w = 1.0
     # Penalty weight for finger<->panel contact while panel_contact_mask is active.
     panel_contact_penalty_w = 3.0
-    # Penalty weight (per non-front base face in contact with the door).
-    base_door_contact_penalty_w = 1.0
+    # Penalty weight (per non-front base face in contact with the door). High on purpose: a
+    # base panel hitting the door in the real world means a securely-mounted robot is injured.
+    base_door_contact_penalty_w = 5.0
+    # Penalty weight for the x5/arx camera arm contacting any door body (frame/panel/handle).
+    # Harsh: the slender camera arm hitting the door is a serious real-world failure.
+    x5_door_contact_penalty_w = 10.0
 
     robot_body_quat_scale = 1.0
     robot_key_body_pos_scale = 3.0
