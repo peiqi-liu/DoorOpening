@@ -538,7 +538,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # lambda_c in r = r_target - lambda_l*r_limit - lambda_c*r_contact
     self_collision_penalty_w = 1.0
     # Penalty weight for finger<->panel contact while panel_contact_mask is active.
-    panel_contact_penalty_w = 1.5
+    panel_contact_penalty_w = 2.5
     # Penalty weight (per non-front base face in contact with the door). High on purpose: a
     # base panel hitting the door in the real world means a securely-mounted robot is injured.
     base_door_contact_penalty_w = 5.0
