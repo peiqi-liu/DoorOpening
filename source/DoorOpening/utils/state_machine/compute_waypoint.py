@@ -913,7 +913,9 @@ def play_and_save_traj(
         robot_traj,
         door_traj,
         key_idx_in_key_indices,
-        length=1000,
+        # All motions must share num_frames (the multi-motion lib enforces it), so this length
+        # applies to every door (push + pull), not just pull.
+        length=1200,
     )
     print(robot_traj.shape)
     print(door_traj.shape)

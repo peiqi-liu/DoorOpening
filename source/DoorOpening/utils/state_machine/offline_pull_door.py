@@ -331,8 +331,8 @@ def state_machine_offline_right_pull_door(
     _, _, robot_initial_yaw = euler_xyz_from_quat(base_target_rot)
 
     release_base_x_delta_1 = -0.12
-    # Blocking pose Y: -y approaches the open leaf, +y backs away. Extra margin off the leaf.
-    release_base_y = 0.25
+    # Blocking pose Y: -y approaches the open leaf, +y backs away. Slightly closer to the leaf.
+    release_base_y = 0.20
     release_palm_x_delta = 0.25
     release_palm_y_delta = -0.1
     release_base_x_delta_2 = -0.18
@@ -405,9 +405,12 @@ def state_machine_offline_right_pull_door(
     # Step 6: Retract the arm to the left side of the tilted base
     # -------------------------
     tilted_base_yaw_world = robot_initial_yaw + tilt_base_yaw
-    retreat_local_x = 0.15
+    # Extend the retract target further from the base (was 0.15) so the EE is not on top of
+    # the franka shoulder mount (~0.178 m): a too-close target forces a cramped back-folded arm.
+    retreat_local_x = 0.40
     retreat_local_y = 0.25
-    retreat_z_lift = -0.03
+    # Retract the arm higher so the Franka clears the arx/x5 camera arm during the retract.
+    retreat_z_lift = 0.10
     retreat_dx, retreat_dy = _rotate_xy_counterclockwise(
         retreat_local_x,
         retreat_local_y,
@@ -441,9 +444,12 @@ def state_machine_offline_right_pull_door(
     # -------------------------
     # Step 7: Push the panel open with the arm while keeping the base still
     # -------------------------
-    push_contact_x_offset = 0.35
+    # Negative x offset so the hand reaches toward the panel/handle (positive shot the arm
+    # back, away from the door).
+    push_contact_x_offset = -0.45
     push_contact_y_offset = 0.25
-    push_contact_z_offset = 0.25
+    # Lower contact point on the panel (was 0.25) so the hand pushes lower on the door.
+    push_contact_z_offset = 0.10
     contact_board_pos = get_board_edge(
         door_urdf_path,
         door_initial_pose,
@@ -482,7 +488,10 @@ def state_machine_offline_right_pull_door(
     ).to(device)
 
     palm_target_pos = board_pos.clone()
-    # palm_target_pos[:, 0] += push_contact_x_offset
+    # Apply the forward (x) offset so the hand walks along the panel off the bare free edge,
+    # but NOT the lateral (y) offset: at full-open the panel face normal is ~y, so y is a
+    # perpendicular gap that would hold the hand off the panel surface.
+    palm_target_pos[:, 0] += push_contact_x_offset
     palm_target_pos[:, 2] += push_contact_z_offset
     palm_target_pose = _make_pose(palm_target_pos, push_palm_rot)
 
@@ -510,7 +519,8 @@ def state_machine_offline_right_pull_door(
     # -------------------------
     traverse_mid_x = 0.4
     traverse_mid_y = 0.0
-    traverse_far_x = -0.5
+    # Drive past the doorway so the closing door panel clears the base.
+    traverse_far_x = -0.7
     base_target_pos[:, 0] = traverse_mid_x
     base_target_pos[:, 1] = traverse_mid_y
     base_target_pose = _make_pose(base_target_pos, base_target_rot)
@@ -626,7 +636,8 @@ def state_machine_offline_left_pull_door(
     # Unified with the push-left planner so pregrasp/grasp base + palm offsets match
     # (keeps the base off the side wall, like the push planner).
     pregrasp_base_x_offset = 0.55
-    pregrasp_base_y_offset = 0.30
+    # Pulled 5cm back off the +y side so the left door pregrasp doesn't reach so far right.
+    pregrasp_base_y_offset = 0.25
     pregrasp_palm_x_offset = 0.35
     pregrasp_palm_y_offset = 0.15
     pregrasp_palm_z_offset = 0.25
@@ -839,7 +850,8 @@ def state_machine_offline_left_pull_door(
     retreat_local_x = 0.10
     retreat_local_y = -0.42
     retreat_z_lift = 0.04
-    push_contact_x_offset = -0.3
+    # Larger x offset magnitude (was -0.3) so the arm reaches a bit further forward into the panel.
+    push_contact_x_offset = -0.4
     push_contact_y_offset = -0.2
     push_contact_z_offset = 0.1
     contact_virtual_door_angle = 1.0
@@ -971,8 +983,10 @@ def state_machine_offline_left_pull_door(
     ).to(device)
 
     palm_target_pos = board_pos.clone()
-    # palm_target_pos[:, 0] += push_contact_x_offset
-    # palm_target_pos[:, 1] += push_contact_y_offset
+    # Apply the forward (x) offset so the hand walks along the panel off the bare free edge,
+    # but NOT the lateral (y) offset: at full-open the panel face normal is ~y, so y is a
+    # perpendicular gap that would hold the hand off the panel surface.
+    palm_target_pos[:, 0] += push_contact_x_offset
     palm_target_pos[:, 2] += push_contact_z_offset
     palm_target_pose = _make_pose(palm_target_pos, push_palm_rot)
 
@@ -1000,7 +1014,8 @@ def state_machine_offline_left_pull_door(
     # -------------------------
     traverse_mid_x = 0.45
     traverse_mid_y = -0.05
-    traverse_far_x = -0.5
+    # Drive past the doorway so the closing door panel clears the base.
+    traverse_far_x = -0.7
     base_target_pos[:, 0] = traverse_mid_x
     base_target_pos[:, 1] = traverse_mid_y
     base_target_pose = _make_pose(base_target_pos, base_target_rot)

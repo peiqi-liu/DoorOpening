@@ -496,7 +496,8 @@ def state_machine_offline_push_left_door(
 
     base_target_pos = handle_pos.clone()
     base_target_pos[:, 0] += 0.55
-    base_target_pos[:, 1] += 0.30
+    # Pulled 5cm back off the +y side so the left door pregrasp doesn't reach so far right.
+    base_target_pos[:, 1] += 0.25
     base_target_pose = _make_pose(base_target_pos, base_target_rot)
 
     palm_target_pos = handle_pos.clone()

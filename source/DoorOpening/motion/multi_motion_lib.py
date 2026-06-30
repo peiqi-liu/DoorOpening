@@ -78,6 +78,24 @@ class ReferenceMotionManager:
     # --------------------------------------------------
     # Load motion data (moved from Env)
     # --------------------------------------------------
+    @staticmethod
+    def _pad_traj_to_frames(traj: torch.Tensor, target_frames: int) -> torch.Tensor:
+        """Pad a per-frame tensor along dim 0 to target_frames by repeating its last frame.
+
+        Lets motions of different lengths share one stacked [M, T, ...] buffer: a shorter
+        motion simply holds its final pose for the extra frames instead of tripping a hard
+        length check. A no-op when traj already has target_frames frames.
+        """
+        cur = int(traj.shape[0])
+        if cur == target_frames:
+            return traj
+        if cur > target_frames:
+            return traj[:target_frames]
+        if cur == 0:
+            raise ValueError("Cannot pad an empty trajectory.")
+        pad = traj[-1:].expand(target_frames - cur, *traj.shape[1:])
+        return torch.cat([traj, pad], dim=0)
+
     def _load_motion_bundle(self, motion_paths, label: str):
         robot_joint_pos_trajs = []
         door_trajs = []
@@ -110,13 +128,13 @@ class ReferenceMotionManager:
             if panel_contact_mask is None:
                 panel_contact_mask = torch.zeros(motion_num_frames, device=self.device)
 
+            # Allow mixed-length motions: track the longest and pad shorter motions up to it
+            # below (a shorter motion holds its final pose for the extra frames) instead of
+            # hard-failing. When every motion already has the same length this is a no-op.
             if num_frames is None:
                 num_frames = motion_num_frames
-            elif motion_num_frames != num_frames:
-                raise ValueError(
-                    f"Inconsistent {label} motion length in '{motion_file}': "
-                    f"{motion_num_frames} vs {num_frames}."
-                )
+            else:
+                num_frames = max(num_frames, motion_num_frames)
 
             robot_joint_pos_trajs.append(robot_joint_pos_traj)
             door_trajs.append(door_traj)
@@ -132,6 +150,17 @@ class ReferenceMotionManager:
             door_body_pos_trajs.append(door_body_pos_traj)
         if num_frames is None:
             raise FileNotFoundError(f"No {label} motion files were provided.")
+
+        # Pad any shorter motion up to the longest so the stacked [M, T, ...] buffers align.
+        robot_joint_pos_trajs = [self._pad_traj_to_frames(t, num_frames) for t in robot_joint_pos_trajs]
+        robot_joint_vel_trajs = [self._pad_traj_to_frames(t, num_frames) for t in robot_joint_vel_trajs]
+        robot_body_pos_trajs = [self._pad_traj_to_frames(t, num_frames) for t in robot_body_pos_trajs]
+        robot_body_quat_trajs = [self._pad_traj_to_frames(t, num_frames) for t in robot_body_quat_trajs]
+        door_trajs = [self._pad_traj_to_frames(t, num_frames) for t in door_trajs]
+        hinge_contact_masks_list = [self._pad_traj_to_frames(t, num_frames) for t in hinge_contact_masks_list]
+        panel_contact_masks_list = [self._pad_traj_to_frames(t, num_frames) for t in panel_contact_masks_list]
+        robot_body_pos_vel_list = [self._pad_traj_to_frames(t, num_frames) for t in robot_body_pos_vel_list]
+        door_body_pos_trajs = [self._pad_traj_to_frames(t, num_frames) for t in door_body_pos_trajs]
 
         phase_key_indices, phase_key_counts = self._stack_phase_key_indices(key_indices_list, num_frames)
         return {
