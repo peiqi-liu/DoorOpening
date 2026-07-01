@@ -1,8 +1,24 @@
 import torch
 
-# Keep the handle contact sensor filtered to palm/finger bodies only so force_matrix_w
-# reports robot-hand contact on Door/link_2 instead of total handle contact.
+# The HANDLE contact-bonus sensor is filtered to the palm and the LOWEST (proximal) finger
+# segments only -- palm_center/palm_lower + mcp_joint + pip. The distal segments and tips
+# (dip / realtip / fingertip) are intentionally excluded so the bonus rewards wrapping the
+# handle with the palm + finger bases, NOT wrenching a fist and pressing down from the top.
 HANDLE_CONTACT_FILTER_PRIM_PATHS = (
+    "/World/envs/env_.*/Robot/palm_center",
+    "/World/envs/env_.*/Robot/palm_lower",
+    "/World/envs/env_.*/Robot/mcp_joint_1",
+    "/World/envs/env_.*/Robot/pip_1",
+    "/World/envs/env_.*/Robot/mcp_joint_2",
+    "/World/envs/env_.*/Robot/pip_2",
+    "/World/envs/env_.*/Robot/mcp_joint_3",
+    "/World/envs/env_.*/Robot/pip_3",
+)
+
+# Penalize finger<->panel contact. Unlike the handle bonus, this keeps the FULL hand set
+# (palm + every finger link incl. tips): ANY part of the hand on the panel (Door/link_1) is
+# undesirable, so the tips must still be tracked here.
+PANEL_CONTACT_FILTER_PRIM_PATHS = (
     "/World/envs/env_.*/Robot/palm_center",
     "/World/envs/env_.*/Robot/palm_lower",
     "/World/envs/env_.*/Robot/mcp_joint_1",
@@ -21,10 +37,6 @@ HANDLE_CONTACT_FILTER_PRIM_PATHS = (
     "/World/envs/env_.*/Robot/realtip_3",
     "/World/envs/env_.*/Robot/fingertip_3",
 )
-
-# Penalize finger<->panel contact: same LEAP hand body set as the handle filter, but the
-# sensor lives on the door panel (Door/link_1) instead of the handle (Door/link_2).
-PANEL_CONTACT_FILTER_PRIM_PATHS = HANDLE_CONTACT_FILTER_PRIM_PATHS
 
 X5_BODY_NAMES = (
     "x5_base_link",
@@ -47,12 +59,14 @@ DOOR_FRAME_FILTER_INDEX = 0
 
 # Base<->door contact penalty: the mobile base is a cube whose +x face (front_panel) leads
 # the approach and is allowed to touch the door. The other three vertical faces should never
-# hit the door, so a contact sensor watches them against all door bodies. front_panel (and
-# the top/control-box, which face away from the door) are intentionally excluded.
+# hit the door, plus the franka control box on top (which houses the arm controller and must
+# be protected). Only front_panel and top_panel are excluded. A contact sensor watches this
+# set against all door bodies.
 BASE_NON_FRONT_PANEL_BODY_NAMES = (
-    "back_panel",   # -x face
-    "left_panel",   # +y face
-    "right_panel",  # -y face
+    "back_panel",          # -x face
+    "left_panel",          # +y face
+    "right_panel",         # -y face
+    "franka_control_box",  # top/-x controller box -- protect from door contact
 )
 BASE_DOOR_CONTACT_PRIM_PATH = (
     "/World/envs/env_.*/Robot/(" + "|".join(BASE_NON_FRONT_PANEL_BODY_NAMES) + ")"

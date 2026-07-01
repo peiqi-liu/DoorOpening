@@ -517,10 +517,10 @@ def state_machine_offline_right_pull_door(
     # Step 8: Restore the base to normal yaw, traverse with a suitable arm pose,
     # then finish the traverse with default arm joints
     # -------------------------
-    traverse_mid_x = 0.4
+    traverse_mid_x = 0.2
     traverse_mid_y = 0.0
-    # Drive past the doorway so the closing door panel clears the base.
-    traverse_far_x = -0.7
+    # Drive well past the doorway so the closing door panel can't smash the base from behind.
+    traverse_far_x = -1.0
     base_target_pos[:, 0] = traverse_mid_x
     base_target_pos[:, 1] = traverse_mid_y
     base_target_pose = _make_pose(base_target_pos, base_target_rot)
@@ -1012,10 +1012,10 @@ def state_machine_offline_left_pull_door(
     # Step 8: Restore the base to normal yaw, traverse with a suitable arm pose,
     # then finish the traverse with default arm joints
     # -------------------------
-    traverse_mid_x = 0.45
+    traverse_mid_x = 0.2
     traverse_mid_y = -0.05
-    # Drive past the doorway so the closing door panel clears the base.
-    traverse_far_x = -0.7
+    # Drive well past the doorway so the closing door panel can't smash the base from behind.
+    traverse_far_x = -1.0
     base_target_pos[:, 0] = traverse_mid_x
     base_target_pos[:, 1] = traverse_mid_y
     base_target_pose = _make_pose(base_target_pos, base_target_rot)

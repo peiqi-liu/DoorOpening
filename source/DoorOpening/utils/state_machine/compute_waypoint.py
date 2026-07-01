@@ -909,13 +909,15 @@ def play_and_save_traj(
     #             new_door_traj.append(door_point)
     # robot_traj = new_robot_traj
     # door_traj = new_door_traj
+    # Pull motions get a longer horizon (1200) than push (1000); pull has more phases
+    # (retract + push-panel + traverse). The multi-motion lib pads the shorter (push) motions
+    # up to the longest on load, so mixing lengths is safe.
+    traj_length = 1200 if planner_opening_direction == "pull" else 1000
     robot_traj, door_traj, robot_traj_d, door_traj_d, key_indices = collocate_and_playback(
         robot_traj,
         door_traj,
         key_idx_in_key_indices,
-        # All motions must share num_frames (the multi-motion lib enforces it), so this length
-        # applies to every door (push + pull), not just pull.
-        length=1200,
+        length=traj_length,
     )
     print(robot_traj.shape)
     print(door_traj.shape)
@@ -1003,14 +1005,17 @@ def play_and_save_traj(
     if len(key_indices) > 5:
         hinge_contact_mask[key_indices[2]:key_indices[5]] = 1
 
-    # panel_contact_mask: PENALIZE finger<->panel (Door/link_1) contact. The fingers
-    # should grip the handle, never slap the panel -- except where pushing the panel is
-    # the intended task:
-    #   push: pushing the door drives the hand onto the panel by design -> never penalize.
-    #   pull: penalize everywhere up to step 7 (keyframe 6); steps 7-8 push the panel open
-    #         and hold the door while restoring yaw + moving forward, so contact is allowed.
+    # panel_contact_mask: PENALIZE finger<->panel (Door/link_1) contact. The fingers should
+    # grip the handle, never touch the panel -- except where pushing the panel is the task.
+    #   push: the door is opened via the HANDLE (grasp + base-forward), never by pressing the
+    #         panel with the hand, so finger<->panel contact is always undesirable -> penalize
+    #         the whole trajectory.
+    #   pull: penalize everywhere up to step 7 (keyframe 6); steps 7-8 push the panel open and
+    #         hold the door while restoring yaw + moving forward, so contact is allowed there.
     panel_contact_mask = torch.zeros(len(robot_traj), dtype=torch.int8)
-    if planner_opening_direction != "push" and len(key_indices) > 6:
+    if planner_opening_direction == "push":
+        panel_contact_mask[:] = 1
+    elif len(key_indices) > 6:
         panel_contact_mask[:key_indices[6]] = 1
 
     data = {
