@@ -497,7 +497,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # - future reference motion summary at twist indices
     #   => currently disabled in _build_observations(), so not counted in observation_space
     proprioception_observation_space = actuated_joints_num * 3
-    joint_reference_error_observation_space = len(finger_joints)
+    # Reference joint-angle error (sim reading - reference) for base + arm(franka) + finger.
+    joint_reference_error_observation_space = len(base_joints) + len(arm_joints) + len(finger_joints)
     key_body_error_observation_space = len(robot_key_bodies) * 3
     robot_pose_observation_space = (len(robot_key_bodies) - 1) * (3 + 6)
     base_velocity_observation_space = 6
@@ -507,7 +508,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     observation_space = (
         proprioception_observation_space
-        # + joint_reference_error_observation_space
+        + joint_reference_error_observation_space
         + key_body_error_observation_space
         + robot_pose_observation_space
         + base_velocity_observation_space
