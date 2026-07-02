@@ -73,13 +73,21 @@
       <material name="grey">
       </material>
     </visual>
-    <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
+    <!-- Lidar-mast-only collision. The chassis BODY (z<0.43) is already collided by the
+         front/back/left/right/top panels + franka_control_box, which also carry the contact
+         penalties; the full tidybot2_base_link.STL duplicated that volume (Y up to +-0.254,
+         right at the panels at +-0.2555) so it wrapped/stole the left/right panel contacts,
+         and its solid mid-body sits inside the Franka/X5 workspace and snagged the arms.
+         tidybot2_mast.STL is the STL cropped to just the thin lidar pole (triangles reaching
+         above z=0.75): a 0.04x0.04 tube spanning z[0.595,1.595] at (x=-0.26,y=0). Exact real
+         geometry, so no oversized box. NOTE: the pole's lower end (z~0.6-0.9) is within the
+         Franka's back reach; if the arm ever swings behind itself it could touch it. If that
+         happens, filter chassis-vs-arm collisions rather than shrinking the pole. -->
+    <collision name="mast_pole">
+      <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://glorbot/meshes/tidybot2/tidybot2_base_link.STL" />
+          filename="package://glorbot/meshes/tidybot2/tidybot2_mast.STL" />
       </geometry>
     </collision>
   </link>
@@ -101,6 +109,12 @@
       <material name="black">
       </material>
     </visual>
+    <collision>
+      <origin xyz="0.014 0 -0.011" rpy="0 0 0" />
+      <geometry>
+        <box size="0.103 0.075 0.148" />
+      </geometry>
+    </collision>
   </link>
   <!-- Fixed joint to chassis_link -->
   <joint name="lidar_joint" type="fixed">
@@ -743,9 +757,13 @@
       </geometry>
       <material name="panda_white"/>
     </visual>
+    <!-- Use the watertight VISUAL mesh for collision. The shipped collision/link5.obj is a
+         coarse non-watertight triangle soup (300 tris, no shared verts); convex_decomposition
+         (VHACD) can't voxelize it cleanly and drops interior volume -> a hole in the collider.
+         visual/link5.obj is watertight, so decomposition yields a clean solid link. -->
     <collision>
       <geometry>
-        <mesh filename="package://glorbot/meshes/franka/collision/link5.obj"/>
+        <mesh filename="package://glorbot/meshes/franka/visual/link5.obj"/>
       </geometry>
       <material name="panda_white"/>
     </collision>
@@ -844,10 +862,17 @@
         <color rgba="0.2 0.2 0.2 1.0" />
       </material>
     </visual>
+    <!-- Palm collision uses the actual palm_lower.stl mesh (convex_decomposition via the
+         converter cfg), not a box: the old box (0.04 x 0.135 x 0.042) covered only a ~40%
+         thin slab of the palm's X width (mesh is 0.103 wide). Origin matches the VISUAL so
+         the collider aligns with the rendered palm. NOTE: with enabled_self_collisions=True,
+         the decomposed palm hulls may contact the non-adjacent finger links (pip/dip/
+         fingertip) when the hand closes; if that snags, filter palm-vs-finger collisions. -->
     <collision>
-      <origin xyz="-0.040095249652862544332 -0.045757756134899473244 -0.015" rpy="0 -0 0" />
+      <origin xyz="-0.020095249652862544332 0.025757756134899473244 -0.034722403578460216134"
+        rpy="0 -0 0" />
       <geometry>
-        <box size="0.04 0.135 0.042" />
+        <mesh filename="package://glorbot/meshes/leap/palm_lower.stl" />
       </geometry>
     </collision>
     <inertial>
@@ -1557,9 +1582,9 @@
             </material>
         </visual>
         <collision>
-            <origin xyz="0.15 0 -0.055" rpy="0 1.5707963267948966 0"/>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
             <geometry>
-                <cylinder length="0.15" radius="0.02" />
+                <mesh filename="package://glorbot/meshes/arx_x5/link3.STL"/>
             </geometry>
         </collision>
     </link>
@@ -1590,9 +1615,9 @@
             </material>
         </visual>
         <collision>
-            <origin xyz="0.06575 -0.001 -0.02" rpy="0 0 0"/>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
             <geometry>
-                <cylinder length="0.05" radius="0.025" />
+                <mesh filename="package://glorbot/meshes/arx_x5/link4.STL"/>
             </geometry>
         </collision>
     </link>
@@ -1626,11 +1651,9 @@
             </material>
         </visual>
         <collision>
-            <origin
-                xyz="0.055 0.00 0.083"
-                rpy="0 1.5707963267948966 0" />
+            <origin xyz="0 0 0" rpy="0 0 0"/>
             <geometry>
-                <cylinder length="0.025" radius="0.02" />
+                <mesh filename="package://glorbot/meshes/arx_x5/link5.STL"/>
             </geometry>
         </collision>
     </link>

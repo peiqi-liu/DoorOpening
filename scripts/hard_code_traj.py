@@ -357,6 +357,7 @@ def main():
     # renders them; the URDF->USD converter marks them instanceable and the GUI skips
     # instanced colliders (make_instanceable=False in the converter cfg does not change this).
     disable_collision_scope_instancing()  # default expr "/World/envs/env_.*/Robot"
+    disable_collision_scope_instancing("/World/envs/env_.*/Door")
     # Play the simulator
     sim.reset()
     print("material properties: ", scene["robot"].root_physx_view.get_material_properties())

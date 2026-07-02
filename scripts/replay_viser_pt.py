@@ -363,6 +363,10 @@ def _has_aux_prediction(frames: list[dict]) -> bool:
     return any(_to_numpy_vector(frame.get("aux_prediction")) is not None for frame in frames)
 
 
+def _has_aux_input(frames: list[dict]) -> bool:
+    return any(_to_numpy_vector(frame.get("aux_input")) is not None for frame in frames)
+
+
 def _door_joint_prediction(frame: dict) -> np.ndarray | None:
     return _to_numpy_vector(frame.get("door_joint_prediction"))
 
@@ -430,6 +434,7 @@ def main() -> None:
         streams = [stream for stream in streams if stream["name"] in requested_clouds]
     hidden_clouds = set(args.hide_clouds)
     has_aux_prediction = _has_aux_prediction(frames)
+    has_aux_input = _has_aux_input(frames)
     has_door_joint_prediction = _has_door_joint_prediction(frames)
 
     joint_sources = [] if args.no_robot else _available_joint_sources(frames)
@@ -476,6 +481,15 @@ def main() -> None:
             "/aux_prediction",
             points=np.zeros((0, 3), dtype=np.float32),
             colors=(255, 140, 0),
+            point_size=args.point_size * 3.0,
+        )
+
+    aux_input_handle = None
+    if has_aux_input:
+        aux_input_handle = server.scene.add_point_cloud(
+            "/aux_input",
+            points=np.zeros((0, 3), dtype=np.float32),
+            colors=(0, 200, 255),
             point_size=args.point_size * 3.0,
         )
 
@@ -559,6 +573,11 @@ def main() -> None:
             # aux_prediction is in the measured robot-base frame, so use the measured pose.
             aux_points = _aux_prediction_world_points(frame, _measured_base_pose(frame, base_layout))
             aux_handle.points = aux_points if show_aux.value else np.zeros((0, 3), dtype=np.float32)
+        if aux_input_handle is not None and show_aux_input is not None:
+            aux_input_points = _aux_input_world_points(frame)
+            aux_input_handle.points = (
+                aux_input_points if show_aux_input.value else np.zeros((0, 3), dtype=np.float32)
+            )
         _update_robot(frame)
         if has_door_joint_prediction:
             door_joint_pred = _door_joint_prediction(frame)
@@ -589,6 +608,11 @@ def main() -> None:
 
     if show_aux is not None:
         @show_aux.on_update
+        def _(_event):
+            _apply_frame(int(frame_slider.value))
+
+    if show_aux_input is not None:
+        @show_aux_input.on_update
         def _(_event):
             _apply_frame(int(frame_slider.value))
 
