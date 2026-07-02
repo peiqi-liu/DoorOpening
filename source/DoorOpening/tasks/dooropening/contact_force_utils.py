@@ -1,18 +1,24 @@
 import torch
 
-# The HANDLE contact-bonus sensor is filtered to the palm and the LOWEST (proximal) finger
-# segments only -- palm_center/palm_lower + mcp_joint + pip. The distal segments and tips
-# (dip / realtip / fingertip) are intentionally excluded so the bonus rewards wrapping the
-# handle with the palm + finger bases, NOT wrenching a fist and pressing down from the top.
+# The HANDLE contact-bonus sensor rewards contact from the PALM and the INNER finger segments
+# only. The mcp_joint (the outward knuckle at the finger base) is excluded, so the bonus is
+# collected by gripping with the palm + inner finger surfaces (pip / dip / fingertip /
+# realtip), not by knocking the handle with the outward knuckle.
 HANDLE_CONTACT_FILTER_PRIM_PATHS = (
     "/World/envs/env_.*/Robot/palm_center",
     "/World/envs/env_.*/Robot/palm_lower",
-    "/World/envs/env_.*/Robot/mcp_joint_1",
     "/World/envs/env_.*/Robot/pip_1",
-    "/World/envs/env_.*/Robot/mcp_joint_2",
+    "/World/envs/env_.*/Robot/dip_1",
+    "/World/envs/env_.*/Robot/realtip_1",
+    "/World/envs/env_.*/Robot/fingertip_1",
     "/World/envs/env_.*/Robot/pip_2",
-    "/World/envs/env_.*/Robot/mcp_joint_3",
+    "/World/envs/env_.*/Robot/dip_2",
+    "/World/envs/env_.*/Robot/realtip_2",
+    "/World/envs/env_.*/Robot/fingertip_2",
     "/World/envs/env_.*/Robot/pip_3",
+    "/World/envs/env_.*/Robot/dip_3",
+    "/World/envs/env_.*/Robot/realtip_3",
+    "/World/envs/env_.*/Robot/fingertip_3",
 )
 
 # Penalize finger<->panel contact. Unlike the handle bonus, this keeps the FULL hand set
@@ -57,20 +63,27 @@ DOOR_BODY_CONTACT_FILTER_PRIM_PATHS = (
 )
 DOOR_FRAME_FILTER_INDEX = 0
 
-# Base<->door contact penalty: the mobile base is a cube whose +x face (front_panel) leads
-# the approach and is allowed to touch the door. The other three vertical faces should never
-# hit the door, plus the franka control box on top (which houses the arm controller and must
-# be protected). Only front_panel and top_panel are excluded. A contact sensor watches this
-# set against all door bodies.
-BASE_NON_FRONT_PANEL_BODY_NAMES = (
-    "back_panel",          # -x face
-    "left_panel",          # +y face
-    "right_panel",         # -y face
-    "franka_control_box",  # top/-x controller box -- protect from door contact
+# Base<->door contact penalty: ALL FOUR vertical faces of the mobile-base cube (front + back +
+# left + right) should avoid the door. top_panel is excluded (a vertical door can't hit the
+# top). The franka_control_box is NOT here -- it is protected by the harsher x5<->door penalty
+# below (strong penalty + early termination), since crushing the arm controller is critical.
+BASE_DOOR_CONTACT_BODY_NAMES = (
+    "front_panel",  # +x face (door-facing)
+    "back_panel",   # -x face
+    "left_panel",   # +y face
+    "right_panel",  # -y face
+    # Full chassis + lidar mast (now carries a collision mesh): the base/mast hitting the door
+    # is penalized just like the panels.
+    "tidybot2_base_link",
 )
 BASE_DOOR_CONTACT_PRIM_PATH = (
-    "/World/envs/env_.*/Robot/(" + "|".join(BASE_NON_FRONT_PANEL_BODY_NAMES) + ")"
+    "/World/envs/env_.*/Robot/(" + "|".join(BASE_DOOR_CONTACT_BODY_NAMES) + ")"
 )
+
+# The franka control box houses the arm controller and is critical -- protect it like the x5
+# camera arm: contact with any door body feeds the harsh x5<->door penalty AND early
+# termination (rollout counted as a failure), rather than the milder base<->door penalty.
+FRANKA_BOX_DOOR_CONTACT_PRIM_PATH = "/World/envs/env_.*/Robot/franka_control_box"
 
 # Bodies over which the self-collision penalty r_contact is counted. This is the
 # fine-grained, per-link self-collision set: every robot link is its own entity, so
@@ -103,6 +116,9 @@ SELF_COLLISION_BODY_NAMES = (
     # can register a constant self-contact floor -- watch stats/self_collision_body_count_mean
     # and trim this group if it never drops to ~0.
     "franka_control_box", "front_panel", "back_panel", "left_panel", "right_panel", "top_panel",
+    # Full base chassis + lidar mast: tidybot2_base_link now carries a collision mesh
+    # (tidybot2_base_link.STL), so the tall lidar stick is finally a collision body.
+    "tidybot2_base_link",
 )
 # LEAP hand bodies are intentionally NOT in the self-collision set: penalizing finger
 # self-collision drove the finger poses too conservative.

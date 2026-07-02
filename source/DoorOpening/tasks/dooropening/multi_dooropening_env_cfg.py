@@ -18,6 +18,7 @@ from DoorOpening.constants.robot_constants import (
 from DoorOpening.tasks.dooropening.contact_force_utils import (
     BASE_DOOR_CONTACT_PRIM_PATH,
     DOOR_BODY_CONTACT_FILTER_PRIM_PATHS,
+    FRANKA_BOX_DOOR_CONTACT_PRIM_PATH,
     FLANGE_CONTACT_PRIM_PATH,
     FLANGE_SELF_COLLISION_FILTER_PRIM_PATHS,
     HANDLE_CONTACT_FILTER_PRIM_PATHS,
@@ -289,10 +290,18 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         debug_vis=False,
         filter_prim_paths_expr=list(PANEL_CONTACT_FILTER_PRIM_PATHS),
     )
-    # Base<->door contact: the 3 non-front base faces against all door bodies. Any contact
-    # here is penalized (only the front face may touch the door while pushing through).
+    # Base<->door contact: all four vertical base faces against all door bodies. Any contact
+    # here is penalized.
     contact_forces_base_door = ContactSensorCfg(
         prim_path=BASE_DOOR_CONTACT_PRIM_PATH,
+        update_period=0.0,
+        history_length=1,
+        debug_vis=False,
+        filter_prim_paths_expr=list(DOOR_BODY_CONTACT_FILTER_PRIM_PATHS),
+    )
+    # Franka control box <-> door: folded into the harsh x5<->door penalty + termination.
+    contact_forces_door_franka_box = ContactSensorCfg(
+        prim_path=FRANKA_BOX_DOOR_CONTACT_PRIM_PATH,
         update_period=0.0,
         history_length=1,
         debug_vis=False,

@@ -128,6 +128,17 @@ class PinocchioIKSolver():
             if idx >= 0 and joint not in ["base_x_joint", "base_y_joint", "base_rotation_joint"]:
                 self.arm_joint_indices.append(idx)
 
+        # arm_joint_indices come from idx_qs (configuration indices) but are used below to
+        # index the frame Jacobian columns and v_full, which are velocity (nv) indexed. That
+        # aliasing is only valid when idx_q == idx_v for every joint, i.e. nq == nv (no
+        # free-flyer / planar-base / cos-sin-encoded continuous joint anywhere in the model).
+        # Fail loudly rather than silently drive the wrong DOFs if that ever changes.
+        assert self.model.nq == self.model.nv, (
+            f"PinocchioIKSolver assumes nq == nv (got nq={self.model.nq}, nv={self.model.nv}); "
+            "a free-flyer/planar/continuous joint would misalign arm_joint_indices between "
+            "configuration space and velocity space."
+        )
+
         self.has_joint_reference = reference_joint_pos is not None
         self.reference_joint_gain = reference_joint_gain if self.has_joint_reference else 0.0
         self.q_ref = self.q_neutral.copy()
@@ -240,7 +251,7 @@ class PinocchioIKSolver():
 
         Returns:
             pos: end-effector position (x, y, z)
-            quat: end-effector quaternion (w, x, y, z)
+            quat: end-effector quaternion (x, y, z, w)  # scipy convention, scalar-last
         """
         if link_name is None:
             frame_idx = self.ee_frame_idx
@@ -278,12 +289,11 @@ class PinocchioIKSolver():
             num_attempts: start from multiple initial configs
             max_iterations: time budget in number of steps
         """
-        i = 0
         if custom_ee_frame is not None:
             _ee_frame_idx = [f.name for f in self.model.frames].index(custom_ee_frame)
         else:
             _ee_frame_idx = self.ee_frame_idx
-        
+
         assert pos_desired is not None or quat_desired is not None, "Either pos_desired or quat_desired must be provided"
         assert (pos_desired is not None and quat_desired is not None) or q_init is not None, "if pos_desired or quat_desired is not provided, q_init must be provided"
         if q_init is not None:
@@ -291,64 +301,105 @@ class PinocchioIKSolver():
             pos_desired = pos if pos_desired is None else pos_desired
             quat_desired = quat if quat_desired is None else quat_desired
 
-        if q_init is None:
-            q = self.q_ref.copy() if self.has_joint_reference else self.q_neutral.copy()
-            if num_attempts > 1:
-                raise NotImplementedError(
-                    "Sampling multiple initial configs not yet supported by Pinocchio solver."
-                )
+        # ---- Build the list of seed configurations to try ----
+        if q_init is not None:
+            # A caller-provided seed forces a single attempt from that seed (num_attempts is ignored).
+            seeds = [self._qmap_control2model(q_init, ignore_missing_joints=ignore_missing_joints)]
         else:
-            q = self._qmap_control2model(q_init, ignore_missing_joints=ignore_missing_joints)
-            # Override the number of attempts
-            num_attempts = 1
-            if pos_desired is None or quat_desired is None:
-                pos, quat = self.compute_fk(q_init)
-                pos_desired = pos if pos_desired is None else pos_desired
-                quat_desired = quat if quat_desired is None else quat_desired
+            base_seed = self.q_ref.copy() if self.has_joint_reference else self.q_neutral.copy()
+            # attempt 0 = reference/neutral seed (previous behavior); the remaining attempts are
+            # random configs sampled uniformly within the finite arm joint limits, so a target
+            # that is unreachable from one (possibly singular) seed can still be found.
+            seeds = [base_seed]
+            for _ in range(max(0, int(num_attempts) - 1)):
+                seeds.append(self._random_arm_seed(base_seed))
 
         desired_ee_pose = pinocchio.SE3(R.from_quat(quat_desired).as_matrix(), pos_desired)
-        while True:
-            pinocchio.forwardKinematics(self.model, self.data, q)
-            pinocchio.updateFramePlacement(self.model, self.data, _ee_frame_idx)
-            dMi = desired_ee_pose.actInv(self.data.oMf[_ee_frame_idx])
-            err = pinocchio.log(dMi).vector
-            if verbose:
-                print(f"[pinocchio_ik_solver] iter={i}; error={err}")
-            if np.linalg.norm(err) < self.EPS:
-                success = True
-                break
-            if i >= max_iterations:
-                success = False
-                break
-            J = pinocchio.computeFrameJacobian(
-                self.model,
-                self.data,
-                q,
-                _ee_frame_idx,
-                pinocchio.ReferenceFrame.LOCAL,
-            )
-            J_arm = J[:, self.arm_joint_indices]
-            damping = J_arm.dot(J_arm.T) + self.DAMP * np.eye(J_arm.shape[0])
-            v = -J_arm.T.dot(np.linalg.solve(damping, err))
-            if self.reference_joint_gain > 0.0 and len(self.arm_joint_indices) > 0:
-                J_arm_pinv = np.linalg.pinv(J_arm, rcond=1e-4)
-                nullspace = np.eye(len(self.arm_joint_indices)) - J_arm_pinv.dot(J_arm)
-                q_ref_delta = self.q_ref[self.arm_joint_indices] - q[self.arm_joint_indices]
-                q_ref_delta = (q_ref_delta + np.pi) % (2 * np.pi) - np.pi
-                v += nullspace.dot(self.reference_joint_gain * q_ref_delta)
-            # v = v.clip(-0.1, 0.1)
-            v_full = np.zeros(self.model.nv)
 
-            for k, idx in enumerate(self.arm_joint_indices):
-                v_full[idx] = v[k]
-            q = pinocchio.integrate(self.model, q, v_full * self.DT)
-            # q[3:] = wrap_to_pi(q[3:])
-            i += 1
+        # Track the least-bad iterate across ALL iterations and attempts, so a non-converged
+        # call returns that instead of the last (possibly wild) iterate.
+        best_q = None
+        best_err = None
+        best_err_norm = np.inf
+        best_iter = 0
 
-        q_control = self._qmap_model2control(q.flatten())
-        debug_info = {"iter": i, "final_error": err}
+        for q in seeds:
+            q = q.copy()
+            i = 0
+            success = False
+            while True:
+                pinocchio.forwardKinematics(self.model, self.data, q)
+                pinocchio.updateFramePlacement(self.model, self.data, _ee_frame_idx)
+                dMi = desired_ee_pose.actInv(self.data.oMf[_ee_frame_idx])
+                err = pinocchio.log(dMi).vector
+                err_norm = np.linalg.norm(err)
+                if err_norm < best_err_norm:
+                    best_err_norm = err_norm
+                    best_err = err
+                    best_q = q.copy()
+                    best_iter = i
+                if verbose:
+                    print(f"[pinocchio_ik_solver] iter={i}; error={err}")
+                if err_norm < self.EPS:
+                    success = True
+                    break
+                if i >= max_iterations:
+                    success = False
+                    break
+                J = pinocchio.computeFrameJacobian(
+                    self.model,
+                    self.data,
+                    q,
+                    _ee_frame_idx,
+                    pinocchio.ReferenceFrame.LOCAL,
+                )
+                J_arm = J[:, self.arm_joint_indices]
+                damping = J_arm.dot(J_arm.T) + self.DAMP * np.eye(J_arm.shape[0])
+                v = -J_arm.T.dot(np.linalg.solve(damping, err))
+                if self.reference_joint_gain > 0.0 and len(self.arm_joint_indices) > 0:
+                    J_arm_pinv = np.linalg.pinv(J_arm, rcond=1e-4)
+                    nullspace = np.eye(len(self.arm_joint_indices)) - J_arm_pinv.dot(J_arm)
+                    q_ref_delta = self.q_ref[self.arm_joint_indices] - q[self.arm_joint_indices]
+                    q_ref_delta = (q_ref_delta + np.pi) % (2 * np.pi) - np.pi
+                    v += nullspace.dot(self.reference_joint_gain * q_ref_delta)
+                # v = v.clip(-0.1, 0.1)
+                v_full = np.zeros(self.model.nv)
+                for k, idx in enumerate(self.arm_joint_indices):
+                    v_full[idx] = v[k]
+                q = pinocchio.integrate(self.model, q, v_full * self.DT)
+                # Clamp the integrated CONFIGURATION (never the velocity) to the model joint
+                # limits every DLS step so the arm cannot walk past its limits into a
+                # contorted/folded pose. Base prismatic/revolute limits are wide (+-5 m / +-1e5
+                # rad) so this is a no-op on the (externally set, unmoved) base in practice.
+                q = np.clip(q, self.model.lowerPositionLimit, self.model.upperPositionLimit)
+                i += 1
 
-        return q_control, success, debug_info
+            if success:
+                # Return the first converged solution immediately (unchanged success behavior).
+                q_control = self._qmap_model2control(q.flatten())
+                debug_info = {"iter": i, "final_error": err, "attempts": len(seeds)}
+                return q_control, True, debug_info
+
+        # No attempt converged: return the least-bad iterate, not the last wild one.
+        q_control = self._qmap_model2control(best_q.flatten())
+        debug_info = {
+            "iter": best_iter,
+            "final_error": best_err,
+            "attempts": len(seeds),
+            "best_error_norm": best_err_norm,
+        }
+        return q_control, False, debug_info
+
+    def _random_arm_seed(self, base_seed: np.ndarray) -> np.ndarray:
+        """Copy of base_seed with the controlled ARM joints randomized uniformly within their
+        finite position limits (base / non-arm joints are left untouched)."""
+        q = base_seed.copy()
+        lo = self.model.lowerPositionLimit
+        hi = self.model.upperPositionLimit
+        for idx in self.arm_joint_indices:
+            if np.isfinite(lo[idx]) and np.isfinite(hi[idx]):
+                q[idx] = np.random.uniform(lo[idx], hi[idx])
+        return q
 
     def q_array_to_dict(self, arr: np.ndarray):
         state = {}
@@ -523,6 +574,55 @@ def test_fk_ik(urdf_file, ee_link_name, true_joint_names, initial_joint_state):
     assert hz > 100, "IK solver too slow"
 
 
+def test_ik_reachable_within_limits(
+    urdf_file,
+    ee_link_name,
+    controlled_joints,
+    ready_pose,
+    num_targets: int = 25,
+    seed: int = 0,
+):
+    """Regression guard against the folded/contorted-pose bug.
+
+    Commands a set of *reachable* EE poses (each is FK of a small random perturbation of the
+    Franka ready pose, so a valid solution provably exists near the seed) and asserts that IK
+    (a) reports success=True and (b) returns a configuration inside the model joint limits.
+    """
+    urdf_path = os.path.join(os.path.dirname(__file__), urdf_file)
+    solver = PinocchioIKSolver(
+        urdf_path, ee_link_name, controlled_joints, reference_joint_pos=ready_pose
+    )
+    lo = solver.model.lowerPositionLimit
+    hi = solver.model.upperPositionLimit
+    rng = np.random.default_rng(seed)
+
+    ready = {"base_x_joint": 0.0, "base_y_joint": 0.0, "base_rotation_joint": 0.0}
+    ready.update(ready_pose)
+
+    for t in range(num_targets):
+        perturbed = dict(ready)
+        for j, v in ready_pose.items():
+            perturbed[j] = v + float(rng.uniform(-0.3, 0.3))
+        target_pos, target_quat = solver.compute_fk(perturbed)
+
+        res, success, info = solver.compute_ik(target_pos, target_quat, q_init=ready)
+        assert success, f"IK failed on reachable target #{t}: {info}"
+
+        q_model = solver._qmap_control2model(res)
+        assert np.all(q_model >= lo - 1e-6) and np.all(q_model <= hi + 1e-6), (
+            f"IK result outside joint limits on target #{t}"
+        )
+    print(f"test_ik_reachable_within_limits PASSED ({num_targets} reachable targets)")
+
+
 if __name__ == "__main__":
+    _urdf = "/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/glorbot/glorbot.urdf"
+    _ee = "palm_center"
+    _names = ["base_x_joint", "base_y_joint", "base_rotation_joint", "panda_joint1", "panda_joint2", "panda_joint3", "panda_joint4", "panda_joint5", "panda_joint6", "panda_joint7"]
+    # Standard Franka ready pose (joint names read from the URDF).
+    _ready = {"panda_joint1": 0.0, "panda_joint2": -0.785, "panda_joint3": 0.0, "panda_joint4": -2.356, "panda_joint5": 0.0, "panda_joint6": 1.571, "panda_joint7": 0.785}
+
     print("Testing FK and IK...")
-    test_fk_ik(urdf_file="/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/glorbot/glorbot.urdf", ee_link_name="palm_center", true_joint_names=["base_x_joint", "base_y_joint", "base_rotation_joint", "panda_joint1", "panda_joint2", "panda_joint3", "panda_joint4", "panda_joint5", "panda_joint6", "panda_joint7"], initial_joint_state={"base_x_joint": 0.0, "base_y_joint": 0.0, "base_rotation_joint": 0.0, "panda_joint1": 0.0, "panda_joint2": 0.0, "panda_joint3": 0.0, "panda_joint4": 0.0, "panda_joint5": 0.0, "panda_joint6": 0.0, "panda_joint7": 0.0})
+    test_fk_ik(urdf_file=_urdf, ee_link_name=_ee, true_joint_names=_names, initial_joint_state={n: 0.0 for n in _names})
+    print("Testing IK reachability + joint limits...")
+    test_ik_reachable_within_limits(urdf_file=_urdf, ee_link_name=_ee, controlled_joints=_names, ready_pose=_ready)

@@ -67,6 +67,10 @@ GLORBOT_CONFIG = ArticulationCfg(
             contact_offset=ROBOT_CONTACT_OFFSET,
             rest_offset=ROBOT_REST_OFFSET,
         ),
+        # Decompose collision meshes into convex pieces (default is a single convex_hull, which
+        # would turn the chassis + tall lidar-mast mesh into one solid wedge). Needed so the
+        # tidybot2_base_link mast collision approximates the real thin stick, not a big blob.
+        collider_type="convex_decomposition",
         # scale = (0.8, 0.8, 0.8),
         activate_contact_sensors=True,
     ),

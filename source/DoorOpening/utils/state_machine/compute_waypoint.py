@@ -585,9 +585,18 @@ def collocate_and_playback(robot_traj, door_traj, key_idx_in_key_indices, length
         key_indices.append(key_indices[-1] + seg_len)
 
         # ---- Chord-length parameterization ----
-        if len(ps) == 1:
-            # Degenerate case: repeat point
-            seg_traj = np.repeat(ps, seg_len, axis=0)
+        # Drop consecutive duplicate waypoints first: the offline IK can return the same config
+        # for two adjacent waypoints (e.g. an unreachable/saturated target that best-errors onto
+        # its neighbour's pose), which makes the chord-length parameter non-strictly-increasing
+        # and crashes CubicSpline ("x must be strictly increasing").
+        if len(ps) > 1:
+            seg_dists = np.linalg.norm(ps[1:] - ps[:-1], axis=1)
+            keep = np.concatenate([[True], seg_dists > 1e-9])
+            ps = ps[keep]
+
+        if len(ps) < 2:
+            # Degenerate case: single (or all-duplicate) point -> repeat it.
+            seg_traj = np.repeat(ps[:1], seg_len, axis=0)
         else:
             dists = np.linalg.norm(ps[1:] - ps[:-1], axis=1)
             t_local = np.concatenate([[0.0], np.cumsum(dists)])

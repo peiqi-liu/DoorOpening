@@ -360,6 +360,9 @@ class DooropeningEnv(DirectRLEnv):
             "contact_forces_door_x5_link4",
             "contact_forces_door_x5_link5",
             "contact_forces_door_x5_camera",
+            # Franka control box is protected like the x5 arm: its door contact feeds the same
+            # harsh penalty and the same termination check.
+            "contact_forces_door_franka_box",
         )
         per_body_force_norms = []
         for sensor_name in sensor_names:
@@ -737,6 +740,7 @@ class DooropeningEnv(DirectRLEnv):
         self.scene.sensors["contact_forces_door2"] = ContactSensor(self.cfg.contact_forces_door2)
         self.scene.sensors["contact_forces_door_panel"] = ContactSensor(self.cfg.contact_forces_door_panel)
         self.scene.sensors["contact_forces_base_door"] = ContactSensor(self.cfg.contact_forces_base_door)
+        self.scene.sensors["contact_forces_door_franka_box"] = ContactSensor(self.cfg.contact_forces_door_franka_box)
         self.scene.sensors["contact_forces_door_x5_base"] = ContactSensor(self.cfg.contact_forces_door_x5_base)
         self.scene.sensors["contact_forces_door_x5_link1"] = ContactSensor(self.cfg.contact_forces_door_x5_link1)
         self.scene.sensors["contact_forces_door_x5_link2"] = ContactSensor(self.cfg.contact_forces_door_x5_link2)
@@ -1281,6 +1285,7 @@ class DooropeningEnv(DirectRLEnv):
         self.scene.sensors["contact_forces_door_x5_camera"].update(self.cfg.sim_dt)
         self.scene.sensors["contact_forces_door_panel"].update(self.cfg.sim_dt)
         self.scene.sensors["contact_forces_base_door"].update(self.cfg.sim_dt)
+        self.scene.sensors["contact_forces_door_franka_box"].update(self.cfg.sim_dt)
         self.scene.sensors["contact_forces_self_collision"].update(self.cfg.sim_dt)
 
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
@@ -2041,9 +2046,9 @@ class DooropeningEnv(DirectRLEnv):
             (panel_contact * self.ref_panel_contact_mask.squeeze()).mean().detach().cpu().item()
         )
 
-        # Base<->door contact penalty: only the front base face may touch the door. Count the
-        # non-front faces (back/left/right) whose contact force with any door body exceeds the
-        # threshold and penalize per face in contact.
+        # Base<->door contact penalty: no base face should touch the door. Count the four
+        # vertical faces (front/back/left/right) whose contact force with any door body exceeds
+        # the threshold and penalize per face in contact.
         base_door_force_norm = get_self_contact_body_force_norm(
             self.scene.sensors["contact_forces_base_door"],
             expected_num_envs=self.num_envs,
