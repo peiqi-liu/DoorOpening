@@ -585,9 +585,18 @@ def collocate_and_playback(robot_traj, door_traj, key_idx_in_key_indices, length
         key_indices.append(key_indices[-1] + seg_len)
 
         # ---- Chord-length parameterization ----
-        if len(ps) == 1:
-            # Degenerate case: repeat point
-            seg_traj = np.repeat(ps, seg_len, axis=0)
+        # Drop consecutive duplicate waypoints first: the offline IK can return the same config
+        # for two adjacent waypoints (e.g. an unreachable/saturated target that best-errors onto
+        # its neighbour's pose), which makes the chord-length parameter non-strictly-increasing
+        # and crashes CubicSpline ("x must be strictly increasing").
+        if len(ps) > 1:
+            seg_dists = np.linalg.norm(ps[1:] - ps[:-1], axis=1)
+            keep = np.concatenate([[True], seg_dists > 1e-9])
+            ps = ps[keep]
+
+        if len(ps) < 2:
+            # Degenerate case: single (or all-duplicate) point -> repeat it.
+            seg_traj = np.repeat(ps[:1], seg_len, axis=0)
         else:
             dists = np.linalg.norm(ps[1:] - ps[:-1], axis=1)
             t_local = np.concatenate([[0.0], np.cumsum(dists)])
@@ -909,11 +918,15 @@ def play_and_save_traj(
     #             new_door_traj.append(door_point)
     # robot_traj = new_robot_traj
     # door_traj = new_door_traj
+    # Pull motions get a longer horizon (1200) than push (1000); pull has more phases
+    # (retract + push-panel + traverse). The multi-motion lib pads the shorter (push) motions
+    # up to the longest on load, so mixing lengths is safe.
+    traj_length = 1200 if planner_opening_direction == "pull" else 1000
     robot_traj, door_traj, robot_traj_d, door_traj_d, key_indices = collocate_and_playback(
         robot_traj,
         door_traj,
         key_idx_in_key_indices,
-        length=1000,
+        length=traj_length,
     )
     print(robot_traj.shape)
     print(door_traj.shape)
@@ -988,12 +1001,31 @@ def play_and_save_traj(
     # for i in torch.arange(0, robot_body_pos_traj.shape[0], 100):
     #     print(i, robot_body_pos_traj[i], robot_body_quat_traj[i])
 
-    mask = torch.zeros(len(robot_traj), dtype=torch.int8)
-    if planner_opening_direction == "push" and len(key_indices) > 4:
-        mask[key_indices[2]:key_indices[4]] = 1
-    else:
-        # Contact with hinge should happen between keyframe 2 and 4
-        mask[key_indices[1]:key_indices[3]] = 1
+    # ---- Contact masks (time-gated reward shaping) ----
+    # Keyframe layout (both planners): 0=start, 1=pregrasp, 2=grasp, 3=rotate-hinge,
+    # 4=open/pull-end, 5=base-forward (push) / blocking-pose (pull). Pull additionally
+    # has 6=retract-arm, 7-8=push-panel-open, 9-10=traverse.
+    #
+    # hinge_contact_mask: ENCOURAGE palm<->handle contact while the hand actually works
+    # the handle, i.e. keyframes 2..5 for both directions:
+    #   pull: rotate handle (3) -> pull open (4) -> move base to blocking pose (5)
+    #   push: rotate handle (3) -> open door (4) -> base forward (4.5)
+    hinge_contact_mask = torch.zeros(len(robot_traj), dtype=torch.int8)
+    if len(key_indices) > 5:
+        hinge_contact_mask[key_indices[2]:key_indices[5]] = 1
+
+    # panel_contact_mask: PENALIZE finger<->panel (Door/link_1) contact. The fingers should
+    # grip the handle, never touch the panel -- except where pushing the panel is the task.
+    #   push: the door is opened via the HANDLE (grasp + base-forward), never by pressing the
+    #         panel with the hand, so finger<->panel contact is always undesirable -> penalize
+    #         the whole trajectory.
+    #   pull: penalize everywhere up to step 7 (keyframe 6); steps 7-8 push the panel open and
+    #         hold the door while restoring yaw + moving forward, so contact is allowed there.
+    panel_contact_mask = torch.zeros(len(robot_traj), dtype=torch.int8)
+    if planner_opening_direction == "push":
+        panel_contact_mask[:] = 1
+    elif len(key_indices) > 6:
+        panel_contact_mask[:key_indices[6]] = 1
 
     data = {
         "handle_side": planner_handle_side,
@@ -1005,7 +1037,8 @@ def play_and_save_traj(
         "robot_joint_pos_traj": robot_traj,
         "robot_joint_vel_traj": robot_traj_d,
         # "key_indices": torch.tensor(key_indices, dtype=torch.int32)[key_idx_in_key_indices]
-        "hinge_contact_mask": mask,
+        "hinge_contact_mask": hinge_contact_mask,
+        "panel_contact_mask": panel_contact_mask,
         "key_indices": key_indices,
         "robot_body_pos_twist": robot_body_pos_twist,
         "door_body_pos_traj": door_body_pos_traj

@@ -16,10 +16,13 @@ from DoorOpening.constants.robot_constants import (
     ROBOT_BASE_BODY_LINK_NAME,
 )
 from DoorOpening.tasks.dooropening.contact_force_utils import (
+    BASE_DOOR_CONTACT_PRIM_PATH,
     DOOR_BODY_CONTACT_FILTER_PRIM_PATHS,
+    FRANKA_BOX_DOOR_CONTACT_PRIM_PATH,
     FLANGE_CONTACT_PRIM_PATH,
     FLANGE_SELF_COLLISION_FILTER_PRIM_PATHS,
     HANDLE_CONTACT_FILTER_PRIM_PATHS,
+    PANEL_CONTACT_FILTER_PRIM_PATHS,
     SELF_COLLISION_CONTACT_PRIM_PATH,
     SELF_COLLISION_FILTER_PRIM_PATHS,
     X5_BODY_NAMES,
@@ -150,8 +153,9 @@ class EventCfg:
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("door", joint_names="joint_1"),
-            "stiffness_distribution_params": (38.0, 38.0),
-            "damping_distribution_params": (5.0, 5.0),
+            # Start ~midpoint of the ADR endpoints (stiffness 1..125 -> 63, damping 1..16.7 -> ~8.8).
+            "stiffness_distribution_params": (63.0, 63.0),
+            "damping_distribution_params": (8.8, 8.8),
             # Use absolute values so the curriculum is expressed in physical gains, not multipliers of the
             # board actuator defaults (whose damping is 0.2).
             "operation": "abs",
@@ -276,6 +280,33 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         debug_vis=False,
         filter_prim_paths_expr=list(HANDLE_CONTACT_FILTER_PRIM_PATHS),
     )
+    # Finger<->panel contact sensor: LEAP hand bodies against the door panel (Door/link_1).
+    # Gated by panel_contact_mask, a force above threshold here is penalized (fingers should
+    # grip the handle, not the panel) except where pushing the panel is the task.
+    contact_forces_door_panel = ContactSensorCfg(
+        prim_path="/World/envs/env_.*/Door/link_1",
+        update_period=0.0,
+        history_length=1,
+        debug_vis=False,
+        filter_prim_paths_expr=list(PANEL_CONTACT_FILTER_PRIM_PATHS),
+    )
+    # Base<->door contact: all four vertical base faces against all door bodies. Any contact
+    # here is penalized.
+    contact_forces_base_door = ContactSensorCfg(
+        prim_path=BASE_DOOR_CONTACT_PRIM_PATH,
+        update_period=0.0,
+        history_length=1,
+        debug_vis=False,
+        filter_prim_paths_expr=list(DOOR_BODY_CONTACT_FILTER_PRIM_PATHS),
+    )
+    # Franka control box <-> door: folded into the harsh x5<->door penalty + termination.
+    contact_forces_door_franka_box = ContactSensorCfg(
+        prim_path=FRANKA_BOX_DOOR_CONTACT_PRIM_PATH,
+        update_period=0.0,
+        history_length=1,
+        debug_vis=False,
+        filter_prim_paths_expr=list(DOOR_BODY_CONTACT_FILTER_PRIM_PATHS),
+    )
     contact_forces_door_x5_base = ContactSensorCfg(
         prim_path=f"/World/envs/env_.*/Robot/{X5_BODY_NAMES[0]}",
         update_period=0.0,
@@ -347,6 +378,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         filter_prim_paths_expr=list(FLANGE_SELF_COLLISION_FILTER_PRIM_PATHS),
     )
     handle_contact_force_threshold = 1.0
+    # Finger<->panel contact above this (N) is treated as a panel collision when panel_contact_mask is on.
+    panel_contact_force_threshold = 5.0
+    # Contact between a non-front base face and any door body above this (N) is penalized.
+    base_door_contact_force_threshold = 1.0
     x5_body_contact_force_threshold = 1.5
     # Self-collision penalty (r_contact): per step we count the self-collision links whose
     # net self-contact force exceeds this threshold, then scale by self_collision_penalty_w.
@@ -504,13 +539,21 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_arm_joint_vel_w = 2.0
     robot_finger_joint_vel_w = 0.5
     door_joint_pos_w = 4.0
-    hinge_contact_reward_w = 1.0
+    hinge_contact_reward_w = 8.0
     robot_body_lin_vel_w = 1.0
     robot_body_ang_vel_w = 0.5
     joint_limit_penalty_w = 40.0
     joint_limit_penalty_margin_ratio = 0.05
     # lambda_c in r = r_target - lambda_l*r_limit - lambda_c*r_contact
     self_collision_penalty_w = 1.0
+    # Penalty weight for finger<->panel contact while panel_contact_mask is active.
+    panel_contact_penalty_w = 1.0
+    # Penalty weight (per non-front base face in contact with the door). High on purpose: a
+    # base panel hitting the door in the real world means a securely-mounted robot is injured.
+    base_door_contact_penalty_w = 10.0
+    # Penalty weight for the x5/arx camera arm contacting any door body (frame/panel/handle).
+    # Harsh: the slender camera arm hitting the door is a serious real-world failure.
+    x5_door_contact_penalty_w = 20.0
 
     robot_body_quat_scale = 1.0
     robot_key_body_pos_scale = 3.0
@@ -553,7 +596,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     # These are the ADR endpoints for simulator parameters handled by EventTerms at reset.
     # Door-board mass and door gains are specified in physical units, while robot gains use multipliers.
-    # The door board starts at stiffness=100 and damping=10, and the hinge starts at stiffness=1 and damping=1.
+    # The door board starts at stiffness=63 and damping=8.8 (~midpoint of its ADR endpoints).
     adr_cfg_dict = {
         "num_increments": num_adr_increments,
         "door_board_mass": {
@@ -564,8 +607,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "damping_distribution_params": (0.7, 1.3),
         },
         "door_board_joint_stiffness_and_damping": {
-            "stiffness_distribution_params": (1.0, 75.0),
-            "damping_distribution_params": (1.0, 10.0),
+            # Stiffer panel endpoint (was 75). Damping scaled proportionally (10 * 125/75 ~= 16.7)
+            # to keep the same damping/stiffness ratio (~7.5) the curriculum was tuned around.
+            "stiffness_distribution_params": (1.0, 125.0),
+            "damping_distribution_params": (1.0, 16.7),
         },
         "door_hinge_joint_stiffness_and_damping": {
             "stiffness_distribution_params": (10.0, 60.0),

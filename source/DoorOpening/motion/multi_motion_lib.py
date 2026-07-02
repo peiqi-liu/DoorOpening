@@ -78,6 +78,24 @@ class ReferenceMotionManager:
     # --------------------------------------------------
     # Load motion data (moved from Env)
     # --------------------------------------------------
+    @staticmethod
+    def _pad_traj_to_frames(traj: torch.Tensor, target_frames: int) -> torch.Tensor:
+        """Pad a per-frame tensor along dim 0 to target_frames by repeating its last frame.
+
+        Lets motions of different lengths share one stacked [M, T, ...] buffer: a shorter
+        motion simply holds its final pose for the extra frames instead of tripping a hard
+        length check. A no-op when traj already has target_frames frames.
+        """
+        cur = int(traj.shape[0])
+        if cur == target_frames:
+            return traj
+        if cur > target_frames:
+            return traj[:target_frames]
+        if cur == 0:
+            raise ValueError("Cannot pad an empty trajectory.")
+        pad = traj[-1:].expand(target_frames - cur, *traj.shape[1:])
+        return torch.cat([traj, pad], dim=0)
+
     def _load_motion_bundle(self, motion_paths, label: str):
         robot_joint_pos_trajs = []
         door_trajs = []
@@ -86,60 +104,63 @@ class ReferenceMotionManager:
         robot_joint_vel_trajs = []
         key_indices_list = []
         hinge_contact_masks_list = []
+        panel_contact_masks_list = []
         robot_body_pos_vel_list = []
         door_body_pos_trajs = []
         num_frames = None
         for motion_file in motion_paths:
             loaded_motion = self._load_motion_pkl(motion_file)
-            if len(loaded_motion) == 10:
-                (
-                    robot_joint_pos_traj,
-                    door_traj,
-                    robot_body_pos_traj,
-                    robot_body_quat_traj,
-                    robot_joint_vel_traj,
-                    key_indices,
-                    self.num_frames,
-                    hinge_contact_mask,
-                    robot_body_pos_vel,
-                    door_body_pos_traj,
-                ) = loaded_motion
-            else:
-                (
-                    robot_joint_pos_traj,
-                    door_traj,
-                    robot_body_pos_traj,
-                    robot_body_quat_traj,
-                    robot_joint_vel_traj,
-                    key_indices,
-                    self.num_frames,
-                    robot_body_pos_vel,
-                    door_body_pos_traj,
-                ) = loaded_motion
-                hinge_contact_mask = torch.zeros(self.num_frames, device=self.device)
+            robot_joint_pos_traj = loaded_motion["robot_joint_pos_traj"]
+            door_traj = loaded_motion["door_traj"]
+            robot_body_pos_traj = loaded_motion["robot_body_pos_traj"]
+            robot_body_quat_traj = loaded_motion["robot_body_quat_traj"]
+            robot_joint_vel_traj = loaded_motion["robot_joint_vel_traj"]
+            key_indices = loaded_motion["key_indices"]
+            robot_body_pos_vel = loaded_motion["robot_body_pos_vel"]
+            door_body_pos_traj = loaded_motion["door_body_pos_traj"]
+            self.num_frames = loaded_motion["num_frames"]
 
             motion_num_frames = int(robot_joint_pos_traj.shape[0])
+            hinge_contact_mask = loaded_motion["hinge_contact_mask"]
+            if hinge_contact_mask is None:
+                hinge_contact_mask = torch.zeros(motion_num_frames, device=self.device)
+            panel_contact_mask = loaded_motion["panel_contact_mask"]
+            if panel_contact_mask is None:
+                panel_contact_mask = torch.zeros(motion_num_frames, device=self.device)
+
+            # Allow mixed-length motions: track the longest and pad shorter motions up to it
+            # below (a shorter motion holds its final pose for the extra frames) instead of
+            # hard-failing. When every motion already has the same length this is a no-op.
             if num_frames is None:
                 num_frames = motion_num_frames
-            elif motion_num_frames != num_frames:
-                raise ValueError(
-                    f"Inconsistent {label} motion length in '{motion_file}': "
-                    f"{motion_num_frames} vs {num_frames}."
-                )
+            else:
+                num_frames = max(num_frames, motion_num_frames)
 
             robot_joint_pos_trajs.append(robot_joint_pos_traj)
             door_trajs.append(door_traj)
             robot_body_pos_trajs.append(robot_body_pos_traj)
             robot_body_quat_trajs.append(robot_body_quat_traj)
-            robot_joint_vel_trajs.append(robot_joint_vel_traj) 
+            robot_joint_vel_trajs.append(robot_joint_vel_traj)
             if isinstance(key_indices, list):
                 key_indices = torch.tensor(key_indices, device=self.device)
             key_indices_list.append(key_indices)
             hinge_contact_masks_list.append(hinge_contact_mask)
+            panel_contact_masks_list.append(panel_contact_mask)
             robot_body_pos_vel_list.append(robot_body_pos_vel)
             door_body_pos_trajs.append(door_body_pos_traj)
         if num_frames is None:
             raise FileNotFoundError(f"No {label} motion files were provided.")
+
+        # Pad any shorter motion up to the longest so the stacked [M, T, ...] buffers align.
+        robot_joint_pos_trajs = [self._pad_traj_to_frames(t, num_frames) for t in robot_joint_pos_trajs]
+        robot_joint_vel_trajs = [self._pad_traj_to_frames(t, num_frames) for t in robot_joint_vel_trajs]
+        robot_body_pos_trajs = [self._pad_traj_to_frames(t, num_frames) for t in robot_body_pos_trajs]
+        robot_body_quat_trajs = [self._pad_traj_to_frames(t, num_frames) for t in robot_body_quat_trajs]
+        door_trajs = [self._pad_traj_to_frames(t, num_frames) for t in door_trajs]
+        hinge_contact_masks_list = [self._pad_traj_to_frames(t, num_frames) for t in hinge_contact_masks_list]
+        panel_contact_masks_list = [self._pad_traj_to_frames(t, num_frames) for t in panel_contact_masks_list]
+        robot_body_pos_vel_list = [self._pad_traj_to_frames(t, num_frames) for t in robot_body_pos_vel_list]
+        door_body_pos_trajs = [self._pad_traj_to_frames(t, num_frames) for t in door_body_pos_trajs]
 
         phase_key_indices, phase_key_counts = self._stack_phase_key_indices(key_indices_list, num_frames)
         return {
@@ -154,6 +175,7 @@ class ReferenceMotionManager:
             "phase_key_indices": phase_key_indices,
             "phase_key_counts": phase_key_counts,
             "hinge_contact_mask": torch.stack(hinge_contact_masks_list, dim=0).to(self.device),
+            "panel_contact_mask": torch.stack(panel_contact_masks_list, dim=0).to(self.device),
             "robot_body_pos_vel": torch.stack(robot_body_pos_vel_list, dim=0).to(self.device),
             "door_body_pos_traj": torch.stack(door_body_pos_trajs, dim=0).to(self.device),
             "num_frames": int(num_frames),
@@ -178,6 +200,7 @@ class ReferenceMotionManager:
         self.phase_key_indices = motion_bundle["phase_key_indices"]
         self.phase_key_counts = motion_bundle["phase_key_counts"]
         self.hinge_contact_mask = motion_bundle["hinge_contact_mask"]
+        self.panel_contact_mask = motion_bundle["panel_contact_mask"]
         self.num_motions = self.robot_joint_pos_traj.shape[0]
         self.num_frames = motion_bundle["num_frames"]
         self.robot_body_pos_vel = motion_bundle["robot_body_pos_vel"]
@@ -215,6 +238,10 @@ class ReferenceMotionManager:
             hinge_contact_mask = motions["hinge_contact_mask"]
         else:
             hinge_contact_mask = None
+        if "panel_contact_mask" in motions:
+            panel_contact_mask = motions["panel_contact_mask"]
+        else:
+            panel_contact_mask = None
         robot_body_pos_vel = motions["robot_body_pos_twist"]
         door_body_pos_traj = motions["door_body_pos_traj"]
 
@@ -239,14 +266,25 @@ class ReferenceMotionManager:
         robot_joint_vel_traj = self._finite_difference(robot_joint_pos_traj, motion_dt)
         if hinge_contact_mask is not None:
             hinge_contact_mask = hinge_contact_mask.to(self.device).squeeze()
+        if panel_contact_mask is not None:
+            panel_contact_mask = panel_contact_mask.to(self.device).squeeze()
         robot_body_pos_vel = robot_body_pos_vel.to(self.device).squeeze()
         door_body_pos_traj = door_body_pos_traj.to(self.device).squeeze()
         num_frames = robot_joint_pos_traj.shape[0]
 
-        if hinge_contact_mask is not None:
-            return robot_joint_pos_traj, door_traj, robot_body_pos_traj, robot_body_quat_traj, robot_joint_vel_traj, key_indices, num_frames, hinge_contact_mask, robot_body_pos_vel, door_body_pos_traj
-        else:
-            return robot_joint_pos_traj, door_traj, robot_body_pos_traj, robot_body_quat_traj, robot_joint_vel_traj, key_indices, num_frames, robot_body_pos_vel, door_body_pos_traj
+        return {
+            "robot_joint_pos_traj": robot_joint_pos_traj,
+            "door_traj": door_traj,
+            "robot_body_pos_traj": robot_body_pos_traj,
+            "robot_body_quat_traj": robot_body_quat_traj,
+            "robot_joint_vel_traj": robot_joint_vel_traj,
+            "key_indices": key_indices,
+            "num_frames": num_frames,
+            "hinge_contact_mask": hinge_contact_mask,
+            "panel_contact_mask": panel_contact_mask,
+            "robot_body_pos_vel": robot_body_pos_vel,
+            "door_body_pos_traj": door_body_pos_traj,
+        }
 
     def _finite_difference(self, traj: torch.Tensor, dt: float) -> torch.Tensor:
         traj_d = torch.zeros_like(traj)
@@ -564,6 +602,7 @@ class ReferenceMotionManager:
         self.ref_robot_body_pos = self._sample_env_traj(self.robot_body_pos_traj, idx)
         self.ref_robot_body_quat = self._sample_env_quat_traj(self.robot_body_quat_traj, idx)
         self.ref_hinge_contact_mask = self._gather_env_traj(self.hinge_contact_mask, floor_idx)
+        self.ref_panel_contact_mask = self._gather_env_traj(self.panel_contact_mask, floor_idx)
         self.ref_robot_body_pos_vel = self._sample_env_traj(self.robot_body_pos_vel, idx)
         self.ref_door_body_pos = self._sample_env_traj(self.door_body_pos_traj, idx)
         if self.twist_indices is not None:
@@ -678,6 +717,15 @@ class ReferenceMotionManager:
         if env_ids is None:
             return self.ref_hinge_contact_mask
         return self.ref_hinge_contact_mask[env_ids]
+
+    def get_panel_contact_mask(self, env_ids: Optional[Sequence[int]] = None, motion_indices: Optional[torch.Tensor] = None):
+        if motion_indices is not None:
+            frame_idx = self.frame_idx if env_ids is None else self.frame_idx[env_ids]
+            floor_idx = torch.floor(frame_idx).long().clamp(min=0, max=self.num_frames - 1)
+            return self._gather_reference_traj("panel_contact_mask", floor_idx, env_ids=env_ids, motion_indices=motion_indices)
+        if env_ids is None:
+            return self.ref_panel_contact_mask
+        return self.ref_panel_contact_mask[env_ids]
 
     def get_door_body_pos_twist(self, env_ids: Optional[Sequence[int]] = None, motion_indices: Optional[torch.Tensor] = None):
         if motion_indices is not None:

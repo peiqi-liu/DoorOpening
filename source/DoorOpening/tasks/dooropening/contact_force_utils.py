@@ -1,8 +1,30 @@
 import torch
 
-# Keep the handle contact sensor filtered to palm/finger bodies only so force_matrix_w
-# reports robot-hand contact on Door/link_2 instead of total handle contact.
+# The HANDLE contact-bonus sensor rewards contact from the PALM and the INNER finger segments
+# only. The mcp_joint (the outward knuckle at the finger base) is excluded, so the bonus is
+# collected by gripping with the palm + inner finger surfaces (pip / dip / fingertip /
+# realtip), not by knocking the handle with the outward knuckle.
 HANDLE_CONTACT_FILTER_PRIM_PATHS = (
+    "/World/envs/env_.*/Robot/palm_center",
+    "/World/envs/env_.*/Robot/palm_lower",
+    "/World/envs/env_.*/Robot/pip_1",
+    "/World/envs/env_.*/Robot/dip_1",
+    "/World/envs/env_.*/Robot/realtip_1",
+    "/World/envs/env_.*/Robot/fingertip_1",
+    "/World/envs/env_.*/Robot/pip_2",
+    "/World/envs/env_.*/Robot/dip_2",
+    "/World/envs/env_.*/Robot/realtip_2",
+    "/World/envs/env_.*/Robot/fingertip_2",
+    "/World/envs/env_.*/Robot/pip_3",
+    "/World/envs/env_.*/Robot/dip_3",
+    "/World/envs/env_.*/Robot/realtip_3",
+    "/World/envs/env_.*/Robot/fingertip_3",
+)
+
+# Penalize finger<->panel contact. Unlike the handle bonus, this keeps the FULL hand set
+# (palm + every finger link incl. tips): ANY part of the hand on the panel (Door/link_1) is
+# undesirable, so the tips must still be tracked here.
+PANEL_CONTACT_FILTER_PRIM_PATHS = (
     "/World/envs/env_.*/Robot/palm_center",
     "/World/envs/env_.*/Robot/palm_lower",
     "/World/envs/env_.*/Robot/mcp_joint_1",
@@ -41,38 +63,65 @@ DOOR_BODY_CONTACT_FILTER_PRIM_PATHS = (
 )
 DOOR_FRAME_FILTER_INDEX = 0
 
+# Base<->door contact penalty: ALL FOUR vertical faces of the mobile-base cube (front + back +
+# left + right) should avoid the door. top_panel is excluded (a vertical door can't hit the
+# top). The franka_control_box is NOT here -- it is protected by the harsher x5<->door penalty
+# below (strong penalty + early termination), since crushing the arm controller is critical.
+BASE_DOOR_CONTACT_BODY_NAMES = (
+    "front_panel",  # +x face (door-facing)
+    "back_panel",   # -x face
+    "left_panel",   # +y face
+    "right_panel",  # -y face
+    # Full chassis + lidar mast (now carries a collision mesh): the base/mast hitting the door
+    # is penalized just like the panels.
+    "tidybot2_base_link",
+)
+BASE_DOOR_CONTACT_PRIM_PATH = (
+    "/World/envs/env_.*/Robot/(" + "|".join(BASE_DOOR_CONTACT_BODY_NAMES) + ")"
+)
+
+# The franka control box houses the arm controller and is critical -- protect it like the x5
+# camera arm: contact with any door body feeds the harsh x5<->door penalty AND early
+# termination (rollout counted as a failure), rather than the milder base<->door penalty.
+FRANKA_BOX_DOOR_CONTACT_PRIM_PATH = "/World/envs/env_.*/Robot/franka_control_box"
+
 # Bodies over which the self-collision penalty r_contact is counted. This is the
 # fine-grained, per-link self-collision set: every robot link is its own entity, so
-# contact is scored link-pair by link-pair (fingertip_1 vs fingertip_2, finger vs
-# forearm, panda_link2 vs panda_link5, ...) instead of lumping the hand/arm/x5 into
-# single blobs. Only moving links that carry collision geometry are listed.
+# contact is scored link-pair by link-pair (panda_link2 vs panda_link5, an x5 link vs a
+# base panel, ...) instead of lumping the arm/x5/base into single blobs. Only links that
+# carry collision geometry are listed.
 #
 # Bodies are excluded on purpose so that a *connection* (structural coincidence) is
 # never read as a *collision*:
 #   - panda_link0 (static arm mount) and panda_link7 (the flange the hand bolts onto):
 #     each is physically coincident with its neighbour through a collision-free connector
 #     link (tidybot2_base_link / palm_center), two joints away in the tree, so PhysX's
-#     direct-neighbour filter does NOT drop it. panda_link7 still matters (a finger can
-#     fold back onto the flange), so it gets its own sensor below that is filtered to the
-#     finger links only, which keeps the permanent palm_lower<->flange contact out.
-#   - collision-free connector / sensor links (palm_center, realtip_*, lidar, imu, ...):
-#     they never report contact anyway.
-#   - the mobile-base shell (panels / control box / wheels): its parts permanently abut
-#     one another and would read as constant self-collision.
+#     direct-neighbour filter does NOT drop it. The LEAP hand is now excluded entirely
+#     (finger self-collision made finger poses too conservative), so panda_link7 and the
+#     dedicated finger<->flange sensor below are no longer used.
+#   - collision-free connector / sensor links (palm_center, realtip_*, lidar, imu, base
+#     chain links, ...): they carry no collision geometry, so they never report contact and
+#     cannot be sensor bodies.
+# The mobile-base chassis shell (control box + panels) IS included now so an arm folding
+# back onto the base is caught -- those panels carry the only base collision geometry.
 # PhysX articulation self-collision already drops every directly jointed (parent-child)
 # pair among the links below, so joint connections between them are not counted either.
 SELF_COLLISION_BODY_NAMES = (
     # Franka arm (skip link0 mount and link7 flange; see note above)
     "panda_link1", "panda_link2", "panda_link3", "panda_link4", "panda_link5", "panda_link6",
-    # LEAP hand
-    "palm_lower",
-    "mcp_joint_1", "pip_1", "dip_1", "fingertip_1",
-    "mcp_joint_2", "pip_2", "dip_2", "fingertip_2",
-    "mcp_joint_3", "pip_3", "dip_3", "fingertip_3",
-    "mcp_joint_4", "pip_4", "dip_4", "fingertip_4",
     # x5 / arx camera arm
     "x5_base_link", "link1", "link2", "link3", "link4", "link5", "x5_camera_link",
+    # Mobile-base chassis shell (the only base bodies that carry collision geometry).
+    # NOTE: these panels are separate sibling bodies fixed to the chassis; if they abut they
+    # can register a constant self-contact floor -- watch stats/self_collision_body_count_mean
+    # and trim this group if it never drops to ~0.
+    "franka_control_box", "front_panel", "back_panel", "left_panel", "right_panel", "top_panel",
+    # Full base chassis + lidar mast: tidybot2_base_link now carries a collision mesh
+    # (tidybot2_base_link.STL), so the tall lidar stick is finally a collision body.
+    "tidybot2_base_link",
 )
+# LEAP hand bodies are intentionally NOT in the self-collision set: penalizing finger
+# self-collision drove the finger poses too conservative.
 
 # One contact sensor covering every self-collision body. IsaacLab treats the leaf path
 # as a regex and resolves the alternation into a single multi-body sensor, so

@@ -73,6 +73,15 @@
       <material name="grey">
       </material>
     </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://glorbot/meshes/tidybot2/tidybot2_base_link.STL" />
+      </geometry>
+    </collision>
   </link>
   <!-- Final attachment of chassis to the virtual base -->
   <joint name="base_to_chassis_fixed" type="fixed">
