@@ -39,6 +39,30 @@ ROBOT_REST_OFFSET = 0.001
 ROBOT_MAX_DEPENETRATION_VELOCITY = 500.0
 
 
+def disable_collision_scope_instancing(robot_prim_path_expr: str = "/World/envs/env_.*/Robot") -> int:
+    """De-instance each link's ``collisions`` scope so the collider debug viz renders.
+
+    The URDF->USD converter authors every link's ``collisions`` (and ``visuals``) scope as a
+    USD instance referencing a shared prototype, and Isaac Sim's collider debug visualization
+    (the green overlay) does not draw colliders that live inside instanced prototypes. Setting
+    ``make_instanceable=False`` in the converter cfg does NOT change this (verified). This flips
+    only the ``collisions`` scopes to uninstanceable (``visuals`` stay instanced), so physics and
+    memory are unaffected. Call once after the robot is spawned. Returns the count de-instanced.
+    """
+    from pxr import Usd
+    import isaaclab.sim as sim_utils
+
+    scopes = [
+        scope
+        for robot_prim in sim_utils.find_matching_prims(robot_prim_path_expr)
+        for scope in Usd.PrimRange(robot_prim, Usd.TraverseInstanceProxies())
+        if scope.GetName() == "collisions" and scope.IsInstance()
+    ]
+    for scope in scopes:
+        scope.SetInstanceable(False)
+    return len(scopes)
+
+
 GLORBOT_CONFIG = ArticulationCfg(
     spawn=sim_utils.UrdfFileCfg(
         fix_base=True,

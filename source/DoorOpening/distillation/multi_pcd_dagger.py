@@ -2084,12 +2084,13 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             )
 
         student_actions = env_actions.clone()
-        # Only the base action changes interface: env [wz, vx_w, vy_w] delta-action
-        # units become student [vx_robot, vy_robot, wz_robot] velocity units.
-        # Arm/hand stay in the env's normalized delta-action convention.
-        student_actions[:, :3] = self._env_base_vector_to_robot_frame(
-            env_actions[:, :3] * self.base_action_scale
-        )
+        # Only the base action changes frame, not magnitude: env [wz, vx_w, vy_w]
+        # normalized delta-action becomes student [vx_robot, vy_robot, wz_robot] in the
+        # same normalized [-1, 1] convention (robot frame). base_action_scale is applied
+        # only at the boundary (env _scale_actions in sim, * real_world_base_scale at
+        # deploy), so it stays a real, decoupled step-size knob instead of cancelling in
+        # the integration round-trip. Arm/hand stay in the env's normalized convention.
+        student_actions[:, :3] = self._env_base_vector_to_robot_frame(env_actions[:, :3])
         return student_actions
 
     def _student_actions_to_env_actions(self, student_actions):
@@ -2099,9 +2100,10 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             )
 
         env_actions = student_actions.clone()
-        # The env applies dt in _pre_physics_step when integrating delta actions.
-        # Keep arm/hand untouched here; only rotate/scale the base velocity command.
-        env_actions[:, :3] = self._robot_base_vector_to_env_frame(student_actions[:, :3]) / self.base_action_scale
+        # Base output is a normalized [-1, 1] robot-frame action; only rotate it into the
+        # env [wz, vx_w, vy_w] frame. base_action_scale and dt are applied by the env in
+        # _scale_actions/_pre_physics_step. Keep arm/hand untouched.
+        env_actions[:, :3] = self._robot_base_vector_to_env_frame(student_actions[:, :3])
         return env_actions.clamp(-1.0, 1.0)
 
     def _get_student_base_velocity_vector(self):

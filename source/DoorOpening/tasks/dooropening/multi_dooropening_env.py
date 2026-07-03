@@ -26,7 +26,7 @@ from DoorOpening.assets.door.multi_door_cfg import (
 )
 from DoorOpening.tasks.dooropening.dooropening_adr import DoorOpeningADR
 from DoorOpening.tasks.dooropening.multi_dooropening_env_cfg import DooropeningEnvCfg
-from DoorOpening.assets.glorbot.glorbot_cfg import glorbot_urdf_path
+from DoorOpening.assets.glorbot.glorbot_cfg import glorbot_urdf_path, disable_collision_scope_instancing
 from isaaclab.sensors import Camera, ContactSensor
 from DoorOpening.constants.robot_constants import CAMERA_JOINT_DEFAULT_VALUES, CAMERA_JOINT_NAMES, FULL_JOINT_NAMES, ROBOT_KEY_BODY_NAMES
 from DoorOpening.tasks.dooropening.contact_force_utils import (
@@ -721,7 +721,13 @@ class DooropeningEnv(DirectRLEnv):
     def _setup_scene(self):
         configure_multi_door_assets_for_rank(self.cfg.door_cfg, int(self.cfg.scene.num_envs))
         self.robot = Articulation(self.cfg.robot_cfg)
+        # Make the robot's per-link `collisions` scopes renderable by the collider debug viz
+        # (green overlay); the converter marks them instanceable and the GUI skips instanced
+        # colliders. Runs on the spawn source before cloning, so it's free at runtime.
+        disable_collision_scope_instancing(self.cfg.robot_cfg.prim_path)
         self.door = Articulation(self.cfg.door_cfg)
+        # Same instancing fix for the door's converted USD, so its collider boxes render too.
+        disable_collision_scope_instancing(self.cfg.door_cfg.prim_path)
         # add ground plane
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
         # Do not clone env_0 over the other envs for heterogeneous multi-door
