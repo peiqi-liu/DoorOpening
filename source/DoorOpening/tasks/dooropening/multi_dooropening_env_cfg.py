@@ -403,15 +403,14 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # Finger<->panel contact above this (N) is treated as a panel collision when panel_contact_mask is on.
     panel_contact_force_threshold = 12.0
     # Contact between a non-front base face and any door body above this (N) is penalized.
-    base_door_contact_force_threshold = 1.0
+    base_door_contact_force_threshold = 5.0
     x5_body_contact_force_threshold = 1.5
     # The franka control box is sturdy (unlike the slender x5 arm), so it should NOT end the
     # episode on light contact. It still feeds the contact PENALTY at the x5 threshold above, but
-    # TERMINATION for the box uses this higher force threshold (N). Derived from the stiffest door:
-    # a "small hit" (~0.1 rad / ~6 deg deflection) of the panel at max stiffness K=125 N*m/rad,
-    # contacting near mid-panel (lever r~0.5 m), exerts F = K*theta/r ~= 25 N; ~1/3 of that ~= 8 N.
-    # Set to 10 N (a bit above the 1/3 estimate) so the sturdy box tolerates a slightly harder tap.
-    franka_box_contact_force_threshold = 10.0
+    # TERMINATION for the box uses this higher force threshold (N). At the stiffest door
+    # (K=125 N*m/rad, mid-panel lever r~0.5 m) the quasi-static force is ~5 N per cm of push
+    # (F = K*d/r^2), so 17.5 N ~= the door pushed ~3.5 cm into the box before terminating.
+    franka_box_contact_force_threshold = 17.5
     # Self-collision penalty (r_contact): per step we count the self-collision links whose
     # net self-contact force exceeds this threshold, then scale by self_collision_penalty_w.
     self_collision_force_threshold = 1.0
