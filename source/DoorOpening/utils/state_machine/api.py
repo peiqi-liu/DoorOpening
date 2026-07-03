@@ -60,7 +60,11 @@ def compute_base_joint(base_pos_w, base_quat_w, abs_pos):
 
     return torch.cat([x_r, y_r, theta_r], dim=-1)
 
-def solve_ik(robot_urdf_path, q, palm_pose, base_pose, robot_initial_pose):
+def solve_ik(robot_urdf_path, q, palm_pose, base_pose, robot_initial_pose, num_attempts=8):
+    # num_attempts>1 lets a failed solve retry from randomized arm seeds (robust reposition), at
+    # the cost of possibly jumping to a different IK branch. Pass num_attempts=1 inside continuity
+    # -critical for-loops so a hard frame returns the best-effort NEAR the previous pose (smooth)
+    # instead of jumping to a distant branch.
     robot_initial_pos, robot_initial_quat = robot_initial_pose[..., :3], robot_initial_pose[..., 3:]
     if base_pose is not None:
         base_joint_pos = compute_base_joint(robot_initial_pos, robot_initial_quat, base_pose).squeeze()
@@ -87,12 +91,24 @@ def solve_ik(robot_urdf_path, q, palm_pose, base_pose, robot_initial_pose):
         # print("desired palm_quat: ", palm_quat)
         # print("desired palm_pos: ", palm_pos)
         # print("q_init: ", q)
-        joint_pos_des, success, debug_info = ik_solver.compute_ik(palm_pos, palm_quat, q_init=q)
+        # num_attempts>1: try q as the first seed, then retry from randomized arm configs if it
+        # fails to converge (a reachable target shouldn't be abandoned on one bad seed).
+        joint_pos_des, success, debug_info = ik_solver.compute_ik(
+            palm_pos, palm_quat, q_init=q, num_attempts=num_attempts
+        )
+        if not success:
+            print(
+                "[solve_ik] WARNING: IK did NOT converge -- returning best-effort (contorted) pose. "
+                f"palm_pos(base frame)={np.round(palm_pos, 3)} "
+                f"best_error_norm={debug_info.get('best_error_norm')}. "
+                "A large error means the target is out of reach (base parked too far / bad target); "
+                "a small error means the solver stalled near the goal."
+            )
         q = joint_pos_des
     elif palm_pose is not None and palm_pose.shape[-1] == 3:
         palm_pos = palm_pose[..., :3]
         palm_pos = palm_pos.squeeze().detach().numpy()
-        joint_pos_des, success, debug_info = ik_solver.compute_ik(palm_pos, q_init=q)
+        joint_pos_des, success, debug_info = ik_solver.compute_ik(palm_pos, q_init=q, num_attempts=num_attempts)
         q = joint_pos_des
     # lower_joint_limits = robot.data.soft_joint_pos_limits.clone().detach().cpu()[:, :10, 0]
     # upper_joint_limits = robot.data.soft_joint_pos_limits.clone().detach().cpu()[:, :10, 1]

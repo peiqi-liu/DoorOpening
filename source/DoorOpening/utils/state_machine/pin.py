@@ -79,7 +79,12 @@ class CEM:
 class PinocchioIKSolver():
     """IK solver using pinocchio which can handle end-effector constraints for optimized IK solutions"""
 
-    EPS = 1e-4
+    # Convergence tolerance on the 6-D pose-error norm (position [m] + orientation [rad]). 1e-4
+    # (~0.1 mm / 1e-4 rad) was far tighter than a damped-least-squares solve realistically floors
+    # at (~1e-3), so visually-fine grasps were being flagged "not converged" and spuriously
+    # triggering the random-restart fallback. 1e-2 (~1 cm / ~0.5 deg) is plenty accurate for
+    # grasping/pushing and matches what looks converged. (Test tolerance EPS_IK_CORRECT=0.05.)
+    EPS = 1e-2
     DT = 1e-1
     DAMP = 1e-4
 
@@ -303,8 +308,14 @@ class PinocchioIKSolver():
 
         # ---- Build the list of seed configurations to try ----
         if q_init is not None:
-            # A caller-provided seed forces a single attempt from that seed (num_attempts is ignored).
-            seeds = [self._qmap_control2model(q_init, ignore_missing_joints=ignore_missing_joints)]
+            # Attempt 0 is the caller's seed (keeps the natural, continuous pose when it solves,
+            # since the loop returns the FIRST converged seed). If it FAILS to converge, fall back
+            # to extra attempts from randomized arm configs (base joints kept) so a reachable
+            # target isn't abandoned just because the caller's seed sat in a bad/singular basin.
+            seed0 = self._qmap_control2model(q_init, ignore_missing_joints=ignore_missing_joints)
+            seeds = [seed0]
+            for _ in range(max(0, int(num_attempts) - 1)):
+                seeds.append(self._random_arm_seed(seed0))
         else:
             base_seed = self.q_ref.copy() if self.has_joint_reference else self.q_neutral.copy()
             # attempt 0 = reference/neutral seed (previous behavior); the remaining attempts are

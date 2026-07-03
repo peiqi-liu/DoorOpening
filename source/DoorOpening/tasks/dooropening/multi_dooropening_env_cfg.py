@@ -124,6 +124,28 @@ class EventCfg:
         },
     )
 
+    # Panel-only (link_1) friction, deliberately HIGHER/WIDER than the door-wide material above.
+    # Defined after door_physics_material so it OVERRIDES link_1 (the frame link_0 and the handle
+    # link_2 keep the normal door material -- the handle must stay grippable/turnable).
+    # Why: in sim, low panel friction lets a hand that overshoots and presses the panel SLIDE down
+    # while still turning the handle, so the policy learns to lean on the panel -- but a real panel
+    # grips and JAMS. Sampling high panel friction makes sim jam too, so the behaviour transfers.
+    # The same surface property also makes base<->panel contact jam instead of slide and helps the
+    # base hold the door open. Mirrors the body_names="link_1" targeting used by door_board_mass.
+    panel_physics_material = EventTerm(
+        func=randomize_rigid_body_material,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("door", body_names="link_1"),
+            # Wide range spanning slip (low) to jam (high) so the policy trains on both, but biased
+            # high to model a gripping real panel. Deliberately wider than the door-wide material.
+            "static_friction_range": (0.7, 2.5),
+            "dynamic_friction_range": (0.7, 2.5),
+            "restitution_range": (0.0, 0.0),
+            "num_buckets": 250,
+        },
+    )
+
     door_board_mass = EventTerm(
         func=randomize_rigid_body_mass,
         mode="reset",
@@ -379,10 +401,17 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     )
     handle_contact_force_threshold = 1.0
     # Finger<->panel contact above this (N) is treated as a panel collision when panel_contact_mask is on.
-    panel_contact_force_threshold = 5.0
+    panel_contact_force_threshold = 12.0
     # Contact between a non-front base face and any door body above this (N) is penalized.
     base_door_contact_force_threshold = 1.0
     x5_body_contact_force_threshold = 1.5
+    # The franka control box is sturdy (unlike the slender x5 arm), so it should NOT end the
+    # episode on light contact. It still feeds the contact PENALTY at the x5 threshold above, but
+    # TERMINATION for the box uses this higher force threshold (N). Derived from the stiffest door:
+    # a "small hit" (~0.1 rad / ~6 deg deflection) of the panel at max stiffness K=125 N*m/rad,
+    # contacting near mid-panel (lever r~0.5 m), exerts F = K*theta/r ~= 25 N; ~1/3 of that ~= 8 N.
+    # Set to 10 N (a bit above the 1/3 estimate) so the sturdy box tolerates a slightly harder tap.
+    franka_box_contact_force_threshold = 10.0
     # Self-collision penalty (r_contact): per step we count the self-collision links whose
     # net self-contact force exceeds this threshold, then scale by self_collision_penalty_w.
     self_collision_force_threshold = 1.0
@@ -533,7 +562,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_key_body_pos_w = 2.0
     robot_base_joint_pos_w = 3.0
     robot_arm_joint_pos_w = 3.0
-    robot_finger_joint_pos_w = 1.0
+    robot_finger_joint_pos_w = 1.5
     robot_arx_joint_pos_w = 5.0
     robot_arx_tuck_joint_pos_w = 2.0
     robot_base_joint_vel_w = 1.0
@@ -548,7 +577,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # lambda_c in r = r_target - lambda_l*r_limit - lambda_c*r_contact
     self_collision_penalty_w = 1.0
     # Penalty weight for finger<->panel contact while panel_contact_mask is active.
-    panel_contact_penalty_w = 1.0
+    panel_contact_penalty_w = 0.3
     # Penalty weight (per non-front base face in contact with the door). High on purpose: a
     # base panel hitting the door in the real world means a securely-mounted robot is injured.
     base_door_contact_penalty_w = 10.0

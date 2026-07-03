@@ -212,8 +212,9 @@ def state_machine_offline_push_right_door(
     # Step 2: Move to grasp
     # -------------------------
     palm_target_pos = handle_pos.clone()
-    palm_target_pos[:, 0] += 0.05
-    # Slightly inward (-y; was -0.07).
+    # Grasp EE ~1.5 cm FORWARD (-x). Left/right nudge intentionally NOT applied on the push door
+    # (only forward helps here); y stays at the prior -0.10.
+    palm_target_pos[:, 0] += 0.035
     palm_target_pos[:, 1] += -0.10
     palm_target_pos[:, 2] += 0.08
     palm_target_pose = _make_pose(palm_target_pos, default_palm_rot)
@@ -322,6 +323,7 @@ def state_machine_offline_push_right_door(
             palm_pose=palm_target_pose,
             base_pose=base_target_pose,
             robot_initial_pose=robot_initial_pose,
+            num_attempts=1,  # loop body: single seed for continuity (no random-restart branch jumps)
         )[0]
         # Grasp the handle until the door is cracked open (~0.4 rad), then relax to a PARTLY
         # open hand (not fully open) and push the rest of the way with it.
@@ -423,6 +425,7 @@ def state_machine_offline_push_right_door(
             palm_pose=None,
             base_pose=step_base_pose,
             robot_initial_pose=robot_initial_pose,
+            num_attempts=1,  # loop body: single seed for continuity (no random-restart branch jumps)
         )[0]
         q_robot[10:26] = safe_open_hand_q
         if traverse_step == traverse_steps:
@@ -543,8 +546,9 @@ def state_machine_offline_push_left_door(
     # Step 2: Move to grasp
     # -------------------------
     palm_target_pos = handle_pos.clone()
-    palm_target_pos[:, 0] += 0.04
-    # Slightly inward (+y; was 0.0).
+    # Grasp EE ~1.5 cm FORWARD (-x). Left/right nudge intentionally NOT applied on the push door
+    # (only forward helps here); y stays at the prior 0.03.
+    palm_target_pos[:, 0] += 0.025
     palm_target_pos[:, 1] += 0.03
     palm_target_pos[:, 2] += 0.10
     palm_target_pose = _make_pose(palm_target_pos, default_palm_rot)
@@ -656,6 +660,7 @@ def state_machine_offline_push_left_door(
             palm_pose=palm_target_pose,
             base_pose=base_target_pose,
             robot_initial_pose=robot_initial_pose,
+            num_attempts=1,  # loop body: single seed for continuity (no random-restart branch jumps)
         )[0]
         # Grasp the handle until the door is cracked open (~0.4 rad), then relax to a PARTLY
         # open hand (not fully open) and push the rest of the way with it.
@@ -728,6 +733,7 @@ def state_machine_offline_push_left_door(
             palm_pose=None,
             base_pose=step_base_pose,
             robot_initial_pose=robot_initial_pose,
+            num_attempts=1,  # loop body: single seed for continuity (no random-restart branch jumps)
         )[0]
         q_robot[10:26] = safe_open_hand_q
         if traverse_step == traverse_steps:

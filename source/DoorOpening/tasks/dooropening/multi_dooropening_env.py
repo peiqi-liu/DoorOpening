@@ -351,8 +351,8 @@ class DooropeningEnv(DirectRLEnv):
             filter_indices=filter_indices,
         )
 
-    def _get_x5_body_contact_force_norm(self, filter_indices=None) -> torch.Tensor:
-        sensor_names = (
+    def _get_x5_body_contact_force_norm(self, filter_indices=None, include_franka_box=True) -> torch.Tensor:
+        sensor_names = [
             "contact_forces_door_x5_base",
             "contact_forces_door_x5_link1",
             "contact_forces_door_x5_link2",
@@ -360,10 +360,12 @@ class DooropeningEnv(DirectRLEnv):
             "contact_forces_door_x5_link4",
             "contact_forces_door_x5_link5",
             "contact_forces_door_x5_camera",
-            # Franka control box is protected like the x5 arm: its door contact feeds the same
-            # harsh penalty and the same termination check.
-            "contact_forces_door_franka_box",
-        )
+        ]
+        if include_franka_box:
+            # Franka control box feeds the same harsh PENALTY as the x5 arm (include it here). For
+            # TERMINATION it is checked separately at a higher threshold (see _get_dones), because
+            # the sturdy box tolerates far more force than the slender x5 arm.
+            sensor_names.append("contact_forces_door_franka_box")
         per_body_force_norms = []
         for sensor_name in sensor_names:
             force_w = self._get_filtered_contact_force_w(
@@ -373,6 +375,14 @@ class DooropeningEnv(DirectRLEnv):
             )
             per_body_force_norms.append(torch.linalg.vector_norm(force_w, dim=-1))
         return torch.stack(per_body_force_norms, dim=-1).max(dim=-1).values
+
+    def _get_franka_box_contact_force_norm(self, filter_indices=None) -> torch.Tensor:
+        force_w = self._get_filtered_contact_force_w(
+            self.scene.sensors["contact_forces_door_franka_box"],
+            expected_num_envs=self.num_envs,
+            filter_indices=filter_indices,
+        )
+        return torch.linalg.vector_norm(force_w, dim=-1)
 
     def _get_x5_body_frame_contact_force_norm(self) -> torch.Tensor:
         return self._get_x5_body_contact_force_norm(filter_indices=(DOOR_FRAME_FILTER_INDEX,))
@@ -862,17 +872,11 @@ class DooropeningEnv(DirectRLEnv):
                 family_name = DOOR_FAMILY_NAMES[int(family_id)]
                 self.completed_successes_by_family[family_name].append(float(value))
 
-        self.extras["success/active_success_rate"] = self.episode_reached_last_frame.float().mean().item()
         success_rate = self._mean_completed_metric(self.completed_successes)
         if success_rate is not None:
             self.extras["success/success_rate"] = success_rate
 
         for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
-            family_mask = self.env_family_ids == int(family_id)
-            if family_mask.any():
-                self.extras[f"success/family_active_success_rate/{family_name}"] = (
-                    self.episode_reached_last_frame[family_mask].float().mean().item()
-                )
             family_success_rate = self._mean_completed_metric(self.completed_successes_by_family[family_name])
             if family_success_rate is not None:
                 self.extras[f"success/family_success_rate/{family_name}"] = family_success_rate
@@ -2187,8 +2191,14 @@ class DooropeningEnv(DirectRLEnv):
         reset_key_body_pos_delta = reset_key_body_pos_delta ** 2
         reset_key_body_quat_delta = reset_key_body_quat_delta ** 2
         reset_door_joint_pos_delta = reset_door_joint_pos_delta ** 2
-        x5_body_force_norm = self._get_x5_body_contact_force_norm()
-        unsafe_x5_body_contact = x5_body_force_norm > self.cfg.x5_body_contact_force_threshold
+        # Termination: the slender x5 arm is lethal on light contact (1.5 N), but the sturdy franka
+        # control box only ends the episode past its own higher threshold (~10 N). The box is still
+        # penalized at the x5 threshold in the reward above -- just not episode-ending on a tap.
+        x5_arm_force_norm = self._get_x5_body_contact_force_norm(include_franka_box=False)
+        franka_box_force_norm = self._get_franka_box_contact_force_norm()
+        unsafe_x5_body_contact = (x5_arm_force_norm > self.cfg.x5_body_contact_force_threshold) | (
+            franka_box_force_norm > self.cfg.franka_box_contact_force_threshold
+        )
         # key_body_pos_err, key_body_quat_err, door_err, root_pos_err, root_rot_err, arm_joint_pos_err, finger_joint_pos_err, base_joint_vel_err, arm_joint_vel_err, finger_joint_vel_err, door_pos_err = compute_tracking_error(
         key_body_pos_err, key_body_quat_err, door_err, base_joint_pos_err, arm_joint_pos_err, finger_joint_pos_err, arx_joint_pos_err, base_joint_vel_err, arm_joint_vel_err, finger_joint_vel_err = compute_tracking_error(
             robot_key_body_pos = self.robot_reset_key_body_pos,

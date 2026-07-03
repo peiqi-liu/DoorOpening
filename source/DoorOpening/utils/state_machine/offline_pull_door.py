@@ -179,8 +179,10 @@ def state_machine_offline_right_pull_door(
     # Step 2: Move to grasp
     # -------------------------
     # Unified with the push-right planner so grasp palm<->handle offsets match.
-    grasp_palm_x_offset = 0.05
-    grasp_palm_y_offset = -0.07
+    # Right-handle door: nudge grasp EE ~2.5 cm LEFT (-y, toward door center) and ~1.5 cm FORWARD
+    # (-x, toward the handle/door). Robot faces -x, so right=+y / left=-y / forward=-x.
+    grasp_palm_x_offset = 0.035
+    grasp_palm_y_offset = -0.085
     grasp_palm_z_offset = 0.08
     grasp_open_ratio = 0.70
 
@@ -312,6 +314,7 @@ def state_machine_offline_right_pull_door(
             palm_pose=palm_target_pose,
             base_pose=base_target_pose,
             robot_initial_pose=robot_initial_pose,
+            num_attempts=1,  # loop body: single seed for continuity (no random-restart branch jumps)
         )[0]
 
         _append_state(
@@ -331,11 +334,16 @@ def state_machine_offline_right_pull_door(
     _, _, robot_initial_yaw = euler_xyz_from_quat(base_target_rot)
 
     release_base_x_delta_1 = -0.12
-    # Blocking pose Y: -y approaches the open leaf, +y backs away. Slightly closer to the leaf.
-    release_base_y = 0.20
+    # Blocking pose Y: -y approaches the open leaf (left), +y backs away (right). Moved a bit LEFT
+    # (0.20 -> 0.10), toward the leaf, for better blocking -- the arm now retracts to the right, so
+    # the base no longer needs to stay clear of it on that side.
+    release_base_y = 0.10
     release_palm_x_delta = 0.25
     release_palm_y_delta = -0.1
-    release_base_x_delta_2 = -0.18
+    # Backed the blocking base off the door (-0.18 -> -0.10, i.e. +0.08 behind in x) so the arm has
+    # reach headroom to retract further. This is the door-blocking pose held through the push, so
+    # keep the back-off small to preserve blocking margin. (+x back is fine; +y right was not.)
+    release_base_x_delta_2 = -0.10
     release_door_open_angle = 1.35
 
     # Turn the base toward the opened panel on +y before the push phase.
@@ -404,27 +412,22 @@ def state_machine_offline_right_pull_door(
     # -------------------------
     # Step 6: Retract the arm to the left side of the tilted base
     # -------------------------
-    tilted_base_yaw_world = robot_initial_yaw + tilt_base_yaw
-    # Pull the retract target IN to a reachable tuck (the old 0.60/0.50 offset put it ~1.0 m
-    # from the franka base, at/past its ~0.93 m reach, so the arm pinned at full extension and
-    # stabbed the panel instead of retracting). x stays large enough to avoid the shoulder-
-    # mount back-fold; +y keeps it on the opposite side from the left door.
-    retreat_local_x = 0.50
-    retreat_local_y = 0.45
-    # Lower the retract target so it drops into comfortable reach instead of sitting above the
-    # shoulder at the extension limit -- this is what keeps the larger x/y offset reachable
-    # (verified: (0.55,0.50) at z~0.9-1.0 still solves with the retract orientation).
-    retreat_z_lift = -0.10
-    retreat_dx, retreat_dy = _rotate_xy_counterclockwise(
-        retreat_local_x,
-        retreat_local_y,
-        tilted_base_yaw_world,
-    )
-
-    retreat_palm_pos = base_target_pos.clone()
-    retreat_palm_pos[:, 0] += retreat_dx
-    retreat_palm_pos[:, 1] += retreat_dy
-    retreat_palm_pos[:, 2] = palm_target_pose[:, 2].clone() + retreat_z_lift
+    # Retract offset applied DIRECTLY in world frame -- no base-yaw rotation (that rotation was
+    # mixing the axes: "dx too small, dy too large"). Now these map straight to world directions:
+    # +x pulls the hand BACKWARD off the door; +y nudges it to the RIGHT to clear the panel.
+    retreat_local_x = 0.22
+    retreat_local_y = 0.35
+    # LIFT the retract target up: the arm swings a wide arc from here around to the panel-hold
+    # pose, and doing that low sweeps it through the arx camera arm on the base. Keeping the hand
+    # high makes the swing pass OVER the arx instead of colliding with it.
+    retreat_z_lift = 0.28
+    # No base move at the retract stage: the base stays at the door-blocking pose set in step 5.
+    # Append the retract offset to the LAST palm location (step 5's palm pose), NOT the base pose,
+    # so dx/dy/dz are all deltas from where the hand currently is.
+    retreat_palm_pos = palm_target_pose[:, :3].clone()
+    retreat_palm_pos[:, 0] += retreat_local_x
+    retreat_palm_pos[:, 1] += retreat_local_y
+    retreat_palm_pos[:, 2] += retreat_z_lift
     retreat_palm_pose = _make_pose(retreat_palm_pos, default_palm_rot)
 
     q_robot[:10] = solve_ik(
@@ -433,6 +436,8 @@ def state_machine_offline_right_pull_door(
         palm_pose=retreat_palm_pose,
         base_pose=None,
         robot_initial_pose=robot_initial_pose,
+        num_attempts=1,  # retract must continue smoothly from the blocking pose; the random-
+        # restart fallback would otherwise flip the arm ~180 deg to a different IK branch.
     )[0]
     q_robot[10:26] = safe_open_hand_q
 
@@ -448,22 +453,26 @@ def state_machine_offline_right_pull_door(
     # -------------------------
     # Step 7: Push the panel open with the arm while keeping the base still
     # -------------------------
-    # Contact point is now the panel CENTER (get_board_pos), which keeps a stable moment arm
-    # even on narrow doors. Only a small x offset so we push near the center, not toward the
-    # hinge axis (short lever -> strong forces on the franka).
-    push_contact_x_offset = -0.1
+    # Push contact anchored at the panel CENTER (get_board_pos) then shifted toward the FREE/OUTER
+    # edge for a longer lever arm (lighter push force). At the contact door angle the panel has
+    # swung toward the robot, so its outer edge is at +x from the center -- a POSITIVE x offset
+    # moves ALONG the panel toward that edge. (The old -0.1 pushed toward the hinge/inner edge.)
+    push_contact_x_offset = 0.13
     push_contact_y_offset = 0.25
-    # Lower contact point on the panel (was 0.25) so the hand pushes lower on the door.
-    push_contact_z_offset = 0.10
-    # Extra outward +y for a NON-KEY approach waypoint: the arm first swings OUT to the side of
-    # the panel, then moves in to contact -- so it does not penetrate straight through the panel.
-    push_approach_out_y = 0.20
+    # Contact height on the panel: raised back up so the hand holds/pushes the panel HIGHER (the
+    # low contact made the arm swing down toward the arx on the way in).
+    push_contact_z_offset = 0.22
+    # Extra outward +y for a NON-KEY approach waypoint: the arm first swings OUT to the side of the
+    # panel, then moves in to contact -- so it does not penetrate straight through. Reduced from
+    # 0.20 -> 0.10 because the approach was landing too far to the right.
+    push_approach_out_y = 0.10
     contact_board_pos = get_board_pos(
         door_urdf_path,
         door_initial_pose,
         torch.tensor([contact_virtual_door_angle, 0.0], device=device).unsqueeze(0),
     ).to(device)
 
+    # Base stays at the (shifted) door-blocking pose from step 6 -- base_pose=None keeps it put.
     # --- Non-key approach: move outward (extra +y) before pushing in ---
     palm_target_pos = contact_board_pos.clone()
     palm_target_pos[:, 0] += push_contact_x_offset
@@ -555,7 +564,7 @@ def state_machine_offline_right_pull_door(
     # Traverse forward THROUGH the doorway with a smooth, interpolated base sweep while the arm
     # keeps HOLDING the door panel (palm pinned), so the arm does not jerk away from the panel.
     # The tilted blocking yaw is restored to normal over the same sweep.
-    traverse_mid_x = -0.05
+    traverse_mid_x = 0.0
     # Keep the base a bit closer to the +y door panel during the traverse (was 0.0) so the arm
     # can still reach the panel it is holding instead of drifting out of reach.
     traverse_mid_y = 0.10
@@ -581,6 +590,7 @@ def state_machine_offline_right_pull_door(
             palm_pose=palm_target_pose,
             base_pose=base_target_pose,
             robot_initial_pose=robot_initial_pose,
+            num_attempts=1,  # loop body: single seed for continuity (no random-restart branch jumps)
         )[0]
         q_robot[10:26] = safe_open_hand_q
         _append_state(
@@ -724,8 +734,10 @@ def state_machine_offline_left_pull_door(
     # -------------------------
     # Step 2: Move to grasp
     # -------------------------
-    grasp_palm_x_offset = 0.04
-    grasp_palm_y_offset = 0.0
+    # Left-handle door: nudge grasp EE ~2.5 cm RIGHT (+y, toward door center) and ~1.5 cm FORWARD
+    # (-x, toward the handle/door). Robot faces -x, so right=+y / left=-y / forward=-x.
+    grasp_palm_x_offset = 0.025
+    grasp_palm_y_offset = 0.015
     grasp_palm_z_offset = 0.10
     grasp_open_ratio = 0.7
 
@@ -860,6 +872,7 @@ def state_machine_offline_left_pull_door(
             palm_pose=palm_target_pose,
             base_pose=base_target_pose,
             robot_initial_pose=robot_initial_pose,
+            num_attempts=1,  # loop body: single seed for continuity (no random-restart branch jumps)
         )[0]
 
         _append_state(
@@ -902,7 +915,10 @@ def state_machine_offline_left_pull_door(
     # Larger x offset magnitude (was -0.3) so the arm reaches a bit further forward into the panel.
     # Contact point is now the panel CENTER (get_board_pos); only a small x offset so we push
     # near the center, not toward the hinge axis (short lever -> strong forces on the franka).
-    push_contact_x_offset = -0.1
+    # Push contact shifted toward the panel FREE/OUTER edge for a longer lever arm (+x moves along
+    # the panel toward that edge, since it swings toward the robot as it opens). Pulled back a bit
+    # toward the CENTER (0.18 -> 0.10) so the contact isn't so far out on the panel.
+    push_contact_x_offset = 0.10
     push_contact_y_offset = -0.2
     push_contact_z_offset = 0.1
     contact_virtual_door_angle = 1.0
@@ -980,6 +996,8 @@ def state_machine_offline_left_pull_door(
         palm_pose=retreat_palm_pose,
         base_pose=None,
         robot_initial_pose=robot_initial_pose,
+        num_attempts=1,  # retract must continue smoothly from the blocking pose; the random-
+        # restart fallback would otherwise flip the arm ~180 deg to a different IK branch.
     )[0]
     q_robot[10:26] = safe_open_hand_q
     # retreat_arm_q = q_robot[3:10].clone()
@@ -1034,10 +1052,13 @@ def state_machine_offline_left_pull_door(
     ).to(device)
 
     palm_target_pos = board_pos.clone()
-    # Apply the forward (x) offset so the hand walks along the panel off the bare free edge,
-    # but NOT the lateral (y) offset: at full-open the panel face normal is ~y, so y is a
-    # perpendicular gap that would hold the hand off the panel surface.
+    # Apply the forward (x) offset so the hand walks along the panel off the bare free edge, PLUS a
+    # SMALL lateral (y) offset so the palm stays just OFF the panel face instead of penetrating it.
+    # At full-open the panel normal is ~y and the hand is on the -y side, so a small -y keeps it
+    # off the surface (mirror of the right door's +y push_open_y_offset).
+    push_open_y_offset = -0.08
     palm_target_pos[:, 0] += push_contact_x_offset
+    palm_target_pos[:, 1] += push_open_y_offset
     palm_target_pos[:, 2] += push_contact_z_offset
     palm_target_pose = _make_pose(palm_target_pos, push_palm_rot)
 
@@ -1066,7 +1087,7 @@ def state_machine_offline_left_pull_door(
     # Traverse forward THROUGH the doorway with a smooth, interpolated base sweep while the arm
     # keeps HOLDING the door panel (palm pinned), so the arm does not jerk away from the panel.
     # The tilted blocking yaw is restored to normal over the same sweep.
-    traverse_mid_x = -0.05
+    traverse_mid_x = 0.0
     traverse_mid_y = -0.05
     # Drive well past the doorway so the closing door panel can't smash the base from behind.
     traverse_far_x = -1.0
@@ -1090,6 +1111,7 @@ def state_machine_offline_left_pull_door(
             palm_pose=palm_target_pose,
             base_pose=base_target_pose,
             robot_initial_pose=robot_initial_pose,
+            num_attempts=1,  # loop body: single seed for continuity (no random-restart branch jumps)
         )[0]
         q_robot[10:26] = safe_open_hand_q
         _append_state(
