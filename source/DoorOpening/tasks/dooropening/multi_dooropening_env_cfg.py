@@ -27,7 +27,7 @@ from DoorOpening.tasks.dooropening.contact_force_utils import (
     SELF_COLLISION_FILTER_PRIM_PATHS,
     X5_BODY_NAMES,
 )
-from isaaclab.assets import ArticulationCfg
+from isaaclab.assets import Articulation, ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.envs.mdp.events import (
     randomize_actuator_gains,
@@ -40,8 +40,9 @@ from isaaclab.utils import configclass
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 
 from isaaclab.managers import EventTermCfg as EventTerm
-from isaaclab.managers import SceneEntityCfg
+from isaaclab.managers import ManagerTermBase, SceneEntityCfg
 from isaaclab.envs.common import ViewerCfg
+import isaaclab.utils.math as math_utils
 import torch
 import numpy as np
 from isaaclab.sensors import CameraCfg, ContactSensorCfg
@@ -96,6 +97,108 @@ def randomize_joint_effort_limits(
     sampled_limits = low + (high - low) * torch.rand((len(env_ids), num_joints), device=asset.device)
     asset.write_joint_effort_limit_to_sim(sampled_limits, joint_ids=joint_ids, env_ids=env_ids)
 
+
+class randomize_rigid_body_material_per_body(ManagerTermBase):
+    """Per-reset friction/restitution randomization for SPECIFIC bodies of a *heterogeneous*
+    multi-asset articulation.
+
+    IsaacLab's stock ``randomize_rigid_body_material`` only supports per-body targeting on a
+    homogeneous articulation: it derives the collision-shape layout from env 0 and asserts it equals
+    ``root_physx_view.max_shapes`` (the batch maximum across all envs). With a ``MultiAssetSpawner``
+    the doors carry different collision-shape counts per env, so env 0's layout (e.g. 6 shapes)
+    disagrees with the batch max (e.g. 9) and the stock term raises
+    ``failed to parse the number of shapes per body``.
+
+    This variant builds, once at init, a per-env boolean mask over the flattened
+    ``(num_envs, max_shapes)`` material buffer marking the shape slots that belong to the targeted
+    bodies -- honoring each env's own layout -- and each reset scatters freshly sampled material
+    properties into just those slots. Params match the stock term (``static_friction_range``,
+    ``dynamic_friction_range``, ``restitution_range``, ``num_buckets``, ``asset_cfg``,
+    ``make_consistent``).
+    """
+
+    def __init__(self, cfg: EventTerm, env):
+        super().__init__(cfg, env)
+
+        self.asset_cfg: SceneEntityCfg = cfg.params["asset_cfg"]
+        self.asset = env.scene[self.asset_cfg.name]
+        if not isinstance(self.asset, Articulation):
+            raise ValueError(
+                "randomize_rigid_body_material_per_body only supports Articulation assets; "
+                f"got '{self.asset_cfg.name}' of type {type(self.asset)}."
+            )
+
+        # Pre-sample the friction/restitution buckets (same semantics as the stock term).
+        static_friction_range = cfg.params.get("static_friction_range", (1.0, 1.0))
+        dynamic_friction_range = cfg.params.get("dynamic_friction_range", (1.0, 1.0))
+        restitution_range = cfg.params.get("restitution_range", (0.0, 0.0))
+        num_buckets = int(cfg.params.get("num_buckets", 1))
+        ranges = torch.tensor(
+            [static_friction_range, dynamic_friction_range, restitution_range], device="cpu"
+        )
+        self.material_buckets = math_utils.sample_uniform(
+            ranges[:, 0], ranges[:, 1], (num_buckets, 3), device="cpu"
+        )
+        if cfg.params.get("make_consistent", False):
+            self.material_buckets[:, 1] = torch.min(self.material_buckets[:, 0], self.material_buckets[:, 1])
+
+        # Build the per-env mask of flattened material-buffer slots that belong to the target bodies.
+        # Unlike the stock term we walk EVERY env's own link layout, so heterogeneous shape counts are
+        # handled correctly instead of assuming env 0's layout applies to all envs.
+        view = self.asset.root_physx_view
+        num_envs = view.count
+        max_shapes = view.max_shapes
+        self._shape_mask = torch.zeros((num_envs, max_shapes), dtype=torch.bool)
+        if self.asset_cfg.body_ids == slice(None):
+            # Whole-asset target -- every shape slot is fair game (prefer the stock term in that case).
+            self._shape_mask[:] = True
+        else:
+            target_body_ids = {int(b) for b in self.asset_cfg.body_ids}
+            max_target_body = max(target_body_ids)
+            for env_idx in range(num_envs):
+                offset = 0
+                for body_idx, link_path in enumerate(view.link_paths[env_idx]):
+                    num_shapes = self.asset._physics_sim_view.create_rigid_body_view(link_path).max_shapes
+                    if body_idx in target_body_ids:
+                        self._shape_mask[env_idx, offset : offset + num_shapes] = True
+                    offset += num_shapes
+                    # Bodies are ordered by link index, so once we've passed the last target we're done.
+                    if body_idx >= max_target_body:
+                        break
+
+    def __call__(
+        self,
+        env,
+        env_ids: torch.Tensor | None,
+        static_friction_range: tuple[float, float],
+        dynamic_friction_range: tuple[float, float],
+        restitution_range: tuple[float, float],
+        num_buckets: int,
+        asset_cfg: SceneEntityCfg,
+        make_consistent: bool = False,
+    ):
+        if env_ids is None:
+            env_ids = torch.arange(env.scene.num_envs, device="cpu")
+        else:
+            env_ids = env_ids.cpu()
+        if len(env_ids) == 0:
+            return
+
+        view = self.asset.root_physx_view
+        max_shapes = view.max_shapes
+        # Per-shape bucket draw, identical to the stock term, so each shape is re-randomized per reset.
+        bucket_ids = torch.randint(0, self.material_buckets.shape[0], (len(env_ids), max_shapes), device="cpu")
+        material_samples = self.material_buckets[bucket_ids]  # (len(env_ids), max_shapes, 3)
+
+        materials = view.get_material_properties()            # (num_envs, max_shapes, 3), cpu
+        selected = materials[env_ids]
+        env_mask = self._shape_mask[env_ids]                  # (len(env_ids), max_shapes) bool
+        selected[env_mask] = material_samples[env_mask]
+        materials[env_ids] = selected
+
+        view.set_material_properties(materials, env_ids)
+
+
 @configclass
 class EventCfg:
     """Configuration for reset-time physics randomization."""
@@ -133,7 +236,10 @@ class EventCfg:
     # The same surface property also makes base<->panel contact jam instead of slide and helps the
     # base hold the door open. Mirrors the body_names="link_1" targeting used by door_board_mass.
     panel_physics_material = EventTerm(
-        func=randomize_rigid_body_material,
+        # Stock randomize_rigid_body_material can't target a single body on the heterogeneous
+        # multi-asset door (per-env collision-shape counts differ -> "failed to parse the number of
+        # shapes per body"). This drop-in variant masks link_1's shape slots per env instead.
+        func=randomize_rigid_body_material_per_body,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("door", body_names="link_1"),
