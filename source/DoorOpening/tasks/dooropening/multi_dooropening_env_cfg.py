@@ -536,7 +536,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     observation_space = (
         proprioception_observation_space
-        + joint_reference_error_observation_space
+        # + joint_reference_error_observation_space  # DISABLED: joint-angle-diff obs commented out
         + key_body_error_observation_space
         + robot_pose_observation_space
         + base_velocity_observation_space
