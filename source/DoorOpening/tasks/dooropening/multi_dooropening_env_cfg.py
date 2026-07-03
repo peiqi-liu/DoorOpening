@@ -16,14 +16,14 @@ from DoorOpening.constants.robot_constants import (
     ROBOT_BASE_BODY_LINK_NAME,
 )
 from DoorOpening.tasks.dooropening.contact_force_utils import (
-    BASE_DOOR_CONTACT_PRIM_PATH,
+    BASE_DOOR_CONTACT_BODY_NAMES,
     DOOR_BODY_CONTACT_FILTER_PRIM_PATHS,
     FRANKA_BOX_DOOR_CONTACT_PRIM_PATH,
     FLANGE_CONTACT_PRIM_PATH,
     FLANGE_SELF_COLLISION_FILTER_PRIM_PATHS,
     HANDLE_CONTACT_FILTER_PRIM_PATHS,
     PANEL_CONTACT_FILTER_PRIM_PATHS,
-    SELF_COLLISION_CONTACT_PRIM_PATH,
+    SELF_COLLISION_BODY_NAMES,
     SELF_COLLISION_FILTER_PRIM_PATHS,
     X5_BODY_NAMES,
 )
@@ -53,6 +53,25 @@ import isaaclab.sim as sim_utils
 euler_angles = torch.tensor([-np.pi / 4, 0.0, 0])  # (roll, pitch, yaw) in radians
 POINTCLOUD_CAMERA_QUAT = quat_from_euler_xyz(euler_angles[0], euler_angles[1], euler_angles[2])
 POINTCLOUD_CAMERA_QUAT = tuple(POINTCLOUD_CAMERA_QUAT.tolist())
+
+
+def _robot_body_contact_sensor(body_name: str, filter_prim_paths) -> ContactSensorCfg:
+    """A single-body filtered contact sensor on a robot body.
+
+    IsaacLab reports filtered contacts (``force_matrix_w``) correctly only when the sensor
+    ``prim_path`` matches a SINGLE body per env (see ContactSensorCfg docs). So contact
+    groups that used to be one multi-body sensor (base<->door, self-collision) are declared
+    one sensor per body here and aggregated in the env. Field names must stay
+    ``contact_forces_<group>_<body>`` -- the env builds the sensor keys from the same body-name
+    lists, so a missing field fails loudly at scene setup.
+    """
+    return ContactSensorCfg(
+        prim_path=f"/World/envs/env_.*/Robot/{body_name}",
+        update_period=0.0,
+        history_length=1,
+        debug_vis=False,
+        filter_prim_paths_expr=list(filter_prim_paths),
+    )
 
 
 def randomize_joint_effort_limits(
@@ -418,15 +437,15 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         debug_vis=False,
         filter_prim_paths_expr=list(PANEL_CONTACT_FILTER_PRIM_PATHS),
     )
-    # Base<->door contact: all four vertical base faces against all door bodies. Any contact
-    # here is penalized.
-    contact_forces_base_door = ContactSensorCfg(
-        prim_path=BASE_DOOR_CONTACT_PRIM_PATH,
-        update_period=0.0,
-        history_length=1,
-        debug_vis=False,
-        filter_prim_paths_expr=list(DOOR_BODY_CONTACT_FILTER_PRIM_PATHS),
-    )
+    # Base<->door contact: every vertical base face + chassis against all door bodies. Any
+    # contact here is penalized. Split one-sensor-per-body (see _robot_body_contact_sensor):
+    # a multi-body sensor cannot report filtered contacts. The env aggregates these back into
+    # a per-body [N, 5] tensor via BASE_DOOR_CONTACT_BODY_NAMES.
+    contact_forces_base_door_front_panel = _robot_body_contact_sensor("front_panel", DOOR_BODY_CONTACT_FILTER_PRIM_PATHS)
+    contact_forces_base_door_back_panel = _robot_body_contact_sensor("back_panel", DOOR_BODY_CONTACT_FILTER_PRIM_PATHS)
+    contact_forces_base_door_left_panel = _robot_body_contact_sensor("left_panel", DOOR_BODY_CONTACT_FILTER_PRIM_PATHS)
+    contact_forces_base_door_right_panel = _robot_body_contact_sensor("right_panel", DOOR_BODY_CONTACT_FILTER_PRIM_PATHS)
+    contact_forces_base_door_tidybot2_base_link = _robot_body_contact_sensor("tidybot2_base_link", DOOR_BODY_CONTACT_FILTER_PRIM_PATHS)
     # Franka control box <-> door: folded into the harsh x5<->door penalty + termination.
     contact_forces_door_franka_box = ContactSensorCfg(
         prim_path=FRANKA_BOX_DOOR_CONTACT_PRIM_PATH,
@@ -484,17 +503,32 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         debug_vis=False,
         filter_prim_paths_expr=list(DOOR_BODY_CONTACT_FILTER_PRIM_PATHS),
     )
-    # Self-collision sensor: the fine-grained per-link self-collision set (franka arm +
-    # LEAP hand + x5 arm) filtered against itself. force_matrix_w[n, b] aggregates the
-    # self-contact on link b from every other (non-adjacent) link, which we
-    # threshold-count into the self-collision penalty r_contact.
-    contact_forces_self_collision = ContactSensorCfg(
-        prim_path=SELF_COLLISION_CONTACT_PRIM_PATH,
-        update_period=0.0,
-        history_length=1,
-        debug_vis=False,
-        filter_prim_paths_expr=list(SELF_COLLISION_FILTER_PRIM_PATHS),
-    )
+    # Self-collision: the fine-grained per-link self-collision set (franka arm + x5 arm +
+    # base chassis) filtered against itself. Each body's net self-contact force (from every
+    # other non-adjacent link; PhysX drops self/adjacent pairs) is threshold-counted into the
+    # self-collision penalty r_contact. Split one-sensor-per-body (see
+    # _robot_body_contact_sensor): a multi-body sensor cannot report filtered contacts. The env
+    # aggregates these back into a per-body [N, 20] tensor via SELF_COLLISION_BODY_NAMES.
+    contact_forces_self_collision_panda_link1 = _robot_body_contact_sensor("panda_link1", SELF_COLLISION_FILTER_PRIM_PATHS)
+    contact_forces_self_collision_panda_link2 = _robot_body_contact_sensor("panda_link2", SELF_COLLISION_FILTER_PRIM_PATHS)
+    contact_forces_self_collision_panda_link3 = _robot_body_contact_sensor("panda_link3", SELF_COLLISION_FILTER_PRIM_PATHS)
+    contact_forces_self_collision_panda_link4 = _robot_body_contact_sensor("panda_link4", SELF_COLLISION_FILTER_PRIM_PATHS)
+    contact_forces_self_collision_panda_link5 = _robot_body_contact_sensor("panda_link5", SELF_COLLISION_FILTER_PRIM_PATHS)
+    contact_forces_self_collision_panda_link6 = _robot_body_contact_sensor("panda_link6", SELF_COLLISION_FILTER_PRIM_PATHS)
+    contact_forces_self_collision_x5_base_link = _robot_body_contact_sensor("x5_base_link", SELF_COLLISION_FILTER_PRIM_PATHS)
+    contact_forces_self_collision_link1 = _robot_body_contact_sensor("link1", SELF_COLLISION_FILTER_PRIM_PATHS)
+    contact_forces_self_collision_link2 = _robot_body_contact_sensor("link2", SELF_COLLISION_FILTER_PRIM_PATHS)
+    contact_forces_self_collision_link3 = _robot_body_contact_sensor("link3", SELF_COLLISION_FILTER_PRIM_PATHS)
+    contact_forces_self_collision_link4 = _robot_body_contact_sensor("link4", SELF_COLLISION_FILTER_PRIM_PATHS)
+    contact_forces_self_collision_link5 = _robot_body_contact_sensor("link5", SELF_COLLISION_FILTER_PRIM_PATHS)
+    contact_forces_self_collision_x5_camera_link = _robot_body_contact_sensor("x5_camera_link", SELF_COLLISION_FILTER_PRIM_PATHS)
+    contact_forces_self_collision_franka_control_box = _robot_body_contact_sensor("franka_control_box", SELF_COLLISION_FILTER_PRIM_PATHS)
+    contact_forces_self_collision_front_panel = _robot_body_contact_sensor("front_panel", SELF_COLLISION_FILTER_PRIM_PATHS)
+    contact_forces_self_collision_back_panel = _robot_body_contact_sensor("back_panel", SELF_COLLISION_FILTER_PRIM_PATHS)
+    contact_forces_self_collision_left_panel = _robot_body_contact_sensor("left_panel", SELF_COLLISION_FILTER_PRIM_PATHS)
+    contact_forces_self_collision_right_panel = _robot_body_contact_sensor("right_panel", SELF_COLLISION_FILTER_PRIM_PATHS)
+    contact_forces_self_collision_top_panel = _robot_body_contact_sensor("top_panel", SELF_COLLISION_FILTER_PRIM_PATHS)
+    contact_forces_self_collision_tidybot2_base_link = _robot_body_contact_sensor("tidybot2_base_link", SELF_COLLISION_FILTER_PRIM_PATHS)
     # Flange self-collision sensor: catches a finger folding back onto the Franka flange
     # (panda_link7) while structurally excluding the permanent palm_lower<->flange contact
     # (the flange is filtered to the distal finger links only, never palm_lower).

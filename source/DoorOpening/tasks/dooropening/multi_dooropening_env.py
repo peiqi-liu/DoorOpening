@@ -30,7 +30,9 @@ from DoorOpening.assets.glorbot.glorbot_cfg import glorbot_urdf_path, disable_co
 from isaaclab.sensors import Camera, ContactSensor
 from DoorOpening.constants.robot_constants import CAMERA_JOINT_DEFAULT_VALUES, CAMERA_JOINT_NAMES, FULL_JOINT_NAMES, ROBOT_KEY_BODY_NAMES
 from DoorOpening.tasks.dooropening.contact_force_utils import (
+    BASE_DOOR_CONTACT_BODY_NAMES,
     DOOR_FRAME_FILTER_INDEX,
+    SELF_COLLISION_BODY_NAMES,
     get_filtered_contact_force_w,
     get_self_contact_body_force_norm,
 )
@@ -40,6 +42,14 @@ from DoorOpening.utils.quat_utils import quat_to_6d
 from DoorOpening.utils.extract_pointcloud_from_articulation import FrankaLeapSampler
 from DoorOpening.utils.viser_pt import format_iterated_record_path, prepare_pointcloud
 from typing import Tuple
+
+
+# Per-body contact-sensor keys for the two groups that were split one-sensor-per-body (filtered
+# contacts require a single-body sensor prim_path). Order matches the body-name lists, but the
+# consumers only threshold-count over bodies, so order is not load-bearing. Keys must match the
+# cfg field names `contact_forces_<group>_<body>`; a mismatch raises AttributeError at setup.
+BASE_DOOR_SENSOR_NAMES = tuple(f"contact_forces_base_door_{b}" for b in BASE_DOOR_CONTACT_BODY_NAMES)
+SELF_COLLISION_SENSOR_NAMES = tuple(f"contact_forces_self_collision_{b}" for b in SELF_COLLISION_BODY_NAMES)
 
 
 class DooropeningEnv(DirectRLEnv):
@@ -351,6 +361,19 @@ class DooropeningEnv(DirectRLEnv):
             filter_indices=filter_indices,
         )
 
+    def _stacked_self_contact_force_norm(self, sensor_names) -> torch.Tensor:
+        """Per-body net filtered contact-force magnitude, stacked across single-body sensors.
+
+        Each ``sensor_names`` entry is a single-body contact sensor (filtered contacts require a
+        single-body ``prim_path``), so ``get_self_contact_body_force_norm`` returns ``[N, 1]``. We
+        stack them to recover the ``[N, num_bodies]`` tensor the old multi-body sensor produced.
+        """
+        per_body = [
+            get_self_contact_body_force_norm(self.scene.sensors[name], expected_num_envs=self.num_envs)[:, 0]
+            for name in sensor_names
+        ]
+        return torch.stack(per_body, dim=-1)
+
     def _get_x5_body_contact_force_norm(self, filter_indices=None, include_franka_box=True) -> torch.Tensor:
         sensor_names = [
             "contact_forces_door_x5_base",
@@ -397,10 +420,7 @@ class DooropeningEnv(DirectRLEnv):
         so the old finger<->flange sensor is no longer used.
         """
         threshold = self.cfg.self_collision_force_threshold
-        force_norm = get_self_contact_body_force_norm(
-            self.scene.sensors["contact_forces_self_collision"],
-            expected_num_envs=self.num_envs,
-        )
+        force_norm = self._stacked_self_contact_force_norm(SELF_COLLISION_SENSOR_NAMES)
         count = (force_norm > threshold).sum(dim=-1)
         return count.to(dtype=force_norm.dtype)
 
@@ -755,7 +775,9 @@ class DooropeningEnv(DirectRLEnv):
             self.scene.sensors["pointcloud_camera"] = self.pointcloud_camera
         self.scene.sensors["contact_forces_door2"] = ContactSensor(self.cfg.contact_forces_door2)
         self.scene.sensors["contact_forces_door_panel"] = ContactSensor(self.cfg.contact_forces_door_panel)
-        self.scene.sensors["contact_forces_base_door"] = ContactSensor(self.cfg.contact_forces_base_door)
+        # base<->door split one-sensor-per-body (filtered contacts need a single-body prim_path)
+        for _name in BASE_DOOR_SENSOR_NAMES:
+            self.scene.sensors[_name] = ContactSensor(getattr(self.cfg, _name))
         self.scene.sensors["contact_forces_door_franka_box"] = ContactSensor(self.cfg.contact_forces_door_franka_box)
         self.scene.sensors["contact_forces_door_x5_base"] = ContactSensor(self.cfg.contact_forces_door_x5_base)
         self.scene.sensors["contact_forces_door_x5_link1"] = ContactSensor(self.cfg.contact_forces_door_x5_link1)
@@ -766,7 +788,9 @@ class DooropeningEnv(DirectRLEnv):
         self.scene.sensors["contact_forces_door_x5_camera"] = ContactSensor(self.cfg.contact_forces_door_x5_camera)
         # Self-collision penalty over the franka arm, x5/arx arm, and mobile-base chassis.
         # The LEAP hand is excluded so finger poses stay free; the finger<->flange sensor is dropped.
-        self.scene.sensors["contact_forces_self_collision"] = ContactSensor(self.cfg.contact_forces_self_collision)
+        # Split one-sensor-per-body (filtered contacts need a single-body prim_path).
+        for _name in SELF_COLLISION_SENSOR_NAMES:
+            self.scene.sensors[_name] = ContactSensor(getattr(self.cfg, _name))
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)    
@@ -1294,9 +1318,11 @@ class DooropeningEnv(DirectRLEnv):
         self.scene.sensors["contact_forces_door_x5_link5"].update(self.cfg.sim_dt)
         self.scene.sensors["contact_forces_door_x5_camera"].update(self.cfg.sim_dt)
         self.scene.sensors["contact_forces_door_panel"].update(self.cfg.sim_dt)
-        self.scene.sensors["contact_forces_base_door"].update(self.cfg.sim_dt)
+        for _name in BASE_DOOR_SENSOR_NAMES:
+            self.scene.sensors[_name].update(self.cfg.sim_dt)
         self.scene.sensors["contact_forces_door_franka_box"].update(self.cfg.sim_dt)
-        self.scene.sensors["contact_forces_self_collision"].update(self.cfg.sim_dt)
+        for _name in SELF_COLLISION_SENSOR_NAMES:
+            self.scene.sensors[_name].update(self.cfg.sim_dt)
 
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
         self.robot_dof_targets[:] = self._pin_arx_targets_to_fixed_pose(self.robot_dof_targets)
@@ -2052,20 +2078,13 @@ class DooropeningEnv(DirectRLEnv):
         weighted_panel_contact_penalty = (
             self.panel_contact_penalty_w * self.ref_panel_contact_mask.squeeze() * panel_contact
         )
-        self.extras["error/panel_contact_penalty"] = weighted_panel_contact_penalty.mean().item()
         self.extras["stats/panel_contact_force_norm_mean"] = float(panel_force_norm.mean().detach().cpu().item())
         self.extras["stats/panel_contact_force_norm_max"] = float(panel_force_norm.max().detach().cpu().item())
-        self.extras["stats/panel_contact_frac"] = float(
-            (panel_contact * self.ref_panel_contact_mask.squeeze()).mean().detach().cpu().item()
-        )
 
         # Base<->door contact penalty: no base face should touch the door. Count the four
         # vertical faces (front/back/left/right) whose contact force with any door body exceeds
         # the threshold and penalize per face in contact.
-        base_door_force_norm = get_self_contact_body_force_norm(
-            self.scene.sensors["contact_forces_base_door"],
-            expected_num_envs=self.num_envs,
-        )
+        base_door_force_norm = self._stacked_self_contact_force_norm(BASE_DOOR_SENSOR_NAMES)
         base_door_contact_count = (base_door_force_norm > self.cfg.base_door_contact_force_threshold).sum(dim=-1)
         weighted_base_door_contact_penalty = self.base_door_contact_penalty_w * base_door_contact_count.to(dtype=base_door_force_norm.dtype)
         self.extras["error/base_door_contact_penalty"] = weighted_base_door_contact_penalty.mean().item()

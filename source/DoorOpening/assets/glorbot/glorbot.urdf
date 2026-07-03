@@ -528,17 +528,17 @@
     name="back_right_steer_link">
     <inertial>
       <origin
-        xyz="0 0 0"
+        xyz="-0.0028646 0.0018946 -0.019363"
         rpy="0 0 0" />
       <mass
-        value="0" />
+        value="0.23041" />
       <inertia
-        ixx="0"
-        ixy="0"
-        ixz="0"
-        iyy="0"
-        iyz="0"
-        izz="0" />
+        ixx="0.00011367"
+        ixy="-1.4966E-06"
+        ixz="-1.5287E-05"
+        iyy="0.0001507"
+        iyz="-2.2832E-06"
+        izz="0.00014628" />
     </inertial>
     <visual>
       <origin
