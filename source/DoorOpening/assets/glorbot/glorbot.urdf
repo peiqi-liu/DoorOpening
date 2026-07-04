@@ -757,13 +757,12 @@
       </geometry>
       <material name="panda_white"/>
     </visual>
-    <!-- Use the watertight VISUAL mesh for collision. The shipped collision/link5.obj is a
-         coarse non-watertight triangle soup (300 tris, no shared verts); convex_decomposition
-         (VHACD) can't voxelize it cleanly and drops interior volume -> a hole in the collider.
-         visual/link5.obj is watertight, so decomposition yields a clean solid link. -->
+    <!-- All franka links (incl. link5) use their low-poly collision/*.obj collider. NOTE:
+         collision/link5.obj is coarse/non-watertight -- the original author avoided it because
+         convex_decomposition (VHACD) could leave a hole; if cooking stalls/holes, that is why. -->
     <collision>
       <geometry>
-        <mesh filename="package://glorbot/meshes/franka/visual/link5.obj"/>
+        <mesh filename="package://glorbot/meshes/franka/collision/link5.obj"/>
       </geometry>
       <material name="panda_white"/>
     </collision>

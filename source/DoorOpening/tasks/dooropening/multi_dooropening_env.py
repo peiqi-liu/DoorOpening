@@ -32,7 +32,6 @@ from DoorOpening.constants.robot_constants import CAMERA_JOINT_DEFAULT_VALUES, C
 from DoorOpening.tasks.dooropening.contact_force_utils import (
     BASE_DOOR_CONTACT_BODY_NAMES,
     DOOR_FRAME_FILTER_INDEX,
-    SELF_COLLISION_BODY_NAMES,
     get_filtered_contact_force_w,
     get_self_contact_body_force_norm,
 )
@@ -44,12 +43,16 @@ from DoorOpening.utils.viser_pt import format_iterated_record_path, prepare_poin
 from typing import Tuple
 
 
-# Per-body contact-sensor keys for the two groups that were split one-sensor-per-body (filtered
-# contacts require a single-body sensor prim_path). Order matches the body-name lists, but the
-# consumers only threshold-count over bodies, so order is not load-bearing. Keys must match the
-# cfg field names `contact_forces_<group>_<body>`; a mismatch raises AttributeError at setup.
+# Contact-sensor keys. base_door is still one single-body sensor per base face (each filtered
+# against the door). self_collision is now THREE multi-body group sensors (franka / x5 / base);
+# consumers threshold-count over the per-body force_matrix, so order is not load-bearing. Keys
+# must match the cfg field names; a mismatch raises AttributeError at setup.
 BASE_DOOR_SENSOR_NAMES = tuple(f"contact_forces_base_door_{b}" for b in BASE_DOOR_CONTACT_BODY_NAMES)
-SELF_COLLISION_SENSOR_NAMES = tuple(f"contact_forces_self_collision_{b}" for b in SELF_COLLISION_BODY_NAMES)
+SELF_COLLISION_SENSOR_NAMES = (
+    "contact_forces_self_collision_franka",
+    "contact_forces_self_collision_x5",
+    "contact_forces_self_collision_base",
+)
 
 
 class DooropeningEnv(DirectRLEnv):
@@ -216,6 +219,7 @@ class DooropeningEnv(DirectRLEnv):
         self.joint_limit_penalty_w = self.cfg.joint_limit_penalty_w
         self.joint_limit_penalty_margin_ratio = self.cfg.joint_limit_penalty_margin_ratio
         self.self_collision_penalty_w = self.cfg.self_collision_penalty_w
+        self.franka_box_contact_penalty_w = self.cfg.franka_box_contact_penalty_w
 
         self.reset_key_body_pos_delta_min = self.cfg.reset_key_body_pos_delta_min
         self.reset_key_body_quat_delta_min = self.cfg.reset_key_body_quat_delta_min
@@ -376,8 +380,6 @@ class DooropeningEnv(DirectRLEnv):
 
     def _get_x5_body_contact_force_norm(self, filter_indices=None, include_franka_box=True) -> torch.Tensor:
         sensor_names = [
-            "contact_forces_door_x5_base",
-            "contact_forces_door_x5_link1",
             "contact_forces_door_x5_link2",
             "contact_forces_door_x5_link3",
             "contact_forces_door_x5_link4",
@@ -385,9 +387,9 @@ class DooropeningEnv(DirectRLEnv):
             "contact_forces_door_x5_camera",
         ]
         if include_franka_box:
-            # Franka control box feeds the same harsh PENALTY as the x5 arm (include it here). For
-            # TERMINATION it is checked separately at a higher threshold (see _get_dones), because
-            # the sturdy box tolerates far more force than the slender x5 arm.
+            # Legacy path (default callers now pass include_franka_box=False): the franka control
+            # box is handled by its own graded penalty in _get_rewards, not the harsh x5 penalty or
+            # a hard termination. Kept only for callers that still want the box lumped in.
             sensor_names.append("contact_forces_door_franka_box")
         per_body_force_norms = []
         for sensor_name in sensor_names:
@@ -420,7 +422,16 @@ class DooropeningEnv(DirectRLEnv):
         so the old finger<->flange sensor is no longer used.
         """
         threshold = self.cfg.self_collision_force_threshold
-        force_norm = self._stacked_self_contact_force_norm(SELF_COLLISION_SENSOR_NAMES)
+        # Each group sensor is multi-body: get_self_contact_body_force_norm returns
+        # [N, group_bodies] (net filtered force per body). Concatenate the three groups, then
+        # count the bodies whose self-contact force exceeds the threshold.
+        force_norm = torch.cat(
+            [
+                get_self_contact_body_force_norm(self.scene.sensors[name], expected_num_envs=self.num_envs)
+                for name in SELF_COLLISION_SENSOR_NAMES
+            ],
+            dim=-1,
+        )
         count = (force_norm > threshold).sum(dim=-1)
         return count.to(dtype=force_norm.dtype)
 
@@ -779,16 +790,13 @@ class DooropeningEnv(DirectRLEnv):
         for _name in BASE_DOOR_SENSOR_NAMES:
             self.scene.sensors[_name] = ContactSensor(getattr(self.cfg, _name))
         self.scene.sensors["contact_forces_door_franka_box"] = ContactSensor(self.cfg.contact_forces_door_franka_box)
-        self.scene.sensors["contact_forces_door_x5_base"] = ContactSensor(self.cfg.contact_forces_door_x5_base)
-        self.scene.sensors["contact_forces_door_x5_link1"] = ContactSensor(self.cfg.contact_forces_door_x5_link1)
         self.scene.sensors["contact_forces_door_x5_link2"] = ContactSensor(self.cfg.contact_forces_door_x5_link2)
         self.scene.sensors["contact_forces_door_x5_link3"] = ContactSensor(self.cfg.contact_forces_door_x5_link3)
         self.scene.sensors["contact_forces_door_x5_link4"] = ContactSensor(self.cfg.contact_forces_door_x5_link4)
         self.scene.sensors["contact_forces_door_x5_link5"] = ContactSensor(self.cfg.contact_forces_door_x5_link5)
         self.scene.sensors["contact_forces_door_x5_camera"] = ContactSensor(self.cfg.contact_forces_door_x5_camera)
-        # Self-collision penalty over the franka arm, x5/arx arm, and mobile-base chassis.
-        # The LEAP hand is excluded so finger poses stay free; the finger<->flange sensor is dropped.
-        # Split one-sensor-per-body (filtered contacts need a single-body prim_path).
+        # Self-collision penalty over the franka arm, x5/arx arm, and base -- grouped into 3
+        # multi-body sensors (franka / x5 / base) to keep the PhysX contact-view count low.
         for _name in SELF_COLLISION_SENSOR_NAMES:
             self.scene.sensors[_name] = ContactSensor(getattr(self.cfg, _name))
         # add lights
@@ -1310,8 +1318,6 @@ class DooropeningEnv(DirectRLEnv):
         targets = self.robot_dof_targets + self.dt * self.scaled_actions
         targets = self._pin_arx_targets_to_fixed_pose(targets)
         self.scene.sensors["contact_forces_door2"].update(self.cfg.sim_dt)
-        self.scene.sensors["contact_forces_door_x5_base"].update(self.cfg.sim_dt)
-        self.scene.sensors["contact_forces_door_x5_link1"].update(self.cfg.sim_dt)
         self.scene.sensors["contact_forces_door_x5_link2"].update(self.cfg.sim_dt)
         self.scene.sensors["contact_forces_door_x5_link3"].update(self.cfg.sim_dt)
         self.scene.sensors["contact_forces_door_x5_link4"].update(self.cfg.sim_dt)
@@ -2047,7 +2053,7 @@ class DooropeningEnv(DirectRLEnv):
         )
         handle_force_norm = torch.linalg.vector_norm(contact_forces_door2, dim=-1)
         self.extras["stats/filtered_handle_force_norm_mean"] = float(handle_force_norm.mean().detach().cpu().item())
-        x5_body_force_norm = self._get_x5_body_contact_force_norm()
+        x5_body_force_norm = self._get_x5_body_contact_force_norm(include_franka_box=False)
         unsafe_x5_body_contact = x5_body_force_norm > self.cfg.x5_body_contact_force_threshold
         self.extras["stats/x5_body_contact_force_norm_max"] = float(x5_body_force_norm.max().detach().cpu().item())
         self.extras["stats/x5_body_unsafe_contact_frac"] = float(
@@ -2090,6 +2096,23 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["error/base_door_contact_penalty"] = weighted_base_door_contact_penalty.mean().item()
         self.extras["stats/base_door_contact_frac"] = float(
             (base_door_contact_count > 0).float().mean().detach().cpu().item()
+        )
+
+        # Franka control-box <-> door contact: no longer episode-ending (the box is sturdy). A
+        # graded penalty ramps linearly from 0 at min_force (25 N -- light taps are free) to the
+        # full weight at max_force (75 N and above). Replaces the old hard-termination check.
+        franka_box_force_norm = self._get_franka_box_contact_force_norm()
+        franka_box_penalty_frac = torch.clamp(
+            (franka_box_force_norm - self.cfg.franka_box_contact_penalty_min_force)
+            / (self.cfg.franka_box_contact_penalty_max_force - self.cfg.franka_box_contact_penalty_min_force),
+            min=0.0,
+            max=1.0,
+        )
+        weighted_franka_box_contact_penalty = self.franka_box_contact_penalty_w * franka_box_penalty_frac
+        self.extras["error/franka_box_contact_penalty"] = weighted_franka_box_contact_penalty.mean().item()
+        self.extras["stats/franka_box_contact_force_norm_max"] = float(franka_box_force_norm.max().detach().cpu().item())
+        self.extras["fail/franka_box_contact_frac"] = float(
+            (franka_box_force_norm > self.cfg.franka_box_contact_penalty_min_force).float().mean().detach().cpu().item()
         )
 
         deep_mimic_reward = compute_deep_mimic_rewards(
@@ -2192,6 +2215,7 @@ class DooropeningEnv(DirectRLEnv):
             - weighted_self_collision_penalty
             - weighted_base_door_contact_penalty
             - weighted_x5_door_contact_penalty
+            - weighted_franka_box_contact_penalty
         )
         final_reward = torch.where(is_killed, final_reward + termination_penalty, final_reward)
 
@@ -2216,14 +2240,10 @@ class DooropeningEnv(DirectRLEnv):
         reset_key_body_pos_delta = reset_key_body_pos_delta ** 2
         reset_key_body_quat_delta = reset_key_body_quat_delta ** 2
         reset_door_joint_pos_delta = reset_door_joint_pos_delta ** 2
-        # Termination: the slender x5 arm is lethal on light contact (1.5 N), but the sturdy franka
-        # control box only ends the episode past its own higher threshold (~10 N). The box is still
-        # penalized at the x5 threshold in the reward above -- just not episode-ending on a tap.
+        # Termination: the slender x5 arm is lethal on light contact (1.5 N). The franka control
+        # box is NO LONGER episode-ending -- a graded force penalty in _get_rewards handles it.
         x5_arm_force_norm = self._get_x5_body_contact_force_norm(include_franka_box=False)
-        franka_box_force_norm = self._get_franka_box_contact_force_norm()
-        unsafe_x5_body_contact = (x5_arm_force_norm > self.cfg.x5_body_contact_force_threshold) | (
-            franka_box_force_norm > self.cfg.franka_box_contact_force_threshold
-        )
+        unsafe_x5_body_contact = x5_arm_force_norm > self.cfg.x5_body_contact_force_threshold
         # key_body_pos_err, key_body_quat_err, door_err, root_pos_err, root_rot_err, arm_joint_pos_err, finger_joint_pos_err, base_joint_vel_err, arm_joint_vel_err, finger_joint_vel_err, door_pos_err = compute_tracking_error(
         key_body_pos_err, key_body_quat_err, door_err, base_joint_pos_err, arm_joint_pos_err, finger_joint_pos_err, arx_joint_pos_err, base_joint_vel_err, arm_joint_vel_err, finger_joint_vel_err = compute_tracking_error(
             robot_key_body_pos = self.robot_reset_key_body_pos,
@@ -2248,12 +2268,15 @@ class DooropeningEnv(DirectRLEnv):
             ref_robot_arm_joint_vel = self.ref_robot_arm_joint_vel,
             ref_robot_finger_joint_vel = self.ref_robot_finger_joint_vel,
         )
-        return \
-            unsafe_x5_body_contact | \
-            (key_body_pos_err > reset_key_body_pos_delta) | \
-            (key_body_quat_err > reset_key_body_quat_delta) | \
-            (door_err > reset_door_joint_pos_delta), \
-            time_out
+        # Separate the three hard-termination failure modes and log each fraction for diagnosis
+        # (the franka-box failure is now a graded penalty, logged as fail/franka_box_contact_frac).
+        fail_robot_drift = (key_body_pos_err > reset_key_body_pos_delta) | (key_body_quat_err > reset_key_body_quat_delta)
+        fail_door_drift = door_err > reset_door_joint_pos_delta
+        fail_x5_collision = unsafe_x5_body_contact
+        self.extras["fail/robot_drift_frac"] = float(fail_robot_drift.float().mean().detach().cpu().item())
+        self.extras["fail/door_drift_frac"] = float(fail_door_drift.float().mean().detach().cpu().item())
+        self.extras["fail/x5_collision_frac"] = float(fail_x5_collision.float().mean().detach().cpu().item())
+        return fail_robot_drift | fail_door_drift | fail_x5_collision, time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:

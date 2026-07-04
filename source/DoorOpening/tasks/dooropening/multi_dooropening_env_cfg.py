@@ -19,15 +19,17 @@ from DoorOpening.tasks.dooropening.contact_force_utils import (
     BASE_DOOR_CONTACT_BODY_NAMES,
     DOOR_BODY_CONTACT_FILTER_PRIM_PATHS,
     FRANKA_BOX_DOOR_CONTACT_PRIM_PATH,
-    FLANGE_CONTACT_PRIM_PATH,
-    FLANGE_SELF_COLLISION_FILTER_PRIM_PATHS,
     HANDLE_CONTACT_FILTER_PRIM_PATHS,
     PANEL_CONTACT_FILTER_PRIM_PATHS,
-    SELF_COLLISION_BODY_NAMES,
-    SELF_COLLISION_FILTER_PRIM_PATHS,
+    SELF_COLLISION_BASE_FILTER_PRIM_PATHS,
+    SELF_COLLISION_BASE_PRIM_PATH,
+    SELF_COLLISION_FRANKA_FILTER_PRIM_PATHS,
+    SELF_COLLISION_FRANKA_PRIM_PATH,
+    SELF_COLLISION_X5_FILTER_PRIM_PATHS,
+    SELF_COLLISION_X5_PRIM_PATH,
     X5_BODY_NAMES,
 )
-from isaaclab.assets import Articulation, ArticulationCfg
+from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.envs.mdp.events import (
     randomize_actuator_gains,
@@ -40,9 +42,8 @@ from isaaclab.utils import configclass
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 
 from isaaclab.managers import EventTermCfg as EventTerm
-from isaaclab.managers import ManagerTermBase, SceneEntityCfg
+from isaaclab.managers import SceneEntityCfg
 from isaaclab.envs.common import ViewerCfg
-import isaaclab.utils.math as math_utils
 import torch
 import numpy as np
 from isaaclab.sensors import CameraCfg, ContactSensorCfg
@@ -117,107 +118,6 @@ def randomize_joint_effort_limits(
     asset.write_joint_effort_limit_to_sim(sampled_limits, joint_ids=joint_ids, env_ids=env_ids)
 
 
-class randomize_rigid_body_material_per_body(ManagerTermBase):
-    """Per-reset friction/restitution randomization for SPECIFIC bodies of a *heterogeneous*
-    multi-asset articulation.
-
-    IsaacLab's stock ``randomize_rigid_body_material`` only supports per-body targeting on a
-    homogeneous articulation: it derives the collision-shape layout from env 0 and asserts it equals
-    ``root_physx_view.max_shapes`` (the batch maximum across all envs). With a ``MultiAssetSpawner``
-    the doors carry different collision-shape counts per env, so env 0's layout (e.g. 6 shapes)
-    disagrees with the batch max (e.g. 9) and the stock term raises
-    ``failed to parse the number of shapes per body``.
-
-    This variant builds, once at init, a per-env boolean mask over the flattened
-    ``(num_envs, max_shapes)`` material buffer marking the shape slots that belong to the targeted
-    bodies -- honoring each env's own layout -- and each reset scatters freshly sampled material
-    properties into just those slots. Params match the stock term (``static_friction_range``,
-    ``dynamic_friction_range``, ``restitution_range``, ``num_buckets``, ``asset_cfg``,
-    ``make_consistent``).
-    """
-
-    def __init__(self, cfg: EventTerm, env):
-        super().__init__(cfg, env)
-
-        self.asset_cfg: SceneEntityCfg = cfg.params["asset_cfg"]
-        self.asset = env.scene[self.asset_cfg.name]
-        if not isinstance(self.asset, Articulation):
-            raise ValueError(
-                "randomize_rigid_body_material_per_body only supports Articulation assets; "
-                f"got '{self.asset_cfg.name}' of type {type(self.asset)}."
-            )
-
-        # Pre-sample the friction/restitution buckets (same semantics as the stock term).
-        static_friction_range = cfg.params.get("static_friction_range", (1.0, 1.0))
-        dynamic_friction_range = cfg.params.get("dynamic_friction_range", (1.0, 1.0))
-        restitution_range = cfg.params.get("restitution_range", (0.0, 0.0))
-        num_buckets = int(cfg.params.get("num_buckets", 1))
-        ranges = torch.tensor(
-            [static_friction_range, dynamic_friction_range, restitution_range], device="cpu"
-        )
-        self.material_buckets = math_utils.sample_uniform(
-            ranges[:, 0], ranges[:, 1], (num_buckets, 3), device="cpu"
-        )
-        if cfg.params.get("make_consistent", False):
-            self.material_buckets[:, 1] = torch.min(self.material_buckets[:, 0], self.material_buckets[:, 1])
-
-        # Build the per-env mask of flattened material-buffer slots that belong to the target bodies.
-        # Unlike the stock term we walk EVERY env's own link layout, so heterogeneous shape counts are
-        # handled correctly instead of assuming env 0's layout applies to all envs.
-        view = self.asset.root_physx_view
-        num_envs = view.count
-        max_shapes = view.max_shapes
-        self._shape_mask = torch.zeros((num_envs, max_shapes), dtype=torch.bool)
-        if self.asset_cfg.body_ids == slice(None):
-            # Whole-asset target -- every shape slot is fair game (prefer the stock term in that case).
-            self._shape_mask[:] = True
-        else:
-            target_body_ids = {int(b) for b in self.asset_cfg.body_ids}
-            max_target_body = max(target_body_ids)
-            for env_idx in range(num_envs):
-                offset = 0
-                for body_idx, link_path in enumerate(view.link_paths[env_idx]):
-                    num_shapes = self.asset._physics_sim_view.create_rigid_body_view(link_path).max_shapes
-                    if body_idx in target_body_ids:
-                        self._shape_mask[env_idx, offset : offset + num_shapes] = True
-                    offset += num_shapes
-                    # Bodies are ordered by link index, so once we've passed the last target we're done.
-                    if body_idx >= max_target_body:
-                        break
-
-    def __call__(
-        self,
-        env,
-        env_ids: torch.Tensor | None,
-        static_friction_range: tuple[float, float],
-        dynamic_friction_range: tuple[float, float],
-        restitution_range: tuple[float, float],
-        num_buckets: int,
-        asset_cfg: SceneEntityCfg,
-        make_consistent: bool = False,
-    ):
-        if env_ids is None:
-            env_ids = torch.arange(env.scene.num_envs, device="cpu")
-        else:
-            env_ids = env_ids.cpu()
-        if len(env_ids) == 0:
-            return
-
-        view = self.asset.root_physx_view
-        max_shapes = view.max_shapes
-        # Per-shape bucket draw, identical to the stock term, so each shape is re-randomized per reset.
-        bucket_ids = torch.randint(0, self.material_buckets.shape[0], (len(env_ids), max_shapes), device="cpu")
-        material_samples = self.material_buckets[bucket_ids]  # (len(env_ids), max_shapes, 3)
-
-        materials = view.get_material_properties()            # (num_envs, max_shapes, 3), cpu
-        selected = materials[env_ids]
-        env_mask = self._shape_mask[env_ids]                  # (len(env_ids), max_shapes) bool
-        selected[env_mask] = material_samples[env_mask]
-        materials[env_ids] = selected
-
-        view.set_material_properties(materials, env_ids)
-
-
 @configclass
 class EventCfg:
     """Configuration for reset-time physics randomization."""
@@ -234,36 +134,15 @@ class EventCfg:
         },
     )
 
+    # Door-wide friction/restitution. Range widened to the UNION of the former door-wide and
+    # panel-only (link_1) materials so the panel still trains across slip<->jam, using the stock
+    # per-asset mechanism. The separate per-body panel term was removed (its custom per-env
+    # view creation caused host-RAM OOM at num_envs=4096).
     door_physics_material = EventTerm(
         func=randomize_rigid_body_material,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("door"),
-            "static_friction_range": (0.8, 1.25),
-            "dynamic_friction_range": (0.9, 1.1),
-            "restitution_range": (0.0, 0.0),
-            "num_buckets": 250,
-        },
-    )
-
-    # Panel-only (link_1) friction, deliberately HIGHER/WIDER than the door-wide material above.
-    # Defined after door_physics_material so it OVERRIDES link_1 (the frame link_0 and the handle
-    # link_2 keep the normal door material -- the handle must stay grippable/turnable).
-    # Why: in sim, low panel friction lets a hand that overshoots and presses the panel SLIDE down
-    # while still turning the handle, so the policy learns to lean on the panel -- but a real panel
-    # grips and JAMS. Sampling high panel friction makes sim jam too, so the behaviour transfers.
-    # The same surface property also makes base<->panel contact jam instead of slide and helps the
-    # base hold the door open. Mirrors the body_names="link_1" targeting used by door_board_mass.
-    panel_physics_material = EventTerm(
-        # Stock randomize_rigid_body_material can't target a single body on the heterogeneous
-        # multi-asset door (per-env collision-shape counts differ -> "failed to parse the number of
-        # shapes per body"). This drop-in variant masks link_1's shape slots per env instead.
-        func=randomize_rigid_body_material_per_body,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("door", body_names="link_1"),
-            # Wide range spanning slip (low) to jam (high) so the policy trains on both, but biased
-            # high to model a gripping real panel. Deliberately wider than the door-wide material.
             "static_friction_range": (0.7, 2.5),
             "dynamic_friction_range": (0.7, 2.5),
             "restitution_range": (0.0, 0.0),
@@ -441,28 +320,12 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # contact here is penalized. Split one-sensor-per-body (see _robot_body_contact_sensor):
     # a multi-body sensor cannot report filtered contacts. The env aggregates these back into
     # a per-body [N, 5] tensor via BASE_DOOR_CONTACT_BODY_NAMES.
-    contact_forces_base_door_front_panel = _robot_body_contact_sensor("front_panel", DOOR_BODY_CONTACT_FILTER_PRIM_PATHS)
-    contact_forces_base_door_back_panel = _robot_body_contact_sensor("back_panel", DOOR_BODY_CONTACT_FILTER_PRIM_PATHS)
     contact_forces_base_door_left_panel = _robot_body_contact_sensor("left_panel", DOOR_BODY_CONTACT_FILTER_PRIM_PATHS)
     contact_forces_base_door_right_panel = _robot_body_contact_sensor("right_panel", DOOR_BODY_CONTACT_FILTER_PRIM_PATHS)
     contact_forces_base_door_tidybot2_base_link = _robot_body_contact_sensor("tidybot2_base_link", DOOR_BODY_CONTACT_FILTER_PRIM_PATHS)
     # Franka control box <-> door: folded into the harsh x5<->door penalty + termination.
     contact_forces_door_franka_box = ContactSensorCfg(
         prim_path=FRANKA_BOX_DOOR_CONTACT_PRIM_PATH,
-        update_period=0.0,
-        history_length=1,
-        debug_vis=False,
-        filter_prim_paths_expr=list(DOOR_BODY_CONTACT_FILTER_PRIM_PATHS),
-    )
-    contact_forces_door_x5_base = ContactSensorCfg(
-        prim_path=f"/World/envs/env_.*/Robot/{X5_BODY_NAMES[0]}",
-        update_period=0.0,
-        history_length=1,
-        debug_vis=False,
-        filter_prim_paths_expr=list(DOOR_BODY_CONTACT_FILTER_PRIM_PATHS),
-    )
-    contact_forces_door_x5_link1 = ContactSensorCfg(
-        prim_path=f"/World/envs/env_.*/Robot/{X5_BODY_NAMES[1]}",
         update_period=0.0,
         history_length=1,
         debug_vis=False,
@@ -503,41 +366,32 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         debug_vis=False,
         filter_prim_paths_expr=list(DOOR_BODY_CONTACT_FILTER_PRIM_PATHS),
     )
-    # Self-collision: the fine-grained per-link self-collision set (franka arm + x5 arm +
-    # base chassis) filtered against itself. Each body's net self-contact force (from every
-    # other non-adjacent link; PhysX drops self/adjacent pairs) is threshold-counted into the
-    # self-collision penalty r_contact. Split one-sensor-per-body (see
-    # _robot_body_contact_sensor): a multi-body sensor cannot report filtered contacts. The env
-    # aggregates these back into a per-body [N, 20] tensor via SELF_COLLISION_BODY_NAMES.
-    contact_forces_self_collision_panda_link1 = _robot_body_contact_sensor("panda_link1", SELF_COLLISION_FILTER_PRIM_PATHS)
-    contact_forces_self_collision_panda_link2 = _robot_body_contact_sensor("panda_link2", SELF_COLLISION_FILTER_PRIM_PATHS)
-    contact_forces_self_collision_panda_link3 = _robot_body_contact_sensor("panda_link3", SELF_COLLISION_FILTER_PRIM_PATHS)
-    contact_forces_self_collision_panda_link4 = _robot_body_contact_sensor("panda_link4", SELF_COLLISION_FILTER_PRIM_PATHS)
-    contact_forces_self_collision_panda_link5 = _robot_body_contact_sensor("panda_link5", SELF_COLLISION_FILTER_PRIM_PATHS)
-    contact_forces_self_collision_panda_link6 = _robot_body_contact_sensor("panda_link6", SELF_COLLISION_FILTER_PRIM_PATHS)
-    contact_forces_self_collision_x5_base_link = _robot_body_contact_sensor("x5_base_link", SELF_COLLISION_FILTER_PRIM_PATHS)
-    contact_forces_self_collision_link1 = _robot_body_contact_sensor("link1", SELF_COLLISION_FILTER_PRIM_PATHS)
-    contact_forces_self_collision_link2 = _robot_body_contact_sensor("link2", SELF_COLLISION_FILTER_PRIM_PATHS)
-    contact_forces_self_collision_link3 = _robot_body_contact_sensor("link3", SELF_COLLISION_FILTER_PRIM_PATHS)
-    contact_forces_self_collision_link4 = _robot_body_contact_sensor("link4", SELF_COLLISION_FILTER_PRIM_PATHS)
-    contact_forces_self_collision_link5 = _robot_body_contact_sensor("link5", SELF_COLLISION_FILTER_PRIM_PATHS)
-    contact_forces_self_collision_x5_camera_link = _robot_body_contact_sensor("x5_camera_link", SELF_COLLISION_FILTER_PRIM_PATHS)
-    contact_forces_self_collision_franka_control_box = _robot_body_contact_sensor("franka_control_box", SELF_COLLISION_FILTER_PRIM_PATHS)
-    contact_forces_self_collision_front_panel = _robot_body_contact_sensor("front_panel", SELF_COLLISION_FILTER_PRIM_PATHS)
-    contact_forces_self_collision_back_panel = _robot_body_contact_sensor("back_panel", SELF_COLLISION_FILTER_PRIM_PATHS)
-    contact_forces_self_collision_left_panel = _robot_body_contact_sensor("left_panel", SELF_COLLISION_FILTER_PRIM_PATHS)
-    contact_forces_self_collision_right_panel = _robot_body_contact_sensor("right_panel", SELF_COLLISION_FILTER_PRIM_PATHS)
-    contact_forces_self_collision_top_panel = _robot_body_contact_sensor("top_panel", SELF_COLLISION_FILTER_PRIM_PATHS)
-    contact_forces_self_collision_tidybot2_base_link = _robot_body_contact_sensor("tidybot2_base_link", SELF_COLLISION_FILTER_PRIM_PATHS)
-    # Flange self-collision sensor: catches a finger folding back onto the Franka flange
-    # (panda_link7) while structurally excluding the permanent palm_lower<->flange contact
-    # (the flange is filtered to the distal finger links only, never palm_lower).
-    contact_forces_flange_self_collision = ContactSensorCfg(
-        prim_path=FLANGE_CONTACT_PRIM_PATH,
+    # Self-collision penalty (r_contact): THREE multi-body group sensors (franka arm / x5 arm /
+    # base) instead of one filtered sensor per body. 15 single-body filtered sensors created 15
+    # PhysX contact views (+ Warp kernels + buffers x num_envs) and OOM'd host RAM at 4096 envs.
+    # Each group's force_matrix_w is [N, group_bodies, num_filters, 3]; the env reduces it to a
+    # per-body force and counts bodies over threshold. Each group filters against the OTHER groups
+    # + the fixed door frame (see contact_force_utils).
+    contact_forces_self_collision_franka = ContactSensorCfg(
+        prim_path=SELF_COLLISION_FRANKA_PRIM_PATH,
         update_period=0.0,
         history_length=1,
         debug_vis=False,
-        filter_prim_paths_expr=list(FLANGE_SELF_COLLISION_FILTER_PRIM_PATHS),
+        filter_prim_paths_expr=list(SELF_COLLISION_FRANKA_FILTER_PRIM_PATHS),
+    )
+    contact_forces_self_collision_x5 = ContactSensorCfg(
+        prim_path=SELF_COLLISION_X5_PRIM_PATH,
+        update_period=0.0,
+        history_length=1,
+        debug_vis=False,
+        filter_prim_paths_expr=list(SELF_COLLISION_X5_FILTER_PRIM_PATHS),
+    )
+    contact_forces_self_collision_base = ContactSensorCfg(
+        prim_path=SELF_COLLISION_BASE_PRIM_PATH,
+        update_period=0.0,
+        history_length=1,
+        debug_vis=False,
+        filter_prim_paths_expr=list(SELF_COLLISION_BASE_FILTER_PRIM_PATHS),
     )
     handle_contact_force_threshold = 1.0
     # Finger<->panel contact above this (N) is treated as a panel collision when panel_contact_mask is on.
@@ -545,12 +399,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # Contact between a non-front base face and any door body above this (N) is penalized.
     base_door_contact_force_threshold = 5.0
     x5_body_contact_force_threshold = 1.5
-    # The franka control box is sturdy (unlike the slender x5 arm), so it should NOT end the
-    # episode on light contact. It still feeds the contact PENALTY at the x5 threshold above, but
-    # TERMINATION for the box uses this higher force threshold (N). At the stiffest door
-    # (K=125 N*m/rad, mid-panel lever r~0.5 m) the quasi-static force is ~5 N per cm of push
-    # (F = K*d/r^2), so 17.5 N ~= the door pushed ~3.5 cm into the box before terminating.
-    franka_box_contact_force_threshold = 17.5
+    # (Removed franka_box_contact_force_threshold: the franka control box no longer terminates the
+    # episode. It is handled by the graded franka_box_contact_penalty_* params above instead.)
     # Self-collision penalty (r_contact): per step we count the self-collision links whose
     # net self-contact force exceeds this threshold, then scale by self_collision_penalty_w.
     self_collision_force_threshold = 1.0
@@ -708,7 +558,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_arm_joint_vel_w = 2.0
     robot_finger_joint_vel_w = 0.5
     door_joint_pos_w = 4.0
-    hinge_contact_reward_w = 8.0
+    hinge_contact_reward_w = 1.5
     robot_body_lin_vel_w = 1.0
     robot_body_ang_vel_w = 0.5
     joint_limit_penalty_w = 40.0
@@ -723,6 +573,13 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # Penalty weight for the x5/arx camera arm contacting any door body (frame/panel/handle).
     # Harsh: the slender camera arm hitting the door is a serious real-world failure.
     x5_door_contact_penalty_w = 20.0
+    # Franka control-box <-> door contact is NO LONGER episode-ending (the box is sturdy). Instead
+    # a graded penalty ramps linearly from 0 penalty at min_force to the full weight at max_force
+    # (clamped): <25 N is free, 25-75 N ramps up, >=75 N is the max penalty.
+    # NOTE: franka_box_contact_penalty_w (the magnitude at >=75 N) is a starting guess -- tune it.
+    franka_box_contact_penalty_w = 10.0
+    franka_box_contact_penalty_min_force = 25.0
+    franka_box_contact_penalty_max_force = 75.0
 
     robot_body_quat_scale = 1.0
     robot_key_body_pos_scale = 3.0

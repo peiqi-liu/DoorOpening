@@ -15,6 +15,11 @@ DEFAULT_CACHE_ROOT = REPO_ROOT / "IsaacLab_tmp"
 CACHE_ROOT_ENV_VAR = "DOOROPENING_ISAACLAB_CACHE_DIR"
 CACHE_FORCE_CONVERSION_ENV_VAR = "DOOROPENING_FORCE_USD_CONVERSION"
 DISTRIBUTED_RUN_TAG_ENV_VAR = "DOOROPENING_DISTRIBUTED_RUN_TAG"
+# Set by preconvert_shared_urdf_assets once the serialized, validated conversion for THIS run has
+# finished. While set, spawn-time cfgs LOAD the freshly-converted USDs instead of reconverting them
+# (which, under force_usd_conversion=True + distributed, races across ranks on the shared USD files
+# and yields a half-written, rigid-body-less door -> a random env dies with "no rigid bodies").
+ASSETS_PRECONVERTED_ENV_VAR = "DOOROPENING_ASSETS_PRECONVERTED_TAG"
 
 
 def get_converter_cache_root() -> Path:
@@ -57,11 +62,21 @@ def resolve_converter_cache_dir(
 
 
 def should_force_usd_conversion(default: bool = False) -> bool:
-    """Return whether URDF converters should ignore the cached USD output."""
-    configured = os.environ.get(CACHE_FORCE_CONVERSION_ENV_VAR)
-    if configured is None:
-        return default
-    return configured.strip().lower() not in {"", "0", "false", "no", "off"}
+    """Return whether URDF converters should ignore the cached USD output.
+
+    FORCED ON: always reconvert URDF->USD on every run, regardless of the
+    ``DOOROPENING_FORCE_USD_CONVERSION`` env var, the ``default`` argument, or the cache state.
+    This guarantees the robot AND all doors are rebuilt from the current URDFs, so a stale or
+    partial cached USD can never hang initialize_physics. Applies to glorbot (glorbot_cfg) and
+    every door (door_cfg / multi_door_cfg) via should_force_asset_usd_conversion.
+    To restore cache-aware behavior, remove the ``return True`` line below.
+    """
+    return True
+    # --- Previous cache-aware behavior (disabled by the forced return above) ---
+    # configured = os.environ.get(CACHE_FORCE_CONVERSION_ENV_VAR)
+    # if configured is None:
+    #     return default
+    # return configured.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
 def should_force_asset_usd_conversion(
@@ -71,11 +86,24 @@ def should_force_asset_usd_conversion(
     default: bool = False,
 ) -> bool:
     """Force reconversion when the source asset tree is newer than the cached USD."""
+    # If the serialized+validated preconvert already produced FRESH USDs for this run, LOAD them --
+    # do NOT reconvert at spawn. In distributed, each rank rebuilds its door cfgs and would
+    # otherwise reconvert the SAME shared door USD files concurrently (force_usd_conversion=True);
+    # a rank then reads a half-written USD (geometry, no rigid bodies) and a random env crashes.
+    # Only reconvert here if the cached USD is genuinely broken (self-repair fallback).
+    if _assets_preconverted_this_run():
+        return _is_cached_usd_missing_default_prim(asset_path, usd_dir)
     if should_force_usd_conversion(default=default):
         return True
     if _is_source_asset_newer_than_cache(str(asset_path), str(usd_dir)):
         return True
     return _is_cached_usd_missing_default_prim(asset_path, usd_dir)
+
+
+def _assets_preconverted_this_run() -> bool:
+    """True once this run's serialized preconvert has finished (so spawn should LOAD, not reconvert)."""
+    tag = os.environ.get(ASSETS_PRECONVERTED_ENV_VAR)
+    return bool(tag) and tag == os.environ.get(DISTRIBUTED_RUN_TAG_ENV_VAR, tag)
 
 
 @lru_cache(maxsize=None)
@@ -232,6 +260,16 @@ def preconvert_shared_urdf_assets(
             time.sleep(poll_interval_s)
         if verbose:
             print(f"[asset-prewarm] Rank {rank} detected completed shared URDF conversion.")
+
+    # The serialized preconvert above produced FRESH, validated USDs for this run. Signal spawn to
+    # LOAD them instead of reconverting (which would race across ranks -> half-written door USDs ->
+    # "no rigid bodies" on a random env). Door cfgs are rebuilt after this and consult
+    # _assets_preconverted_this_run() via should_force_asset_usd_conversion; the robot + the initial
+    # cfgs here (not rebuilt) are switched to load directly.
+    os.environ[ASSETS_PRECONVERTED_ENV_VAR] = os.environ.get(DISTRIBUTED_RUN_TAG_ENV_VAR, "1")
+    for cfg in unique_cfgs:
+        with contextlib.suppress(Exception):
+            cfg.force_usd_conversion = False
 
 
 def _iter_multi_asset_urdf_cfgs(spawn_cfg: object) -> Iterable[object]:
