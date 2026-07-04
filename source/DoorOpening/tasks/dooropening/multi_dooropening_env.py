@@ -2086,11 +2086,18 @@ class DooropeningEnv(DirectRLEnv):
         )
         panel_force_norm = torch.linalg.vector_norm(contact_forces_door_panel, dim=-1)
         panel_contact = (panel_force_norm > self.cfg.panel_contact_force_threshold).to(dtype=panel_force_norm.dtype)
+        # Finger<->panel penalty term is kept in the reward but DISABLED via
+        # panel_contact_penalty_w=0.0 (panel friction DR handles the sim2real slip). Kept computed +
+        # logged so re-enabling is just a nonzero weight and the diagnostics stay in wandb.
         weighted_panel_contact_penalty = (
             self.panel_contact_penalty_w * self.ref_panel_contact_mask.squeeze() * panel_contact
         )
+        self.extras["error/panel_contact_penalty"] = weighted_panel_contact_penalty.mean().item()
         self.extras["stats/panel_contact_force_norm_mean"] = float(panel_force_norm.mean().detach().cpu().item())
         self.extras["stats/panel_contact_force_norm_max"] = float(panel_force_norm.max().detach().cpu().item())
+        self.extras["stats/panel_contact_frac"] = float(
+            (panel_contact * self.ref_panel_contact_mask.squeeze()).mean().detach().cpu().item()
+        )
 
         # Base<->door contact penalty: no base face should touch the door. Count the four
         # vertical faces (front/back/left/right) whose contact force with any door body exceeds
@@ -2245,10 +2252,12 @@ class DooropeningEnv(DirectRLEnv):
         reset_key_body_pos_delta = reset_key_body_pos_delta ** 2
         reset_key_body_quat_delta = reset_key_body_quat_delta ** 2
         reset_door_joint_pos_delta = reset_door_joint_pos_delta ** 2
-        # Termination: the slender x5 arm is lethal on light contact (1.5 N). The franka control
-        # box is NO LONGER episode-ending -- a graded force penalty in _get_rewards handles it.
+        # Termination: robot/door tracking drift only. Neither the x5 arm nor the franka control
+        # box ends the episode anymore -- both are discouraged by (high) contact penalties in
+        # _get_rewards (x5: x5_door_contact_penalty_w) instead of hard termination. The x5-arm
+        # contact is still computed here PURELY to keep logging its fraction to wandb.
         x5_arm_force_norm = self._get_x5_body_contact_force_norm(include_franka_box=False)
-        unsafe_x5_body_contact = x5_arm_force_norm > self.cfg.x5_body_contact_force_threshold
+        unsafe_x5_arm_contact = x5_arm_force_norm > self.cfg.x5_body_contact_force_threshold
         # key_body_pos_err, key_body_quat_err, door_err, root_pos_err, root_rot_err, arm_joint_pos_err, finger_joint_pos_err, base_joint_vel_err, arm_joint_vel_err, finger_joint_vel_err, door_pos_err = compute_tracking_error(
         key_body_pos_err, key_body_quat_err, door_err, base_joint_pos_err, arm_joint_pos_err, finger_joint_pos_err, arx_joint_pos_err, base_joint_vel_err, arm_joint_vel_err, finger_joint_vel_err = compute_tracking_error(
             robot_key_body_pos = self.robot_reset_key_body_pos,
@@ -2273,15 +2282,17 @@ class DooropeningEnv(DirectRLEnv):
             ref_robot_arm_joint_vel = self.ref_robot_arm_joint_vel,
             ref_robot_finger_joint_vel = self.ref_robot_finger_joint_vel,
         )
-        # Separate the three hard-termination failure modes and log each fraction for diagnosis
-        # (the franka-box failure is now a graded penalty, logged as fail/franka_box_contact_frac).
+        # Hard-termination failure modes are now robot/door tracking drift only; log each fraction
+        # for diagnosis. x5-arm and franka-box door contact are (high) contact penalties in
+        # _get_rewards, not terminations (x5 contact fraction is logged there as
+        # stats/x5_body_unsafe_contact_frac).
         fail_robot_drift = (key_body_pos_err > reset_key_body_pos_delta) | (key_body_quat_err > reset_key_body_quat_delta)
         fail_door_drift = door_err > reset_door_joint_pos_delta
-        fail_x5_collision = unsafe_x5_body_contact
         self.extras["fail/robot_drift_frac"] = float(fail_robot_drift.float().mean().detach().cpu().item())
         self.extras["fail/door_drift_frac"] = float(fail_door_drift.float().mean().detach().cpu().item())
-        self.extras["fail/x5_collision_frac"] = float(fail_x5_collision.float().mean().detach().cpu().item())
-        return fail_robot_drift | fail_door_drift | fail_x5_collision, time_out
+        # Logged-only (NOT a termination): fraction of envs with unsafe x5-arm door contact.
+        self.extras["fail/x5_collision_frac"] = float(unsafe_x5_arm_contact.float().mean().detach().cpu().item())
+        return fail_robot_drift | fail_door_drift, time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
