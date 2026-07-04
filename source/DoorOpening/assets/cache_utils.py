@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import os
+import shutil
 import time
 import xml.etree.ElementTree as ET
 from functools import lru_cache
@@ -188,6 +189,11 @@ def preconvert_shared_urdf_assets(
     if not is_distributed_launch():
         return
 
+    # Guard every URDF->USD conversion in this process -- the serialized preconvert below AND
+    # any on-demand spawn-time conversion -- with a per-asset lock + private staging + atomic
+    # publish, so no two ranks ever write the same shared cache dir concurrently.
+    install_rank_safe_urdf_converter()
+
     asset_cfgs = [GLORBOT_CONFIG.spawn]
     asset_cfgs.extend(_iter_multi_asset_urdf_cfgs(getattr(door_configs, "spawn", None)))
     unique_cfgs = _deduplicate_urdf_cfgs(asset_cfgs)
@@ -214,9 +220,27 @@ def preconvert_shared_urdf_assets(
     if rank == 0:
         lock_fd = _acquire_lock(lock_path, timeout_s=timeout_s, poll_interval_s=poll_interval_s)
         try:
+            _gc_stale_prewarm_markers(sync_root)
             with contextlib.suppress(FileNotFoundError):
                 error_path.unlink()
-            if not done_path.exists():
+            # Only trust an existing .done marker if the USDs it claims actually exist on disk.
+            # run_tag can collide across launches (the MASTER_ADDR/PORT fallback is reused), so a
+            # stale marker from a previous run -- or a partially cleared cache -- must never let
+            # ranks skip straight to spawn and convert on-demand (which races on the shared NFS
+            # cache: two ranks writing frame.tmp.usd -> NFS silly-rename -> NULL UsdStage -> abort).
+            missing = _doors_missing_usd(unique_cfgs)
+            if done_path.exists() and not missing:
+                if verbose:
+                    print(f"[asset-prewarm] Shared URDF conversion already complete: {done_path}")
+            else:
+                if done_path.exists():
+                    if verbose:
+                        print(
+                            f"[asset-prewarm] Ignoring stale/incomplete .done marker (missing "
+                            f"{len(missing)} USDs, first={missing[0] if missing else '-'}); reconverting."
+                        )
+                    with contextlib.suppress(FileNotFoundError):
+                        done_path.unlink()
                 if verbose:
                     print(f"[asset-prewarm] Rank 0 converting {len(unique_cfgs)} shared URDF assets.")
                 for idx, cfg in enumerate(unique_cfgs, start=1):
@@ -224,11 +248,16 @@ def preconvert_shared_urdf_assets(
                         asset_label = Path(str(getattr(cfg, "asset_path", ""))).parent.name
                         print(f"[asset-prewarm] Converting {idx}/{len(unique_cfgs)}: {asset_label}")
                     _convert_and_validate_urdf(UrdfConverter, cfg)
+                still_missing = _doors_missing_usd(unique_cfgs)
+                if still_missing:
+                    raise RuntimeError(
+                        "Shared URDF preconversion finished but "
+                        f"{len(still_missing)} USDs are still missing; first={still_missing[0]}"
+                    )
+                # Write .done only after verifying every USD is present, so the marker never lies.
                 done_path.write_text(str(time.time()), encoding="utf-8")
                 if verbose:
                     print(f"[asset-prewarm] Rank 0 finished shared URDF conversion: {done_path}")
-            elif verbose:
-                print(f"[asset-prewarm] Shared URDF conversion already complete: {done_path}")
         except Exception as exc:
             error_path.write_text(repr(exc), encoding="utf-8")
             raise
@@ -245,7 +274,13 @@ def preconvert_shared_urdf_assets(
                 )
             )
         last_log_time = time.monotonic()
-        while not done_path.exists():
+        while True:
+            # Require BOTH the .done marker AND the actual USDs on disk. This makes a stale marker
+            # harmless: keep waiting until rank 0 of THIS launch has really produced every USD,
+            # instead of proceeding to a spawn-time on-demand conversion that races across ranks.
+            # (done_path.exists() short-circuits the per-door stat sweep until the marker appears.)
+            if done_path.exists() and not _doors_missing_usd(unique_cfgs):
+                break
             if error_path.exists():
                 message = error_path.read_text(encoding="utf-8").strip() or "unknown error"
                 raise RuntimeError(f"Rank 0 URDF preconversion failed: {message}")
@@ -417,6 +452,147 @@ def _release_lock(lock_fd: int, lock_path: Path) -> None:
     os.close(lock_fd)
     with contextlib.suppress(FileNotFoundError):
         lock_path.unlink()
+
+
+_ORIG_URDF_CONVERTER_INIT = None
+
+
+def install_rank_safe_urdf_converter() -> None:
+    """Serialize + isolate URDF->USD conversions so ranks never write a shared cache dir at once.
+
+    Wraps ``UrdfConverter.__init__`` so that whenever a conversion would actually WRITE into a
+    shared ``usd_dir`` (the serialized preconvert OR an on-demand spawn), it:
+      1. takes a per-asset file lock on ``<usd_dir>.convert.lock``,
+      2. converts into a private ``<usd_dir>.staging.<pid>`` directory, then
+      3. atomically publishes the finished files into the shared dir (``os.replace`` per file).
+    Two processes converting the same door can therefore never collide on the intermediate
+    ``configuration/*.tmp.usd`` files (which on NFS silly-renames the open file, fails the write,
+    returns a NULL ``UsdStage`` and aborts the process). Generated USDs use relative references,
+    so moving the tree into place is safe. Idempotent; a pure cache-hit load takes no lock and
+    keeps the stock (fast) behavior.
+    """
+    global _ORIG_URDF_CONVERTER_INIT
+    from isaaclab.sim.converters import UrdfConverter
+
+    if getattr(UrdfConverter, "_dooropening_rank_safe", False):
+        return
+    _ORIG_URDF_CONVERTER_INIT = UrdfConverter.__init__
+
+    def _rank_safe_init(self, cfg):
+        shared_dir = getattr(cfg, "usd_dir", None)
+        if shared_dir is None:
+            # No shared cache dir -> IsaacLab already uses a random /tmp dir (race-safe).
+            _ORIG_URDF_CONVERTER_INIT(self, cfg)
+            return
+        shared_dir = str(shared_dir)
+        force = bool(getattr(cfg, "force_usd_conversion", False))
+        if not force and _cached_conversion_is_current(UrdfConverter, cfg, shared_dir):
+            # Cache hit: the stock init just loads, no write -> no lock needed.
+            _ORIG_URDF_CONVERTER_INIT(self, cfg)
+            return
+        with _asset_convert_lock(shared_dir):
+            # Another process may have published a valid USD while we waited for the lock.
+            if _cached_conversion_is_current(UrdfConverter, cfg, shared_dir):
+                saved_force = getattr(cfg, "force_usd_conversion", False)
+                try:
+                    cfg.force_usd_conversion = False
+                    _ORIG_URDF_CONVERTER_INIT(self, cfg)
+                finally:
+                    cfg.force_usd_conversion = saved_force
+                return
+            staging = Path(f"{shared_dir}.staging.{os.getpid()}")
+            _rmtree(staging)
+            saved_usd_dir = cfg.usd_dir
+            saved_force = getattr(cfg, "force_usd_conversion", False)
+            try:
+                cfg.usd_dir = str(staging)
+                cfg.force_usd_conversion = True  # staging is empty -> must convert
+                _ORIG_URDF_CONVERTER_INIT(self, cfg)
+                _publish_converted_dir(staging, Path(shared_dir))
+            finally:
+                cfg.usd_dir = saved_usd_dir
+                cfg.force_usd_conversion = saved_force
+                _rmtree(staging)
+            # Repoint the converter at the published location so ``usd_path`` is correct.
+            self._usd_dir = shared_dir
+
+    UrdfConverter.__init__ = _rank_safe_init
+    UrdfConverter._dooropening_rank_safe = True
+
+
+def _cached_conversion_is_current(converter_cls: type, cfg: object, usd_dir: str) -> bool:
+    """True when a converted USD for ``cfg`` already exists in ``usd_dir`` with a matching hash."""
+    usd_path = _expected_usd_path(
+        getattr(cfg, "asset_path", ""), usd_dir, getattr(cfg, "usd_file_name", None)
+    )
+    if not usd_path.is_file():
+        return False
+    try:
+        saved_hash = (Path(usd_dir) / ".asset_hash").read_text(encoding="utf-8").splitlines()[0]
+    except (OSError, IndexError):
+        return False
+    try:
+        current_hash = converter_cls._config_to_hash(cfg)
+    except Exception:
+        return False
+    return saved_hash == current_hash
+
+
+@contextlib.contextmanager
+def _asset_convert_lock(usd_dir: str, *, timeout_s: float = 900.0, poll_interval_s: float = 0.5):
+    lock_path = Path(f"{usd_dir}.convert.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = _acquire_lock(lock_path, timeout_s=timeout_s, poll_interval_s=poll_interval_s)
+    try:
+        yield
+    finally:
+        _release_lock(lock_fd, lock_path)
+
+
+def _publish_converted_dir(staging_dir: Path, shared_dir: Path) -> None:
+    """Atomically move freshly converted files from a private staging dir into the shared cache."""
+    shared_dir.mkdir(parents=True, exist_ok=True)
+    for src in sorted(staging_dir.rglob("*")):
+        if not src.is_file():
+            continue
+        if src.name.endswith(".tmp.usd"):
+            # Intermediate importer artifacts; the published USDs reference the flattened files.
+            continue
+        rel = src.relative_to(staging_dir)
+        dst = shared_dir / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(str(src), str(dst))  # atomic within the same filesystem; overwrites stale files
+
+
+def _rmtree(path: Path) -> None:
+    with contextlib.suppress(FileNotFoundError):
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def _doors_missing_usd(cfgs: Iterable[object]) -> list[str]:
+    """Return source asset paths whose expected converted USD is not present on disk."""
+    missing: list[str] = []
+    for cfg in cfgs:
+        asset_path = getattr(cfg, "asset_path", "")
+        usd_dir = getattr(cfg, "usd_dir", "")
+        if not usd_dir:
+            continue
+        usd_path = _expected_usd_path(asset_path, usd_dir, getattr(cfg, "usd_file_name", None))
+        if not usd_path.is_file():
+            missing.append(str(asset_path))
+    return missing
+
+
+def _gc_stale_prewarm_markers(sync_root: Path, max_age_s: float = 3 * 24 * 3600.0) -> None:
+    """Prune old .done/.failed/.lock markers so a stale one can never be mistaken for this run."""
+    now = time.time()
+    for pattern in ("*.done", "*.failed", "*.lock"):
+        for marker in sync_root.glob(pattern):
+            try:
+                if now - marker.stat().st_mtime > max_age_s:
+                    marker.unlink()
+            except (FileNotFoundError, OSError):
+                continue
 
 
 def _safe_open_usd_stage(path: str | Path, *, context: str) -> object:
