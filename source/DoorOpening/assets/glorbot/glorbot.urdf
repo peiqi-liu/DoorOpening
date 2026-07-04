@@ -758,7 +758,7 @@
       <material name="panda_white"/>
     </visual>
     <!-- All franka links (incl. link5) use their low-poly collision/*.obj collider. NOTE:
-         collision/link5.obj is coarse/non-watertight -- the original author avoided it because
+         collision/link5.obj is coarse/non-watertight; the original author avoided it because
          convex_decomposition (VHACD) could leave a hole; if cooking stalls/holes, that is why. -->
     <collision>
       <geometry>

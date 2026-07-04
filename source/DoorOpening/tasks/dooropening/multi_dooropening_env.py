@@ -755,10 +755,15 @@ class DooropeningEnv(DirectRLEnv):
         # Make the robot's per-link `collisions` scopes renderable by the collider debug viz
         # (green overlay); the converter marks them instanceable and the GUI skips instanced
         # colliders. Runs on the spawn source before cloning, so it's free at runtime.
-        disable_collision_scope_instancing(self.cfg.robot_cfg.prim_path)
+        if self.sim.has_gui():
+            disable_collision_scope_instancing(self.cfg.robot_cfg.prim_path)
         self.door = Articulation(self.cfg.door_cfg)
         # Same instancing fix for the door's converted USD, so its collider boxes render too.
-        disable_collision_scope_instancing(self.cfg.door_cfg.prim_path)
+        # GUI-only cosmetics: on the heterogeneous multi-door set each SetInstanceable() triggers a
+        # USD recomposition (O(N^2) over thousands of unique door colliders) and stalls headless
+        # training for many minutes, so skip it entirely when there is no viewer.
+        if self.sim.has_gui():
+            disable_collision_scope_instancing(self.cfg.door_cfg.prim_path)
         # add ground plane
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
         # Do not clone env_0 over the other envs for heterogeneous multi-door
