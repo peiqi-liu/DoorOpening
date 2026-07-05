@@ -211,7 +211,6 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_arm_joint_vel_w = self.cfg.robot_arm_joint_vel_w
         self.robot_finger_joint_vel_w = self.cfg.robot_finger_joint_vel_w
         self.hinge_contact_reward_w = self.cfg.hinge_contact_reward_w
-        self.panel_contact_penalty_w = self.cfg.panel_contact_penalty_w
         self.base_door_contact_penalty_w = self.cfg.base_door_contact_penalty_w
         self.x5_door_contact_penalty_w = self.cfg.x5_door_contact_penalty_w
         self.robot_body_lin_vel_w = self.cfg.robot_body_lin_vel_w
@@ -1542,6 +1541,15 @@ class DooropeningEnv(DirectRLEnv):
         #         - self.ref_robot_base_joint_pos.to(policy_joint_pos),
         #         policy_joint_pos[:, self._target_arm_slice] - self.ref_robot_arm_joint_pos.to(policy_joint_pos),
         #         policy_joint_pos[:, self._target_finger_slice] - self.ref_robot_finger_joint_pos.to(policy_joint_pos),
+        #     ),
+        #     dim=-1,
+        # ).unsqueeze(dim=1)
+        # policy_joint_ref_err = torch.cat(
+        #     (
+        #         clean_joint_pos[:, self._target_base_rot_slice.start : self._target_base_xy_slice.stop]
+        #         - self.ref_robot_base_joint_pos.to(clean_joint_pos),
+        #         clean_joint_pos[:, self._target_arm_slice] - self.ref_robot_arm_joint_pos.to(clean_joint_pos),
+        #         clean_joint_pos[:, self._target_finger_slice] - self.ref_robot_finger_joint_pos.to(clean_joint_pos),
         #     ),
         #     dim=-1,
         # ).unsqueeze(dim=1)
