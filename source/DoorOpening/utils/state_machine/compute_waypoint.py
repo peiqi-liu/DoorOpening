@@ -1027,6 +1027,13 @@ def play_and_save_traj(
     elif len(key_indices) > 6:
         panel_contact_mask[:key_indices[6]] = 1
 
+    # grasp_stage_mask: the PREGRASP -> GRASP window (keyframes 1..3: pregrasp, grasp, up to the
+    # rotate keyframe). Used ONLY to gate the finger<->panel normal-force LOGGING (no reward) so we
+    # can monitor how hard the fingers press the panel while approaching + closing on the handle.
+    grasp_stage_mask = torch.zeros(len(robot_traj), dtype=torch.int8)
+    if len(key_indices) > 3:
+        grasp_stage_mask[key_indices[1]:key_indices[3]] = 1
+
     data = {
         "handle_side": planner_handle_side,
         "opening_direction": planner_opening_direction,
@@ -1039,6 +1046,7 @@ def play_and_save_traj(
         # "key_indices": torch.tensor(key_indices, dtype=torch.int32)[key_idx_in_key_indices]
         "hinge_contact_mask": hinge_contact_mask,
         "panel_contact_mask": panel_contact_mask,
+        "grasp_stage_mask": grasp_stage_mask,
         "key_indices": key_indices,
         "robot_body_pos_twist": robot_body_pos_twist,
         "door_body_pos_traj": door_body_pos_traj

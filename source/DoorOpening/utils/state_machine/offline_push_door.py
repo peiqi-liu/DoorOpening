@@ -183,7 +183,9 @@ def state_machine_offline_push_right_door(
     base_target_pose = _make_pose(base_target_pos, base_target_rot)
 
     palm_target_pos = handle_pos.clone()
-    palm_target_pos[:, 0] += 0.40
+    # Moved back (0.40 -> 0.45): wider palm<->door x gap to compensate for removing the
+    # finger<->panel penalty.
+    palm_target_pos[:, 0] += 0.45
     # Slightly inward (-y; was -0.20).
     palm_target_pos[:, 1] += -0.23
     palm_target_pos[:, 2] += 0.2
@@ -212,9 +214,9 @@ def state_machine_offline_push_right_door(
     # Step 2: Move to grasp
     # -------------------------
     palm_target_pos = handle_pos.clone()
-    # Grasp EE ~1.5 cm FORWARD (-x). Left/right nudge intentionally NOT applied on the push door
-    # (only forward helps here); y stays at the prior -0.10.
-    palm_target_pos[:, 0] += 0.035
+    # Grasp EE moved BACK (0.035 -> 0.05) to widen the palm<->door x gap (compensates for removing
+    # the finger<->panel penalty). Left/right nudge still not applied on push; y = -0.10.
+    palm_target_pos[:, 0] += 0.05
     palm_target_pos[:, 1] += -0.10
     palm_target_pos[:, 2] += 0.08
     palm_target_pose = _make_pose(palm_target_pos, default_palm_rot)
@@ -517,7 +519,9 @@ def state_machine_offline_push_left_door(
     base_target_pose = _make_pose(base_target_pos, base_target_rot)
 
     palm_target_pos = handle_pos.clone()
-    palm_target_pos[:, 0] += 0.35
+    # Moved back (0.35 -> 0.40): wider palm<->door x gap to compensate for removing the
+    # finger<->panel penalty.
+    palm_target_pos[:, 0] += 0.40
     # Slightly inward (+y; was 0.15).
     palm_target_pos[:, 1] += 0.18
     palm_target_pos[:, 2] += 0.25
@@ -546,9 +550,9 @@ def state_machine_offline_push_left_door(
     # Step 2: Move to grasp
     # -------------------------
     palm_target_pos = handle_pos.clone()
-    # Grasp EE ~1.5 cm FORWARD (-x). Left/right nudge intentionally NOT applied on the push door
-    # (only forward helps here); y stays at the prior 0.03.
-    palm_target_pos[:, 0] += 0.025
+    # Grasp EE moved BACK (0.025 -> 0.05) to widen the palm<->door x gap (compensates for removing
+    # the finger<->panel penalty). Left/right nudge still not applied on push; y = 0.03.
+    palm_target_pos[:, 0] += 0.05
     palm_target_pos[:, 1] += 0.03
     palm_target_pos[:, 2] += 0.10
     palm_target_pose = _make_pose(palm_target_pos, default_palm_rot)

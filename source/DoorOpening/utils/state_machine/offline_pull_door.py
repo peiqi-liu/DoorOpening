@@ -141,7 +141,9 @@ def state_machine_offline_right_pull_door(
     # (keeps the base off the side wall, like the push planner).
     pregrasp_base_x_offset = 0.6
     pregrasp_base_y_offset = -0.30
-    pregrasp_palm_x_offset = 0.40
+    # Moved back (0.40 -> 0.45): larger palm<->door x gap to compensate for removing the
+    # finger<->panel contact penalty (the demo grasps from further out so fingers don't press panel).
+    pregrasp_palm_x_offset = 0.45
     pregrasp_palm_y_offset = -0.20
     pregrasp_palm_z_offset = 0.2
 
@@ -181,7 +183,9 @@ def state_machine_offline_right_pull_door(
     # Unified with the push-right planner so grasp palm<->handle offsets match.
     # Right-handle door: nudge grasp EE ~2.5 cm LEFT (-y, toward door center) and ~1.5 cm FORWARD
     # (-x, toward the handle/door). Robot faces -x, so right=+y / left=-y / forward=-x.
-    grasp_palm_x_offset = 0.035
+    # Moved back (0.035 -> 0.05): larger palm<->door x gap compensates for removing the
+    # finger<->panel penalty, so the grasp doesn't drive fingers into the panel.
+    grasp_palm_x_offset = 0.05
     grasp_palm_y_offset = -0.085
     grasp_palm_z_offset = 0.08
     grasp_open_ratio = 0.70
@@ -697,7 +701,9 @@ def state_machine_offline_left_pull_door(
     pregrasp_base_x_offset = 0.55
     # Pulled 5cm back off the +y side so the left door pregrasp doesn't reach so far right.
     pregrasp_base_y_offset = 0.25
-    pregrasp_palm_x_offset = 0.35
+    # Moved back (0.35 -> 0.40): larger palm<->door x gap to compensate for removing the
+    # finger<->panel penalty.
+    pregrasp_palm_x_offset = 0.40
     pregrasp_palm_y_offset = 0.15
     pregrasp_palm_z_offset = 0.25
 
@@ -736,7 +742,9 @@ def state_machine_offline_left_pull_door(
     # -------------------------
     # Left-handle door: nudge grasp EE ~2.5 cm RIGHT (+y, toward door center) and ~1.5 cm FORWARD
     # (-x, toward the handle/door). Robot faces -x, so right=+y / left=-y / forward=-x.
-    grasp_palm_x_offset = 0.025
+    # Moved back (0.025 -> 0.05): larger palm<->door x gap compensates for removing the
+    # finger<->panel penalty.
+    grasp_palm_x_offset = 0.05
     grasp_palm_y_offset = 0.015
     grasp_palm_z_offset = 0.10
     grasp_open_ratio = 0.7
