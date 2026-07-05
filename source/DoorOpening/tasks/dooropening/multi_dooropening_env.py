@@ -291,6 +291,13 @@ class DooropeningEnv(DirectRLEnv):
             family_name: deque(maxlen=self.games_to_track) for family_name in DOOR_FAMILY_NAMES
         }
         self.episode_reached_last_frame = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        # Per-episode collision LATCHES + rolling completed-episode buffers, so we can report the
+        # FRACTION OF ROLLOUTS that experienced any x5-arm / franka-box door collision -- far clearer
+        # than the per-step instantaneous fraction.
+        self.completed_x5_collisions = deque(maxlen=self.games_to_track)
+        self.completed_franka_box_collisions = deque(maxlen=self.games_to_track)
+        self.episode_x5_collided = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.episode_franka_box_collided = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         torch.set_printoptions(precision=4, sci_mode=False)
 
@@ -914,10 +921,24 @@ class DooropeningEnv(DirectRLEnv):
             for family_id, value in zip(done_family_ids, episode_successes):
                 family_name = DOOR_FAMILY_NAMES[int(family_id)]
                 self.completed_successes_by_family[family_name].append(float(value))
+            # Record whether each COMPLETED rollout had any x5-arm / franka-box door collision.
+            self.completed_x5_collisions.extend(
+                self.episode_x5_collided[done_mask].to(dtype=torch.float32).detach().cpu().tolist()
+            )
+            self.completed_franka_box_collisions.extend(
+                self.episode_franka_box_collided[done_mask].to(dtype=torch.float32).detach().cpu().tolist()
+            )
 
         success_rate = self._mean_completed_metric(self.completed_successes)
         if success_rate is not None:
             self.extras["success/success_rate"] = success_rate
+        # Fraction of completed rollouts that experienced ANY x5-arm / franka-box door collision.
+        x5_collision_rate = self._mean_completed_metric(self.completed_x5_collisions)
+        if x5_collision_rate is not None:
+            self.extras["fail/x5_collision_episode_rate"] = x5_collision_rate
+        franka_box_collision_rate = self._mean_completed_metric(self.completed_franka_box_collisions)
+        if franka_box_collision_rate is not None:
+            self.extras["fail/franka_box_collision_episode_rate"] = franka_box_collision_rate
 
         for family_id, family_name in enumerate(DOOR_FAMILY_NAMES):
             family_success_rate = self._mean_completed_metric(self.completed_successes_by_family[family_name])
@@ -1837,6 +1858,7 @@ class DooropeningEnv(DirectRLEnv):
         self.ref_door_joint_pos = self.door_joint_pos.clone()
         self.ref_hinge_contact_mask = torch.zeros(self.num_envs, device=self.device, dtype=self.door_joint_pos.dtype)
         self.ref_panel_contact_mask = torch.zeros(self.num_envs, device=self.device, dtype=self.door_joint_pos.dtype)
+        self.ref_grasp_stage_mask = torch.zeros(self.num_envs, device=self.device, dtype=self.door_joint_pos.dtype)
         self.ref_robot_body_lin_vel = self.robot_body_lin_vel
         self.ref_robot_body_ang_vel = self.robot_body_ang_vel
 
@@ -1985,6 +2007,7 @@ class DooropeningEnv(DirectRLEnv):
         self.ref_door_joint_pos = self.ref_motion_lib.get_door_joint_pos()
         self.ref_hinge_contact_mask = self.ref_motion_lib.get_hinge_contact_mask()
         self.ref_panel_contact_mask = self.ref_motion_lib.get_panel_contact_mask()
+        self.ref_grasp_stage_mask = self.ref_motion_lib.get_grasp_stage_mask()
         self.ref_door_body_pos_twist = self.ref_motion_lib.get_door_body_pos_twist()
         ref_motion_dt = max(float(self.ref_motion_lib.frame_dt), 1e-6)
         ref_robot_body_lin_vel = self.ref_motion_lib.get_robot_body_lin_vel()
@@ -2060,6 +2083,8 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["stats/filtered_handle_force_norm_mean"] = float(handle_force_norm.mean().detach().cpu().item())
         x5_body_force_norm = self._get_x5_body_contact_force_norm(include_franka_box=False)
         unsafe_x5_body_contact = x5_body_force_norm > self.cfg.x5_body_contact_force_threshold
+        # Latch: this episode had at least one x5-arm door collision (reported per-rollout below).
+        self.episode_x5_collided |= unsafe_x5_body_contact
         self.extras["stats/x5_body_contact_force_norm_max"] = float(x5_body_force_norm.max().detach().cpu().item())
         self.extras["stats/x5_body_unsafe_contact_frac"] = float(
             unsafe_x5_body_contact.float().mean().detach().cpu().item()
@@ -2084,19 +2109,16 @@ class DooropeningEnv(DirectRLEnv):
             self.scene.sensors["contact_forces_door_panel"],
             expected_num_envs=self.num_envs,
         )
+        # Finger<->panel contact PENALTY fully removed (the panel friction DR + the moved-back
+        # pregrasp/grasp poses now handle finger pressing on the panel). We still REPORT the
+        # finger<->panel normal force to wandb for debugging -- averaged ONLY over envs currently in
+        # the PREGRASP->GRASP stage (ref_grasp_stage_mask, keyframes 1..3), since that is where
+        # finger pressing on the panel matters. Masked mean = 0 when no env is in that stage.
         panel_force_norm = torch.linalg.vector_norm(contact_forces_door_panel, dim=-1)
-        panel_contact = (panel_force_norm > self.cfg.panel_contact_force_threshold).to(dtype=panel_force_norm.dtype)
-        # Finger<->panel penalty term is kept in the reward but DISABLED via
-        # panel_contact_penalty_w=0.0 (panel friction DR handles the sim2real slip). Kept computed +
-        # logged so re-enabling is just a nonzero weight and the diagnostics stay in wandb.
-        weighted_panel_contact_penalty = (
-            self.panel_contact_penalty_w * self.ref_panel_contact_mask.squeeze() * panel_contact
-        )
-        self.extras["error/panel_contact_penalty"] = weighted_panel_contact_penalty.mean().item()
-        self.extras["stats/panel_contact_force_norm_mean"] = float(panel_force_norm.mean().detach().cpu().item())
-        self.extras["stats/panel_contact_force_norm_max"] = float(panel_force_norm.max().detach().cpu().item())
-        self.extras["stats/panel_contact_frac"] = float(
-            (panel_contact * self.ref_panel_contact_mask.squeeze()).mean().detach().cpu().item()
+        grasp_stage = (self.ref_grasp_stage_mask.squeeze() > 0).to(panel_force_norm.dtype)
+        grasp_denom = grasp_stage.sum().clamp(min=1.0)
+        self.extras["finger panel normal forces mean"] = float(
+            ((panel_force_norm * grasp_stage).sum() / grasp_denom).detach().cpu().item()
         )
 
         # Base<->door contact penalty: no base face should touch the door. Count the four
@@ -2114,6 +2136,8 @@ class DooropeningEnv(DirectRLEnv):
         # graded penalty ramps linearly from 0 at min_force (25 N -- light taps are free) to the
         # full weight at max_force (75 N and above). Replaces the old hard-termination check.
         franka_box_force_norm = self._get_franka_box_contact_force_norm()
+        # Latch: this episode had at least one franka-box door collision (> min_force).
+        self.episode_franka_box_collided |= franka_box_force_norm > self.cfg.franka_box_contact_penalty_min_force
         franka_box_penalty_frac = torch.clamp(
             (franka_box_force_norm - self.cfg.franka_box_contact_penalty_min_force)
             / (self.cfg.franka_box_contact_penalty_max_force - self.cfg.franka_box_contact_penalty_min_force),
@@ -2223,7 +2247,6 @@ class DooropeningEnv(DirectRLEnv):
             + weighted_arx_tuck_reward
             + total_alive_reward
             - weighted_joint_limit_penalty
-            - weighted_panel_contact_penalty
             - weighted_self_collision_penalty
             - weighted_base_door_contact_penalty
             - weighted_x5_door_contact_penalty
@@ -2335,6 +2358,8 @@ class DooropeningEnv(DirectRLEnv):
             self.applied_robot_dof_targets[env_ids, :] = self.robot_dof_targets[env_ids, :]
             self._action_target_history[env_ids] = self.robot_dof_targets[env_ids].unsqueeze(1)
             self.episode_reached_last_frame[env_ids] = False
+            self.episode_x5_collided[env_ids] = False
+            self.episode_franka_box_collided[env_ids] = False
             super()._reset_idx(env_ids)
             self._sample_door_handle_effort_limits(env_ids)
             self._apply_door_handle_effort_limits(env_ids)
@@ -2392,6 +2417,8 @@ class DooropeningEnv(DirectRLEnv):
         self.applied_robot_dof_targets[env_ids, :] = self.robot_dof_targets[env_ids, :]
         self._action_target_history[env_ids] = self.robot_dof_targets[env_ids].unsqueeze(1)
         self.episode_reached_last_frame[env_ids] = False
+        self.episode_x5_collided[env_ids] = False
+        self.episode_franka_box_collided[env_ids] = False
         super()._reset_idx(env_ids)
         self._sample_door_handle_effort_limits(env_ids)
         self._apply_door_handle_effort_limits(env_ids)
