@@ -301,12 +301,13 @@ class DooropeningEnv(DirectRLEnv):
 
         # Task-based success: latch when the base reaches the FAR side of the door. We work in BASE-X
         # JOINT space, NOT robot.data.root_state_w -- the articulation root is the fixed `base_link`
-        # spawned at ROBOT_INITIAL_POS; the mobile base moves *below* it via the base_x prismatic joint
-        # (axis +x). So base world x = ROBOT_INITIAL_POS.x + base_x_joint, and the signed distance the
-        # base has moved PAST the door plane (start side is +x, door at DOOR_INITIAL_POS.x) is
-        #     dist_past = (DOOR_INITIAL_POS.x - ROBOT_INITIAL_POS.x) - base_x_joint.
-        # (= -1.0 - base_x_joint here: at spawn base_x_joint~0 -> dist_past~-1.0 (not past); larger
-        # negative base_x_joint -> the robot has driven through -> positive dist_past.)
+        # spawned at ROBOT_INITIAL_POS; the mobile base moves *below* it via the base_x prismatic joint.
+        # The robot spawns facing the door, so base_x GROWS as it drives toward/through the door
+        # (traj.pkl: base_x ~0 at spawn -> ~1.5 pull / ~2.5 push). Hence base world x = ROBOT_INITIAL.x
+        # - base_x_joint, and the signed distance PAST the door plane (door at DOOR_INITIAL.x) is
+        #     dist_past = DOOR_INITIAL.x - world_x = base_x_joint + (DOOR_INITIAL.x - ROBOT_INITIAL.x)
+        # (= base_x_joint - 1.0 here: spawn base_x~0 -> ~-1.0 (not past); base_x=1.0 at the door plane;
+        # pull ends ~+0.5 past, push ends ~+1.5 past).
         self.episode_reached_far_side = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.completed_reached_last_frame = deque(maxlen=self.games_to_track)
         self._base_x_dof_idx = int(self._robot_base_xy_dof_idx[0].item())
@@ -931,9 +932,11 @@ class DooropeningEnv(DirectRLEnv):
 
     def _base_dist_past_door(self, base_x_joint: torch.Tensor) -> torch.Tensor:
         """Signed distance the base has moved PAST the door plane, from the base_x JOINT value.
-        base world x = ROBOT_INITIAL_POS.x + base_x_joint; door plane at DOOR_INITIAL_POS.x, so
-        dist_past = (DOOR_INITIAL_POS.x - ROBOT_INITIAL_POS.x) - base_x_joint (positive => on far side)."""
-        return self._door_minus_robot_x - base_x_joint
+        base_x GROWS as the robot drives toward/through the door (verified from traj.pkl: ~0 at spawn
+        -> ~1.5 for pull, ~2.5 for push), i.e. base world x = ROBOT_INITIAL_POS.x - base_x_joint. So
+        dist_past = DOOR_INITIAL_POS.x - world_x = base_x_joint + (DOOR_INITIAL_POS.x - ROBOT_INITIAL_POS.x)
+        = base_x_joint - 1.0 here (positive => past the door on the far side)."""
+        return base_x_joint + self._door_minus_robot_x
 
     def _far_side_threshold(self) -> torch.Tensor:
         """Per-env clearance the base must move PAST the door plane to count as success.
