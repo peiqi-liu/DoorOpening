@@ -2177,7 +2177,7 @@ class DooropeningEnv(DirectRLEnv):
         panel_force_norm = torch.linalg.vector_norm(contact_forces_door_panel, dim=-1)
         grasp_stage = (self.ref_grasp_stage_mask.squeeze() > 0).to(panel_force_norm.dtype)
         grasp_denom = grasp_stage.sum().clamp(min=1.0)
-        self.extras["finger panel normal forces mean"] = float(
+        self.extras["finger_panel_normal_forces_mean"] = float(
             ((panel_force_norm * grasp_stage).sum() / grasp_denom).detach().cpu().item()
         )
 
