@@ -55,7 +55,11 @@ DEFAULT_NUM_VARIANTS = 512
 DEFAULT_DEBUG_FIRST_N = 0
 DEFAULT_START_BASE_SAMPLING = "paired"
 DEFAULT_START_BASE_RADIUS_M = 1.0
-DEFAULT_START_BASE_ANGLE_RANGE_DEG = 30.0
+# Per-door standoff distance is now drawn from this (min, max) range instead of the single fixed
+# radius above, so the robot no longer always starts exactly 1.0 m away.
+DEFAULT_START_BASE_RADIUS_RANGE_M = (0.9, 1.35)
+# Tighter left/right approach spread (was 30 deg) -- robots were starting too far to the side.
+DEFAULT_START_BASE_ANGLE_RANGE_DEG = 15.0
 DEFAULT_START_BASE_PAIR_SEED = 0
 DEFAULT_FRANKA_START_JOINT_NOISE_RAD = 0.2
 
@@ -236,7 +240,15 @@ def parse_args():
         "--start-base-radius",
         type=float,
         default=DEFAULT_START_BASE_RADIUS_M,
-        help="Radius in meters for the initial mobile-base waypoint around the door.",
+        help="Fixed fallback radius in meters (used only when --start-base-radius-range is disabled).",
+    )
+    parser.add_argument(
+        "--start-base-radius-range",
+        type=float,
+        nargs=2,
+        metavar=("MIN", "MAX"),
+        default=DEFAULT_START_BASE_RADIUS_RANGE_M,
+        help="Per-door standoff distance range (min max) in meters; overrides --start-base-radius.",
     )
     parser.add_argument(
         "--start-base-angle-range-deg",
@@ -306,6 +318,12 @@ def paired_start_angle(pair_key, seed, angle_range_deg):
     return -angle_limit + 2.0 * angle_limit * unit
 
 
+def paired_start_radius(pair_key, seed, radius_range):
+    lo, hi = float(radius_range[0]), float(radius_range[1])
+    unit = stable_unit_interval(f"dooropening-start-radius-v1:{int(seed)}:{pair_key}")
+    return lo + (hi - lo) * unit
+
+
 def compute_base_joint_from_world_pose(base_world_pose, target_world_pose):
     base_pos = base_world_pose["pos"]
     base_yaw = quat_xyzw_to_yaw(base_world_pose["rot"])
@@ -332,6 +350,8 @@ def sample_initial_state(rng, variant_name, args):
     sampled_approach_angle_rad = None
     pair_key = None
 
+    sampled_radius = float(args.start_base_radius)
+    radius_range = getattr(args, "start_base_radius_range", None)
     if args.start_base_sampling != "none":
         if args.start_base_sampling == "paired":
             pair_key = build_direction_pair_key(variant_name)
@@ -340,14 +360,18 @@ def sample_initial_state(rng, variant_name, args):
                 args.start_base_pair_seed,
                 args.start_base_angle_range_deg,
             )
+            if radius_range is not None:
+                sampled_radius = paired_start_radius(pair_key, args.start_base_pair_seed, radius_range)
         else:
             angle_limit = math.radians(args.start_base_angle_range_deg)
             sampled_approach_angle_rad = rng.uniform(-angle_limit, angle_limit)
+            if radius_range is not None:
+                sampled_radius = rng.uniform(float(radius_range[0]), float(radius_range[1]))
 
         sampled_robot_world_pose = {
             "pos": [
-                float(DOOR_INITIAL_POS[0]) + float(args.start_base_radius) * math.cos(sampled_approach_angle_rad),
-                float(DOOR_INITIAL_POS[1]) + float(args.start_base_radius) * math.sin(sampled_approach_angle_rad),
+                float(DOOR_INITIAL_POS[0]) + sampled_radius * math.cos(sampled_approach_angle_rad),
+                float(DOOR_INITIAL_POS[1]) + sampled_radius * math.sin(sampled_approach_angle_rad),
                 float(ROBOT_INITIAL_POS[2]),
             ],
             "rot": list(ROBOT_INITIAL_ROT),
@@ -364,7 +388,8 @@ def sample_initial_state(rng, variant_name, args):
         "robot_franka_joint_pos": robot_franka_joint_pos,
         "door_joint_pos": door_joint_pos,
         "start_base_sampling": str(args.start_base_sampling),
-        "start_base_radius_m": float(args.start_base_radius),
+        "start_base_radius_m": float(sampled_radius),
+        "start_base_radius_range_m": None if radius_range is None else [float(radius_range[0]), float(radius_range[1])],
         "start_base_angle_range_deg": float(args.start_base_angle_range_deg),
         "start_base_pair_seed": int(args.start_base_pair_seed),
         "start_base_pair_key": None if pair_key is None else str(pair_key),

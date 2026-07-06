@@ -917,7 +917,10 @@ def state_machine_offline_left_pull_door(
     )
     safe_open_hand_q = open_hand(1.0).to(q_robot.device)
     push_palm_rot = get_rotation_quat(0.0, 0.0, math.pi / 2, device)
-    retreat_local_x = 0.10
+    # Retract the arm further BACKWARD (away from the door): retreat_local_x is the base-local
+    # forward offset of the retracted palm, so a more-negative value pulls the palm behind the base.
+    # Was +0.10 (slightly forward of the base); now -0.10 to keep the arm clear of the panel.
+    retreat_local_x = -0.10
     retreat_local_y = -0.42
     retreat_z_lift = 0.04
     # Larger x offset magnitude (was -0.3) so the arm reaches a bit further forward into the panel.

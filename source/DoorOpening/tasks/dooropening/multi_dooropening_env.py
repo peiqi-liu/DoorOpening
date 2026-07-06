@@ -298,6 +298,20 @@ class DooropeningEnv(DirectRLEnv):
         self.episode_x5_collided = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.episode_franka_box_collided = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
+        # Task-based success: latch when the base reaches the FAR side of the door (past the door
+        # plane along the approach axis by the per-env threshold). Success is read at episode end.
+        self.episode_reached_far_side = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.completed_reached_last_frame = deque(maxlen=self.games_to_track)
+        # Per-motion reference FINAL base x (env-relative). Push refs end far past the door, pull refs
+        # end near it -> this tells us the door type per env so we can pick the right far-side clearance.
+        self.motion_final_base_rel_x = None
+        if self.ref_motion_lib is not None:
+            _traj = getattr(self.ref_motion_lib, "robot_joint_pos_traj", None)
+            if _traj is not None and _traj.ndim == 3:
+                _base_x_traj_idx = FULL_JOINT_NAMES.index("base_x_joint")
+                _last_frame = max(int(self.ref_motion_lib.num_frames) - 1, 0)
+                self.motion_final_base_rel_x = _traj[:, _last_frame, _base_x_traj_idx].detach().clone().to(self.device)
+
         torch.set_printoptions(precision=4, sci_mode=False)
 
         self.reset_progress_total = self.cfg.reset_progress_total
@@ -906,16 +920,50 @@ class DooropeningEnv(DirectRLEnv):
         )
         return current_frame_idx >= self.success_frame_idx
 
+    def _far_side_threshold(self) -> torch.Tensor:
+        """Per-env clearance the base must move PAST the door plane to count as success.
+        Push refs traverse far past the door (-> success_far_push_dist); pull refs end near it
+        (-> success_far_pull_dist). Door type is inferred from the reference's final base x."""
+        if self.motion_final_base_rel_x is None:
+            return torch.full((self.num_envs,), float(self.cfg.success_far_pull_dist), device=self.device)
+        env_origin_x = self.scene.env_origins[:, 0]
+        door_rel_x = self.door.data.root_state_w[:, 0] - env_origin_x
+        env_motion_idx = self.ref_motion_lib.env_to_file_map.to(device=self.device, dtype=torch.long)
+        ref_final_base_rel_x = self.motion_final_base_rel_x[env_motion_idx]
+        # How far past the door plane the REFERENCE ends (+x is the start side, door plane -> far side).
+        ref_dist_past = door_rel_x - ref_final_base_rel_x
+        is_push = ref_dist_past > float(self.cfg.success_far_push_ref_dist)
+        return torch.where(
+            is_push,
+            torch.full_like(door_rel_x, float(self.cfg.success_far_push_dist)),
+            torch.full_like(door_rel_x, float(self.cfg.success_far_pull_dist)),
+        )
+
+    def _update_far_side_tracker(self):
+        """Latch, each step, whether the base has traversed to the far side of the door."""
+        if self.motion_final_base_rel_x is None:
+            return
+        env_origin_x = self.scene.env_origins[:, 0]
+        door_rel_x = self.door.data.root_state_w[:, 0] - env_origin_x
+        robot_rel_x = self.robot.data.root_state_w[:, 0] - env_origin_x
+        actual_dist_past = door_rel_x - robot_rel_x
+        self.episode_reached_far_side |= actual_dist_past > self._far_side_threshold()
+
     def _update_success_metrics(self):
         self._update_last_frame_tracker()
+        self._update_far_side_tracker()
 
         done_mask = torch.nonzero(self.reset_buf, as_tuple=False).squeeze(-1)
         if done_mask.numel() > 0:
-            episode_successes_tensor = (
-                self.episode_reached_last_frame[done_mask] | self.reset_time_outs[done_mask]
-            ).to(dtype=torch.float32)
+            # Task success = the robot reached the FAR side of the door during the episode.
+            episode_successes_tensor = self.episode_reached_far_side[done_mask].to(dtype=torch.float32)
             episode_successes = episode_successes_tensor.detach().cpu().tolist()
             self.completed_successes.extend(float(value) for value in episode_successes)
+            # Keep the old imitation metric (reached last ref frame / timeout) logged for comparison.
+            self.completed_reached_last_frame.extend(
+                (self.episode_reached_last_frame[done_mask] | self.reset_time_outs[done_mask])
+                .to(dtype=torch.float32).detach().cpu().tolist()
+            )
             done_family_ids = self.env_family_ids[done_mask].detach().cpu().tolist()
             for family_id, value in zip(done_family_ids, episode_successes):
                 family_name = DOOR_FAMILY_NAMES[int(family_id)]
@@ -931,6 +979,10 @@ class DooropeningEnv(DirectRLEnv):
         success_rate = self._mean_completed_metric(self.completed_successes)
         if success_rate is not None:
             self.extras["success/success_rate"] = success_rate
+        # Old imitation-style success (reached last ref frame or timed out) kept for comparison.
+        reached_last_frame_rate = self._mean_completed_metric(self.completed_reached_last_frame)
+        if reached_last_frame_rate is not None:
+            self.extras["success/reached_last_frame_rate"] = reached_last_frame_rate
         # Fraction of completed rollouts that experienced ANY x5-arm / franka-box door collision.
         x5_collision_rate = self._mean_completed_metric(self.completed_x5_collisions)
         if x5_collision_rate is not None:
@@ -2366,6 +2418,7 @@ class DooropeningEnv(DirectRLEnv):
             self.applied_robot_dof_targets[env_ids, :] = self.robot_dof_targets[env_ids, :]
             self._action_target_history[env_ids] = self.robot_dof_targets[env_ids].unsqueeze(1)
             self.episode_reached_last_frame[env_ids] = False
+            self.episode_reached_far_side[env_ids] = False
             self.episode_x5_collided[env_ids] = False
             self.episode_franka_box_collided[env_ids] = False
             super()._reset_idx(env_ids)
@@ -2425,6 +2478,7 @@ class DooropeningEnv(DirectRLEnv):
         self.applied_robot_dof_targets[env_ids, :] = self.robot_dof_targets[env_ids, :]
         self._action_target_history[env_ids] = self.robot_dof_targets[env_ids].unsqueeze(1)
         self.episode_reached_last_frame[env_ids] = False
+        self.episode_reached_far_side[env_ids] = False
         self.episode_x5_collided[env_ids] = False
         self.episode_franka_box_collided[env_ids] = False
         super()._reset_idx(env_ids)

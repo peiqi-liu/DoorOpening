@@ -218,6 +218,26 @@ parser.add_argument(
         "Load with torch.load(path) to get a dict with keys 'runs', 'joint_names', 'num_envs'."
     ),
 )
+parser.add_argument(
+    "--save-viser-pt",
+    "--save_viser_pt",
+    dest="save_viser_pt",
+    type=str,
+    default=None,
+    help=(
+        "Save a replay_viser_pt.py-compatible .pt of robot joint angles (compact_q) + PD targets "
+        "(compact_target) for one env, ordered [base_x, base_y, base_rotation, panda_1..7, "
+        "finger_0..N]. Play it with scripts/replay_viser_pt.py."
+    ),
+)
+parser.add_argument(
+    "--viser-env-id",
+    "--viser_env_id",
+    dest="viser_env_id",
+    type=int,
+    default=0,
+    help="Env index to record for --save-viser-pt.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 
@@ -246,6 +266,7 @@ import gymnasium as gym
 import torch
 
 from isaaclab.utils.dict import print_dict
+from isaaclab.utils.math import quat_apply
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import isaaclab_tasks  # noqa: F401
@@ -265,6 +286,28 @@ MODE_CONTACT_FORCE_THRESHOLD = 5.0
 
 def _get_base_env(env):
     return getattr(env, "unwrapped", getattr(env, "env", env))
+
+
+def _build_compact_joint_layout(joint_names):
+    """Return (names, indices) for the compact viser-pt joint order
+    [base_x_joint, base_y_joint, base_rotation_joint, panda_joint1..7, finger_joint_0..N].
+
+    Uses the REAL joint names so scripts/replay_viser_pt.py matches them straight onto the URDF
+    (base_x/y/rotation are actuated URDF joints -> the base is driven through them).
+    """
+    desired = ["base_x_joint", "base_y_joint", "base_rotation_joint"] + [f"panda_joint{i}" for i in range(1, 8)]
+    fingers = sorted(
+        (n for n in joint_names if str(n).startswith("finger_joint_")),
+        key=lambda n: int(str(n).rsplit("_", 1)[1]),
+    )
+    desired += list(fingers)
+    name_to_idx = {str(n): i for i, n in enumerate(joint_names)}
+    names, indices = [], []
+    for n in desired:
+        if n in name_to_idx:
+            names.append(n)
+            indices.append(name_to_idx[n])
+    return names, indices
 
 
 def _patch_no_auto_resets(base_env):
@@ -914,6 +957,45 @@ def main(env_cfg, agent_cfg: dict):
     except Exception:
         _replay_joint_names = None
 
+    viser_pt_state = None
+    if args_cli.save_viser_pt is not None:
+        _compact_names, _compact_idx = _build_compact_joint_layout(list(base_env.robot.data.joint_names))
+        # applied_robot_dof_targets is stored in _robot_dof_idx order (NOT joint_names order) -> map
+        # each compact joint's full-dof index to its position within _robot_dof_idx for the target.
+        _dof_to_target_pos = {int(d): k for k, d in enumerate(base_env._robot_dof_idx.detach().cpu().tolist())}
+        _target_pos = [int(_dof_to_target_pos.get(int(j), -1)) for j in _compact_idx]
+        _v_env_id = max(0, min(int(args_cli.viser_env_id), int(base_env.num_envs) - 1))
+        _v_env_origin = base_env.scene.env_origins[_v_env_id].detach().clone()  # on device
+        _v_door_asset_idx = int(base_env.env_asset_indices[_v_env_id].item())
+        _v_door_urdf = str(asset_paths[_v_door_asset_idx])
+        _v_door_root = base_env.door.data.root_state_w[_v_env_id, :7].detach().clone()  # on device
+        # Build the door pointcloud sampler ONCE (loads URDF); sample_link_set() is cheap per frame.
+        _v_door_sampler = None
+        try:
+            from DoorOpening.utils.extract_pointcloud_from_articulation import FrankaLeapSampler
+
+            _v_door_sampler = FrankaLeapSampler(_v_door_urdf, device=str(base_env.device), num_points=2048)
+        except Exception as _exc:  # noqa: BLE001
+            print(f"[WARN] --save-viser-pt: could not build door pointcloud sampler ({_exc}); robot-only frames.")
+        viser_pt_state = {
+            "env_id": _v_env_id,
+            "compact_names": _compact_names,
+            "compact_idx": torch.as_tensor(_compact_idx, device=base_env.device, dtype=torch.long),
+            "target_idx": torch.as_tensor([max(p, 0) for p in _target_pos], device=base_env.device, dtype=torch.long),
+            "target_valid": torch.as_tensor([p >= 0 for p in _target_pos], device=base_env.device, dtype=torch.bool),
+            "env_origin": _v_env_origin,
+            "door_sampler": _v_door_sampler,
+            "door_link_names": ["base", "link_0", "link_1", "link_2"],
+            "door_root_pos_w": _v_door_root[:3],
+            "door_root_quat_w": _v_door_root[3:7],
+            "frames": [],
+            "frame_dt": float(getattr(base_env, "step_dt", 0.025)),
+        }
+        print(
+            f"[INFO] Saving viser .pt (joint angles + PD targets + door pointcloud, env {viser_pt_state['env_id']}); "
+            f"joints={viser_pt_state['compact_names']}"
+        )
+
     if args_cli.video:
         video_folder = args_cli.video_folder or os.path.join(experiment_dir, "videos", "eval_multi_distillation")
         video_kwargs = {
@@ -1122,6 +1204,38 @@ def main(env_cfg, agent_cfg: dict):
                     _run_active.append(active.detach().cpu().clone())
                 obs, _, _, _, _ = env.step(actions)
                 frozen_state.restore()
+                if viser_pt_state is not None:
+                    # Record the tracked env while it is ACTIVE (skip frozen frames), across every
+                    # eval run -> --num_eval_runs continuous rollouts concatenated in save order.
+                    _e = viser_pt_state["env_id"]
+                    if bool(active[_e].item()):
+                        _org = viser_pt_state["env_origin"]  # device (3,)
+                        _q = base_env.robot.data.joint_pos[_e, viser_pt_state["compact_idx"]].detach().cpu().clone()
+                        _tgt = base_env.applied_robot_dof_targets[_e, viser_pt_state["target_idx"]].detach().cpu().clone()
+                        _tgt[~viser_pt_state["target_valid"].cpu()] = 0.0  # joints not in the controlled set
+                        _rb = base_env.robot.data.root_state_w[_e, :7].detach()
+                        _dj = base_env.door.data.joint_pos[_e].detach()
+                        _frame = {
+                            "compact_q": _q,
+                            "compact_target": _tgt,
+                            "door_joint_pos": _dj.cpu().clone(),
+                            "robot_base_pos_w": (_rb[:3] - _org).cpu().clone(),
+                            "robot_base_quat_w": _rb[3:7].cpu().clone(),
+                        }
+                        # Deformed door pointcloud (env-relative world) for this frame's door joints.
+                        _sampler = viser_pt_state["door_sampler"]
+                        if _sampler is not None:
+                            try:
+                                _pb = _sampler.sample_link_set(_dj.unsqueeze(0), viser_pt_state["door_link_names"])[0]
+                                _rq = viser_pt_state["door_root_quat_w"].unsqueeze(0).expand(_pb.shape[0], -1)
+                                _pw = quat_apply(_rq, _pb) + viser_pt_state["door_root_pos_w"]
+                                _frame["door_points_world"] = (_pw - _org).detach().cpu().clone()
+                            except Exception as _exc:  # noqa: BLE001
+                                if not viser_pt_state.get("_warned_sampler"):
+                                    print(f"[WARN] door pointcloud sampling failed ({_exc}); robot-only frames.")
+                                    viser_pt_state["_warned_sampler"] = True
+                                viser_pt_state["door_sampler"] = None
+                        viser_pt_state["frames"].append(_frame)
                 if replay_runs is not None:
                     _run_applied_targets.append(base_env.applied_robot_dof_targets.detach().cpu().clone())
                 if mode_tracker is not None:
@@ -1260,6 +1374,25 @@ def main(env_cfg, agent_cfg: dict):
             "[INFO] Replay layout: runs[i]['joint_pos'] shape = [T, num_envs, num_joints], "
             "runs[i]['applied_targets'] shape = [T, num_envs, num_dof]. "
             "Use runs[i]['active_mask'] to filter envs that were still tracking at each step."
+        )
+
+    if args_cli.save_viser_pt and viser_pt_state is not None and viser_pt_state["frames"]:
+        viser_path = pathlib.Path(args_cli.save_viser_pt).expanduser()
+        if viser_path.is_dir():
+            viser_path = viser_path / "viser_replay.pt"
+        viser_path = str(viser_path)
+        os.makedirs(os.path.dirname(viser_path) or ".", exist_ok=True)
+        torch.save(
+            {
+                "frames": viser_pt_state["frames"],
+                "compact_target_joint_names": viser_pt_state["compact_names"],
+                "frame_dt": viser_pt_state["frame_dt"],
+            },
+            viser_path,
+        )
+        print(
+            f"[INFO] Saved {len(viser_pt_state['frames'])} viser frames (robot + door pointcloud) to {viser_path} "
+            f"(env {viser_pt_state['env_id']}, all runs concatenated)."
         )
 
     dagger._close_viser_debug_tools()

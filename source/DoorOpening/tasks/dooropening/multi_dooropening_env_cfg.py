@@ -600,6 +600,14 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     reset_key_body_quat_delta_max = 3.0
     reset_door_joint_pos_delta_min = 0.5
     reset_door_joint_pos_delta_max = 0.8
+    # Task-based success: the robot must end up traversed to the FAR side of the door (measured as
+    # distance the base has moved past the door plane along the approach axis, +x -> door -> far side).
+    # Push refs traverse well past the door, so they need a real clearance; pull refs only end just
+    # past (or at) the doorway, so they use a lenient threshold. Push vs pull is inferred from how far
+    # the reference motion's final base moves past the door (> success_far_push_ref_dist => push).
+    success_far_push_dist = 0.5
+    success_far_pull_dist = 0.0
+    success_far_push_ref_dist = 0.75
     # We are slowly increasing our tolerance on base position drift and slowly only resettting the env from the first key frame
     # This variable is used to indicate when we stop increasing the tolerance and reset the env from the first key frame for the greatest probability
     reset_progress_total = 4e5

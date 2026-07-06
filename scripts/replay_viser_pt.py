@@ -436,6 +436,11 @@ def main() -> None:
     has_aux_prediction = _has_aux_prediction(frames)
     has_aux_input = _has_aux_input(frames)
     has_door_joint_prediction = _has_door_joint_prediction(frames)
+    has_compact_joint_state = any(
+        _to_numpy_vector(frame.get("compact_q")) is not None
+        or _to_numpy_vector(frame.get("compact_target")) is not None
+        for frame in frames
+    )
 
     joint_sources = [] if args.no_robot else _available_joint_sources(frames)
     robot_requested = bool(joint_sources) and isinstance(payload.get("compact_target_joint_names"), (list, tuple))
@@ -588,6 +593,23 @@ def main() -> None:
                         np.array2string(door_joint_pred, precision=4, suppress_small=True),
                     )
                 )
+        if has_compact_joint_state:
+            # Print saved joint angles + PD targets per frame (in the payload's saved order, i.e.
+            # [base_x, base_y, base_rotation, panda_1..7, finger_0..N]), like door_joint_prediction.
+            compact_q_vec = _to_numpy_vector(frame.get("compact_q"))
+            if compact_q_vec is not None:
+                print(
+                    "[frame {}] joint_angles: {}".format(
+                        frame_idx, np.array2string(compact_q_vec, precision=4, suppress_small=True)
+                    )
+                )
+            compact_target_vec = _to_numpy_vector(frame.get("compact_target"))
+            if compact_target_vec is not None:
+                print(
+                    "[frame {}] joint_targets: {}".format(
+                        frame_idx, np.array2string(compact_target_vec, precision=4, suppress_small=True)
+                    )
+                )
 
     @frame_slider.on_update
     def _(_event):
@@ -638,6 +660,14 @@ def main() -> None:
         dj0 = _door_joint_prediction(frames[0])
         dj_dim = 0 if dj0 is None else int(dj0.size)
         print(f"Door joint prediction present ({dj_dim} dims) — printing per frame to this console.")
+    if has_compact_joint_state:
+        _cnames = payload.get("compact_target_joint_names")
+        _order = (
+            [str(n) if n is not None else "<base>" for n in _cnames]
+            if isinstance(_cnames, (list, tuple))
+            else "unknown"
+        )
+        print(f"Saved joint state present — printing joint_angles/joint_targets per frame. Order: {_order}")
     if args.fps is None:
         print(f"Playback FPS: {initial_fps:.2f} (from {_format_fps_source_label(payload_fps_source)})")
     else:
