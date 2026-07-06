@@ -29,6 +29,7 @@ from DoorOpening.tasks.dooropening.multi_dooropening_env_cfg import DooropeningE
 from DoorOpening.assets.glorbot.glorbot_cfg import glorbot_urdf_path, disable_collision_scope_instancing
 from isaaclab.sensors import Camera, ContactSensor
 from DoorOpening.constants.robot_constants import CAMERA_JOINT_DEFAULT_VALUES, CAMERA_JOINT_NAMES, FULL_JOINT_NAMES, ROBOT_KEY_BODY_NAMES
+from DoorOpening.constants.env_constants import DOOR_INITIAL_POS, ROBOT_INITIAL_POS
 from DoorOpening.tasks.dooropening.contact_force_utils import (
     BASE_DOOR_CONTACT_BODY_NAMES,
     DOOR_FRAME_FILTER_INDEX,
@@ -298,12 +299,20 @@ class DooropeningEnv(DirectRLEnv):
         self.episode_x5_collided = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.episode_franka_box_collided = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
-        # Task-based success: latch when the base reaches the FAR side of the door (past the door
-        # plane along the approach axis by the per-env threshold). Success is read at episode end.
+        # Task-based success: latch when the base reaches the FAR side of the door. We work in BASE-X
+        # JOINT space, NOT robot.data.root_state_w -- the articulation root is the fixed `base_link`
+        # spawned at ROBOT_INITIAL_POS; the mobile base moves *below* it via the base_x prismatic joint
+        # (axis +x). So base world x = ROBOT_INITIAL_POS.x + base_x_joint, and the signed distance the
+        # base has moved PAST the door plane (start side is +x, door at DOOR_INITIAL_POS.x) is
+        #     dist_past = (DOOR_INITIAL_POS.x - ROBOT_INITIAL_POS.x) - base_x_joint.
+        # (= -1.0 - base_x_joint here: at spawn base_x_joint~0 -> dist_past~-1.0 (not past); larger
+        # negative base_x_joint -> the robot has driven through -> positive dist_past.)
         self.episode_reached_far_side = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.completed_reached_last_frame = deque(maxlen=self.games_to_track)
-        # Per-motion reference FINAL base x (env-relative). Push refs end far past the door, pull refs
-        # end near it -> this tells us the door type per env so we can pick the right far-side clearance.
+        self._base_x_dof_idx = int(self._robot_base_xy_dof_idx[0].item())
+        self._door_minus_robot_x = float(DOOR_INITIAL_POS[0] - ROBOT_INITIAL_POS[0])
+        # Per-motion reference FINAL base_x JOINT value. Push refs end far past the door (very negative
+        # base_x), pull refs end near it -> tells us the door type per env for the far-side threshold.
         self.motion_final_base_rel_x = None
         if self.ref_motion_lib is not None:
             _traj = getattr(self.ref_motion_lib, "robot_joint_pos_traj", None)
@@ -920,33 +929,34 @@ class DooropeningEnv(DirectRLEnv):
         )
         return current_frame_idx >= self.success_frame_idx
 
+    def _base_dist_past_door(self, base_x_joint: torch.Tensor) -> torch.Tensor:
+        """Signed distance the base has moved PAST the door plane, from the base_x JOINT value.
+        base world x = ROBOT_INITIAL_POS.x + base_x_joint; door plane at DOOR_INITIAL_POS.x, so
+        dist_past = (DOOR_INITIAL_POS.x - ROBOT_INITIAL_POS.x) - base_x_joint (positive => on far side)."""
+        return self._door_minus_robot_x - base_x_joint
+
     def _far_side_threshold(self) -> torch.Tensor:
         """Per-env clearance the base must move PAST the door plane to count as success.
         Push refs traverse far past the door (-> success_far_push_dist); pull refs end near it
-        (-> success_far_pull_dist). Door type is inferred from the reference's final base x."""
+        (-> success_far_pull_dist). Door type is inferred from the reference's final base_x joint."""
         if self.motion_final_base_rel_x is None:
             return torch.full((self.num_envs,), float(self.cfg.success_far_pull_dist), device=self.device)
-        env_origin_x = self.scene.env_origins[:, 0]
-        door_rel_x = self.door.data.root_state_w[:, 0] - env_origin_x
         env_motion_idx = self.ref_motion_lib.env_to_file_map.to(device=self.device, dtype=torch.long)
-        ref_final_base_rel_x = self.motion_final_base_rel_x[env_motion_idx]
-        # How far past the door plane the REFERENCE ends (+x is the start side, door plane -> far side).
-        ref_dist_past = door_rel_x - ref_final_base_rel_x
+        ref_final_base_x_joint = self.motion_final_base_rel_x[env_motion_idx]
+        ref_dist_past = self._base_dist_past_door(ref_final_base_x_joint)
         is_push = ref_dist_past > float(self.cfg.success_far_push_ref_dist)
         return torch.where(
             is_push,
-            torch.full_like(door_rel_x, float(self.cfg.success_far_push_dist)),
-            torch.full_like(door_rel_x, float(self.cfg.success_far_pull_dist)),
+            torch.full_like(ref_dist_past, float(self.cfg.success_far_push_dist)),
+            torch.full_like(ref_dist_past, float(self.cfg.success_far_pull_dist)),
         )
 
     def _update_far_side_tracker(self):
         """Latch, each step, whether the base has traversed to the far side of the door."""
         if self.motion_final_base_rel_x is None:
             return
-        env_origin_x = self.scene.env_origins[:, 0]
-        door_rel_x = self.door.data.root_state_w[:, 0] - env_origin_x
-        robot_rel_x = self.robot.data.root_state_w[:, 0] - env_origin_x
-        actual_dist_past = door_rel_x - robot_rel_x
+        base_x_joint = self.robot.data.joint_pos[:, self._base_x_dof_idx]
+        actual_dist_past = self._base_dist_past_door(base_x_joint)
         self.episode_reached_far_side |= actual_dist_past > self._far_side_threshold()
 
     def _update_success_metrics(self):
