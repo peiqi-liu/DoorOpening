@@ -150,7 +150,7 @@ GLORBOT_CONFIG = ArticulationCfg(
             # is ~1e5 rad/s^2 of angular acceleration when the PD saturates, so the fingers overshoot
             # in a single step and jitter. Armature adds effective rotor inertia the implicit PD sees,
             # capping the per-step acceleration and killing the shake (tune up to ~0.03 if it persists).
-            armature=0.01,
+            # armature=0.01,
         ),
     }
 )

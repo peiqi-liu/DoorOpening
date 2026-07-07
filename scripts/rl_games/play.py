@@ -29,7 +29,7 @@ def _normalize_family_selection(family_spec):
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Play a checkpoint of an RL agent from RL-Games.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
-parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
+parser.add_argument("--video_length", type=int, default=2000, help="Length of the recorded video (in steps).")
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
@@ -780,8 +780,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
             if args_cli.video:
                 timestep += 1
-                # exit the play loop after recording one video
-                if timestep == args_cli.video_length:
+                # Exit the play loop after recording one video -- BUT never cut off an in-progress
+                # --save-viser-pt capture: keep stepping until the requested viser rollouts are done
+                # (the viser-done break above handles stopping then). Use >= so the break still fires
+                # once viser finishes even though we skipped the exact video_length step.
+                viser_capturing = viser_pt_state is not None and not viser_pt_state.get("done")
+                if timestep >= args_cli.video_length and not viser_capturing:
                     break
 
             # time delay for real-time evaluation
