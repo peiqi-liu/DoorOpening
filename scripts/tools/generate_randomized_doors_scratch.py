@@ -58,9 +58,11 @@ DEFAULT_START_BASE_RADIUS_M = 1.0
 # Per-door standoff distance is now drawn from this (min, max) range instead of the single fixed
 # radius above, so the robot no longer always starts exactly 1.0 m away. Widened to push the robot
 # farther back (up to 2.0 m) so the policy must handle longer approaches, not just near-contact starts.
-DEFAULT_START_BASE_RADIUS_RANGE_M = (1.0, 2.0)
-# Tighter left/right approach spread (was 30 deg) -- robots were starting too far to the side.
-DEFAULT_START_BASE_ANGLE_RANGE_DEG = 15.0
+DEFAULT_START_BASE_RADIUS_RANGE_M = (1.0, 1.5)
+# Approach-angle spread (was 30 -> 15). This is ALSO the initial base yaw: the robot sits at angle
+# alpha on the door-centered ring and must yaw by alpha to face the door, so base_rotation = alpha.
+# Tightened to 8 deg so the start heading isn't yawed too far off the door axis.
+DEFAULT_START_BASE_ANGLE_RANGE_DEG = 8.0
 DEFAULT_START_BASE_PAIR_SEED = 0
 DEFAULT_FRANKA_START_JOINT_NOISE_RAD = 0.05
 
@@ -328,6 +330,20 @@ def yaw_to_quat_xyzw(yaw_rad):
     return [0.0, 0.0, math.sin(half), math.cos(half)]
 
 
+def quat_wxyz_to_yaw(quat):
+    # ROBOT_INITIAL_ROT / DOOR_INITIAL_ROT are stored in Isaac's (w, x, y, z) convention, so their
+    # yaw must be read as wxyz -- reading (0,0,0,1) as xyzw wrongly gives yaw 0 instead of pi.
+    w, x, y, z = [float(v) for v in quat]
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    return math.atan2(siny_cosp, cosy_cosp)
+
+
+def yaw_to_quat_wxyz(yaw_rad):
+    half = 0.5 * float(yaw_rad)
+    return [math.cos(half), 0.0, 0.0, math.sin(half)]
+
+
 def stable_unit_interval(key):
     digest = hashlib.blake2b(key.encode("utf-8"), digest_size=8).digest()
     return int.from_bytes(digest, byteorder="big", signed=False) / float(1 << 64)
@@ -347,9 +363,9 @@ def paired_start_radius(pair_key, seed, radius_range):
 
 def compute_base_joint_from_world_pose(base_world_pose, target_world_pose):
     base_pos = base_world_pose["pos"]
-    base_yaw = quat_xyzw_to_yaw(base_world_pose["rot"])
+    base_yaw = quat_wxyz_to_yaw(base_world_pose["rot"])
     target_pos = target_world_pose["pos"]
-    target_yaw = quat_xyzw_to_yaw(target_world_pose["rot"])
+    target_yaw = quat_wxyz_to_yaw(target_world_pose["rot"])
     dx = float(target_pos[0]) - float(base_pos[0])
     dy = float(target_pos[1]) - float(base_pos[1])
     x_r = math.cos(base_yaw) * dx + math.sin(base_yaw) * dy
@@ -390,13 +406,14 @@ def sample_initial_state(rng, variant_name, args):
             if radius_range is not None:
                 sampled_radius = rng.uniform(float(radius_range[0]), float(radius_range[1]))
 
-        # Aim the base at the door. From an off-axis standoff the robot must yaw by the approach
-        # angle to keep facing the door center: the home pose (identity rot at +x) faces the door
-        # only from dead-ahead, so leaving rot at identity spawns the robot translated sideways but
-        # still pointing straight down -x -- off-axis that reads as the base clipping/standing on the
-        # panel. base_world_yaw = home_yaw + approach_angle points the heading back at the origin
-        # (verified: heading = base_yaw + pi = direction from the sampled pos to the door).
-        home_yaw = quat_xyzw_to_yaw(ROBOT_INITIAL_ROT)
+        # Sample a standoff on a circle centered on the DOOR, then aim the base back at the door.
+        # The home pose faces the door (ROBOT_INITIAL_ROT is a 180 deg z-rotation in Isaac's wxyz
+        # convention -> home_yaw = pi, heading = -x toward the door); from an off-axis standoff the
+        # base must yaw by the approach angle to keep facing the door center. compute_base_joint_...
+        # then maps the world offset into the base-link frame -- reading the wxyz home yaw correctly
+        # is what makes base_x/base_y place the robot ON the door-centered circle (a wrong yaw of 0
+        # mirrors it, dropping the robot onto the door for larger radii).
+        home_yaw = quat_wxyz_to_yaw(ROBOT_INITIAL_ROT)
         facing_yaw = wrap_to_pi(home_yaw + sampled_approach_angle_rad)
         sampled_robot_world_pose = {
             "pos": [
@@ -404,7 +421,7 @@ def sample_initial_state(rng, variant_name, args):
                 float(DOOR_INITIAL_POS[1]) + sampled_radius * math.sin(sampled_approach_angle_rad),
                 float(ROBOT_INITIAL_POS[2]),
             ],
-            "rot": yaw_to_quat_xyzw(facing_yaw),
+            "rot": yaw_to_quat_wxyz(facing_yaw),
         }
         robot_base_joint_pos = compute_base_joint_from_world_pose(robot_world_pose, sampled_robot_world_pose)
 
