@@ -33,6 +33,7 @@ from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.envs.mdp.events import (
     randomize_actuator_gains,
+    randomize_joint_parameters,
     randomize_rigid_body_mass,
     randomize_rigid_body_material,
 )
@@ -171,6 +172,25 @@ class EventCfg:
             "stiffness_distribution_params": (1.0, 1.0),
             "damping_distribution_params": (1.0, 1.0),
             "operation": "scale",
+        },
+    )
+
+    # Per-episode randomization of the LEAP finger joint armature (reflected rotor inertia the
+    # implicit PD sees). The nominal 0.01 in glorbot_cfg is a sim-stabilization value that is only
+    # loosely grounded in the real geared Dynamixels, so instead of committing to one number we
+    # train across a physical band. Absolute values (not a scale on the 0.01 default) so the range
+    # is explicit; the ADR curriculum in `adr_cfg_dict` widens (0.01, 0.01) -> (0.006, 0.02):
+    # kept above the ~0 that caused finger jitter and below the ~0.03 stability ceiling noted in
+    # glorbot_cfg. To also randomize the arm armature (currently fixed at 0), add an analogous term
+    # scoped to joint_names=["panda_joint.*", "x5_joint.*"] with an endpoint like (0.0, 0.08).
+    robot_finger_armature = EventTerm(
+        func=randomize_joint_parameters,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["finger_joint_.*"]),
+            "armature_distribution_params": (0.01, 0.01),
+            "operation": "abs",
+            "distribution": "uniform",
         },
     )
 
@@ -639,6 +659,11 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         "robot_joint_stiffness_and_damping": {
             "stiffness_distribution_params": (0.8, 1.2),
             "damping_distribution_params": (0.7, 1.3),
+        },
+        "robot_finger_armature": {
+            # Widen from the nominal 0.01 toward the plausible physical band for the geared LEAP
+            # fingers, staying above the finger-jitter floor and below the ~0.03 stability ceiling.
+            "armature_distribution_params": (0.006, 0.02),
         },
         "door_board_joint_stiffness_and_damping": {
             # Stiffer panel endpoint (was 75). Damping scaled proportionally (10 * 125/75 ~= 16.7)

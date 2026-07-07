@@ -868,9 +868,11 @@ def _print_progress(run_index, step, active, timed_out, drifted, metrics, action
     else:
         active_metrics = {name: 0.0 for name in metrics}
     action_loss_text = "n/a" if action_loss is None else f"{float(action_loss.detach().cpu().item()):.6f}"
+    activate_denom = active_count + drift_count
+    activate_rate = active_count / activate_denom if activate_denom > 0 else 0.0
     print(
         "[EVAL] "
-        f"run={run_index} step={step} active={active_count} activate_rate{active_count / (active_count + drift_count)}"
+        f"run={run_index} step={step} active={active_count} activate_rate={activate_rate:.3f} "
         f"timed_out={timeout_count} drifted={drift_count} "
         f"max_key_pos={active_metrics['key_body_pos']:.4f} "
         f"max_key_quat={active_metrics['key_body_quat']:.4f} "

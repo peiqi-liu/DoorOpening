@@ -1025,6 +1025,9 @@ class DooropeningEnv(DirectRLEnv):
         robot_damping = self._current_event_param(
             "robot_joint_stiffness_and_damping", "damping_distribution_params"
         )
+        robot_finger_armature = self._current_event_param(
+            "robot_finger_armature", "armature_distribution_params"
+        )
         board_stiffness = self._current_event_param(
             "door_board_joint_stiffness_and_damping", "stiffness_distribution_params"
         )
@@ -1044,6 +1047,8 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["dr/robot_stiffness_max"] = float(robot_stiffness[1])
         self.extras["dr/robot_damping_min"] = float(robot_damping[0])
         self.extras["dr/robot_damping_max"] = float(robot_damping[1])
+        self.extras["dr/robot_finger_armature_min"] = float(robot_finger_armature[0])
+        self.extras["dr/robot_finger_armature_max"] = float(robot_finger_armature[1])
         self.extras["dr/door_board_stiffness_min"] = float(board_stiffness[0])
         self.extras["dr/door_board_stiffness_max"] = float(board_stiffness[1])
         self.extras["dr/door_board_damping_min"] = float(board_damping[0])

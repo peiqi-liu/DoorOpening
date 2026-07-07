@@ -56,12 +56,13 @@ DEFAULT_DEBUG_FIRST_N = 0
 DEFAULT_START_BASE_SAMPLING = "paired"
 DEFAULT_START_BASE_RADIUS_M = 1.0
 # Per-door standoff distance is now drawn from this (min, max) range instead of the single fixed
-# radius above, so the robot no longer always starts exactly 1.0 m away.
-DEFAULT_START_BASE_RADIUS_RANGE_M = (0.9, 1.35)
+# radius above, so the robot no longer always starts exactly 1.0 m away. Widened to push the robot
+# farther back (up to 2.0 m) so the policy must handle longer approaches, not just near-contact starts.
+DEFAULT_START_BASE_RADIUS_RANGE_M = (1.0, 2.0)
 # Tighter left/right approach spread (was 30 deg) -- robots were starting too far to the side.
 DEFAULT_START_BASE_ANGLE_RANGE_DEG = 15.0
 DEFAULT_START_BASE_PAIR_SEED = 0
-DEFAULT_FRANKA_START_JOINT_NOISE_RAD = 0.2
+DEFAULT_FRANKA_START_JOINT_NOISE_RAD = 0.05
 
 FRANKA_JOINT_NAMES = [
     "panda_joint1",
@@ -108,6 +109,14 @@ def parse_args():
     )
     parser.add_argument("--output-dir", type=Path, default=default_output_dir)
     parser.add_argument("--num-variants", type=int, default=DEFAULT_NUM_VARIANTS)
+    parser.add_argument(
+        "--start-index",
+        type=int,
+        default=0,
+        help="First variant index; variant dirs are named <prefix>__rnd_<start-index+i>. Use a nonzero "
+        "value (e.g. 1) to avoid the reserved __rnd_00 suffix, which the dagger train/validation split "
+        "treats as a held-out validation door (a single __rnd_00 door leaves the training split empty).",
+    )
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
@@ -262,6 +271,13 @@ def parse_args():
         default=DEFAULT_START_BASE_PAIR_SEED,
         help="Seed mixed into the deterministic paired start-base hash.",
     )
+    parser.add_argument(
+        "--franka-start-joint-noise",
+        type=float,
+        default=DEFAULT_FRANKA_START_JOINT_NOISE_RAD,
+        help="Symmetric uniform noise (rad) added to each Franka default joint at the start pose. "
+        "Set 0.0 to start exactly at the default Franka configuration.",
+    )
     return parser.parse_args()
 
 
@@ -342,8 +358,9 @@ def sample_initial_state(rng, variant_name, args):
     door_world_pose = {"pos": list(DOOR_INITIAL_POS), "rot": list(DOOR_INITIAL_ROT)}
     door_joint_pos = [0.0, 0.0]
     robot_base_joint_pos = [0.0, 0.0, 0.0]
+    franka_start_joint_noise = float(getattr(args, "franka_start_joint_noise", DEFAULT_FRANKA_START_JOINT_NOISE_RAD))
     robot_franka_joint_pos = [
-        default_value + rng.uniform(-DEFAULT_FRANKA_START_JOINT_NOISE_RAD, DEFAULT_FRANKA_START_JOINT_NOISE_RAD)
+        default_value + rng.uniform(-franka_start_joint_noise, franka_start_joint_noise)
         for default_value in FRANKA_DEFAULT_JOINT_POS
     ]
     sampled_robot_world_pose = None
@@ -1001,7 +1018,7 @@ def generate_variants(args):
 
     for variant_idx in range(args.num_variants):
         spec = sample_variant_spec(rng, args)
-        variant_name = build_variant_name(args.asset_name_prefix, variant_idx)
+        variant_name = build_variant_name(args.asset_name_prefix, args.start_index + variant_idx)
         variant_dir = output_dir / variant_name
         texture_dir = variant_dir / "texture_dae"
         texture_dir.mkdir(parents=True, exist_ok=False)
