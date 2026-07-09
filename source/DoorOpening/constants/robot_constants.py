@@ -47,6 +47,16 @@ FRANKA_DEFAULT_JOINT_POS = {
     "panda_joint7": 0.0,
 }
 
+FRANKA_END_JOINT_POS = {
+    "panda_joint1": 0.0,
+    "panda_joint2": -0.25,
+    "panda_joint3": 0.0,
+    "panda_joint4": -0.5 * np.pi,
+    "panda_joint5": 0.0,
+    "panda_joint6": 0.5 * np.pi,
+    "panda_joint7": 0.0,
+}
+
 DEFAULT_JOINT_POS = {
     # "x5_joint1": 2.2, 
     # "x5_joint2": 2.355, 

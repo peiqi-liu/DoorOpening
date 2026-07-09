@@ -918,10 +918,10 @@ def play_and_save_traj(
     #             new_door_traj.append(door_point)
     # robot_traj = new_robot_traj
     # door_traj = new_door_traj
-    # Pull motions get a longer horizon (1440 frames = 36 s at the 1/40 s traj dt) than push (1000);
+    # Pull motions get a longer horizon (1440 frames = 36 s at the 1/40 s traj dt) than push (1200);
     # pull has more phases (retract + push-panel + traverse). The multi-motion lib pads the shorter
     # (push) motions up to the longest on load, so mixing lengths is safe.
-    traj_length = 1440 if planner_opening_direction == "pull" else 1000
+    traj_length = 1440 if planner_opening_direction == "pull" else 1200
     robot_traj, door_traj, robot_traj_d, door_traj_d, key_indices = collocate_and_playback(
         robot_traj,
         door_traj,

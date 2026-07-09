@@ -4,7 +4,7 @@ from typing import Literal
 import torch
 from isaaclab.utils.math import quat_from_euler_xyz
 
-from DoorOpening.constants.robot_constants import FRANKA_DEFAULT_JOINT_POS, FRANKA_JOINT_NAMES, CAMERA_JOINT_DEFAULT_VALUES, CAMERA_JOINT_VALUES_WHEN_SEARCHING_HINGE, CAMERA_JOINT_VALUES_WHEN_OBSERVING_LEFT
+from DoorOpening.constants.robot_constants import FRANKA_DEFAULT_JOINT_POS, FRANKA_END_JOINT_POS, FRANKA_JOINT_NAMES, CAMERA_JOINT_DEFAULT_VALUES, CAMERA_JOINT_VALUES_WHEN_SEARCHING_HINGE, CAMERA_JOINT_VALUES_WHEN_OBSERVING_LEFT
 from DoorOpening.utils.state_machine.api import compute_base_joint, get_board_edge, get_hinge_pos, open_hand, solve_ik
 
 HandleSide = Literal["right", "left"]
@@ -139,6 +139,11 @@ def state_machine_offline_push_right_door(
         device=device,
         dtype=q_robot.dtype,
     )
+    franka_end_q = torch.tensor(
+        [FRANKA_END_JOINT_POS[name] for name in FRANKA_JOINT_NAMES],
+        device=device,
+        dtype=q_robot.dtype,
+    )
 
     _append_state(
         robot_traj,
@@ -187,8 +192,8 @@ def state_machine_offline_push_right_door(
     # finger<->panel penalty.
     palm_target_pos[:, 0] += 0.45
     # Slightly inward (-y; was -0.20).
-    palm_target_pos[:, 1] += -0.23
-    palm_target_pos[:, 2] += 0.2
+    palm_target_pos[:, 1] += -0.2
+    palm_target_pos[:, 2] += 0.25
     palm_target_pose = _make_pose(palm_target_pos, default_palm_rot)
 
     q_robot[:10] = solve_ik(
@@ -217,8 +222,8 @@ def state_machine_offline_push_right_door(
     # Grasp EE moved BACK (0.035 -> 0.05) to widen the palm<->door x gap (compensates for removing
     # the finger<->panel penalty). Left/right nudge still not applied on push; y = -0.10.
     palm_target_pos[:, 0] += 0.05
-    palm_target_pos[:, 1] += -0.10
-    palm_target_pos[:, 2] += 0.08
+    palm_target_pos[:, 1] += -0.085
+    palm_target_pos[:, 2] += 0.1
     palm_target_pose = _make_pose(palm_target_pos, default_palm_rot)
 
     q_robot[:10] = solve_ik(
@@ -250,7 +255,7 @@ def state_machine_offline_push_right_door(
     palm_target_pose[:, 3:] = get_rotation_quat(
         math.pi,
         math.pi,
-        math.pi + 0.20,
+        math.pi + 0.25,
         device,
     )
 
@@ -300,7 +305,7 @@ def state_machine_offline_push_right_door(
 
         # Offset palm outward from panel surface — get_hinge_pos returns centroid at the panel
         push_palm_x_offset = 0.08
-        push_palm_y_offset = 0.0
+        push_palm_y_offset = -0.10
         palm_dx, palm_dy = _rotate_xy_counterclockwise(
             push_palm_x_offset,
             push_palm_y_offset,
@@ -352,8 +357,8 @@ def state_machine_offline_push_right_door(
     # -------------------------
     door_center_pos = door_initial_pose[:, :3].to(device).clone()
     release_fwd_base_pos = door_center_pos.clone()
-    release_fwd_base_pos[:, 0] += -0.8
-    release_fwd_base_pos[:, 1] += 0.05
+    release_fwd_base_pos[:, 0] += -0.7
+    release_fwd_base_pos[:, 1] += 0.2
     release_fwd_base_pose = _make_pose(release_fwd_base_pos, base_target_rot)
 
     new_base_joints = compute_base_joint(
@@ -431,7 +436,7 @@ def state_machine_offline_push_right_door(
         )[0]
         q_robot[10:26] = safe_open_hand_q
         if traverse_step == traverse_steps:
-            q_robot[3:10] = franka_default_q
+            q_robot[3:10] = franka_end_q
             q_door = torch.tensor([0.0, 0.0], device=device)
         _append_state(
             robot_traj,
@@ -475,6 +480,11 @@ def state_machine_offline_push_left_door(
         device=device,
         dtype=q_robot.dtype,
     )
+    franka_end_q = torch.tensor(
+        [FRANKA_END_JOINT_POS[name] for name in FRANKA_JOINT_NAMES],
+        device=device,
+        dtype=q_robot.dtype,
+    )
 
     _append_state(
         robot_traj,
@@ -515,15 +525,14 @@ def state_machine_offline_push_left_door(
     base_target_pos = handle_pos.clone()
     base_target_pos[:, 0] += 0.55
     # Base moved a little inward toward the door center (+y; was 0.25) so it doesn't sit out by the wall.
-    base_target_pos[:, 1] += 0.33
+    base_target_pos[:, 1] += 0.3
     base_target_pose = _make_pose(base_target_pos, base_target_rot)
 
     palm_target_pos = handle_pos.clone()
     # Moved back (0.35 -> 0.40): wider palm<->door x gap to compensate for removing the
     # finger<->panel penalty.
     palm_target_pos[:, 0] += 0.40
-    # Slightly inward (+y; was 0.15).
-    palm_target_pos[:, 1] += 0.18
+    palm_target_pos[:, 1] += 0.15
     palm_target_pos[:, 2] += 0.25
     palm_target_pose = _make_pose(palm_target_pos, default_palm_rot)
 
@@ -553,7 +562,7 @@ def state_machine_offline_push_left_door(
     # Grasp EE moved BACK (0.025 -> 0.05) to widen the palm<->door x gap (compensates for removing
     # the finger<->panel penalty). Left/right nudge still not applied on push; y = 0.03.
     palm_target_pos[:, 0] += 0.05
-    palm_target_pos[:, 1] += 0.03
+    palm_target_pos[:, 1] += 0.015
     palm_target_pos[:, 2] += 0.10
     palm_target_pose = _make_pose(palm_target_pos, default_palm_rot)
 
@@ -586,7 +595,7 @@ def state_machine_offline_push_left_door(
     palm_target_pose[:, 3:] = get_rotation_quat(
         math.pi,
         math.pi,
-        math.pi - 0.20,
+        math.pi - 0.25,
         device,
     )
 
@@ -639,7 +648,7 @@ def state_machine_offline_push_left_door(
 
         # Offset palm outward from panel surface — left door swings clockwise so rotate offset clockwise
         push_palm_x_offset = 0.08
-        push_palm_y_offset = 0.0
+        push_palm_y_offset = 0.03
         palm_dx, palm_dy = _rotate_xy_clockwise(
             push_palm_x_offset,
             push_palm_y_offset,
@@ -689,8 +698,8 @@ def state_machine_offline_push_left_door(
     # -------------------------
     door_center_pos = door_initial_pose[:, :3].to(device).clone()
     release_fwd_base_pos = door_center_pos.clone()
-    release_fwd_base_pos[:, 0] += -0.8
-    release_fwd_base_pos[:, 1] += -0.05
+    release_fwd_base_pos[:, 0] += -0.7
+    release_fwd_base_pos[:, 1] += -0.2
     release_fwd_base_pose = _make_pose(release_fwd_base_pos, base_target_rot)
 
     new_base_joints = compute_base_joint(
@@ -741,7 +750,7 @@ def state_machine_offline_push_left_door(
         )[0]
         q_robot[10:26] = safe_open_hand_q
         if traverse_step == traverse_steps:
-            q_robot[3:10] = franka_default_q
+            q_robot[3:10] = franka_end_q
             q_door = torch.tensor([0.0, 0.0], device=device)
         _append_state(
             robot_traj,

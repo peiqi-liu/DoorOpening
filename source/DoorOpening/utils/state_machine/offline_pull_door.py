@@ -140,12 +140,12 @@ def state_machine_offline_right_pull_door(
     # Unified with the push-right planner so pregrasp/grasp base + palm offsets match
     # (keeps the base off the side wall, like the push planner).
     pregrasp_base_x_offset = 0.6
-    pregrasp_base_y_offset = -0.30
+    pregrasp_base_y_offset = -0.35
     # Moved back (0.40 -> 0.45): larger palm<->door x gap to compensate for removing the
     # finger<->panel contact penalty (the demo grasps from further out so fingers don't press panel).
     pregrasp_palm_x_offset = 0.45
     pregrasp_palm_y_offset = -0.20
-    pregrasp_palm_z_offset = 0.2
+    pregrasp_palm_z_offset = 0.25
 
     base_target_pos = handle_pos.clone()
     base_target_pos[:, 0] += pregrasp_base_x_offset
@@ -187,7 +187,7 @@ def state_machine_offline_right_pull_door(
     # finger<->panel penalty, so the grasp doesn't drive fingers into the panel.
     grasp_palm_x_offset = 0.05
     grasp_palm_y_offset = -0.085
-    grasp_palm_z_offset = 0.08
+    grasp_palm_z_offset = 0.10
     grasp_open_ratio = 0.70
 
     palm_target_pos = handle_pos.clone()
@@ -222,7 +222,7 @@ def state_machine_offline_right_pull_door(
     unlatch_palm_z_delta = -0.08
     unlatch_rot_roll = math.pi
     unlatch_rot_pitch = math.pi
-    unlatch_rot_yaw = math.pi + 0.20
+    unlatch_rot_yaw = math.pi + 0.25
 
     q_door = torch.tensor([0.0, unlatch_hinge_angle], device=device)
 
