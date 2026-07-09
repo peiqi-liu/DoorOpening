@@ -229,8 +229,8 @@ class EventCfg:
 class DooropeningEnvCfg(DirectRLEnvCfg):
     sim_dt = 1/120
     decimation = 4
-    episode_length_s = 25.
-    num_sim_steps_to_render=2
+    episode_length_s = 36.
+    num_sim_steps_to_render=4
     # - spaces definition
     state_space = 0
     num_states = 0
@@ -568,7 +568,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     joint_limit_penalty_w = 40.0
     joint_limit_penalty_margin_ratio = 0.05
     # lambda_c in r = r_target - lambda_l*r_limit - lambda_c*r_contact
-    self_collision_penalty_w = 1.0
+    self_collision_penalty_w = 5.0
     # Penalty weight for finger<->panel contact while panel_contact_mask is active.
     # Disabled: finger<->panel contact is no longer penalized. Set back to 0.3 to re-enable.
     # Penalty weight (per non-front base face in contact with the door). High on purpose: a
