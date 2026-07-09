@@ -45,14 +45,15 @@ from typing import Tuple
 
 
 # Contact-sensor keys. base_door is still one single-body sensor per base face (each filtered
-# against the door). self_collision is now THREE multi-body group sensors (franka / x5 / base);
-# consumers threshold-count over the per-body force_matrix, so order is not load-bearing. Keys
-# must match the cfg field names; a mismatch raises AttributeError at setup.
+# against the door). self_collision is now a SINGLE multi-body sensor on the franka arm: the x5
+# camera arm and the mobile base are fixed relative to each other so they cannot self-collide, so
+# only the moving franka arm needs self-collision checks (filtered against x5 + base + door frame).
+# x5/base <-> door-frame contacts are already covered by the dedicated x5_door / base_door sensors.
+# Consumers threshold-count over the per-body force_matrix, so order is not load-bearing. Keys must
+# match the cfg field names; a mismatch raises AttributeError at setup.
 BASE_DOOR_SENSOR_NAMES = tuple(f"contact_forces_base_door_{b}" for b in BASE_DOOR_CONTACT_BODY_NAMES)
 SELF_COLLISION_SENSOR_NAMES = (
     "contact_forces_self_collision_franka",
-    "contact_forces_self_collision_x5",
-    "contact_forces_self_collision_base",
 )
 
 

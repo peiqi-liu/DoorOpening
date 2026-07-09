@@ -21,12 +21,8 @@ from DoorOpening.tasks.dooropening.contact_force_utils import (
     FRANKA_BOX_DOOR_CONTACT_PRIM_PATH,
     HANDLE_CONTACT_FILTER_PRIM_PATHS,
     PANEL_CONTACT_FILTER_PRIM_PATHS,
-    SELF_COLLISION_BASE_FILTER_PRIM_PATHS,
-    SELF_COLLISION_BASE_PRIM_PATH,
     SELF_COLLISION_FRANKA_FILTER_PRIM_PATHS,
     SELF_COLLISION_FRANKA_PRIM_PATH,
-    SELF_COLLISION_X5_FILTER_PRIM_PATHS,
-    SELF_COLLISION_X5_PRIM_PATH,
     X5_BODY_NAMES,
 )
 from isaaclab.assets import ArticulationCfg
@@ -391,26 +387,15 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # Each group's force_matrix_w is [N, group_bodies, num_filters, 3]; the env reduces it to a
     # per-body force and counts bodies over threshold. Each group filters against the OTHER groups
     # + the fixed door frame (see contact_force_utils).
+    # Only the moving franka arm needs self-collision sensing: the x5 arm and mobile base are fixed
+    # relative to each other (can't self-collide), and their door-frame contacts are already caught
+    # by the x5_door / base_door sensors. So a single franka sensor (filtered vs x5 + base + frame).
     contact_forces_self_collision_franka = ContactSensorCfg(
         prim_path=SELF_COLLISION_FRANKA_PRIM_PATH,
         update_period=0.0,
         history_length=1,
         debug_vis=False,
         filter_prim_paths_expr=list(SELF_COLLISION_FRANKA_FILTER_PRIM_PATHS),
-    )
-    contact_forces_self_collision_x5 = ContactSensorCfg(
-        prim_path=SELF_COLLISION_X5_PRIM_PATH,
-        update_period=0.0,
-        history_length=1,
-        debug_vis=False,
-        filter_prim_paths_expr=list(SELF_COLLISION_X5_FILTER_PRIM_PATHS),
-    )
-    contact_forces_self_collision_base = ContactSensorCfg(
-        prim_path=SELF_COLLISION_BASE_PRIM_PATH,
-        update_period=0.0,
-        history_length=1,
-        debug_vis=False,
-        filter_prim_paths_expr=list(SELF_COLLISION_BASE_FILTER_PRIM_PATHS),
     )
     handle_contact_force_threshold = 1.0
     # Finger<->panel contact above this (N) is treated as a panel collision when panel_contact_mask is on.

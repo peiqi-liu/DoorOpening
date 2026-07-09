@@ -84,23 +84,24 @@ BASE_DOOR_CONTACT_PRIM_PATH = (
 # termination (rollout counted as a failure), rather than the milder base<->door penalty.
 FRANKA_BOX_DOOR_CONTACT_PRIM_PATH = "/World/envs/env_.*/Robot/franka_control_box"
 
-# Self-collision penalty (r_contact) sensing. Rather than one filtered ContactSensor per body
-# (15 single-body sensors -> 15 PhysX contact views + Warp kernels + buffers x num_envs, which
-# OOM'd host RAM / crashed Warp's LLVM JIT at 4096 envs), the self-collision bodies are grouped
-# into THREE multi-body sensors -- franka arm, x5/arx arm, and the base. IsaacLab resolves each
-# regex-alternation prim_path into a single multi-body sensor whose force_matrix_w is
-# [N, group_bodies, num_filters, 3]; the env reduces that to a per-body force and counts the
-# bodies over threshold. Each group is filtered against the OTHER two groups + the fixed door
-# frame (cross-group + frame contacts). PhysX already drops directly-jointed (adjacent) pairs.
+# Self-collision penalty (r_contact) sensing. Only the MOVING franka arm needs self-collision
+# checks: the x5/arx camera arm and the mobile base are fixed relative to each other, so they can
+# never self-collide -- the only self-collisions possible are franka<->x5 and franka<->base. So a
+# SINGLE multi-body sensor on the franka arm, filtered against the x5 group + base group + the fixed
+# door frame, covers everything. (x5<->frame and base<->frame contacts are already caught by the
+# dedicated x5_door / base_door sensors, which filter against DOOR_BODY_CONTACT_FILTER_PRIM_PATHS
+# including Door/base.) IsaacLab resolves the regex-alternation prim_path into one multi-body sensor
+# whose force_matrix_w is [N, group_bodies, num_filters, 3]; the env counts franka bodies over
+# threshold. PhysX already drops directly-jointed (adjacent) pairs.
 #
 # Excluded on purpose: panda_link0/panda_link1 (base-adjacent arm mount), panda_link7 flange and
-# the whole LEAP hand (finger self-collision drove poses too conservative), and the left/right/top
-# base panels (deemed not needed).
+# the whole LEAP hand (finger self-collision drove poses too conservative).
 SELF_COLLISION_FRANKA_BODIES = ("panda_link2", "panda_link3", "panda_link4", "panda_link5", "panda_link6")
+# The other two groups the franka arm is checked AGAINST (kept fixed relative to each other).
 SELF_COLLISION_X5_BODIES = ("link2", "link3", "link4", "link5", "x5_camera_link")
 SELF_COLLISION_BASE_BODIES = ("tidybot2_base_link", "franka_control_box")
 
-# The fixed door frame (URDF link_0, merged to `base` at runtime): a robot body striking the
+# The fixed door frame (URDF link_0, merged to `base` at runtime): a franka body striking the
 # immovable frame is scored as a self-collision too.
 DOOR_FRAME_FILTER_PRIM_PATH = "/World/envs/env_.*/Door/base"
 
@@ -118,15 +119,9 @@ def _self_collision_filter_prims(*body_name_groups) -> tuple[str, ...]:
     return prims + (DOOR_FRAME_FILTER_PRIM_PATH,)
 
 
-# One multi-body sensor per group.
+# Single franka self-collision sensor, filtered against the x5 group + base group + door frame.
 SELF_COLLISION_FRANKA_PRIM_PATH = _self_collision_group_prim_path(SELF_COLLISION_FRANKA_BODIES)
-SELF_COLLISION_X5_PRIM_PATH = _self_collision_group_prim_path(SELF_COLLISION_X5_BODIES)
-SELF_COLLISION_BASE_PRIM_PATH = _self_collision_group_prim_path(SELF_COLLISION_BASE_BODIES)
-
-# Each group filters against the OTHER two groups + the door frame.
 SELF_COLLISION_FRANKA_FILTER_PRIM_PATHS = _self_collision_filter_prims(SELF_COLLISION_X5_BODIES, SELF_COLLISION_BASE_BODIES)
-SELF_COLLISION_X5_FILTER_PRIM_PATHS = _self_collision_filter_prims(SELF_COLLISION_FRANKA_BODIES, SELF_COLLISION_BASE_BODIES)
-SELF_COLLISION_BASE_FILTER_PRIM_PATHS = _self_collision_filter_prims(SELF_COLLISION_FRANKA_BODIES, SELF_COLLISION_X5_BODIES)
 
 
 def get_filtered_contact_force_w(sensor, expected_num_envs=None, filter_indices: tuple[int, ...] | None = None) -> torch.Tensor:
