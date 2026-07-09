@@ -146,14 +146,16 @@ GLORBOT_CONFIG = ArticulationCfg(
             effort_limit_sim=1.0,
             stiffness=600,
             damping=40,
+            # Joint friction for the LEAP fingers (was unset -> 0). Matches the real geared-Dynamixel
+            # finger friction and damps overshoot alongside the armature below.
+            friction=0.01,
             # The LEAP finger links are ultralight (izz ~1e-5 kg m^2). With a 1.0 Nm effort limit that
             # is ~1e5 rad/s^2 of angular acceleration when the PD saturates, so the fingers overshoot
             # in a single step and jitter. Armature adds effective rotor inertia the implicit PD sees,
-            # capping the per-step acceleration and killing the shake (tune up to ~0.03 if it persists).
-            # NOTE: this 0.01 is only the nominal / ADR-increment-0 value. At training time the
-            # `robot_finger_armature` EventTerm (see multi_dooropening_env_cfg.py) randomizes it
-            # per-episode and the ADR curriculum widens it toward ~(0.006, 0.02).
-            armature=0.01,
+            # capping the per-step acceleration. NOTE: this is only the nominal / ADR-increment-0 value;
+            # at training time the `robot_finger_armature` EventTerm (see multi_dooropening_env_cfg.py)
+            # randomizes it per-episode -- lower that ADR range too if you want 0.002 to hold in training.
+            armature=0.002,
         ),
     }
 )

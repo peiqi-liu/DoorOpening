@@ -288,6 +288,32 @@ def _get_base_env(env):
     return getattr(env, "unwrapped", getattr(env, "env", env))
 
 
+def get_joint_velocities(base_env, joint_names):
+    """Raw physical joint velocities from PhysX for the named joints -> [num_envs, len(joint_names)].
+
+    Read straight from ``robot.data.joint_vel`` (rad/s for revolute joints, m/s for the prismatic
+    base_x/base_y joints). These are the ACTUAL simulated velocities -- NOT the policy action or any
+    action scale (e.g. base_action_scale) -- so they line up with what you measure on the real robot
+    (base odometry / joint encoders).
+    """
+    all_names = list(base_env.robot.data.joint_names)
+    idx = [all_names.index(n) for n in joint_names]
+    return base_env.robot.data.joint_vel[:, idx]
+
+
+def get_base_velocity(base_env):
+    """Base planar velocity (vx, vy, wz) -> [num_envs, 3] from the base joints.
+
+    vx, vy in m/s (base_x_joint, base_y_joint); wz in rad/s (base_rotation_joint).
+    """
+    return get_joint_velocities(base_env, ["base_x_joint", "base_y_joint", "base_rotation_joint"])
+
+
+def get_base_lin_speed(base_env):
+    """Base ground speed ||(vx, vy)|| in m/s -- directly comparable to the real robot's base odometry."""
+    return torch.linalg.vector_norm(get_base_velocity(base_env)[:, :2], dim=-1)
+
+
 def _build_compact_joint_layout(joint_names):
     """Return (names, indices) for the compact viser-pt joint order
     [base_x_joint, base_y_joint, base_rotation_joint, panda_joint1..7, finger_joint_0..N].
@@ -1311,6 +1337,19 @@ def main(env_cfg, agent_cfg: dict):
             ):
                 _print_progress(run_index, step, active, timed_out, drifted, last_metrics, action_loss=last_action_loss)
                 _print_mode_progress(run_index, step, mode_tracker, mode_step_summary)
+                # Raw base velocity (physical joint velocities; ignores base_action_scale) for
+                # sim<->real comparison. lin speed = ||(base_x_vel, base_y_vel)|| in m/s.
+                _base_speed = get_base_lin_speed(base_env)
+                if bool(active.any()):
+                    _bs = _base_speed[active]
+                    _msg = (
+                        f"[BASE-VEL] run={run_index} step={step} "
+                        f"lin_speed_m_s mean={_bs.mean().item():.3f} max={_bs.max().item():.3f}"
+                    )
+                    if viser_pt_state is not None:
+                        _e = viser_pt_state["env_id"]
+                        _msg += f" tracked_env[{_e}]={_base_speed[_e].item():.3f}"
+                    print(_msg)
 
         if replay_runs is not None and _run_joint_pos:
             replay_runs.append({

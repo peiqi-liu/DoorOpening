@@ -309,6 +309,10 @@ class DooropeningEnv(DirectRLEnv):
         # (= base_x_joint - 1.0 here: spawn base_x~0 -> ~-1.0 (not past); base_x=1.0 at the door plane;
         # pull ends ~+0.5 past, push ends ~+1.5 past).
         self.episode_reached_far_side = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        # Far-side task-success of the LAST completed episode per env, recorded at done and PERSISTED
+        # across reset. A distillation/eval loop reads this right after env.step() -- by then the live
+        # episode_reached_far_side latch has already been cleared in _reset_idx, so it can't be used.
+        self.last_far_side_success = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         self.completed_reached_last_frame = deque(maxlen=self.games_to_track)
         self._base_x_dof_idx = int(self._robot_base_xy_dof_idx[0].item())
         self._door_minus_robot_x = float(DOOR_INITIAL_POS[0] - ROBOT_INITIAL_POS[0])
@@ -972,6 +976,8 @@ class DooropeningEnv(DirectRLEnv):
             episode_successes_tensor = self.episode_reached_far_side[done_mask].to(dtype=torch.float32)
             episode_successes = episode_successes_tensor.detach().cpu().tolist()
             self.completed_successes.extend(float(value) for value in episode_successes)
+            # Persist for a distillation/eval loop to read after env.step() (survives _reset_idx).
+            self.last_far_side_success[done_mask] = episode_successes_tensor
             # Keep the old imitation metric (reached last ref frame / timeout) logged for comparison.
             self.completed_reached_last_frame.extend(
                 (self.episode_reached_last_frame[done_mask] | self.reset_time_outs[done_mask])

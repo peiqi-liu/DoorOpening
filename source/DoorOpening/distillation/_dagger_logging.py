@@ -108,7 +108,14 @@ class LoggingMixin:
 
         episode_rewards = self.current_rewards[done_mask, 0].detach().cpu().tolist()
         episode_lengths = self.current_lengths[done_mask].detach().cpu().tolist()
-        episode_success_tensor = timed_out[done_mask].to(dtype=torch.float32)
+        # Student success = the env's TASK success (base reached the FAR side of the door), matching
+        # the teacher's success/success_rate. Read the persisted per-env buffer because env.step() has
+        # already cleared the live latch. Fall back to timed_out (survived-to-timeout) if unavailable.
+        far_side = getattr(getattr(self, "ov_env", None), "last_far_side_success", None)
+        if far_side is not None:
+            episode_success_tensor = far_side[done_mask].to(dtype=torch.float32)
+        else:
+            episode_success_tensor = timed_out[done_mask].to(dtype=torch.float32)
 
         self.completed_rewards.extend(float(value) for value in episode_rewards)
         self.completed_lengths.extend(float(value) for value in episode_lengths)

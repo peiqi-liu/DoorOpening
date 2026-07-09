@@ -167,7 +167,7 @@ def create_door_cfg(
 
 
 root_path = os.path.dirname(os.path.dirname(__file__))
-asset_base_folder = os.path.join(root_path, "door/RealDoorTest")
+asset_base_folder = os.path.join(root_path, "door/PartNetv5_plusplus")
 asset_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/mobility.urdf"), recursive=True))
 board_offsets = []
 board_bboxes = []
