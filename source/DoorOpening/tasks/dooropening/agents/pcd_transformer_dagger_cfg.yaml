@@ -58,7 +58,7 @@ temporal_state_encoders:
     # - push_pull_belief
     # - target_err_hand
     - base_vel
-    # - aux_handle_pos
+    - aux_handle_pos
     # aux_handle_pos is intentionally NOT in the temporal stack: it is a standalone, recurrent
     # handle-pose input seeded from ground truth on reset (see dagger.aux_handle_input_mode).
   hidden_dims: [128, 256]
@@ -88,7 +88,7 @@ pcd_encoders_cfg:
   local_pcd_t:
     type: "pointnet"
     num_output_tokens: 128
-    num_points: [2500, 1000, 0]  # Policy crop counts [base_crop, palm_crop, (robot slot)]. For pointcloud_source="both" each crop is split evenly across realsense+lidar (e.g. 2500 -> 1250 realsense + 1250 lidar). Robot model points are configured below.
+    num_points: [2500, 0, 0]  # Policy crop counts [base_crop, palm_crop, (robot slot)]. For pointcloud_source="both" each crop is split evenly across realsense+lidar (e.g. 2500 -> 1250 realsense + 1250 lidar). Robot model points are configured below.
     use_pcd: true
 
 state_encoders_cfg:
