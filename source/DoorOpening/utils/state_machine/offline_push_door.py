@@ -5,7 +5,7 @@ import torch
 from isaaclab.utils.math import quat_from_euler_xyz
 
 from DoorOpening.constants.robot_constants import FRANKA_DEFAULT_JOINT_POS, FRANKA_END_JOINT_POS, FRANKA_JOINT_NAMES, CAMERA_JOINT_DEFAULT_VALUES, CAMERA_JOINT_VALUES_WHEN_SEARCHING_HINGE, CAMERA_JOINT_VALUES_WHEN_OBSERVING_LEFT
-from DoorOpening.utils.state_machine.api import compute_base_joint, get_board_edge, get_hinge_pos, open_hand, solve_ik
+from DoorOpening.utils.state_machine.api import get_board_edge, get_hinge_pos, open_hand, solve_ik
 
 HandleSide = Literal["right", "left"]
 
@@ -351,39 +351,39 @@ def state_machine_offline_push_right_door(
     key_idx_in_key_indices.append(len(robot_traj) - 1)
 
     # -------------------------
-    # Step 4.5: Base moves forward; arm IK keeps EE at handle world position.
-    # We pin the base joints directly THEN solve IK with base_pose=None so the
-    # IK cannot pull the base back while trying to reach the handle.
+    # Step 4.5: Base sweeps forward to the release/clearance pose while the arm HOLDS the EE at the
+    # handle world pose. Done as a smooth interpolated base sweep (like the pull planner's traverse
+    # loop) instead of a single jump: each step passes the interpolated base_pose (so the IK can't
+    # pull the base back) AND the pinned palm_pose, so the EE stays put and is re-solved every step.
     # -------------------------
     door_center_pos = door_initial_pose[:, :3].to(device).clone()
     release_fwd_base_pos = door_center_pos.clone()
     release_fwd_base_pos[:, 0] += -0.7
-    release_fwd_base_pos[:, 1] += 0.2
-    release_fwd_base_pose = _make_pose(release_fwd_base_pos, base_target_rot)
+    release_fwd_base_pos[:, 1] += 0.25
 
-    new_base_joints = compute_base_joint(
-        robot_initial_pose[..., :3], robot_initial_pose[..., 3:], release_fwd_base_pose
-    ).squeeze()
-    q_robot[:3] = new_base_joints
-
-    q_robot[:10] = solve_ik(
-        robot_urdf_path,
-        q_robot[:10],
-        palm_pose=palm_target_pose,
-        base_pose=None,
-        robot_initial_pose=robot_initial_pose,
-    )[0]
-    q_robot[:3] = new_base_joints  # re-pin base in case IK drifted it
-    q_robot[10:26] = safe_open_hand_q
-
-    _append_state(
-        robot_traj,
-        door_traj,
-        key_idx_in_key_indices,
-        q_robot,
-        q_door,
-        mark_keyframe=True,
-    )
+    fwd_steps = 8
+    start_fwd_base_pos = base_target_pos.clone()  # base pose at the end of step 4
+    for fwd_step in range(1, fwd_steps + 1):
+        frac = fwd_step / fwd_steps
+        step_base_pos = start_fwd_base_pos + frac * (release_fwd_base_pos - start_fwd_base_pos)
+        step_base_pose = _make_pose(step_base_pos, base_target_rot)
+        q_robot[:10] = solve_ik(
+            robot_urdf_path,
+            q_robot[:10],
+            palm_pose=palm_target_pose,
+            base_pose=step_base_pose,
+            robot_initial_pose=robot_initial_pose,
+            num_attempts=1,  # loop body: single seed for continuity (no random-restart branch jumps)
+        )[0]
+        q_robot[10:26] = safe_open_hand_q
+        _append_state(
+            robot_traj,
+            door_traj,
+            key_idx_in_key_indices,
+            q_robot,
+            q_door,
+            mark_keyframe=(fwd_step == fwd_steps),
+        )
 
     # -------------------------
     # Step 5: Traverse through the doorway with arm still extended
@@ -413,39 +413,36 @@ def state_machine_offline_push_right_door(
     # )
 
     # -------------------------
-    # Step 6: Finish traversing past the doorway with a smooth interpolated base sweep (like the
-    # pull planner), then tuck the arm. palm_pose=None -> only the base moves each step; the arm
-    # holds its config until the final step tucks it and closes the door.
+    # Step 6: Finish traversing past the doorway AND tuck the arm to the end config, as a SINGLE
+    # keyframe. collocate_and_playback then splines the base joints AND the franka joints smoothly
+    # from the step-4.5 keyframe to this one. (Previously a for-loop moved only the base and tucked
+    # the arm on its LAST iteration -- the arm snapped to the end config in ~1 frame, a huge reference
+    # velocity spike that broke DeepMimic tracking. This final traverse+tuck needs no precise motion.)
     # -------------------------
     traverse_far_base_pos = door_center_pos.clone()
     traverse_far_base_pos[:, 0] += -1.5
     traverse_far_base_pos[:, 1] += 0.25
+    traverse_far_base_pose = _make_pose(traverse_far_base_pos, base_target_rot)
 
-    traverse_steps = 8
-    for traverse_step in range(1, traverse_steps + 1):
-        frac = traverse_step / traverse_steps
-        step_base_pos = release_fwd_base_pos + frac * (traverse_far_base_pos - release_fwd_base_pos)
-        step_base_pose = _make_pose(step_base_pos, base_target_rot)
-        q_robot[:10] = solve_ik(
-            robot_urdf_path,
-            q_robot[:10],
-            palm_pose=None,
-            base_pose=step_base_pose,
-            robot_initial_pose=robot_initial_pose,
-            num_attempts=1,  # loop body: single seed for continuity (no random-restart branch jumps)
-        )[0]
-        q_robot[10:26] = safe_open_hand_q
-        if traverse_step == traverse_steps:
-            q_robot[3:10] = franka_end_q
-            q_door = torch.tensor([0.0, 0.0], device=device)
-        _append_state(
-            robot_traj,
-            door_traj,
-            key_idx_in_key_indices,
-            q_robot,
-            q_door,
-            mark_keyframe=(traverse_step == traverse_steps),
-        )
+    q_robot[:10] = solve_ik(
+        robot_urdf_path,
+        q_robot[:10],
+        palm_pose=None,
+        base_pose=traverse_far_base_pose,
+        robot_initial_pose=robot_initial_pose,
+    )[0]
+    q_robot[3:10] = franka_end_q
+    q_robot[10:26] = safe_open_hand_q
+    q_door = torch.tensor([0.0, 0.0], device=device)
+
+    _append_state(
+        robot_traj,
+        door_traj,
+        key_idx_in_key_indices,
+        q_robot,
+        q_door,
+        mark_keyframe=True,
+    )
 
     return robot_traj, door_traj, key_idx_in_key_indices
 
@@ -694,28 +691,62 @@ def state_machine_offline_push_left_door(
     key_idx_in_key_indices.append(len(robot_traj) - 1)
 
     # -------------------------
-    # Step 4.5: Base moves forward while EE stays fixed at handle world position
+    # Step 4.5: Base sweeps forward to the release/clearance pose while the arm HOLDS the EE at the
+    # handle world pose. Done as a smooth interpolated base sweep (like the pull planner's traverse
+    # loop) instead of a single jump: each step passes the interpolated base_pose (so the IK can't
+    # pull the base back) AND the pinned palm_pose, so the EE stays put and is re-solved every step.
     # -------------------------
     door_center_pos = door_initial_pose[:, :3].to(device).clone()
     release_fwd_base_pos = door_center_pos.clone()
     release_fwd_base_pos[:, 0] += -0.7
-    release_fwd_base_pos[:, 1] += -0.2
-    release_fwd_base_pose = _make_pose(release_fwd_base_pos, base_target_rot)
+    release_fwd_base_pos[:, 1] += -0.25
 
-    new_base_joints = compute_base_joint(
-        robot_initial_pose[..., :3], robot_initial_pose[..., 3:], release_fwd_base_pose
-    ).squeeze()
-    q_robot[:3] = new_base_joints
+    fwd_steps = 8
+    start_fwd_base_pos = base_target_pos.clone()  # base pose at the end of step 4
+    for fwd_step in range(1, fwd_steps + 1):
+        frac = fwd_step / fwd_steps
+        step_base_pos = start_fwd_base_pos + frac * (release_fwd_base_pos - start_fwd_base_pos)
+        step_base_pose = _make_pose(step_base_pos, base_target_rot)
+        q_robot[:10] = solve_ik(
+            robot_urdf_path,
+            q_robot[:10],
+            palm_pose=palm_target_pose,
+            base_pose=step_base_pose,
+            robot_initial_pose=robot_initial_pose,
+            num_attempts=1,  # loop body: single seed for continuity (no random-restart branch jumps)
+        )[0]
+        q_robot[10:26] = safe_open_hand_q
+        _append_state(
+            robot_traj,
+            door_traj,
+            key_idx_in_key_indices,
+            q_robot,
+            q_door,
+            mark_keyframe=(fwd_step == fwd_steps),
+        )
+
+    # -------------------------
+    # Step 6: Finish traversing past the doorway AND tuck the arm to the end config, as a SINGLE
+    # keyframe. collocate_and_playback then splines the base joints AND the franka joints smoothly
+    # from the step-4.5 keyframe to this one. (Previously a for-loop moved only the base and tucked
+    # the arm on its LAST iteration -- the arm snapped to the end config in ~1 frame, a huge reference
+    # velocity spike that broke DeepMimic tracking. This final traverse+tuck needs no precise motion.)
+    # -------------------------
+    traverse_far_base_pos = door_center_pos.clone()
+    traverse_far_base_pos[:, 0] += -1.5
+    traverse_far_base_pos[:, 1] += -0.25
+    traverse_far_base_pose = _make_pose(traverse_far_base_pos, base_target_rot)
 
     q_robot[:10] = solve_ik(
         robot_urdf_path,
         q_robot[:10],
-        palm_pose=palm_target_pose,
-        base_pose=None,
+        palm_pose=None,
+        base_pose=traverse_far_base_pose,
         robot_initial_pose=robot_initial_pose,
     )[0]
-    q_robot[:3] = new_base_joints  # re-pin base in case IK drifted it
+    q_robot[3:10] = franka_end_q
     q_robot[10:26] = safe_open_hand_q
+    q_door = torch.tensor([0.0, 0.0], device=device)
 
     _append_state(
         robot_traj,
@@ -725,40 +756,5 @@ def state_machine_offline_push_left_door(
         q_door,
         mark_keyframe=True,
     )
-
-    # -------------------------
-    # Step 6: Finish traversing past the doorway with a smooth interpolated base sweep (like the
-    # pull planner), then tuck the arm. palm_pose=None -> only the base moves each step; the arm
-    # holds its config until the final step tucks it and closes the door.
-    # -------------------------
-    traverse_far_base_pos = door_center_pos.clone()
-    traverse_far_base_pos[:, 0] += -1.5
-    traverse_far_base_pos[:, 1] += -0.25
-
-    traverse_steps = 8
-    for traverse_step in range(1, traverse_steps + 1):
-        frac = traverse_step / traverse_steps
-        step_base_pos = release_fwd_base_pos + frac * (traverse_far_base_pos - release_fwd_base_pos)
-        step_base_pose = _make_pose(step_base_pos, base_target_rot)
-        q_robot[:10] = solve_ik(
-            robot_urdf_path,
-            q_robot[:10],
-            palm_pose=None,
-            base_pose=step_base_pose,
-            robot_initial_pose=robot_initial_pose,
-            num_attempts=1,  # loop body: single seed for continuity (no random-restart branch jumps)
-        )[0]
-        q_robot[10:26] = safe_open_hand_q
-        if traverse_step == traverse_steps:
-            q_robot[3:10] = franka_end_q
-            q_door = torch.tensor([0.0, 0.0], device=device)
-        _append_state(
-            robot_traj,
-            door_traj,
-            key_idx_in_key_indices,
-            q_robot,
-            q_door,
-            mark_keyframe=(traverse_step == traverse_steps),
-        )
 
     return robot_traj, door_traj, key_idx_in_key_indices

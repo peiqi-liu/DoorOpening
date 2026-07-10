@@ -945,6 +945,21 @@ def main(env_cfg, agent_cfg: dict):
     env_cfg.pointcloud_render_mode = "none"
     env_cfg.enable_pointcloud_camera = False
 
+    # # TEMP (eval only): run WITHOUT the LEAP finger armature + finger JOINT friction (both -> 0).
+    # # Zero the spawn actuator values AND the reset-time armature event / ADR target range, so nothing
+    # # re-applies a nonzero armature at reset. Uncomment this block to disable them again.
+    # _finger_act = env_cfg.robot_cfg.actuators.get("finger")
+    # if _finger_act is not None:
+    #     _finger_act.armature = 0.0
+    #     _finger_act.friction = 0.0
+    # _arm_event = getattr(getattr(env_cfg, "events", None), "robot_finger_armature", None)
+    # if _arm_event is not None:
+    #     _arm_event.params["armature_distribution_params"] = (0.0, 0.0)
+    # _adr = getattr(env_cfg, "adr_custom_cfg_dict", None)
+    # if isinstance(_adr, dict) and isinstance(_adr.get("robot_finger_armature"), dict):
+    #     _adr["robot_finger_armature"]["armature_distribution_params"] = (0.0, 0.0)
+    # print("[INFO] TEMP: finger armature + finger joint friction disabled (set to 0.0) for this eval run.")
+
     timestamp = time.strftime("%Y-%m-%d-%H-%M-%S")
     experiment_dir = os.path.join("runs", f"DoorOpening-Distillation-Eval_{timestamp}")
     nn_dir = os.path.join(experiment_dir, "nn")
