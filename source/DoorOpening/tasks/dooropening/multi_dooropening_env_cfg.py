@@ -23,6 +23,8 @@ from DoorOpening.tasks.dooropening.contact_force_utils import (
     PANEL_CONTACT_FILTER_PRIM_PATHS,
     SELF_COLLISION_FRANKA_FILTER_PRIM_PATHS,
     SELF_COLLISION_FRANKA_PRIM_PATH,
+    SELF_COLLISION_HAND_FILTER_PRIM_PATHS,
+    SELF_COLLISION_HAND_PRIM_PATH,
     X5_BODY_NAMES,
 )
 from isaaclab.assets import ArticulationCfg
@@ -39,7 +41,9 @@ from isaaclab.utils import configclass
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 
 from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import ManagerTermBase
 from isaaclab.managers import SceneEntityCfg
+import isaaclab.utils.math as math_utils
 from isaaclab.envs.common import ViewerCfg
 import torch
 import numpy as np
@@ -115,6 +119,84 @@ def randomize_joint_effort_limits(
     asset.write_joint_effort_limit_to_sim(sampled_limits, joint_ids=joint_ids, env_ids=env_ids)
 
 
+class randomize_body_material_subset(ManagerTermBase):
+    """Randomize the physics material of a SUBSET of an articulation's bodies.
+
+    The stock ``randomize_rigid_body_material`` cannot randomize a single body of these generated
+    door assets: its per-body shape-count parse fails ("Expected total shapes: 8, but got: 7") on the
+    convex-decomposition door colliders, because summing the per-link shape counts does not equal
+    ``root_physx_view.max_shapes``. This term sidesteps that assertion by writing the flat material
+    buffer directly over just the target body's shape slice. It reuses the SHARED ``root_physx_view``
+    (no per-env view creation), so it does not reintroduce the host-RAM OOM the old custom per-body
+    panel term caused at num_envs=4096.
+
+    It must run AFTER a door-wide material term so the non-target shapes keep the door-wide sample and
+    only the target body (the handle) is overwritten with the slipperier range.
+    """
+
+    def __init__(self, cfg: EventTerm, env):
+        super().__init__(cfg, env)
+        self.asset_cfg: SceneEntityCfg = cfg.params["asset_cfg"]
+        self.asset = env.scene[self.asset_cfg.name]
+
+        view = self.asset.root_physx_view
+        link_paths = view.link_paths[0]
+        self._total_shapes = view.max_shapes
+        # Per-link shape counts (same source IsaacLab uses) but WITHOUT the strict sum==total assert
+        # that crashes on this asset. For a trailing body we extend its slice to the buffer end so a
+        # shape the per-link parse misses is still covered by the handle material.
+        counts = [
+            self.asset._physics_sim_view.create_rigid_body_view(link_path).max_shapes
+            for link_path in link_paths
+        ]
+        body_ids = self.asset_cfg.body_ids
+        if isinstance(body_ids, slice):
+            body_ids = list(range(len(link_paths)))
+        elif not isinstance(body_ids, (list, tuple)):
+            body_ids = [int(b) for b in torch.as_tensor(body_ids).flatten().tolist()]
+
+        self._shape_slices: list[tuple[int, int]] = []
+        for body_id in body_ids:
+            start = sum(counts[:body_id])
+            end = self._total_shapes if body_id == len(link_paths) - 1 else start + counts[body_id]
+            start = max(0, min(start, self._total_shapes))
+            end = max(start, min(end, self._total_shapes))
+            self._shape_slices.append((start, end))
+
+        static_friction_range = cfg.params.get("static_friction_range", (1.0, 1.0))
+        dynamic_friction_range = cfg.params.get("dynamic_friction_range", (1.0, 1.0))
+        restitution_range = cfg.params.get("restitution_range", (0.0, 0.0))
+        num_buckets = int(cfg.params.get("num_buckets", 1))
+        ranges = torch.tensor([static_friction_range, dynamic_friction_range, restitution_range], device="cpu")
+        self.material_buckets = math_utils.sample_uniform(ranges[:, 0], ranges[:, 1], (num_buckets, 3), device="cpu")
+
+    def __call__(
+        self,
+        env,
+        env_ids: torch.Tensor | None,
+        static_friction_range: tuple[float, float],
+        dynamic_friction_range: tuple[float, float],
+        restitution_range: tuple[float, float],
+        num_buckets: int,
+        asset_cfg: SceneEntityCfg,
+    ):
+        if env_ids is None:
+            env_ids = torch.arange(env.scene.num_envs, device="cpu")
+        else:
+            env_ids = env_ids.cpu()
+
+        # Read the CURRENT buffer (already carries the door-wide sample) and overwrite only the
+        # target body's shape slice, then write the whole buffer back.
+        materials = self.asset.root_physx_view.get_material_properties()
+        for start, end in self._shape_slices:
+            width = end - start
+            if width <= 0:
+                continue
+            bucket_ids = torch.randint(0, num_buckets, (len(env_ids), width), device="cpu")
+            materials[env_ids, start:end] = self.material_buckets[bucket_ids]
+        self.asset.root_physx_view.set_material_properties(materials, env_ids)
+
+
 @configclass
 class EventCfg:
     """Configuration for reset-time physics randomization."""
@@ -131,10 +213,12 @@ class EventCfg:
         },
     )
 
-    # Door-wide friction/restitution. Range widened to the UNION of the former door-wide and
-    # panel-only (link_1) materials so the panel still trains across slip<->jam, using the stock
-    # per-asset mechanism. The separate per-body panel term was removed (its custom per-env
-    # view creation caused host-RAM OOM at num_envs=4096).
+    # Door-wide friction/restitution for the frame + PANEL (link_1). The panel keeps a broad range
+    # so it still trains across slip<->jam. The handle (link_2) is deliberately re-materialized to a
+    # much slipperier range by door_handle_physics_material BELOW (it runs after this term, so it
+    # overrides link_2's material). Both use the stock num_buckets material mechanism (bounded by
+    # num_buckets, not num_envs), so neither reintroduces the host-RAM OOM the old custom per-body
+    # panel term caused at num_envs=4096.
     door_physics_material = EventTerm(
         func=randomize_rigid_body_material,
         mode="reset",
@@ -142,6 +226,24 @@ class EventCfg:
             "asset_cfg": SceneEntityCfg("door"),
             "static_friction_range": (0.7, 2.5),
             "dynamic_friction_range": (0.7, 2.5),
+            "restitution_range": (0.0, 0.0),
+            "num_buckets": 250,
+        },
+    )
+
+    # Handle-only (link_2) friction. A real door handle is slippery metal, NOT like the panel: it
+    # gets a much smaller friction range so the fingers cannot simply stick to it. Scoped to link_2
+    # and defined AFTER door_physics_material so it overwrites the handle's material (event terms run
+    # in definition order). Uses randomize_body_material_subset (not the stock term) because the
+    # stock per-body shape-count parse crashes on this convex-decomposition door. Tune the range if
+    # grasping the handle becomes too hard.
+    door_handle_physics_material = EventTerm(
+        func=randomize_body_material_subset,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("door", body_names="link_2"),
+            "static_friction_range": (0.2, 1.0),
+            "dynamic_friction_range": (0.2, 1.0),
             "restitution_range": (0.0, 0.0),
             "num_buckets": 250,
         },
@@ -238,7 +340,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     asymmetric_obs = True
 
     viewer: ViewerCfg = ViewerCfg(eye=(1.5, -2.0, 1.0), lookat=(0.4, 0.0, 0.7), origin_type="env")
-    door_handle_effort_limit_range_nm = (1.0, 4.0)
+    # Upper bound bumped (4.0 -> 6.0): the door mechanism should resist more than before (the panel
+    # is stronger than expected).
+    door_handle_effort_limit_range_nm = (1.0, 6.0)
     door_handle_effort_limit_sim = door_handle_effort_limit_range_nm[0]
 
     # simulation
@@ -397,9 +501,22 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         debug_vis=False,
         filter_prim_paths_expr=list(SELF_COLLISION_FRANKA_FILTER_PRIM_PATHS),
     )
+    # Finger<->flange self-collision: LEAP digit links (fingers + thumb) filtered ONLY against the
+    # franka panda_link7 flange. Counted with the same self_collision_penalty_w. Intra-hand
+    # contacts are not in the filter set, so finger<->finger / finger<->thumb are NOT penalized.
+    contact_forces_self_collision_hand = ContactSensorCfg(
+        prim_path=SELF_COLLISION_HAND_PRIM_PATH,
+        update_period=0.0,
+        history_length=1,
+        debug_vis=False,
+        filter_prim_paths_expr=list(SELF_COLLISION_HAND_FILTER_PRIM_PATHS),
+    )
     handle_contact_force_threshold = 1.0
-    # Finger<->panel contact above this (N) is treated as a panel collision when panel_contact_mask is on.
-    panel_contact_force_threshold = 12.0
+    # Finger<->panel contact penalty (ACTIVE only while panel_contact_mask is on -- the panel-push
+    # phase). Graded like the franka-box penalty: 0 below min_force (gentle pushing is free), then
+    # ramps linearly to the full weight at/above max_force. Encourages pushing the panel open SOFTLY.
+    panel_contact_penalty_min_force = 15.0
+    panel_contact_penalty_max_force = 60.0
     # Contact between a non-front base face and any door body above this (N) is penalized.
     base_door_contact_force_threshold = 5.0
     x5_body_contact_force_threshold = 1.5
@@ -569,8 +686,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     joint_limit_penalty_margin_ratio = 0.05
     # lambda_c in r = r_target - lambda_l*r_limit - lambda_c*r_contact
     self_collision_penalty_w = 5.0
-    # Penalty weight for finger<->panel contact while panel_contact_mask is active.
-    # Disabled: finger<->panel contact is no longer penalized. Set back to 0.3 to re-enable.
+    # Penalty weight for the GRADED finger<->panel force penalty, applied only while
+    # panel_contact_mask is active (the panel-push phase). Ramps 0 -> w between
+    # panel_contact_penalty_min_force and _max_force. Starting guess -- tune it.
+    panel_contact_penalty_w = 5.0
     # Penalty weight (per non-front base face in contact with the door). High on purpose: a
     # base panel hitting the door in the real world means a securely-mounted robot is injured.
     base_door_contact_penalty_w = 10.0

@@ -94,8 +94,10 @@ FRANKA_BOX_DOOR_CONTACT_PRIM_PATH = "/World/envs/env_.*/Robot/franka_control_box
 # whose force_matrix_w is [N, group_bodies, num_filters, 3]; the env counts franka bodies over
 # threshold. PhysX already drops directly-jointed (adjacent) pairs.
 #
-# Excluded on purpose: panda_link0/panda_link1 (base-adjacent arm mount), panda_link7 flange and
-# the whole LEAP hand (finger self-collision drove poses too conservative).
+# Excluded on purpose from THIS group: panda_link0/panda_link1 (base-adjacent arm mount), the
+# panda_link7 flange, and the whole LEAP hand (finger<->finger self-collision drove poses too
+# conservative). The fingers ARE separately checked against the panda_link7 flange -- see
+# SELF_COLLISION_HAND_* below.
 SELF_COLLISION_FRANKA_BODIES = ("panda_link2", "panda_link3", "panda_link4", "panda_link5", "panda_link6")
 # The other two groups the franka arm is checked AGAINST (kept fixed relative to each other).
 SELF_COLLISION_X5_BODIES = ("link2", "link3", "link4", "link5", "x5_camera_link")
@@ -122,6 +124,22 @@ def _self_collision_filter_prims(*body_name_groups) -> tuple[str, ...]:
 # Single franka self-collision sensor, filtered against the x5 group + base group + door frame.
 SELF_COLLISION_FRANKA_PRIM_PATH = _self_collision_group_prim_path(SELF_COLLISION_FRANKA_BODIES)
 SELF_COLLISION_FRANKA_FILTER_PRIM_PATHS = _self_collision_filter_prims(SELF_COLLISION_X5_BODIES, SELF_COLLISION_BASE_BODIES)
+
+# Finger<->flange self-collision. The LEAP hand as a whole is still excluded from the franka
+# self-collision group above (penalizing finger<->finger drove poses too conservative), but the
+# fingers curling BACK can strike the franka panda_link7 flange behind the palm -- a real collision
+# we DO want to avoid. So a dedicated multi-body sensor over the LEAP digit links (3 fingers + the
+# thumb), filtered ONLY against panda_link7. Because the filter is JUST the flange, intra-hand
+# contacts (finger<->finger, finger<->thumb) never appear in the force matrix and are NOT penalized.
+# palm_lower/palm_center are omitted (fixed-jointed to the flange -> always/adjacent contact).
+FRANKA_FLANGE_BODY = "panda_link7"
+LEAP_HAND_DIGIT_BODIES = tuple(
+    f"{seg}_{i}"
+    for i in (1, 2, 3, 4)
+    for seg in ("mcp_joint", "pip", "dip", "fingertip", "realtip")
+)
+SELF_COLLISION_HAND_PRIM_PATH = _self_collision_group_prim_path(LEAP_HAND_DIGIT_BODIES)
+SELF_COLLISION_HAND_FILTER_PRIM_PATHS = (f"/World/envs/env_.*/Robot/{FRANKA_FLANGE_BODY}",)
 
 
 def get_filtered_contact_force_w(sensor, expected_num_envs=None, filter_indices: tuple[int, ...] | None = None) -> torch.Tensor:

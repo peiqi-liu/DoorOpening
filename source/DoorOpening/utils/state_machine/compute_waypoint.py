@@ -1014,18 +1014,23 @@ def play_and_save_traj(
     if len(key_indices) > 5:
         hinge_contact_mask[key_indices[2]:key_indices[5]] = 1
 
-    # panel_contact_mask: PENALIZE finger<->panel (Door/link_1) contact. The fingers should
-    # grip the handle, never touch the panel -- except where pushing the panel is the task.
-    #   push: the door is opened via the HANDLE (grasp + base-forward), never by pressing the
-    #         panel with the hand, so finger<->panel contact is always undesirable -> penalize
-    #         the whole trajectory.
-    #   pull: penalize everywhere up to step 7 (keyframe 6); steps 7-8 push the panel open and
-    #         hold the door while restoring yaw + moving forward, so contact is allowed there.
+    # panel_contact_mask: gate a GRADED finger<->panel (Door/link_1) FORCE penalty. Unlike the old
+    # binary "no finger<->panel contact ever" penalty (which fought grasping + hinge rotation, where
+    # the fingers legitimately work the handle right next to the panel), this mask is ON ONLY during
+    # the phase where the hand DELIBERATELY PUSHES the panel. There we still want contact -- just a
+    # GENTLE one: the env leaves small forces free and penalizes only large forces. It is OFF for
+    # approach/grasp/rotate/pull so the penalty never touches those phases.
+    #   push: the open-door + base-forward phase (keyframes 3..5) presses the panel open with the
+    #         partly-open hand.
+    #   pull: the push-panel-open + hold-traverse phase (keyframes 7..9) drives the panel open with
+    #         the arm and then holds it against the frame while traversing.
     panel_contact_mask = torch.zeros(len(robot_traj), dtype=torch.int8)
     if planner_opening_direction == "push":
-        panel_contact_mask[:] = 1
-    elif len(key_indices) > 6:
-        panel_contact_mask[:key_indices[6]] = 1
+        if len(key_indices) > 5:
+            panel_contact_mask[key_indices[3]:key_indices[5]] = 1
+    else:
+        if len(key_indices) > 9:
+            panel_contact_mask[key_indices[7]:key_indices[9]] = 1
 
     # grasp_stage_mask: the PREGRASP -> GRASP window (keyframes 1..3: pregrasp, grasp, up to the
     # rotate keyframe). Used ONLY to gate the finger<->panel normal-force LOGGING (no reward) so we

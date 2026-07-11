@@ -54,6 +54,8 @@ from typing import Tuple
 BASE_DOOR_SENSOR_NAMES = tuple(f"contact_forces_base_door_{b}" for b in BASE_DOOR_CONTACT_BODY_NAMES)
 SELF_COLLISION_SENSOR_NAMES = (
     "contact_forces_self_collision_franka",
+    # Finger<->flange: LEAP digit links vs panda_link7 (counted at self_collision_penalty_w).
+    "contact_forces_self_collision_hand",
 )
 
 
@@ -220,6 +222,7 @@ class DooropeningEnv(DirectRLEnv):
         self.joint_limit_penalty_w = self.cfg.joint_limit_penalty_w
         self.joint_limit_penalty_margin_ratio = self.cfg.joint_limit_penalty_margin_ratio
         self.self_collision_penalty_w = self.cfg.self_collision_penalty_w
+        self.panel_contact_penalty_w = self.cfg.panel_contact_penalty_w
         self.franka_box_contact_penalty_w = self.cfg.franka_box_contact_penalty_w
 
         self.reset_key_body_pos_delta_min = self.cfg.reset_key_body_pos_delta_min
@@ -448,17 +451,18 @@ class DooropeningEnv(DirectRLEnv):
         return self._get_x5_body_contact_force_norm(filter_indices=(DOOR_FRAME_FILTER_INDEX,))
 
     def _get_self_collision_body_count(self) -> torch.Tensor:
-        """Number of non-finger robot links in self-collision, per env (fine-grained, per-link).
+        """Number of robot links in self-collision, per env (fine-grained, per-link).
 
         This is the r_contact term in r = r_target - lambda_l*r_limit - lambda_c*r_contact.
         We count the franka arm, x5/arx camera arm, and mobile-base chassis links whose net
-        self-contact force with any other non-adjacent link exceeds the threshold. The LEAP
-        hand is intentionally excluded (finger self-collision drove finger poses conservative),
-        so the old finger<->flange sensor is no longer used.
+        self-contact force with any other non-adjacent link exceeds the threshold. Finger<->finger
+        self-collision is still excluded (it drove finger poses conservative), but the LEAP fingers
+        ARE checked against the panda_link7 flange (contact_forces_self_collision_hand): the fingers
+        curling back into the flange is a real collision we penalize.
         """
         threshold = self.cfg.self_collision_force_threshold
         # Each group sensor is multi-body: get_self_contact_body_force_norm returns
-        # [N, group_bodies] (net filtered force per body). Concatenate the three groups, then
+        # [N, group_bodies] (net filtered force per body). Concatenate the groups, then
         # count the bodies whose self-contact force exceeds the threshold.
         force_norm = torch.cat(
             [
@@ -2186,20 +2190,31 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["error/self_collision_penalty"] = weighted_self_collision_penalty.mean().item()
         self.extras["stats/self_collision_body_count_mean"] = self_collision_body_count.mean().item()
 
-        # Finger<->panel contact penalty: penalize LEAP-finger contact on the door panel
-        # (Door/link_1) while panel_contact_mask is on (fingers should grip the handle, not
-        # the panel). The mask is 0 wherever pressing the panel is the intended task
-        # (the whole push trajectory, and the pull push-panel/hold steps), so no penalty there.
+        # Finger<->panel contact penalty: GRADED force penalty on LEAP-finger contact with the door
+        # panel (Door/link_1), applied ONLY while ref_panel_contact_mask is on (the panel-push
+        # phase: push open-door/base-forward, pull push-panel/hold-traverse). There the hand SHOULD
+        # touch the panel, so we penalize only how HARD it pushes: 0 below min_force (gentle pushing
+        # is free), ramping linearly to the full weight at/above max_force. Off outside the push
+        # phase so it never fights grasping or hinge rotation next to the panel.
         contact_forces_door_panel = self._get_filtered_contact_force_w(
             self.scene.sensors["contact_forces_door_panel"],
             expected_num_envs=self.num_envs,
         )
-        # Finger<->panel contact PENALTY fully removed (the panel friction DR + the moved-back
-        # pregrasp/grasp poses now handle finger pressing on the panel). We still REPORT the
-        # finger<->panel normal force to wandb for debugging -- averaged ONLY over envs currently in
-        # the PREGRASP->GRASP stage (ref_grasp_stage_mask, keyframes 1..3), since that is where
-        # finger pressing on the panel matters. Masked mean = 0 when no env is in that stage.
         panel_force_norm = torch.linalg.vector_norm(contact_forces_door_panel, dim=-1)
+        panel_penalty_frac = torch.clamp(
+            (panel_force_norm - self.cfg.panel_contact_penalty_min_force)
+            / (self.cfg.panel_contact_penalty_max_force - self.cfg.panel_contact_penalty_min_force),
+            min=0.0,
+            max=1.0,
+        )
+        panel_contact_active = (self.ref_panel_contact_mask.squeeze() > 0).to(panel_force_norm.dtype)
+        weighted_panel_contact_penalty = (
+            self.panel_contact_penalty_w * panel_penalty_frac * panel_contact_active
+        )
+        self.extras["error/panel_contact_penalty"] = weighted_panel_contact_penalty.mean().item()
+        self.extras["stats/panel_contact_force_norm_max"] = float(panel_force_norm.max().detach().cpu().item())
+        # Also REPORT the finger<->panel normal force during the PREGRASP->GRASP stage
+        # (ref_grasp_stage_mask, keyframes 1..3) for debugging. Masked mean = 0 when no env is there.
         grasp_stage = (self.ref_grasp_stage_mask.squeeze() > 0).to(panel_force_norm.dtype)
         grasp_denom = grasp_stage.sum().clamp(min=1.0)
         self.extras["finger_panel_normal_forces_mean"] = float(
@@ -2333,6 +2348,7 @@ class DooropeningEnv(DirectRLEnv):
             + total_alive_reward
             - weighted_joint_limit_penalty
             - weighted_self_collision_penalty
+            - weighted_panel_contact_penalty
             - weighted_base_door_contact_penalty
             - weighted_x5_door_contact_penalty
             - weighted_franka_box_contact_penalty
