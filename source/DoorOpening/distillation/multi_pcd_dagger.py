@@ -169,6 +169,11 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         # 0/1 = disabled. Kernel is in depth-image pixels; sigma<=0 falls back to a box blur.
         self.depth_cam_render_blur_kernel_px = int(self.depth_cam_render_cfg.get("blur_kernel_px", 0))
         self.depth_cam_render_blur_sigma_px = float(self.depth_cam_render_cfg.get("blur_sigma_px", 0.0))
+        # Static occluders (door panel + wall distractors) are rasterized a second time with this much
+        # larger inflate_px and composited via a per-pixel min with the main depth. Sparse occluders
+        # (esp. the wall distractors) otherwise leave per-pixel z-buffer gaps at close range that let
+        # farther points (background, the other side of the wall) show through. 0 disables the pass.
+        self.depth_cam_render_occluder_inflate_px = int(self.depth_cam_render_cfg.get("occluder_inflate_px", 0))
         self.lidar_render_cfg = self.runtime_cfg.get("lidar_render", {})
         self.lidar_num_points = self.lidar_render_cfg.get("num_points")
         self.lidar_num_azimuth = int(self.lidar_render_cfg.get("num_azimuth", 512))
@@ -182,6 +187,9 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.lidar_occlusion_eps_rel = float(self.lidar_render_cfg.get("occlusion_eps_rel", 0.01))
         self.lidar_jitter_std_m = float(self.lidar_render_cfg.get("jitter_std_m", 0.001))
         self.lidar_use_compile = bool(self.lidar_render_cfg.get("use_compile", True))
+        # Lidar analog of depth_cam_render_occluder_inflate_px: bin radius for the second,
+        # occluder-only pass. 0 disables it.
+        self.lidar_render_occluder_fill_bins = int(self.lidar_render_cfg.get("occluder_fill_bins", 0))
         self.robot_pointcloud_filter_cfg = dict(self.runtime_cfg.get("robot_pointcloud_filter", {}))
         self.robot_pointcloud_filter_enabled = bool(self.robot_pointcloud_filter_cfg.get("enabled", True))
         self.robot_pointcloud_sdf_cutoff = float(self.robot_pointcloud_filter_cfg.get("sdf_cutoff", 0.02))
@@ -2626,6 +2634,14 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.wall_distractor_center_offset_min_m, self.wall_distractor_center_offset_max_m = map(
             float, self.wall_distractor_cfg.get("center_offset_m", [-0.20, 0.20])
         )
+        # Floor-anchored column height range. When unset, columns fall back to the legacy behavior
+        # of exactly matching the door panel's own bbox height (see sample_column_bounds below).
+        height_range = self.wall_distractor_cfg.get("height_range_m")
+        if height_range is None:
+            self.wall_distractor_height_min_m = None
+            self.wall_distractor_height_max_m = None
+        else:
+            self.wall_distractor_height_min_m, self.wall_distractor_height_max_m = map(float, height_range)
         self.wall_distractor_face_jitter_m = float(self.wall_distractor_cfg.get("face_jitter_m", 0.004))
         self.wall_distractor_resample_each_step = bool(self.wall_distractor_cfg.get("resample_each_step", False))
         self._wall_distractor_local_points = None
@@ -2903,20 +2919,27 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             return torch.empty(shape, device=self.device, dtype=torch.float32).uniform_(float(low), float(high))
 
         thickness_center = 0.5 * (thickness_min + thickness_max)
+        # Split the center-offset range at zero so "front" columns always protrude to the positive
+        # thickness side and "back" columns always sit on the negative side. This turns the single
+        # column per side (whose one random offset could land in front, behind, or straddling the
+        # slab) into two independently-randomized segments, so the doorway reads as an actual
+        # opening cut into a wall instead of a single jamb-like block.
+        front_offset_min_m = max(self.wall_distractor_center_offset_min_m, 0.0)
+        front_offset_max_m = max(self.wall_distractor_center_offset_max_m, front_offset_min_m)
+        back_offset_max_m = min(self.wall_distractor_center_offset_max_m, 0.0)
+        back_offset_min_m = min(self.wall_distractor_center_offset_min_m, back_offset_max_m)
 
-        def sample_column_surfaces():
+        def sample_column_surfaces(is_front):
             column_depth = thickness_extent + rand_range(
                 self.wall_distractor_depth_min_m,
                 self.wall_distractor_depth_max_m,
                 (env_count,),
             )
-            # Shift the column along the door-thickness axis so recessed and protruding
-            # jamb-like distractors are both represented.
-            column_center = thickness_center + rand_range(
-                self.wall_distractor_center_offset_min_m,
-                self.wall_distractor_center_offset_max_m,
-                (env_count,),
-            )
+            if is_front:
+                offset = rand_range(front_offset_min_m, front_offset_max_m, (env_count,))
+            else:
+                offset = rand_range(back_offset_min_m, back_offset_max_m, (env_count,))
+            column_center = thickness_center + offset
             column_depth_half = 0.5 * column_depth
             return column_center - column_depth_half, column_center + column_depth_half
 
@@ -2936,25 +2959,37 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 )
             return column_width.clamp_min(1e-4)
 
-        def sample_column_bounds(attach_on_right):
+        def sample_column_bounds(attach_on_right, is_front):
             edge_gap = rand_range(self.wall_distractor_gap_min_m, self.wall_distractor_gap_max_m, (env_count,))
             column_width = sample_column_width()
-            column_min_surface, column_max_surface = sample_column_surfaces()
+            column_min_surface, column_max_surface = sample_column_surfaces(is_front)
             # The inner face starts just outside the panel side edge.
             # Right column: panel right edge + gap, then extends further in +width.
             # Left column:  panel left edge  - gap, then extends further in -width.
-            column_inner_width = torch.where(attach_on_right, width_max + edge_gap, width_min - edge_gap)
-            column_outer_width = torch.where(
-                attach_on_right,
-                column_inner_width + column_width,
-                column_inner_width - column_width,
-            )
+            if attach_on_right:
+                column_inner_width = width_max + edge_gap
+                column_outer_width = column_inner_width + column_width
+            else:
+                column_inner_width = width_min - edge_gap
+                column_outer_width = column_inner_width - column_width
             column_width_lo = torch.minimum(column_inner_width, column_outer_width)
             column_width_hi = torch.maximum(column_inner_width, column_outer_width)
-            # Keep wall distractors aligned with the current door panel instead of using a
-            # global height span, so they stay at the same vertical level as the slab.
-            column_height_lo = height_min
-            column_height_hi = height_max
+            if self.wall_distractor_height_min_m is not None:
+                # Floor-anchored: column rises from the panel's own bottom edge (height_min, which
+                # sits at ~floor level in the door base frame) up to a randomized height, so columns
+                # need not match the door panel's own height.
+                column_height = rand_range(
+                    self.wall_distractor_height_min_m,
+                    self.wall_distractor_height_max_m,
+                    (env_count,),
+                )
+                column_height_lo = height_min
+                column_height_hi = height_min + column_height
+            else:
+                # Keep wall distractors aligned with the current door panel instead of using a
+                # global height span, so they stay at the same vertical level as the slab.
+                column_height_lo = height_min
+                column_height_hi = height_max
             return (
                 column_min_surface,
                 column_max_surface,
@@ -2964,55 +2999,36 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 column_height_hi,
             )
 
-        left_column_bounds = sample_column_bounds(
-            torch.zeros((env_count,), dtype=torch.bool, device=self.device)
-        )
-        right_column_bounds = sample_column_bounds(
-            torch.ones((env_count,), dtype=torch.bool, device=self.device)
-        )
-        # We build both side columns for every env and then sample points from either side,
-        # so the final wall cloud can contain a mixture of left and right jamb surfaces.
-        left_column_min_surface, left_column_max_surface, left_column_width_lo, left_column_width_hi, left_column_height_lo, left_column_height_hi = left_column_bounds
-        right_column_min_surface, right_column_max_surface, right_column_width_lo, right_column_width_hi, right_column_height_lo, right_column_height_hi = right_column_bounds
+        # Four independent wall segments: {left, right} x {front, back} of the door plane.
+        column_variants = [
+            sample_column_bounds(attach_on_right, is_front)
+            for attach_on_right in (False, True)
+            for is_front in (False, True)
+        ]
+        num_columns = len(column_variants)
+        # Each stack has shape (env_count, num_columns); column order is
+        # [left-back, left-front, right-back, right-front].
+        column_min_surface_stack = torch.stack([v[0] for v in column_variants], dim=1)
+        column_max_surface_stack = torch.stack([v[1] for v in column_variants], dim=1)
+        column_width_lo_stack = torch.stack([v[2] for v in column_variants], dim=1)
+        column_width_hi_stack = torch.stack([v[3] for v in column_variants], dim=1)
+        column_height_lo_stack = torch.stack([v[4] for v in column_variants], dim=1)
+        column_height_hi_stack = torch.stack([v[5] for v in column_variants], dim=1)
 
         wall_points_ordered = torch.empty((env_count, num_points, 3), dtype=torch.float32, device=self.device)
         face_ids = torch.randint(0, 4, (env_count, num_points), device=self.device)
-        use_right_column = torch.randint(0, 2, (env_count, num_points), device=self.device, dtype=torch.int64).bool()
-        if num_points >= 2:
-            # Keep both jamb sides populated for each env while leaving the top lintel clear.
-            use_right_column[:, 0] = False
-            use_right_column[:, 1] = True
+        column_idx = torch.randint(0, num_columns, (env_count, num_points), device=self.device)
+        if num_points >= num_columns:
+            # Keep every column (both jamb sides, both front/back) populated for each env.
+            for column_id in range(num_columns):
+                column_idx[:, column_id] = column_id
 
-        column_min_surface = torch.where(
-            use_right_column,
-            right_column_min_surface.unsqueeze(1),
-            left_column_min_surface.unsqueeze(1),
-        )
-        column_max_surface = torch.where(
-            use_right_column,
-            right_column_max_surface.unsqueeze(1),
-            left_column_max_surface.unsqueeze(1),
-        )
-        column_width_lo = torch.where(
-            use_right_column,
-            right_column_width_lo.unsqueeze(1),
-            left_column_width_lo.unsqueeze(1),
-        )
-        column_width_hi = torch.where(
-            use_right_column,
-            right_column_width_hi.unsqueeze(1),
-            left_column_width_hi.unsqueeze(1),
-        )
-        column_height_lo = torch.where(
-            use_right_column,
-            right_column_height_lo.unsqueeze(1),
-            left_column_height_lo.unsqueeze(1),
-        )
-        column_height_hi = torch.where(
-            use_right_column,
-            right_column_height_hi.unsqueeze(1),
-            left_column_height_hi.unsqueeze(1),
-        )
+        column_min_surface = torch.gather(column_min_surface_stack, 1, column_idx)
+        column_max_surface = torch.gather(column_max_surface_stack, 1, column_idx)
+        column_width_lo = torch.gather(column_width_lo_stack, 1, column_idx)
+        column_width_hi = torch.gather(column_width_hi_stack, 1, column_idx)
+        column_height_lo = torch.gather(column_height_lo_stack, 1, column_idx)
+        column_height_hi = torch.gather(column_height_hi_stack, 1, column_idx)
 
         wall_points_ordered[..., 0] = column_min_surface + torch.rand(
             (env_count, num_points), device=self.device
@@ -3247,13 +3263,21 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
     def _sample_scene_pointcloud_world_cached(self, hole_metadata=None):
         door_pcd_world = self._sample_cached_door_pointcloud_world(hole_metadata=hole_metadata)
         robot_pcd_world = self._sample_robot_pointcloud_world_sampler()
-        scene_parts = [door_pcd_world, robot_pcd_world]
         wall_pcd_world = self._sample_wall_pointcloud_world()
+        # Occluder set = static scene geometry only (door panel + wall distractors), excluding the
+        # robot: the robot's own thin links (fingers) should stay crisp, not get dilated/bloated by
+        # the occluder-fill render pass.
+        occluder_parts = [door_pcd_world]
+        scene_parts = [door_pcd_world, robot_pcd_world]
         if wall_pcd_world.shape[1] > 0:
+            occluder_parts.append(wall_pcd_world)
             scene_parts.append(wall_pcd_world)
-        return torch.cat(scene_parts, dim=1)
+        occluder_pcd_world = torch.cat(occluder_parts, dim=1)
+        return torch.cat(scene_parts, dim=1), occluder_pcd_world
 
-    def _render_lidar_scene_pointcloud_base(self, scene_pcd_world, robot_base_pos_w, robot_base_quat_w):
+    def _render_lidar_scene_pointcloud_base(
+        self, scene_pcd_world, robot_base_pos_w, robot_base_quat_w, occluder_pcd_world=None
+    ):
         rendered_pcd_world, _ = simulate_lidar_render_from_pose(
             pcd=scene_pcd_world,
             lidar_pose=self._get_lidar_pose(),
@@ -3267,6 +3291,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             occlusion_eps_rel=self.lidar_occlusion_eps_rel,
             jitter_std_m=self.lidar_jitter_std_m,
             use_compile=self.lidar_use_compile,
+            occluder_pcd=occluder_pcd_world,
+            occluder_fill_bins=self.lidar_render_occluder_fill_bins,
         )
         return world_to_local(rendered_pcd_world, robot_base_pos_w, robot_base_quat_w)
 
@@ -3276,7 +3302,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
     def _sample_scene_obs_pointcloud_base_depth(self):
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
-        gt_scene_pcd_world = self._sample_scene_pointcloud_world_cached(
+        gt_scene_pcd_world, occluder_pcd_world = self._sample_scene_pointcloud_world_cached(
             hole_metadata=getattr(self, "_current_door_hole_aug_metadata", None)
         )
         if self.viser_raw_enabled:
@@ -3295,6 +3321,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             use_compile=self.depth_cam_render_use_compile,
             blur_kernel_px=self.depth_cam_render_blur_kernel_px,
             blur_sigma_px=self.depth_cam_render_blur_sigma_px,
+            occluder_pcd=occluder_pcd_world,
+            occluder_inflate_px=self.depth_cam_render_occluder_inflate_px,
         )
         scene_pointcloud_base = world_to_local(rendered_pcd_world, robot_base_pos_w, robot_base_quat_w)
         return scene_pointcloud_base
@@ -3302,18 +3330,20 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
     def _sample_scene_obs_pointcloud_base_lidar(self):
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
-        gt_scene_pcd_world = self._sample_scene_pointcloud_world_cached(
+        gt_scene_pcd_world, occluder_pcd_world = self._sample_scene_pointcloud_world_cached(
             hole_metadata=getattr(self, "_current_door_hole_aug_metadata", None)
         )
         if self.viser_raw_enabled:
             self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(gt_scene_pcd_world)
 
-        return self._render_lidar_scene_pointcloud_base(gt_scene_pcd_world, robot_base_pos_w, robot_base_quat_w)
+        return self._render_lidar_scene_pointcloud_base(
+            gt_scene_pcd_world, robot_base_pos_w, robot_base_quat_w, occluder_pcd_world=occluder_pcd_world
+        )
 
     def _sample_scene_obs_pointcloud_base_both(self):
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
-        gt_scene_pcd_world = self._sample_scene_pointcloud_world_cached(
+        gt_scene_pcd_world, occluder_pcd_world = self._sample_scene_pointcloud_world_cached(
             hole_metadata=getattr(self, "_current_door_hole_aug_metadata", None)
         )
         if self.viser_raw_enabled:
@@ -3331,12 +3361,15 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             use_compile=self.depth_cam_render_use_compile,
             blur_kernel_px=self.depth_cam_render_blur_kernel_px,
             blur_sigma_px=self.depth_cam_render_blur_sigma_px,
+            occluder_pcd=occluder_pcd_world,
+            occluder_inflate_px=self.depth_cam_render_occluder_inflate_px,
         )
         depth_pcd_base = world_to_local(rendered_depth_pcd_world, robot_base_pos_w, robot_base_quat_w)
         lidar_pcd_base = self._render_lidar_scene_pointcloud_base(
             gt_scene_pcd_world,
             robot_base_pos_w,
             robot_base_quat_w,
+            occluder_pcd_world=occluder_pcd_world,
         )
         return depth_pcd_base, lidar_pcd_base
 
@@ -3638,7 +3671,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             # State-only policy (no sensor cloud fed to the policy): still show the ground-truth
             # scene cloud in Viser, but compose it from cached link clouds ONLY on capture
             # iterations -- no per-step depth/lidar rendering.
-            gt_scene_pcd_world = self._sample_scene_pointcloud_world_cached(
+            gt_scene_pcd_world, _ = self._sample_scene_pointcloud_world_cached(
                 hole_metadata=getattr(self, "_current_door_hole_aug_metadata", None)
             )
             self._viser_pending_debug_frame = {
