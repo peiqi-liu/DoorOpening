@@ -70,10 +70,14 @@ class PointNetEncoder(nn.Module):
             nn.LeakyReLU(inplace=True),
             nn.Linear(output_dim*2, output_dim),
         )
+        # 3D center of each output token (the FPS-sampled group centroids), stashed for attention
+        # visualization: [B, num_output_tokens, 3] in the encoder's input frame. Detached + cheap.
+        self.last_sampled_xyz = None
 
     def forward(self, xyz: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
         features = xyz.clone().transpose(1, 2).contiguous()
         xyz, features = self.SA_module(xyz, features)
+        self.last_sampled_xyz = xyz.detach()
         features = features.transpose(1, 2).contiguous()
         return self.fc_layer(features)
 
@@ -87,10 +91,13 @@ class MLPEncoder(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(output_dim*2, output_dim)
         )
+        # 3D position of each output token (for attention viz): [B, num_tokens, 3], input frame.
+        self.last_sampled_xyz = None
 
     def forward(self, points):
         if points.shape[1] > self.num_output_tokens:
             points = sample_points_fps(points, points, self.num_output_tokens)
+        self.last_sampled_xyz = points.detach()
         features = self.net(points)
         return features
 
@@ -625,6 +632,22 @@ class PCDTransformer(BaseModel):
         if self.door_joint_prediction_enabled:
             self.door_joint_head = nn.Linear(hidden_dim, self.door_joint_output_dim)
 
+        # Attention-visualization bookkeeping (populated during forward; see model/attention_capture.py).
+        self.last_token_ranges = None
+        self.pcd_encoder_keys = tuple(
+            key for key, cfg in self.pcd_encoders_cfg.items() if cfg.get("use_pcd", False)
+        )
+
+    def get_last_pcd_token_xyz(self):
+        """{pcd_key: [B, num_tokens, 3]} FPS token centers from the most recent forward (attn viz)."""
+        out = {}
+        for key in self.pcd_encoder_keys:
+            if key in self.encoders:
+                xyz = getattr(self.encoders[key], "last_sampled_xyz", None)
+                if xyz is not None:
+                    out[key] = xyz
+        return out
+
     def _configure_push_pull_condition_state_encoder(self):
         input_dim = int(self.push_pull_condition_cfg.get("input_dim", 2))
         if input_dim != 2:
@@ -1034,6 +1057,9 @@ class PCDTransformer(BaseModel):
             token_ranges[key] = slice(token_start_idx, token_start_idx + typed_tokens.shape[1])
             token_start_idx += typed_tokens.shape[1]
         obs_tokens = torch.cat(obs_tokens, dim=1)  # (B, N, H)
+        # Stash the memory-token -> obs-key layout so an attention-visualization pass can map decoder
+        # cross-attention columns back to observation modalities (and pcd tokens back to 3D points).
+        self.last_token_ranges = dict(token_ranges)
 
         memory = self.encoder(obs_tokens)  # (B, N, H)
         query_tokens = self.query_tokens.expand(B, -1, -1)  # (B, chunk_size/C+1, H)

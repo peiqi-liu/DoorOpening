@@ -178,6 +178,23 @@ parser.add_argument(
 )
 parser.add_argument("--print_interval", type=int, default=15, help="Print rollout stats every N env steps.")
 parser.add_argument(
+    "--attn-viz",
+    "--attn_viz",
+    dest="attn_viz",
+    action="store_true",
+    default=False,
+    help="Capture the student decoder's action-query cross-attention over the observation and, for "
+    "the --viser-env-id env, print the per-modality attention and save labeled attention JPGs.",
+)
+parser.add_argument(
+    "--attn-interval",
+    "--attn_interval",
+    dest="attn_interval",
+    type=int,
+    default=25,
+    help="With --attn-viz, save one attention snapshot every N env steps (attn_0.jpg, attn_25.jpg, ...).",
+)
+parser.add_argument(
     "--key_body_pos_threshold",
     type=float,
     default=1.2,
@@ -815,6 +832,72 @@ def _build_student_actions(dagger, iteration):
     return env_actions, student_output
 
 
+def _render_attention_jpgs(attn_state):
+    """Per-step attention TABLE (matplotlib, Agg): attn_<step>.jpg where EVERY memory token is one
+    cell, colored by the action-query attention. NO mean/sum aggregation. The point-cloud tokens are
+    laid out as a labeled grid ('pointcloud'); every other token (proprioception at each timestamp,
+    aux, target_err, conditions) is its own labeled row with its value printed."""
+    out_dir = attn_state["out_dir"]
+    env_id = attn_state["env_id"]
+    snapshots = attn_state["snapshots"]
+    if not snapshots:
+        print("[ATTN] nothing captured; no jpgs written.")
+        return
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+    except Exception as exc:  # noqa: BLE001
+        print(f"[ATTN] matplotlib unavailable ({exc}); skipping jpg rendering.")
+        return
+
+    for step, labels, attn, _pcd in snapshots:
+        attn_np = attn.numpy() if hasattr(attn, "numpy") else np.asarray(attn, dtype=float)
+        vmin, vmax = float(attn_np.min()), float(attn_np.max())
+        pcd_idx = [i for i, lb in enumerate(labels) if lb == "pointcloud"]
+        other_idx = [i for i, lb in enumerate(labels) if lb != "pointcloud"]
+
+        n_other = max(1, len(other_idx))
+        fig = plt.figure(figsize=(13.0, max(5.0, 0.34 * n_other)))
+        gs = fig.add_gridspec(1, 2, width_ratios=[1.6, 1.0])
+
+        # Point-cloud tokens: a grid, each cell = one token (order is FPS, not spatial).
+        ax_pcd = fig.add_subplot(gs[0, 0])
+        if pcd_idx:
+            n = len(pcd_idx)
+            cols = 16
+            rows = int(np.ceil(n / cols))
+            grid = np.full(rows * cols, np.nan)
+            grid[:n] = attn_np[pcd_idx]
+            grid = grid.reshape(rows, cols)
+            ax_pcd.imshow(grid, cmap="viridis", vmin=vmin, vmax=vmax, aspect="auto")
+        ax_pcd.set_title(f"pointcloud  ({len(pcd_idx)} tokens)")
+        ax_pcd.set_xticks([])
+        ax_pcd.set_yticks([])
+
+        # Every other token: one labeled row with its attention value printed in the cell.
+        ax_oth = fig.add_subplot(gs[0, 1])
+        col = attn_np[other_idx].reshape(len(other_idx), 1) if other_idx else np.zeros((1, 1))
+        im = ax_oth.imshow(col, cmap="viridis", vmin=vmin, vmax=vmax, aspect="auto")
+        ax_oth.set_xticks([])
+        ax_oth.set_yticks(range(len(other_idx)))
+        ax_oth.set_yticklabels([labels[i] for i in other_idx], fontsize=8)
+        ax_oth.set_title("proprioception / state / conditions")
+        mid = 0.5 * (vmin + vmax)
+        for r, i in enumerate(other_idx):
+            ax_oth.text(0, r, f"{attn_np[i]:.3f}", ha="center", va="center", fontsize=7,
+                        color="white" if attn_np[i] < mid else "black")
+
+        fig.colorbar(im, ax=[ax_pcd, ax_oth], label="action-query attention (mean over decoder layers)",
+                     shrink=0.8)
+        fig.suptitle(f"per-token attention (env {env_id}, step {step})")
+        path = os.path.join(out_dir, f"attn_{step}.jpg")
+        fig.savefig(path, dpi=100, format="jpg")
+        plt.close(fig)
+    print(f"[ATTN] saved {len(snapshots)} per-step token tables to {out_dir}")
+
+
 def _build_teacher_actions(dagger, obs):
     teacher_output = dagger._get_teacher_actions(obs)
     return teacher_output["actions"], None
@@ -945,20 +1028,20 @@ def main(env_cfg, agent_cfg: dict):
     env_cfg.pointcloud_render_mode = "none"
     env_cfg.enable_pointcloud_camera = False
 
-    # # TEMP (eval only): run WITHOUT the LEAP finger armature + finger JOINT friction (both -> 0).
-    # # Zero the spawn actuator values AND the reset-time armature event / ADR target range, so nothing
-    # # re-applies a nonzero armature at reset. Uncomment this block to disable them again.
-    # _finger_act = env_cfg.robot_cfg.actuators.get("finger")
-    # if _finger_act is not None:
-    #     _finger_act.armature = 0.0
-    #     _finger_act.friction = 0.0
-    # _arm_event = getattr(getattr(env_cfg, "events", None), "robot_finger_armature", None)
-    # if _arm_event is not None:
-    #     _arm_event.params["armature_distribution_params"] = (0.0, 0.0)
-    # _adr = getattr(env_cfg, "adr_custom_cfg_dict", None)
-    # if isinstance(_adr, dict) and isinstance(_adr.get("robot_finger_armature"), dict):
-    #     _adr["robot_finger_armature"]["armature_distribution_params"] = (0.0, 0.0)
-    # print("[INFO] TEMP: finger armature + finger joint friction disabled (set to 0.0) for this eval run.")
+    # TEMP (eval only): run WITHOUT the LEAP finger armature + finger JOINT friction (both -> 0).
+    # Zero the spawn actuator values AND the reset-time armature event / ADR target range, so nothing
+    # re-applies a nonzero armature at reset. Uncomment this block to disable them again.
+    _finger_act = env_cfg.robot_cfg.actuators.get("finger")
+    if _finger_act is not None:
+        _finger_act.armature = 0.0
+        _finger_act.friction = 0.0
+    _arm_event = getattr(getattr(env_cfg, "events", None), "robot_finger_armature", None)
+    if _arm_event is not None:
+        _arm_event.params["armature_distribution_params"] = (0.0, 0.0)
+    _adr = getattr(env_cfg, "adr_custom_cfg_dict", None)
+    if isinstance(_adr, dict) and isinstance(_adr.get("robot_finger_armature"), dict):
+        _adr["robot_finger_armature"]["armature_distribution_params"] = (0.0, 0.0)
+    print("[INFO] TEMP: finger armature + finger joint friction disabled (set to 0.0) for this eval run.")
 
     timestamp = time.strftime("%Y-%m-%d-%H-%M-%S")
     experiment_dir = os.path.join("runs", f"DoorOpening-Distillation-Eval_{timestamp}")
@@ -1100,6 +1183,28 @@ def main(env_cfg, agent_cfg: dict):
     }
     dagger = Dagger(env, dagger_config, summaries_dir=summaries_dir, nn_dir=nn_dir)
     dagger.student_model_ddp.eval()
+
+    # Attention visualization: hook the student decoder's action-query cross-attention. Aggregated
+    # for the tracked env (--viser-env-id) each step -> per-modality attention (printed) + a saved log.
+    attn_state = None
+    if args_cli.attn_viz:
+        from DoorOpening.model.attention_capture import AttentionCapture, top_token_str
+
+        _attn_env_id = max(0, min(int(args_cli.viser_env_id), int(dagger.num_envs) - 1))
+        _attn_dir = os.path.join(experiment_dir, "attn_viz")
+        os.makedirs(_attn_dir, exist_ok=True)
+        attn_state = {
+            "capture": AttentionCapture(dagger.student_model),
+            "env_id": _attn_env_id,
+            "format": top_token_str,
+            "interval": max(1, int(args_cli.attn_interval)),
+            "snapshots": [],  # (step, token_labels, token_attn, pcd) every `interval` steps
+            "out_dir": _attn_dir,
+        }
+        print(
+            f"[INFO] --attn-viz: capturing student action-query attention for env {_attn_env_id} "
+            f"(attn_<step>.jpg every {attn_state['interval']} steps) -> {_attn_dir}"
+        )
     if dagger._has_teacher():
         for teacher_model in dagger._iter_teacher_models():
             teacher_model.eval()
@@ -1218,6 +1323,19 @@ def main(env_cfg, agent_cfg: dict):
                     actions, student_output = _build_teacher_actions(dagger, obs)
                 else:
                     actions, student_output = _build_student_actions(dagger, iteration=step)
+
+                if attn_state is not None:
+                    # Pop the attention captured by the forward inside _build_student_actions above.
+                    # pop() every step to drain the captured weights; only store/print at the interval.
+                    _attn = attn_state["capture"].pop(dagger.student_model, env_id=attn_state["env_id"])
+                    if _attn is not None and int(step) % attn_state["interval"] == 0:
+                        attn_state["snapshots"].append(
+                            (int(step), _attn["token_labels"], _attn["token_attn"], _attn["pcd"])
+                        )
+                        print(
+                            f"[ATTN] step {int(step):04d} env {attn_state['env_id']} | top: "
+                            + attn_state["format"](_attn["token_labels"], _attn["token_attn"], top_k=8)
+                        )
                 mode_step_summary = None
                 mode_logits = None
                 current_contact = None
@@ -1450,6 +1568,10 @@ def main(env_cfg, agent_cfg: dict):
             f"[INFO] Saved {len(viser_pt_state['frames'])} viser frames (robot + door pointcloud) to {viser_path} "
             f"(env {viser_pt_state['env_id']}, all runs concatenated)."
         )
+
+    if attn_state is not None:
+        attn_state["capture"].remove()
+        _render_attention_jpgs(attn_state)
 
     dagger._close_viser_debug_tools()
     env.close()
