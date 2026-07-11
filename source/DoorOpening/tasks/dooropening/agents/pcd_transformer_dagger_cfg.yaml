@@ -58,7 +58,7 @@ temporal_state_encoders:
     # - push_pull_belief
     # - target_err_hand
     - base_vel
-    - aux_handle_pos
+    # - aux_handle_pos
     # aux_handle_pos is intentionally NOT in the temporal stack: it is a standalone, recurrent
     # handle-pose input seeded from ground truth on reset (see dagger.aux_handle_input_mode).
   hidden_dims: [128, 256]
@@ -118,16 +118,16 @@ state_encoders_cfg:
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  target_err_arm:
-    input_dim: 7
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  target_err_hand:
-    input_dim: 12
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
+  # target_err_arm:
+  #   input_dim: 7
+  #   hidden_dims: [128, 256]
+  #   dropout: 0.0
+  #   use_state: true
+  # target_err_hand:
+  #   input_dim: 12
+  #   hidden_dims: [128, 256]
+  #   dropout: 0.0
+  #   use_state: true
 
 transformer_cfg:
   type: "encoder_decoder"
@@ -204,6 +204,14 @@ dagger:
     use_compile: true
     blur_kernel_px: 5  # Spatial depth-image blur before unprojection, emulating the RealSense SDK spatial filter (handle bumps/rounds instead of mesh-sharp). 0/1 = off.
     blur_sigma_px: 1.5  # Gaussian sigma in pixels; <=0 = box blur. Starting point — tune against real RealSense handle captures.
+    # Door panel + wall distractor points are rasterized a second time with this much larger
+    # inflate_px and composited into the depth via a per-pixel min. At close range (near_m below)
+    # a sparse occluder leaves per-pixel z-buffer gaps that let farther points (background, the far
+    # side of the wall) show through; inflate_px=2 above is deliberately small to keep the handle
+    # crisp, so it can't fix this on its own. 0 disables the pass. Tune against the viser point-cloud
+    # replay: raise if rays still visibly punch through the wall/door, lower if occluder silhouettes
+    # look too blocky.
+    occluder_inflate_px: 10
   lidar_render:
     num_points: 9000
     num_azimuth: 128
@@ -215,6 +223,8 @@ dagger:
     occlusion_eps_rel: 0.01
     jitter_std_m: 0.01
     use_compile: true
+    # Lidar analog of depth_cam_render.occluder_inflate_px (bin radius, not pixels). 0 disables it.
+    occluder_fill_bins: 3
   wall_distractors:
     enabled: true
     wall_num_points: 50000
@@ -227,7 +237,10 @@ dagger:
     edge_gap_m: [-0.05, 0.3]  # Empty gap between the panel side edge and the inner face of the wall column.
     depth_m: [0.7, 1.5]  # Extra thickness added beyond the door slab thickness along the door-thickness axis.
     center_offset_m: [-0.80, 0.80]  # Shift of the whole column along the door-thickness axis: negative is recessed behind the slab center, positive protrudes in front.
-    # Wall height follows the door panel bbox height in the ordered door-local height axis.
+    # Column height is floor-anchored (starts at the panel's own bottom edge) and extends upward by a
+    # randomized amount in this range, independently per left/right column. Remove this key to fall
+    # back to the legacy behavior of exactly matching the door panel's own bbox height.
+    height_range_m: [0.40, 1.80]
     face_jitter_m: 0.1  # Small noise added only on the snapped outer faces so the walls do not look perfectly planar.
   door_hole_aug:
     enabled: true # When enabled, drop points from link_1 to simulate a window/open hole in the door panel.

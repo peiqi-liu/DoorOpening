@@ -333,15 +333,25 @@ def _camera_basis_from_pose_x_forward(
     return u_hat, w_hat, v_hat
 
 
-@torch.no_grad()
-def rasterize_depth_zbuffer_from_pose(
+def _dilate_depth_min_pool(depth: torch.Tensor, inflate_px: int) -> torch.Tensor:
+    """Pixel-space nearest-neighbor fill: each pixel becomes the min depth within a
+    (2*inflate_px+1) window, closing small gaps left by sparse point coverage."""
+    if inflate_px <= 0:
+        return depth
+    neg = -depth.unsqueeze(1)
+    neg = F.pad(neg, (inflate_px, inflate_px, inflate_px, inflate_px), mode="constant", value=float("-inf"))
+    k = 2 * inflate_px + 1
+    pooled_neg = F.max_pool2d(neg, kernel_size=(k, k), stride=1)
+    return (-pooled_neg).squeeze(1)
+
+
+def _zbuffer_scatter_raw_depth(
     pcd: torch.Tensor,
     camera_pose: torch.Tensor,
     cam_spec_dict: Dict,
-    inflate_px: int = 0,
-    clip_mode: str = "post",
-):
-    assert pcd.ndim == 3 and pcd.shape[-1] == 3
+    clip_mode: str,
+) -> torch.Tensor:
+    """Per-pixel min-depth z-buffer scatter, before dilation and before near/far clipping."""
     B, _, _ = pcd.shape
     H = int(cam_spec_dict["H"])
     W = int(cam_spec_dict["W"])
@@ -353,8 +363,6 @@ def rasterize_depth_zbuffer_from_pose(
     pcd = torch.nan_to_num(pcd, nan=0.0, posinf=0.0, neginf=0.0)
 
     fx, fy, cx, cy = _get_render_intrinsics(cam_spec_dict, device, dtype)
-    intr = (fx, fy, cx, cy)
-
     cam_pos = camera_pose[:, 0:3]
     u_hat, w_hat, v_hat = _camera_basis_from_pose_x_forward(camera_pose)
 
@@ -384,20 +392,42 @@ def rasterize_depth_zbuffer_from_pose(
     K = H * W
     min_depth = torch.full((B, K), float("inf"), device=device, dtype=dtype)
     min_depth.scatter_reduce_(dim=1, index=pix, src=z_masked, reduce="amin", include_self=True)
-    depth = min_depth.view(B, H, W)
+    return min_depth.view(B, H, W)
 
-    if inflate_px > 0:
-        neg = -depth.unsqueeze(1)
-        neg = F.pad(
-            neg,
-            (inflate_px, inflate_px, inflate_px, inflate_px),
-            mode="constant",
-            value=float("-inf"),
-        )
-        k = 2 * inflate_px + 1
-        pooled_neg = F.max_pool2d(neg, kernel_size=(k, k), stride=1)
-        depth = (-pooled_neg).squeeze(1)
 
+@torch.no_grad()
+def rasterize_depth_zbuffer_from_pose(
+    pcd: torch.Tensor,
+    camera_pose: torch.Tensor,
+    cam_spec_dict: Dict,
+    inflate_px: int = 0,
+    clip_mode: str = "post",
+    occluder_pcd: Optional[torch.Tensor] = None,
+    occluder_inflate_px: int = 0,
+):
+    """
+    occluder_pcd / occluder_inflate_px: an optional second point set (e.g. wall distractors)
+    rasterized in a separate pass with a much larger inflate_px and composited in via a per-pixel
+    min with the main depth. This closes gaps that a sparse occluder leaves in the fine-detail
+    z-buffer (which needs a small inflate_px to keep thin features like the door handle crisp)
+    without needing to blur the whole scene to fill them.
+    """
+    assert pcd.ndim == 3 and pcd.shape[-1] == 3
+    near_m = float(cam_spec_dict["near_m"])
+    far_m = cam_spec_dict["far_m"]
+    far_val = float("inf") if far_m is None else float(far_m)
+    device, dtype = pcd.device, pcd.dtype
+    intr = _get_render_intrinsics(cam_spec_dict, device, dtype)
+
+    depth = _zbuffer_scatter_raw_depth(pcd, camera_pose, cam_spec_dict, clip_mode)
+    depth = _dilate_depth_min_pool(depth, inflate_px)
+
+    if occluder_pcd is not None and occluder_inflate_px > 0 and occluder_pcd.shape[1] > 0:
+        occluder_depth = _zbuffer_scatter_raw_depth(occluder_pcd, camera_pose, cam_spec_dict, clip_mode)
+        occluder_depth = _dilate_depth_min_pool(occluder_depth, occluder_inflate_px)
+        depth = torch.minimum(depth, occluder_depth)
+
+    inf = torch.full((), float("inf"), device=device, dtype=dtype)
     depth = torch.where(depth >= near_m, depth, inf)
     depth = torch.where(depth <= far_val, depth, inf)
     return depth, intr
@@ -482,6 +512,8 @@ def render_points_to_world_grid_from_pose(
     jitter_mode: str = "xyz",
     blur_kernel_px: int = 0,
     blur_sigma_px: float = 0.0,
+    occluder_pcd: Optional[torch.Tensor] = None,
+    occluder_inflate_px: int = 0,
 ):
     depth, intr = rasterize_depth_zbuffer_from_pose(
         pcd,
@@ -489,6 +521,8 @@ def render_points_to_world_grid_from_pose(
         cam_spec_dict=cam_spec_dict,
         inflate_px=inflate_px,
         clip_mode=clip_mode,
+        occluder_pcd=occluder_pcd,
+        occluder_inflate_px=occluder_inflate_px,
     )
     # Spatial blur of the depth image before unprojection (mimics the RealSense SDK spatial filter).
     if int(blur_kernel_px) > 1:
@@ -523,7 +557,14 @@ def get_compiled_renderer_fixed_shapes(
     compile_mode: str = "max-autotune",
     blur_kernel_px: int = 0,
     blur_sigma_px: float = 0.0,
+    occluder_inflate_px: int = 0,
 ):
+    """
+    occluder_inflate_px > 0: the returned wrapper additionally accepts an `occluder_pcd` tensor
+    (e.g. wall distractor points), rasterized in a second pass with this (typically much larger)
+    inflate_px and composited into the main depth via a per-pixel min. See
+    rasterize_depth_zbuffer_from_pose for why this is needed on top of the main inflate_px.
+    """
     if jitter_mode.lower() != "xyz":
         raise ValueError("Compiled renderer supports jitter_mode='xyz' only.")
 
@@ -533,6 +574,7 @@ def get_compiled_renderer_fixed_shapes(
     far_m = cam_spec_dict["far_m"]
     far_val = float("inf") if far_m is None else float(far_m)
     clip_pre = clip_mode == "pre"
+    has_occluder = int(occluder_inflate_px) > 0
     intrinsics = cam_spec_dict.get("intrinsics")
     if intrinsics is None:
         raise ValueError("cam_spec_dict must provide an 'intrinsics' matrix.")
@@ -543,28 +585,27 @@ def get_compiled_renderer_fixed_shapes(
 
     def _get_or_build(device, dtype):
         key = (H, W, near_m, far_val, int(inflate_px), clip_mode, jitter_mode, compile_mode,
-               int(blur_kernel_px), float(blur_sigma_px), intrinsics_key, device, dtype)
+               int(blur_kernel_px), float(blur_sigma_px), int(occluder_inflate_px), intrinsics_key,
+               device, dtype)
         if key in _compiled_cache:
             return _compiled_cache[key]
 
         fx, fy, cx, cy = _get_render_intrinsics(cam_spec_dict, device, dtype)
         u_base, v_base = _get_uv_base(H, W, device, dtype)
         PAD = (int(inflate_px), int(inflate_px), int(inflate_px), int(inflate_px))
-        k = int(2 * inflate_px + 1)
-        KERNEL = (k, k)
+        KERNEL = (int(2 * inflate_px + 1), int(2 * inflate_px + 1))
+        OCC_PAD = (int(occluder_inflate_px),) * 4
+        OCC_KERNEL = (int(2 * occluder_inflate_px + 1), int(2 * occluder_inflate_px + 1))
         if int(blur_kernel_px) > 1:
             BLUR_KERNEL2D, BLUR_PAD = build_depth_blur_kernel2d(blur_kernel_px, blur_sigma_px, device, dtype)
         else:
             BLUR_KERNEL2D, BLUR_PAD = None, 0
 
-        @torch.no_grad()
-        def _compiled_fn(pcd: torch.Tensor, camera_pose: torch.Tensor, jitter_std: torch.Tensor):
-            finite_input = torch.isfinite(pcd).all(dim=-1)
-            pcd = torch.nan_to_num(pcd, nan=0.0, posinf=0.0, neginf=0.0)
-            cam_pos = camera_pose[:, 0:3]
-            u_hat, w_hat, v_hat = _camera_basis_from_pose_x_forward(camera_pose)
+        def _rasterize(points, cam_pos, u_hat, w_hat, v_hat, pad, kernel, infl):
+            finite_input = torch.isfinite(points).all(dim=-1)
+            points = torch.nan_to_num(points, nan=0.0, posinf=0.0, neginf=0.0)
 
-            rel = pcd - cam_pos[:, None, :]
+            rel = points - cam_pos[:, None, :]
             x = (rel * u_hat[:, None, :]).sum(-1)
             y = (rel * w_hat[:, None, :]).sum(-1)
             z = (rel * v_hat[:, None, :]).sum(-1)
@@ -582,26 +623,22 @@ def get_compiled_renderer_fixed_shapes(
             iv = v_pix.floor().clamp(0, H - 1).long()
             pix = iv * W + iu
 
-            inf = torch.full((), float("inf"), device=pcd.device, dtype=pcd.dtype)
-            z_masked = torch.where(inside, z, inf)
+            inf_local = torch.full((), float("inf"), device=points.device, dtype=points.dtype)
+            z_masked = torch.where(inside, z, inf_local)
             K = H * W
-            B = pcd.shape[0]
-            min_depth = torch.full((B, K), float("inf"), device=pcd.device, dtype=pcd.dtype)
+            Bc = points.shape[0]
+            min_depth = torch.full((Bc, K), float("inf"), device=points.device, dtype=points.dtype)
             min_depth.scatter_reduce_(dim=1, index=pix, src=z_masked, reduce="amin", include_self=True)
-            depth = min_depth.view(B, H, W)
+            d = min_depth.view(Bc, H, W)
 
-            if inflate_px > 0:
-                neg = -depth.unsqueeze(1)
-                neg = F.pad(neg, PAD, mode="constant", value=float("-inf"))
-                pooled_neg = F.max_pool2d(neg, kernel_size=KERNEL, stride=1)
-                depth = (-pooled_neg).squeeze(1)
+            if infl > 0:
+                neg = -d.unsqueeze(1)
+                neg = F.pad(neg, pad, mode="constant", value=float("-inf"))
+                pooled_neg = F.max_pool2d(neg, kernel_size=kernel, stride=1)
+                d = (-pooled_neg).squeeze(1)
+            return d
 
-            depth = torch.where(depth >= near_m, depth, inf)
-            depth = torch.where(depth <= far_val, depth, inf)
-
-            if BLUR_KERNEL2D is not None:
-                depth = apply_depth_spatial_blur(depth, BLUR_KERNEL2D, BLUR_PAD)
-
+        def _backproject_and_jitter(depth, cam_pos, u_hat, w_hat, v_hat, jitter_std, B, pcd_device, pcd_dtype):
             u = u_base.expand(B, H, W)
             v = v_base.expand(B, H, W)
             valid = torch.isfinite(depth)
@@ -609,7 +646,7 @@ def get_compiled_renderer_fixed_shapes(
             xx = (u - cx) / fx * zz
             yy = (v - cy) / fy * zz
 
-            nan = torch.full((), float("nan"), device=pcd.device, dtype=pcd.dtype)
+            nan = torch.full((), float("nan"), device=pcd_device, dtype=pcd_dtype)
             xx = torch.where(valid, xx, nan)
             yy = torch.where(valid, yy, nan)
             zz = torch.where(valid, zz, nan)
@@ -622,15 +659,77 @@ def get_compiled_renderer_fixed_shapes(
 
             noise = torch.randn_like(pcd_world) * jitter_std
             pcd_world = torch.where(valid[..., None], pcd_world + noise, pcd_world)
-            return depth, pcd_world, valid
+            return pcd_world, valid
+
+        if has_occluder:
+
+            @torch.no_grad()
+            def _compiled_fn(
+                pcd: torch.Tensor,
+                camera_pose: torch.Tensor,
+                jitter_std: torch.Tensor,
+                occluder_pcd: torch.Tensor,
+            ):
+                cam_pos = camera_pose[:, 0:3]
+                u_hat, w_hat, v_hat = _camera_basis_from_pose_x_forward(camera_pose)
+                B = pcd.shape[0]
+
+                depth = _rasterize(pcd, cam_pos, u_hat, w_hat, v_hat, PAD, KERNEL, inflate_px)
+                occluder_depth = _rasterize(
+                    occluder_pcd, cam_pos, u_hat, w_hat, v_hat, OCC_PAD, OCC_KERNEL, occluder_inflate_px
+                )
+                depth = torch.minimum(depth, occluder_depth)
+
+                inf = torch.full((), float("inf"), device=pcd.device, dtype=pcd.dtype)
+                depth = torch.where(depth >= near_m, depth, inf)
+                depth = torch.where(depth <= far_val, depth, inf)
+
+                if BLUR_KERNEL2D is not None:
+                    depth = apply_depth_spatial_blur(depth, BLUR_KERNEL2D, BLUR_PAD)
+
+                pcd_world, valid = _backproject_and_jitter(
+                    depth, cam_pos, u_hat, w_hat, v_hat, jitter_std, B, pcd.device, pcd.dtype
+                )
+                return depth, pcd_world, valid
+
+        else:
+
+            @torch.no_grad()
+            def _compiled_fn(pcd: torch.Tensor, camera_pose: torch.Tensor, jitter_std: torch.Tensor):
+                cam_pos = camera_pose[:, 0:3]
+                u_hat, w_hat, v_hat = _camera_basis_from_pose_x_forward(camera_pose)
+                B = pcd.shape[0]
+
+                depth = _rasterize(pcd, cam_pos, u_hat, w_hat, v_hat, PAD, KERNEL, inflate_px)
+
+                inf = torch.full((), float("inf"), device=pcd.device, dtype=pcd.dtype)
+                depth = torch.where(depth >= near_m, depth, inf)
+                depth = torch.where(depth <= far_val, depth, inf)
+
+                if BLUR_KERNEL2D is not None:
+                    depth = apply_depth_spatial_blur(depth, BLUR_KERNEL2D, BLUR_PAD)
+
+                pcd_world, valid = _backproject_and_jitter(
+                    depth, cam_pos, u_hat, w_hat, v_hat, jitter_std, B, pcd.device, pcd.dtype
+                )
+                return depth, pcd_world, valid
 
         compiled = torch.compile(_compiled_fn, mode=compile_mode, dynamic=False)
         _compiled_cache[key] = compiled
         return compiled
 
-    def wrapper(pcd: torch.Tensor, camera_pose: torch.Tensor, jitter_std_m: float):
+    def wrapper(
+        pcd: torch.Tensor,
+        camera_pose: torch.Tensor,
+        jitter_std_m: float,
+        occluder_pcd: Optional[torch.Tensor] = None,
+    ):
         compiled = _get_or_build(pcd.device, pcd.dtype)
         jitter_std = torch.tensor(float(jitter_std_m), device=pcd.device, dtype=pcd.dtype)
+        if has_occluder:
+            if occluder_pcd is None:
+                raise ValueError("occluder_inflate_px > 0 requires occluder_pcd to be provided.")
+            return compiled(pcd, camera_pose, jitter_std, occluder_pcd)
         return compiled(pcd, camera_pose, jitter_std)
 
     return wrapper
@@ -650,7 +749,14 @@ def simulate_depth_cam_render_from_pose(
     compile_mode: str = "max-autotune",
     blur_kernel_px: int = 0,
     blur_sigma_px: float = 0.0,
+    occluder_pcd: Optional[torch.Tensor] = None,
+    occluder_inflate_px: int = 0,
 ):
+    """
+    occluder_pcd / occluder_inflate_px: optional second point set (e.g. wall distractors) rasterized
+    with a much larger inflate_px and composited via a per-pixel min with the main depth, so sparse
+    occluders reliably block rays behind them without needing to dilate (and blur) the whole scene.
+    """
     if cam_spec_dict is None:
         raise ValueError("cam_spec_dict must be provided and must contain H/W/intrinsics/near_m/far_m.")
 
@@ -666,8 +772,12 @@ def simulate_depth_cam_render_from_pose(
             compile_mode=compile_mode,
             blur_kernel_px=blur_kernel_px,
             blur_sigma_px=blur_sigma_px,
+            occluder_inflate_px=occluder_inflate_px,
         )
-        _, pcd_world, _ = renderer(pcd, camera_pose, jitter_std_m)
+        if occluder_inflate_px > 0:
+            _, pcd_world, _ = renderer(pcd, camera_pose, jitter_std_m, occluder_pcd)
+        else:
+            _, pcd_world, _ = renderer(pcd, camera_pose, jitter_std_m)
     else:
         _, pcd_world, _ = render_points_to_world_grid_from_pose(
             pcd,
@@ -679,6 +789,8 @@ def simulate_depth_cam_render_from_pose(
             jitter_mode=jitter_mode,
             blur_kernel_px=blur_kernel_px,
             blur_sigma_px=blur_sigma_px,
+            occluder_pcd=occluder_pcd,
+            occluder_inflate_px=occluder_inflate_px,
         )
 
     rendered_pcd = pcd_world.view(batch_size, -1, 3)
@@ -781,28 +893,35 @@ def _get_lidar_dir_flat(Hp: int, Wp: int, device, dtype) -> torch.Tensor:
     return dir_flat
 
 
-@torch.no_grad()
-def render_lidar_bins_to_world_from_pose_fast(
+def _lidar_neighbor_min_pool(range_img: torch.Tensor, radius: int) -> torch.Tensor:
+    """Min range within a (2*radius+1) bin neighborhood, wrapping circularly in azimuth and
+    edge-repeating in polar (same padding convention as the suppress_bins cleanup below). Used both
+    to fill gaps (occluder dilation) and to find a comparison neighbor (suppress_bins cleanup)."""
+    if radius <= 0:
+        return range_img
+    s = int(radius)
+    k = int(2 * s + 1)
+    neg = -range_img.unsqueeze(1)
+    neg = torch.cat([neg[..., -s:], neg, neg[..., :s]], dim=-1)
+    top = neg[:, :, 0:1, :].expand(-1, -1, s, -1)
+    bot = neg[:, :, -1:, :].expand(-1, -1, s, -1)
+    neg = torch.cat([top, neg, bot], dim=-2)
+    pooled = F.max_pool2d(neg, kernel_size=(k, k), stride=1)
+    return (-pooled).squeeze(1)
+
+
+def _lidar_scatter_raw_range(
     pcd: torch.Tensor,
-    lidar_pose: torch.Tensor,
+    R: torch.Tensor,
+    Rt: torch.Tensor,
+    o: torch.Tensor,
     num_azimuth: int,
     num_polar: int,
     near_m: float,
-    far_m: Optional[float],
-    suppress_bins: int,
-    occlusion_eps_m: float,
-    occlusion_eps_rel: float,
-    jitter_std_m: float,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Returns:
-      pts_w:      (B,K,3) world-frame points with NaNs for empty bins
-      valid_flat: (B,K) bool
-    """
-    assert pcd.ndim == 3 and pcd.shape[-1] == 3
-    assert lidar_pose.ndim == 2 and lidar_pose.shape[-1] == 7
-
-    B, _, _ = pcd.shape
+    far_val: float,
+) -> torch.Tensor:
+    """Per-bin min-range scatter, before any suppress/fill neighborhood pooling."""
+    B = pcd.shape[0]
     device, dtype = pcd.device, pcd.dtype
     finite_input = torch.isfinite(pcd).all(dim=-1)
     pcd = torch.nan_to_num(pcd, nan=0.0, posinf=0.0, neginf=0.0)
@@ -810,11 +929,6 @@ def render_lidar_bins_to_world_from_pose_fast(
     Hp = int(num_polar)
     Wp = int(num_azimuth)
     K = Hp * Wp
-
-    o = lidar_pose[:, 0:3]
-    q = lidar_pose[:, 3:7]
-    R = rotmat_from_quat_xyzw(q).to(dtype=dtype)
-    Rt = R.transpose(-1, -2)
 
     rel_w = pcd - o[:, None, :]
     rel_l = torch.matmul(Rt[:, None, :, :], rel_w[..., None]).squeeze(-1)
@@ -825,7 +939,6 @@ def render_lidar_bins_to_world_from_pose_fast(
     inside = finite_input & (z > 0.0)
     if near_m is not None and near_m > 0.0:
         inside = inside & (r >= float(near_m))
-    far_val = float("inf") if far_m is None else float(far_m)
     inside = inside & (r <= far_val)
 
     phi = torch.atan2(y, x)
@@ -848,28 +961,63 @@ def render_lidar_bins_to_world_from_pose_fast(
 
     range_flat = torch.full((B, K), float("inf"), device=device, dtype=dtype)
     range_flat.scatter_reduce_(dim=1, index=pix, src=r_masked, reduce="amin", include_self=True)
-    range_img = range_flat.view(B, Hp, Wp)
+    return range_flat.view(B, Hp, Wp)
+
+
+@torch.no_grad()
+def render_lidar_bins_to_world_from_pose_fast(
+    pcd: torch.Tensor,
+    lidar_pose: torch.Tensor,
+    num_azimuth: int,
+    num_polar: int,
+    near_m: float,
+    far_m: Optional[float],
+    suppress_bins: int,
+    occlusion_eps_m: float,
+    occlusion_eps_rel: float,
+    jitter_std_m: float,
+    occluder_pcd: Optional[torch.Tensor] = None,
+    occluder_fill_bins: int = 0,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Returns:
+      pts_w:      (B,K,3) world-frame points with NaNs for empty bins
+      valid_flat: (B,K) bool
+
+    occluder_pcd / occluder_fill_bins: an optional second point set (e.g. wall distractors) scanned
+    into its own range image and neighbor-min-filled over a (typically much larger) bin radius, then
+    composited into the main range image via a per-bin min. This is the lidar analog of
+    rasterize_depth_zbuffer_from_pose's occluder_pcd/occluder_inflate_px: it closes gaps a sparse
+    occluder leaves in the fine per-bin scatter without touching suppress_bins' edge-cleanup role.
+    """
+    assert pcd.ndim == 3 and pcd.shape[-1] == 3
+    assert lidar_pose.ndim == 2 and lidar_pose.shape[-1] == 7
+
+    device, dtype = pcd.device, pcd.dtype
+    far_val = float("inf") if far_m is None else float(far_m)
+
+    o = lidar_pose[:, 0:3]
+    q = lidar_pose[:, 3:7]
+    R = rotmat_from_quat_xyzw(q).to(dtype=dtype)
+    Rt = R.transpose(-1, -2)
+
+    range_img = _lidar_scatter_raw_range(pcd, R, Rt, o, num_azimuth, num_polar, near_m, far_val)
+
+    if occluder_pcd is not None and occluder_fill_bins > 0 and occluder_pcd.shape[1] > 0:
+        occluder_range = _lidar_scatter_raw_range(occluder_pcd, R, Rt, o, num_azimuth, num_polar, near_m, far_val)
+        occluder_range = _lidar_neighbor_min_pool(occluder_range, int(occluder_fill_bins))
+        range_img = torch.minimum(range_img, occluder_range)
 
     if suppress_bins > 0:
-        s = int(suppress_bins)
-        k = int(2 * s + 1)
-
-        neg = -range_img.unsqueeze(1)
-        neg = torch.cat([neg[..., -s:], neg, neg[..., :s]], dim=-1)
-
-        top = neg[:, :, 0:1, :].expand(-1, -1, s, -1)
-        bot = neg[:, :, -1:, :].expand(-1, -1, s, -1)
-        neg = torch.cat([top, neg, bot], dim=-2)
-
-        pooled = F.max_pool2d(neg, kernel_size=(k, k), stride=1)
-        neighbor_min = (-pooled).squeeze(1)
-
+        neighbor_min = _lidar_neighbor_min_pool(range_img, int(suppress_bins))
         eps = float(occlusion_eps_m) + float(occlusion_eps_rel) * neighbor_min.clamp_min(0.0)
+        inf = torch.full((), float("inf"), device=device, dtype=dtype)
         suppress = torch.isfinite(range_img) & torch.isfinite(neighbor_min) & (range_img > neighbor_min + eps)
-
         range_img = torch.where(suppress, inf, range_img)
-        range_flat = range_img.view(B, K)
 
+    Hp = int(num_polar)
+    Wp = int(num_azimuth)
+    range_flat = range_img.view(range_img.shape[0], Hp * Wp)
     valid_flat = torch.isfinite(range_flat)
 
     dir_flat = _get_lidar_dir_flat(Hp, Wp, device, dtype)
@@ -895,10 +1043,14 @@ def get_compiled_lidar_renderer_fixed_shapes(
     occlusion_eps_m: float,
     occlusion_eps_rel: float,
     compile_mode: str = "max-autotune",
+    occluder_fill_bins: int = 0,
 ):
     """
     Returns compiled callable:
-        fn(pcd: (B,N,3), lidar_pose: (B,7), jitter_std: scalar tensor) -> (pts_w: (B,K,3), valid_flat: (B,K))
+        fn(pcd: (B,N,3), lidar_pose: (B,7), jitter_std: scalar tensor[, occluder_pcd: (B,M,3)])
+            -> (pts_w: (B,K,3), valid_flat: (B,K))
+    The occluder_pcd argument is only accepted (and required) when occluder_fill_bins > 0; see
+    render_lidar_bins_to_world_from_pose_fast for what it does.
 
     IMPORTANT: FIXED shapes (B and N do not change), and all params passed here remain constant.
     """
@@ -910,6 +1062,9 @@ def get_compiled_lidar_renderer_fixed_shapes(
     do_suppress = int(suppress_bins) > 0
     s = int(suppress_bins)
     k = int(2 * s + 1)
+    has_occluder = int(occluder_fill_bins) > 0
+    occ_s = int(occluder_fill_bins)
+    occ_k = int(2 * occ_s + 1)
 
     def _get_or_build(device, dtype):
         key = (
@@ -921,6 +1076,7 @@ def get_compiled_lidar_renderer_fixed_shapes(
             float(occlusion_eps_m),
             float(occlusion_eps_rel),
             compile_mode,
+            int(occluder_fill_bins),
             device,
             dtype,
         )
@@ -929,18 +1085,12 @@ def get_compiled_lidar_renderer_fixed_shapes(
 
         dir_flat = _get_lidar_dir_flat(Hp, Wp, device, dtype)
 
-        @torch.no_grad()
-        def _compiled_fn(pcd: torch.Tensor, lidar_pose: torch.Tensor, jitter_std: torch.Tensor):
-            finite_input = torch.isfinite(pcd).all(dim=-1)
-            pcd = torch.nan_to_num(pcd, nan=0.0, posinf=0.0, neginf=0.0)
-            B = pcd.shape[0]
+        def _scatter_range(points, R, Rt, o):
+            finite_input = torch.isfinite(points).all(dim=-1)
+            points = torch.nan_to_num(points, nan=0.0, posinf=0.0, neginf=0.0)
+            Bc = points.shape[0]
 
-            o = lidar_pose[:, 0:3]
-            q = lidar_pose[:, 3:7]
-            R = rotmat_from_quat_xyzw(q).to(dtype=pcd.dtype)
-            Rt = R.transpose(-1, -2)
-
-            rel_w = pcd - o[:, None, :]
+            rel_w = points - o[:, None, :]
             rel_l = torch.matmul(Rt[:, None, :, :], rel_w[..., None]).squeeze(-1)
             x = rel_l[..., 0]
             y = rel_l[..., 1]
@@ -965,50 +1115,95 @@ def get_compiled_lidar_renderer_fixed_shapes(
             iv = torch.floor(v * float(Hp)).clamp(0, Hp - 1).long()
             pix = iv * Wp + iu
 
-            inf = torch.full((), float("inf"), device=pcd.device, dtype=pcd.dtype)
-            r_masked = torch.where(inside, r, inf)
+            inf_local = torch.full((), float("inf"), device=points.device, dtype=points.dtype)
+            r_masked = torch.where(inside, r, inf_local)
 
-            range_flat = torch.full((B, K), float("inf"), device=pcd.device, dtype=pcd.dtype)
+            range_flat = torch.full((Bc, K), float("inf"), device=points.device, dtype=points.dtype)
             range_flat.scatter_reduce_(dim=1, index=pix, src=r_masked, reduce="amin", include_self=True)
-            range_img = range_flat.view(B, Hp, Wp)
+            return range_flat.view(Bc, Hp, Wp)
 
+        def _neighbor_min_pool(range_img, radius, kernel):
+            if radius <= 0:
+                return range_img
+            neg = -range_img.unsqueeze(1)
+            neg = torch.cat([neg[..., -radius:], neg, neg[..., :radius]], dim=-1)
+            top = neg[:, :, 0:1, :].expand(-1, -1, radius, -1)
+            bot = neg[:, :, -1:, :].expand(-1, -1, radius, -1)
+            neg = torch.cat([top, neg, bot], dim=-2)
+            pooled = F.max_pool2d(neg, kernel_size=kernel, stride=1)
+            return (-pooled).squeeze(1)
+
+        def _finalize(range_img, R, o, jitter_std, pcd_device, pcd_dtype):
+            inf = torch.full((), float("inf"), device=pcd_device, dtype=pcd_dtype)
             if do_suppress:
-                neg = -range_img.unsqueeze(1)
-
-                neg = torch.cat([neg[..., -s:], neg, neg[..., :s]], dim=-1)
-
-                top = neg[:, :, 0:1, :].expand(-1, -1, s, -1)
-                bot = neg[:, :, -1:, :].expand(-1, -1, s, -1)
-                neg = torch.cat([top, neg, bot], dim=-2)
-
-                pooled = F.max_pool2d(neg, kernel_size=(k, k), stride=1)
-                neighbor_min = (-pooled).squeeze(1)
-
+                neighbor_min = _neighbor_min_pool(range_img, s, (k, k))
                 eps = float(occlusion_eps_m) + float(occlusion_eps_rel) * neighbor_min.clamp_min(0.0)
                 suppress = torch.isfinite(range_img) & torch.isfinite(neighbor_min) & (range_img > neighbor_min + eps)
                 range_img = torch.where(suppress, inf, range_img)
-                range_flat = range_img.view(B, K)
+            range_flat = range_img.reshape(range_img.shape[0], K)
 
             valid_flat = torch.isfinite(range_flat)
 
             pts_l = dir_flat.unsqueeze(0) * range_flat.unsqueeze(-1)
             pts_w = torch.matmul(R, pts_l.transpose(1, 2)).transpose(1, 2) + o[:, None, :]
 
-            nan = torch.full((), float("nan"), device=pcd.device, dtype=pcd.dtype)
+            nan = torch.full((), float("nan"), device=pcd_device, dtype=pcd_dtype)
             pts_w = torch.where(valid_flat.unsqueeze(-1), pts_w, nan)
 
             noise = torch.randn_like(pts_w) * jitter_std
             pts_w = torch.where(valid_flat.unsqueeze(-1), pts_w + noise, pts_w)
-
             return pts_w, valid_flat
+
+        if has_occluder:
+
+            @torch.no_grad()
+            def _compiled_fn(
+                pcd: torch.Tensor,
+                lidar_pose: torch.Tensor,
+                jitter_std: torch.Tensor,
+                occluder_pcd: torch.Tensor,
+            ):
+                o = lidar_pose[:, 0:3]
+                q = lidar_pose[:, 3:7]
+                R = rotmat_from_quat_xyzw(q).to(dtype=pcd.dtype)
+                Rt = R.transpose(-1, -2)
+
+                range_img = _scatter_range(pcd, R, Rt, o)
+                occluder_range = _scatter_range(occluder_pcd, R, Rt, o)
+                occluder_range = _neighbor_min_pool(occluder_range, occ_s, (occ_k, occ_k))
+                range_img = torch.minimum(range_img, occluder_range)
+
+                return _finalize(range_img, R, o, jitter_std, pcd.device, pcd.dtype)
+
+        else:
+
+            @torch.no_grad()
+            def _compiled_fn(pcd: torch.Tensor, lidar_pose: torch.Tensor, jitter_std: torch.Tensor):
+                o = lidar_pose[:, 0:3]
+                q = lidar_pose[:, 3:7]
+                R = rotmat_from_quat_xyzw(q).to(dtype=pcd.dtype)
+                Rt = R.transpose(-1, -2)
+
+                range_img = _scatter_range(pcd, R, Rt, o)
+
+                return _finalize(range_img, R, o, jitter_std, pcd.device, pcd.dtype)
 
         compiled = torch.compile(_compiled_fn, mode=compile_mode, dynamic=False)
         _lidar_compiled_cache[key] = compiled
         return compiled
 
-    def wrapper(pcd: torch.Tensor, lidar_pose: torch.Tensor, jitter_std_m: float):
+    def wrapper(
+        pcd: torch.Tensor,
+        lidar_pose: torch.Tensor,
+        jitter_std_m: float,
+        occluder_pcd: Optional[torch.Tensor] = None,
+    ):
         fn = _get_or_build(pcd.device, pcd.dtype)
         jitter_std = torch.tensor(float(jitter_std_m), device=pcd.device, dtype=pcd.dtype)
+        if has_occluder:
+            if occluder_pcd is None:
+                raise ValueError("occluder_fill_bins > 0 requires occluder_pcd to be provided.")
+            return fn(pcd, lidar_pose, jitter_std, occluder_pcd)
         return fn(pcd, lidar_pose, jitter_std)
 
     return wrapper
@@ -1030,11 +1225,17 @@ def simulate_lidar_render_from_pose(
     shuffle: bool = True,
     use_compile: bool = True,
     compile_mode: str = "max-autotune",
+    occluder_pcd: Optional[torch.Tensor] = None,
+    occluder_fill_bins: int = 0,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
     Returns:
       lidar_pcd: (B, num_points, 3) valid-first, NaN padded
       logs: dict
+
+    occluder_pcd / occluder_fill_bins: optional second point set (e.g. wall distractors) filled over
+    a much larger bin radius and composited via a per-bin min with the main range image, so sparse
+    occluders reliably block returns behind them. See render_lidar_bins_to_world_from_pose_fast.
     """
     assert pcd.ndim == 3 and pcd.shape[-1] == 3
     assert lidar_pose.ndim == 2 and lidar_pose.shape[-1] == 7
@@ -1056,8 +1257,12 @@ def simulate_lidar_render_from_pose(
             occlusion_eps_m=float(occlusion_eps_m),
             occlusion_eps_rel=float(occlusion_eps_rel),
             compile_mode=compile_mode,
+            occluder_fill_bins=occluder_fill_bins,
         )
-        pts_w_flat, valid_flat = renderer(pcd, lidar_pose, jitter_std_m)
+        if occluder_fill_bins > 0:
+            pts_w_flat, valid_flat = renderer(pcd, lidar_pose, jitter_std_m, occluder_pcd)
+        else:
+            pts_w_flat, valid_flat = renderer(pcd, lidar_pose, jitter_std_m)
     else:
         pts_w_flat, valid_flat = render_lidar_bins_to_world_from_pose_fast(
             pcd=pcd,
@@ -1070,6 +1275,8 @@ def simulate_lidar_render_from_pose(
             occlusion_eps_m=float(occlusion_eps_m),
             occlusion_eps_rel=float(occlusion_eps_rel),
             jitter_std_m=float(jitter_std_m),
+            occluder_pcd=occluder_pcd,
+            occluder_fill_bins=occluder_fill_bins,
         )
 
     select_count = min(int(num_points), int(K))
