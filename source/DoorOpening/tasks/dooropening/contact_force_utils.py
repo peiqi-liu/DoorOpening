@@ -23,7 +23,9 @@ HANDLE_CONTACT_FILTER_PRIM_PATHS = (
 
 # Penalize finger<->panel contact. Unlike the handle bonus, this keeps the FULL hand set
 # (palm + every finger link incl. tips): ANY part of the hand on the panel (Door/link_1) is
-# undesirable, so the tips must still be tracked here.
+# undesirable, so the tips must still be tracked here. The thumb (the _4 digit) is included too --
+# whether or not its joints are actuated, the thumb links can still press the panel, so they count
+# toward the penalty.
 PANEL_CONTACT_FILTER_PRIM_PATHS = (
     "/World/envs/env_.*/Robot/palm_center",
     "/World/envs/env_.*/Robot/palm_lower",
@@ -42,6 +44,12 @@ PANEL_CONTACT_FILTER_PRIM_PATHS = (
     "/World/envs/env_.*/Robot/dip_3",
     "/World/envs/env_.*/Robot/realtip_3",
     "/World/envs/env_.*/Robot/fingertip_3",
+    # Thumb (_4 digit).
+    "/World/envs/env_.*/Robot/mcp_joint_4",
+    "/World/envs/env_.*/Robot/pip_4",
+    "/World/envs/env_.*/Robot/dip_4",
+    "/World/envs/env_.*/Robot/realtip_4",
+    "/World/envs/env_.*/Robot/fingertip_4",
 )
 
 X5_BODY_NAMES = (
