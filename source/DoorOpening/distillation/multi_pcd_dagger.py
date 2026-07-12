@@ -2628,6 +2628,10 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.wall_distractor_gap_min_m, self.wall_distractor_gap_max_m = map(
             float, self.wall_distractor_cfg.get("edge_gap_m", [0.015, 0.04])
         )
+        # Clamp to non-negative: the gap is the distance from the wall's inner face to the door
+        # panel's own side edge, so a negative value would let the wall overlap into the panel.
+        self.wall_distractor_gap_min_m = max(0.0, self.wall_distractor_gap_min_m)
+        self.wall_distractor_gap_max_m = max(self.wall_distractor_gap_min_m, self.wall_distractor_gap_max_m)
         self.wall_distractor_depth_min_m, self.wall_distractor_depth_max_m = map(
             float, self.wall_distractor_cfg.get("depth_m", [0.10, 0.26])
         )
@@ -2919,29 +2923,28 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             return torch.empty(shape, device=self.device, dtype=torch.float32).uniform_(float(low), float(high))
 
         thickness_center = 0.5 * (thickness_min + thickness_max)
-        # Split the center-offset range at zero so "front" columns always protrude to the positive
-        # thickness side and "back" columns always sit on the negative side. This turns the single
-        # column per side (whose one random offset could land in front, behind, or straddling the
-        # slab) into two independently-randomized segments, so the doorway reads as an actual
-        # opening cut into a wall instead of a single jamb-like block.
-        front_offset_min_m = max(self.wall_distractor_center_offset_min_m, 0.0)
-        front_offset_max_m = max(self.wall_distractor_center_offset_max_m, front_offset_min_m)
-        back_offset_max_m = min(self.wall_distractor_center_offset_max_m, 0.0)
-        back_offset_min_m = min(self.wall_distractor_center_offset_min_m, back_offset_max_m)
 
-        def sample_column_surfaces(is_front):
+        def sample_seam():
+            # Where the front and back segments on one side meet. Randomizing this (instead of
+            # pinning it to thickness_center) preserves the old single-column "recessed/protruding"
+            # variety while still guaranteeing the two segments butt together exactly.
+            return thickness_center + rand_range(
+                self.wall_distractor_center_offset_min_m,
+                self.wall_distractor_center_offset_max_m,
+                (env_count,),
+            )
+
+        def sample_column_surfaces(seam, is_front):
             column_depth = thickness_extent + rand_range(
                 self.wall_distractor_depth_min_m,
                 self.wall_distractor_depth_max_m,
                 (env_count,),
             )
+            # Front and back share the seam as a hard boundary (front's min == back's max == seam),
+            # so the two segments on a side are always exactly attached: no gap, no overlap.
             if is_front:
-                offset = rand_range(front_offset_min_m, front_offset_max_m, (env_count,))
-            else:
-                offset = rand_range(back_offset_min_m, back_offset_max_m, (env_count,))
-            column_center = thickness_center + offset
-            column_depth_half = 0.5 * column_depth
-            return column_center - column_depth_half, column_center + column_depth_half
+                return seam, seam + column_depth
+            return seam - column_depth, seam
 
         def sample_column_width():
             if self.wall_distractor_side_margin_abs_min_m is not None:
@@ -2959,10 +2962,10 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 )
             return column_width.clamp_min(1e-4)
 
-        def sample_column_bounds(attach_on_right, is_front):
+        def sample_column_bounds(attach_on_right, seam, is_front):
             edge_gap = rand_range(self.wall_distractor_gap_min_m, self.wall_distractor_gap_max_m, (env_count,))
             column_width = sample_column_width()
-            column_min_surface, column_max_surface = sample_column_surfaces(is_front)
+            column_min_surface, column_max_surface = sample_column_surfaces(seam, is_front)
             # The inner face starts just outside the panel side edge.
             # Right column: panel right edge + gap, then extends further in +width.
             # Left column:  panel left edge  - gap, then extends further in -width.
@@ -2975,16 +2978,18 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             column_width_lo = torch.minimum(column_inner_width, column_outer_width)
             column_width_hi = torch.maximum(column_inner_width, column_outer_width)
             if self.wall_distractor_height_min_m is not None:
-                # Floor-anchored: column rises from the panel's own bottom edge (height_min, which
-                # sits at ~floor level in the door base frame) up to a randomized height, so columns
-                # need not match the door panel's own height.
-                column_height = rand_range(
-                    self.wall_distractor_height_min_m,
-                    self.wall_distractor_height_max_m,
-                    (env_count,),
+                # Fixed absolute height window (not floor-anchored, not randomized): must reliably
+                # cover the policy's height crop (crop_local_pcd's min/max_height_m, applied in the
+                # robot-base frame) with margin on both ends, so the crop window is never right at
+                # the wall's own edge. A randomized/floor-anchored extent can't guarantee that (a
+                # short random draw could fall short of the crop's own bounds), so this is a fixed
+                # per-env-constant window instead.
+                column_height_lo = torch.full(
+                    (env_count,), self.wall_distractor_height_min_m, device=self.device, dtype=torch.float32
                 )
-                column_height_lo = height_min
-                column_height_hi = height_min + column_height
+                column_height_hi = torch.full(
+                    (env_count,), self.wall_distractor_height_max_m, device=self.device, dtype=torch.float32
+                )
             else:
                 # Keep wall distractors aligned with the current door panel instead of using a
                 # global height span, so they stay at the same vertical level as the slab.
@@ -2999,10 +3004,13 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 column_height_hi,
             )
 
-        # Four independent wall segments: {left, right} x {front, back} of the door plane.
+        # Four wall segments: {left, right} x {front, back} of the door plane. Front/back share a
+        # seam sampled once per side, so each side's pair butts together exactly (see sample_seam).
+        left_seam = sample_seam()
+        right_seam = sample_seam()
         column_variants = [
-            sample_column_bounds(attach_on_right, is_front)
-            for attach_on_right in (False, True)
+            sample_column_bounds(attach_on_right, seam, is_front)
+            for attach_on_right, seam in ((False, left_seam), (True, right_seam))
             for is_front in (False, True)
         ]
         num_columns = len(column_variants)
