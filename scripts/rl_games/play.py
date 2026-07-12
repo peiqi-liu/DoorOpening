@@ -627,6 +627,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if isinstance(obs, dict):
         obs = obs["obs"]
     timestep = 0
+    contact_log_step = 0
     # required: enables the flag for batched observations
     _ = agent.get_batch_size(obs, 1)
     # initialize RNN states if used
@@ -647,6 +648,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 actions = agent.get_action(obs, is_deterministic=agent.is_deterministic)
                 # env stepping
                 obs, _, dones, _ = env.step(actions)
+
+                # Contact-force readout: franka<->arx (arm self-collision vs the arx/x5 camera arm)
+                # and leap-fingers<->panel. Printed every 30 env steps to avoid flooding the console.
+                contact_log_step += 1
+                if contact_log_step % 30 == 0:
+                    _fa = getattr(play_env, "franka_arx_contact_force_norm", None)
+                    _fp = getattr(play_env, "finger_panel_contact_force_norm", None)
+                    if _fa is not None and _fp is not None:
+                        print(
+                            f"[CONTACT] step={contact_log_step} "
+                            f"franka<->arx force: mean={_fa.mean().item():.3f} max={_fa.max().item():.3f} N | "
+                            f"leap-fingers<->panel force: mean={_fp.mean().item():.3f} max={_fp.max().item():.3f} N"
+                        )
 
                 if viser_pt_state is not None and not viser_pt_state.get("done"):
                     _e = viser_pt_state["env_id"]

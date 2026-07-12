@@ -1470,6 +1470,18 @@ def main(env_cfg, agent_cfg: dict):
             ):
                 _print_progress(run_index, step, active, timed_out, drifted, last_metrics, action_loss=last_action_loss)
                 _print_mode_progress(run_index, step, mode_tracker, mode_step_summary)
+                # Contact-force readout over the ACTIVE envs: franka<->arx (franka arm self-collision
+                # vs the arx/x5 camera arm) and leap-fingers<->panel.
+                _fa = getattr(base_env, "franka_arx_contact_force_norm", None)
+                _fp = getattr(base_env, "finger_panel_contact_force_norm", None)
+                if _fa is not None and _fp is not None and bool(active.any()):
+                    _am = active.to(_fa.device)
+                    _fa_a, _fp_a = _fa[_am], _fp[_am]
+                    print(
+                        f"[CONTACT] run={run_index} step={step} "
+                        f"franka<->arx force: mean={_fa_a.mean().item():.3f} max={_fa_a.max().item():.3f} N | "
+                        f"leap-fingers<->panel force: mean={_fp_a.mean().item():.3f} max={_fp_a.max().item():.3f} N"
+                    )
                 # Raw base velocity (physical joint velocities; ignores base_action_scale) for
                 # sim<->real comparison. lin speed = ||(base_x_vel, base_y_vel)|| in m/s.
                 _base_speed = get_base_lin_speed(base_env)

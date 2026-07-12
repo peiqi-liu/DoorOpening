@@ -33,6 +33,7 @@ from DoorOpening.constants.env_constants import DOOR_INITIAL_POS, ROBOT_INITIAL_
 from DoorOpening.tasks.dooropening.contact_force_utils import (
     BASE_DOOR_CONTACT_BODY_NAMES,
     DOOR_FRAME_FILTER_INDEX,
+    SELF_COLLISION_X5_BODIES,
     get_filtered_contact_force_w,
     get_self_contact_body_force_norm,
 )
@@ -449,6 +450,21 @@ class DooropeningEnv(DirectRLEnv):
 
     def _get_x5_body_frame_contact_force_norm(self) -> torch.Tensor:
         return self._get_x5_body_contact_force_norm(filter_indices=(DOOR_FRAME_FILTER_INDEX,))
+
+    def _get_franka_arx_contact_force_norm(self) -> torch.Tensor:
+        """Total contact-force magnitude between the franka arm and the arx/x5 camera arm, per env.
+
+        The franka self-collision sensor filters against [x5 bodies, base bodies, door frame]; the
+        arx (x5) bodies are the FIRST ``len(SELF_COLLISION_X5_BODIES)`` filters. Sum the franka<->arx
+        contact forces (over all franka bodies + those arx filters) and return the magnitude.
+        """
+        arx_filter_indices = tuple(range(len(SELF_COLLISION_X5_BODIES)))
+        force_w = self._get_filtered_contact_force_w(
+            self.scene.sensors["contact_forces_self_collision_franka"],
+            expected_num_envs=self.num_envs,
+            filter_indices=arx_filter_indices,
+        )
+        return torch.linalg.vector_norm(force_w, dim=-1)
 
     def _get_self_collision_body_count(self) -> torch.Tensor:
         """Number of robot links in self-collision, per env (fine-grained, per-link).
@@ -1950,6 +1966,10 @@ class DooropeningEnv(DirectRLEnv):
         self.ref_grasp_stage_mask = torch.zeros(self.num_envs, device=self.device, dtype=self.door_joint_pos.dtype)
         self.ref_robot_body_lin_vel = self.robot_body_lin_vel
         self.ref_robot_body_ang_vel = self.robot_body_ang_vel
+        # Diagnostic contact-force buffers (populated each step in _get_rewards); pre-init so the
+        # eval/play scripts can read them before the first reward computation.
+        self.franka_arx_contact_force_norm = torch.zeros(self.num_envs, device=self.device)
+        self.finger_panel_contact_force_norm = torch.zeros(self.num_envs, device=self.device)
 
         twist_len = len(self.twist_indices) if self.twist_indices is not None else 0
         twist_shape = (self.num_envs, twist_len)
@@ -2213,6 +2233,16 @@ class DooropeningEnv(DirectRLEnv):
         )
         self.extras["error/panel_contact_penalty"] = weighted_panel_contact_penalty.mean().item()
         self.extras["stats/panel_contact_force_norm_max"] = float(panel_force_norm.max().detach().cpu().item())
+
+        # Diagnostic contact forces surfaced for the eval/play scripts to print: (1) franka<->arx
+        # (self-collision of the franka arm against the arx/x5 camera arm) and (2) leap fingers
+        # <->panel. Store per-env tensors as attributes + max/mean in extras.
+        franka_arx_force_norm = self._get_franka_arx_contact_force_norm()
+        self.franka_arx_contact_force_norm = franka_arx_force_norm
+        self.finger_panel_contact_force_norm = panel_force_norm
+        self.extras["stats/franka_arx_contact_force_norm_max"] = float(franka_arx_force_norm.max().detach().cpu().item())
+        self.extras["stats/franka_arx_contact_force_norm_mean"] = float(franka_arx_force_norm.mean().detach().cpu().item())
+        self.extras["stats/finger_panel_contact_force_norm_mean"] = float(panel_force_norm.mean().detach().cpu().item())
         # Also REPORT the finger<->panel normal force during the PREGRASP->GRASP stage
         # (ref_grasp_stage_mask, keyframes 1..3) for debugging. Masked mean = 0 when no env is there.
         grasp_stage = (self.ref_grasp_stage_mask.squeeze() > 0).to(panel_force_norm.dtype)
