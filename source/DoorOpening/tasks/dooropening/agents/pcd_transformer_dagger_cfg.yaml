@@ -53,7 +53,7 @@ temporal_state_encoders:
   # timestamps_ms: [0, 400, 800, 1200, 1600, 2000, 2400, 2800]
   fields:
     - q_arm
-    - q_hand
+    # - q_hand
     # - target_err_arm
     # - push_pull_belief
     # - target_err_hand
@@ -233,14 +233,20 @@ dagger:
     # - height axis: bottom/top of the panel
     # - thickness axis: through the panel, normal to the door slab
     # Each sampled point comes from either the left or right column.
-    side_margin_m: [0.2, 1.20]  # Column width along the door width axis, i.e. how far each column extends outward from the left/right panel edge.
-    edge_gap_m: [-0.05, 0.3]  # Empty gap between the panel side edge and the inner face of the wall column.
-    depth_m: [0.7, 1.5]  # Extra thickness added beyond the door slab thickness along the door-thickness axis.
-    center_offset_m: [-0.80, 0.80]  # Shift of the whole column along the door-thickness axis: negative is recessed behind the slab center, positive protrudes in front.
-    # Column height is floor-anchored (starts at the panel's own bottom edge) and extends upward by a
-    # randomized amount in this range, independently per left/right column. Remove this key to fall
-    # back to the legacy behavior of exactly matching the door panel's own bbox height.
-    height_range_m: [0.40, 1.80]
+    side_margin_m: [0.2, 0.8]  # Column width along the door width axis, i.e. how far each column extends outward from the left/right panel edge.
+    edge_gap_m: [0.0, 0.01]  # Empty gap between the panel side edge and the inner face of the wall column. Clamped to >= 0 in code: the wall must never overlap the door panel.
+    depth_m: [0.1, 1.5]  # Extra thickness added beyond the door slab thickness along the door-thickness axis, independently per front/back segment.
+    # Position of the seam where the front and back segments on one side butt together (see
+    # sample_seam), relative to the door's mid-thickness plane. Pinned to 0 so all 4 walls start
+    # exactly at the door plane; kept as a config key (rather than removed) so sample_seam/
+    # rand_range don't need a special zero-width-range code path.
+    center_offset_m: [0.0, 0.0]
+    # Fixed absolute height window (same for every env, not randomized): the policy's pointcloud
+    # crop keeps only z in [0.55, 1.5] (crop_local_pcd's min/max_height_m defaults, robot-base
+    # frame), so this is that range +/- a 0.3m margin on each side, guaranteeing wall coverage
+    # never runs out right at the crop boundary. Remove this key to fall back to the legacy
+    # behavior of exactly matching the door panel's own bbox height.
+    height_range_m: [0.25, 1.80]
     face_jitter_m: 0.1  # Small noise added only on the snapped outer faces so the walls do not look perfectly planar.
   door_hole_aug:
     enabled: true # When enabled, drop points from link_1 to simulate a window/open hole in the door panel.
