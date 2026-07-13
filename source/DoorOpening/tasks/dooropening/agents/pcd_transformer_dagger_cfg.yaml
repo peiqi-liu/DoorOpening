@@ -198,9 +198,13 @@ dagger:
   depth_cam_render:
     num_points: 12000
     inflate_px: 2  # Was 4. Less silhouette dilation, so handle edges are less crisp and blend into the door surface, closer to real RealSense.
-    jitter_std_m: 0.025  # Was 0.01. Coarser per-point depth noise (~2.5cm).
+    jitter_std_m: 0.025  # Per-point depth noise std (~2.5cm), now applied ALONG the camera ray (see jitter_mode).
     clip_mode: "post"
-    jitter_mode: "xyz"
+    # "axial": perturb depth along the camera ray only, so points stay on their pixel rays and the
+    # lateral silhouette stays crisp -- thin features (the handle) are NOT smeared into a noise blob.
+    # This matches the RealSense depth-noise model (dominantly axial). "xyz" = isotropic world-space
+    # noise (smears thin features); "tangent" = in-image-plane noise (non-compiled path only).
+    jitter_mode: "axial"
     use_compile: true
     blur_kernel_px: 5  # Spatial depth-image blur before unprojection, emulating the RealSense SDK spatial filter (handle bumps/rounds instead of mesh-sharp). 0/1 = off.
     blur_sigma_px: 1.5  # Gaussian sigma in pixels; <=0 = box blur. Starting point — tune against real RealSense handle captures.
@@ -241,12 +245,17 @@ dagger:
     # exactly at the door plane; kept as a config key (rather than removed) so sample_seam/
     # rand_range don't need a special zero-width-range code path.
     center_offset_m: [0.0, 0.0]
-    # Fixed absolute height window (same for every env, not randomized): the policy's pointcloud
-    # crop keeps only z in [0.55, 1.5] (crop_local_pcd's min/max_height_m defaults, robot-base
-    # frame), so this is that range +/- a 0.3m margin on each side, guaranteeing wall coverage
-    # never runs out right at the crop boundary. Remove this key to fall back to the legacy
-    # behavior of exactly matching the door panel's own bbox height.
+    # Wall vertical extent. Every wall starts at the lower bound (0.25); the UPPER bound is randomized
+    # INDEPENDENTLY per wall (each of the four columns draws its own top in [lower, upper]), so the
+    # walls reach different heights. Lower stays below the policy's z-crop [0.55, 1.5] so coverage
+    # never runs out at the bottom of the crop. Remove this key to fall back to the legacy behavior of
+    # exactly matching the door panel's own bbox height.
     height_range_m: [0.25, 1.80]
+    # Wall GT point count = total wall surface area * this density (points/m^2), capped at
+    # wall_num_points. Keeps point density roughly constant as walls change size (esp. with the
+    # randomized height above), instead of always emitting a fixed wall_num_points. Remove for the
+    # legacy fixed-count behavior.
+    point_density_per_m2: 3000
     face_jitter_m: 0.1  # Small noise added only on the snapped outer faces so the walls do not look perfectly planar.
   door_hole_aug:
     enabled: true # When enabled, drop points from link_1 to simulate a window/open hole in the door panel.

@@ -1015,22 +1015,17 @@ def play_and_save_traj(
         hinge_contact_mask[key_indices[2]:key_indices[5]] = 1
 
     # panel_contact_mask: gates the unified finger<->door (panel Door/link_1 + handle Door/link_2)
-    # FORCE-PROTECTION penalty. It is ON ONLY during phases where the hand deliberately works the
-    # panel (and, for pull, retracts away from it), so the strong penalty protects the fingers there
-    # while staying OFF during approach/grasp/rotate/pull-open (where the fingers legitimately load
-    # the handle).
-    #   push: the open-door + base-forward phase (keyframes 3..5) presses the panel open with the
-    #         partly-open hand.
-    #   pull: the retract-arm + push-panel-open + hold-traverse phase (keyframes 6..9): the arm first
-    #         RETRACTS off the door (fingers must come clear -- so it is penalized here too), then
-    #         pushes the panel open and holds it against the frame while traversing.
+    # FORCE-PROTECTION penalty.
+    #   push: ON during the open-door + base-forward phase (keyframes 3..5), where the partly-open
+    #         hand presses the panel open -- there we still want the penalty to keep the push gentle.
+    #   pull: OFF for the whole trajectory (mask stays all-zero). Penalizing finger<->door contact on
+    #         pull made the robot "scared" to push the door panel with the arm, so pull carries no
+    #         finger<->door penalty at all.
     panel_contact_mask = torch.zeros(len(robot_traj), dtype=torch.int8)
     if planner_opening_direction == "push":
         if len(key_indices) > 5:
             panel_contact_mask[key_indices[3]:key_indices[5]] = 1
-    # else:
-    #     if len(key_indices) > 9:
-    #         panel_contact_mask[key_indices[6]:key_indices[9]] = 1
+    # else: pull -> no finger<->door penalty (see above); mask stays all-zero.
 
     # grasp_stage_mask: the PREGRASP -> GRASP window (keyframes 1..3: pregrasp, grasp, up to the
     # rotate keyframe). Used ONLY to gate the finger<->panel normal-force LOGGING (no reward) so we
