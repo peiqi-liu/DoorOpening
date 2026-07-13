@@ -529,7 +529,7 @@ def state_machine_offline_push_left_door(
     # Moved back (0.35 -> 0.40): wider palm<->door x gap to compensate for removing the
     # finger<->panel penalty.
     palm_target_pos[:, 0] += 0.40
-    palm_target_pos[:, 1] += 0.15
+    palm_target_pos[:, 1] += 0.0
     palm_target_pos[:, 2] += 0.25
     palm_target_pose = _make_pose(palm_target_pos, default_palm_rot)
 
@@ -559,7 +559,7 @@ def state_machine_offline_push_left_door(
     # Grasp EE moved BACK (0.025 -> 0.05) to widen the palm<->door x gap (compensates for removing
     # the finger<->panel penalty). Left/right nudge still not applied on push; y = 0.03.
     palm_target_pos[:, 0] += 0.05
-    palm_target_pos[:, 1] += 0.015
+    palm_target_pos[:, 1] += 0.025
     palm_target_pos[:, 2] += 0.10
     palm_target_pose = _make_pose(palm_target_pos, default_palm_rot)
 
@@ -645,7 +645,7 @@ def state_machine_offline_push_left_door(
 
         # Offset palm outward from panel surface — left door swings clockwise so rotate offset clockwise
         push_palm_x_offset = 0.08
-        push_palm_y_offset = 0.03
+        push_palm_y_offset = 0.01
         palm_dx, palm_dy = _rotate_xy_clockwise(
             push_palm_x_offset,
             push_palm_y_offset,

@@ -21,14 +21,10 @@ HANDLE_CONTACT_FILTER_PRIM_PATHS = (
     "/World/envs/env_.*/Robot/fingertip_3",
 )
 
-# Penalize finger<->panel contact. Unlike the handle bonus, this keeps the FULL hand set
-# (palm + every finger link incl. tips): ANY part of the hand on the panel (Door/link_1) is
-# undesirable, so the tips must still be tracked here. The thumb (the _4 digit) is included too --
-# whether or not its joints are actuated, the thumb links can still press the panel, so they count
-# toward the penalty.
+# Penalize finger<->panel contact. Fingers ONLY -- the index/middle/ring digits (_1/_2/_3), every
+# link incl. tips. The palm (palm_center/palm_lower) and the thumb (_4 digit) are intentionally
+# EXCLUDED: pressing the panel (Door/link_1) with the palm or thumb is NOT penalized.
 PANEL_CONTACT_FILTER_PRIM_PATHS = (
-    "/World/envs/env_.*/Robot/palm_center",
-    "/World/envs/env_.*/Robot/palm_lower",
     "/World/envs/env_.*/Robot/mcp_joint_1",
     "/World/envs/env_.*/Robot/pip_1",
     "/World/envs/env_.*/Robot/dip_1",

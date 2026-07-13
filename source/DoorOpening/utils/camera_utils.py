@@ -528,9 +528,18 @@ def render_points_to_world_grid_from_pose(
     if int(blur_kernel_px) > 1:
         kernel2d, pad = build_depth_blur_kernel2d(blur_kernel_px, blur_sigma_px, depth.device, depth.dtype)
         depth = apply_depth_spatial_blur(depth, kernel2d, pad)
+
+    # Axial (along-ray) jitter perturbs DEPTH before unprojection, so points stay on their pixel rays
+    # and the lateral silhouette (thin features like the handle) stays crisp -- the RealSense noise
+    # model is dominantly axial. isotropic 'xyz' / 'tangent' jitter is applied in world space below.
+    axial_jitter = jitter_std_m > 0.0 and jitter_mode.lower() in ("axial", "ray", "depth")
+    if axial_jitter:
+        finite = torch.isfinite(depth)
+        depth = torch.where(finite, depth + torch.randn_like(depth) * float(jitter_std_m), depth)
+
     pcd_world, valid = backproject_depth_to_world_from_pose(depth, camera_pose, intr)
 
-    if jitter_std_m > 0.0:
+    if jitter_std_m > 0.0 and not axial_jitter:
         if jitter_mode.lower() == "xyz":
             noise = torch.randn_like(pcd_world) * float(jitter_std_m)
             pcd_world = torch.where(valid[..., None], pcd_world + noise, pcd_world)
@@ -544,7 +553,7 @@ def render_points_to_world_grid_from_pose(
             jitter = eps_u * uB + eps_w * wB
             pcd_world = torch.where(valid[..., None], pcd_world + jitter, pcd_world)
         else:
-            raise ValueError(f"Unknown jitter_mode '{jitter_mode}'. Use 'tangent' or 'xyz'.")
+            raise ValueError(f"Unknown jitter_mode '{jitter_mode}'. Use 'axial', 'tangent', or 'xyz'.")
 
     return depth, pcd_world, valid
 
@@ -565,8 +574,9 @@ def get_compiled_renderer_fixed_shapes(
     inflate_px and composited into the main depth via a per-pixel min. See
     rasterize_depth_zbuffer_from_pose for why this is needed on top of the main inflate_px.
     """
-    if jitter_mode.lower() != "xyz":
-        raise ValueError("Compiled renderer supports jitter_mode='xyz' only.")
+    axial_jitter = jitter_mode.lower() in ("axial", "ray", "depth")
+    if not axial_jitter and jitter_mode.lower() != "xyz":
+        raise ValueError("Compiled renderer supports jitter_mode='xyz' or 'axial' only.")
 
     H = int(cam_spec_dict["H"])
     W = int(cam_spec_dict["W"])
@@ -643,6 +653,12 @@ def get_compiled_renderer_fixed_shapes(
             v = v_base.expand(B, H, W)
             valid = torch.isfinite(depth)
             zz = depth
+            if axial_jitter:
+                # Perturb depth ALONG the camera ray only (recompute x,y from the noisy depth). This
+                # keeps each point on its pixel ray, so the lateral silhouette stays crisp and thin
+                # features (e.g. the door handle) are not smeared -- matching the RealSense depth-noise
+                # model, which is dominantly axial rather than isotropic.
+                zz = zz + torch.where(valid, torch.randn_like(zz) * jitter_std, torch.zeros_like(zz))
             xx = (u - cx) / fx * zz
             yy = (v - cy) / fy * zz
 
@@ -657,8 +673,9 @@ def get_compiled_renderer_fixed_shapes(
             oB = cam_pos.view(B, 1, 1, 3)
             pcd_world = oB + xx[..., None] * uB + yy[..., None] * wB + zz[..., None] * vB
 
-            noise = torch.randn_like(pcd_world) * jitter_std
-            pcd_world = torch.where(valid[..., None], pcd_world + noise, pcd_world)
+            if not axial_jitter:
+                noise = torch.randn_like(pcd_world) * jitter_std
+                pcd_world = torch.where(valid[..., None], pcd_world + noise, pcd_world)
             return pcd_world, valid
 
         if has_occluder:
