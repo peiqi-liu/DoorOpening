@@ -141,8 +141,10 @@ GLORBOT_CONFIG = ArticulationCfg(
             stiffness=1000.0,
             damping=80.0,
         ),
+        # Index + middle + ring fingers (finger_joint_0..11). Thumb (finger_joint_12..15) is split
+        # into its own group below so it can carry a higher effort limit.
         "finger": ImplicitActuatorCfg(
-            joint_names_expr=["finger_joint_.*"],
+            joint_names_expr=["finger_joint_([0-9]|1[01])"],
             effort_limit_sim=1.0,
             stiffness=600,
             damping=40,
@@ -155,6 +157,20 @@ GLORBOT_CONFIG = ArticulationCfg(
             # capping the per-step acceleration. NOTE: this is only the nominal / ADR-increment-0 value;
             # at training time the `robot_finger_armature` EventTerm (see multi_dooropening_env_cfg.py)
             # randomizes it per-episode -- lower that ADR range too if you want 0.002 to hold in training.
+            armature=0.002,
+        ),
+        # Thumb (finger_joint_12..15). Split out from the other fingers with a HIGHER effort limit:
+        # the thumb is NOT policy-controlled (commented out of finger_joints), so it is only held by
+        # this PD at a fixed reset target. At 1.0 Nm it got shoved off that target by self-collision
+        # from the closing fingers + inertial loads during arm motion and never recovered ("fell"). A
+        # larger effort limit lets it hold. Same gains/friction/armature as the fingers otherwise; the
+        # armature still caps per-step acceleration so the higher cap stays stable. Tune if needed.
+        "thumb": ImplicitActuatorCfg(
+            joint_names_expr=["finger_joint_1[2-5]"],
+            effort_limit_sim=5.0,
+            stiffness=600,
+            damping=40,
+            friction=0.01,
             armature=0.002,
         ),
     }

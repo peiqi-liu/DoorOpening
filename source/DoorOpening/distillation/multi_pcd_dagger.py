@@ -3664,6 +3664,10 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             else:
                 raise KeyError(f"Unsupported student pointcloud key '{key}' in config.")
 
+        # Cache the latest policy-input cloud (base frame, [num_envs, N, 3]) so eval/replay can save
+        # it into the compact .pt even when the full viser_raw path is not enabled.
+        self._last_policy_input_pcd_base = obs.get("local_pcd_t")
+
         if self.viser_raw_enabled and has_pcd:
             self._viser_pending_debug_frame = {
                 "iteration": iteration,

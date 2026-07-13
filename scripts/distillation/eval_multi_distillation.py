@@ -283,7 +283,6 @@ import gymnasium as gym
 import torch
 
 from isaaclab.utils.dict import print_dict
-from isaaclab.utils.math import quat_apply
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import isaaclab_tasks  # noqa: F401
@@ -832,8 +831,8 @@ def _build_student_actions(dagger, iteration):
     return env_actions, student_output
 
 
-def _render_attention_jpgs(attn_state):
-    """Per-step attention TABLE (matplotlib, Agg): attn_<step>.jpg where EVERY memory token is one
+def _render_attention_jpgs(attn_state, run_index=None):
+    """Per-step attention TABLE (matplotlib, Agg): attn[_run<r>]_<step>.jpg where EVERY memory token is one
     cell, colored by the action-query attention. NO mean/sum aggregation. The point-cloud tokens are
     laid out as a labeled grid ('pointcloud'); every other token (proprioception at each timestamp,
     aux, target_err, conditions) is its own labeled row with its value printed."""
@@ -891,11 +890,50 @@ def _render_attention_jpgs(attn_state):
 
         fig.colorbar(im, ax=[ax_pcd, ax_oth], label="action-query attention (mean over decoder layers)",
                      shrink=0.8)
-        fig.suptitle(f"per-token attention (env {env_id}, step {step})")
-        path = os.path.join(out_dir, f"attn_{step}.jpg")
+        _tag = f"run{run_index}_" if run_index is not None else ""
+        _rlbl = f", run {run_index}" if run_index is not None else ""
+        fig.suptitle(f"per-token attention (env {env_id}{_rlbl}, step {step})")
+        path = os.path.join(out_dir, f"attn_{_tag}{step}.jpg")
         fig.savefig(path, dpi=100, format="jpg")
         plt.close(fig)
-    print(f"[ATTN] saved {len(snapshots)} per-step token tables to {out_dir}")
+    _run_str = f" (run {run_index})" if run_index is not None else ""
+    print(f"[ATTN] saved {len(snapshots)} per-step token tables{_run_str} to {out_dir}")
+
+
+def _save_replay_pt(replay_runs, joint_names, base_env, save_replay_arg):
+    """Write the accumulated per-run replay to a .pt. Called after each run for incremental saves."""
+    replay_path = pathlib.Path(save_replay_arg).expanduser()
+    if replay_path.is_dir():
+        replay_path = replay_path / "replay.pt"
+    replay_path = str(replay_path)
+    os.makedirs(os.path.dirname(replay_path) or ".", exist_ok=True)
+    torch.save(
+        {"runs": replay_runs, "joint_names": joint_names, "num_envs": int(base_env.num_envs)},
+        replay_path,
+    )
+    print(f"[INFO] Replay saved to {replay_path} ({len(replay_runs)} run(s) so far).")
+
+
+def _save_viser_pt(viser_pt_state, save_viser_arg):
+    """Write the accumulated viser frames to a .pt. Called after each run for incremental saves."""
+    viser_path = pathlib.Path(save_viser_arg).expanduser()
+    if viser_path.is_dir():
+        viser_path = viser_path / "viser_replay.pt"
+    viser_path = str(viser_path)
+    os.makedirs(os.path.dirname(viser_path) or ".", exist_ok=True)
+    torch.save(
+        {
+            "frames": viser_pt_state["frames"],
+            "compact_target_joint_names": viser_pt_state["compact_names"],
+            "frame_dt": viser_pt_state["frame_dt"],
+            "door_urdf_path": viser_pt_state["door_urdf_path"],
+            "door_joint_names": viser_pt_state["door_joint_names"],
+            "door_root_pos": viser_pt_state["door_root_pos"],  # env-relative
+            "door_root_quat": viser_pt_state["door_root_quat"],
+        },
+        viser_path,
+    )
+    print(f"[INFO] Saved {len(viser_pt_state['frames'])} viser frames to {viser_path} (all runs so far).")
 
 
 def _build_teacher_actions(dagger, obs):
@@ -1031,17 +1069,17 @@ def main(env_cfg, agent_cfg: dict):
     # TEMP (eval only): run WITHOUT the LEAP finger armature + finger JOINT friction (both -> 0).
     # Zero the spawn actuator values AND the reset-time armature event / ADR target range, so nothing
     # re-applies a nonzero armature at reset. Uncomment this block to disable them again.
-    _finger_act = env_cfg.robot_cfg.actuators.get("finger")
-    if _finger_act is not None:
-        _finger_act.armature = 0.0
-        _finger_act.friction = 0.0
-    _arm_event = getattr(getattr(env_cfg, "events", None), "robot_finger_armature", None)
-    if _arm_event is not None:
-        _arm_event.params["armature_distribution_params"] = (0.0, 0.0)
-    _adr = getattr(env_cfg, "adr_custom_cfg_dict", None)
-    if isinstance(_adr, dict) and isinstance(_adr.get("robot_finger_armature"), dict):
-        _adr["robot_finger_armature"]["armature_distribution_params"] = (0.0, 0.0)
-    print("[INFO] TEMP: finger armature + finger joint friction disabled (set to 0.0) for this eval run.")
+    # _finger_act = env_cfg.robot_cfg.actuators.get("finger")
+    # if _finger_act is not None:
+    #     _finger_act.armature = 0.0
+    #     _finger_act.friction = 0.0
+    # _arm_event = getattr(getattr(env_cfg, "events", None), "robot_finger_armature", None)
+    # if _arm_event is not None:
+    #     _arm_event.params["armature_distribution_params"] = (0.0, 0.0)
+    # _adr = getattr(env_cfg, "adr_custom_cfg_dict", None)
+    # if isinstance(_adr, dict) and isinstance(_adr.get("robot_finger_armature"), dict):
+    #     _adr["robot_finger_armature"]["armature_distribution_params"] = (0.0, 0.0)
+    # print("[INFO] TEMP: finger armature + finger joint friction disabled (set to 0.0) for this eval run.")
 
     timestamp = time.strftime("%Y-%m-%d-%H-%M-%S")
     experiment_dir = os.path.join("runs", f"DoorOpening-Distillation-Eval_{timestamp}")
@@ -1093,16 +1131,14 @@ def main(env_cfg, agent_cfg: dict):
         _v_env_id = max(0, min(int(args_cli.viser_env_id), int(base_env.num_envs) - 1))
         _v_env_origin = base_env.scene.env_origins[_v_env_id].detach().clone()  # on device
         _v_door_asset_idx = int(base_env.env_asset_indices[_v_env_id].item())
-        _v_door_urdf = str(asset_paths[_v_door_asset_idx])
-        _v_door_root = base_env.door.data.root_state_w[_v_env_id, :7].detach().clone()  # on device
-        # Build the door pointcloud sampler ONCE (loads URDF); sample_link_set() is cheap per frame.
-        _v_door_sampler = None
-        try:
-            from DoorOpening.utils.extract_pointcloud_from_articulation import FrankaLeapSampler
-
-            _v_door_sampler = FrankaLeapSampler(_v_door_urdf, device=str(base_env.device), num_points=2048)
-        except Exception as _exc:  # noqa: BLE001
-            print(f"[WARN] --save-viser-pt: could not build door pointcloud sampler ({_exc}); robot-only frames.")
+        # Save the door's GLOBAL urdf path so the replay loads the real door mesh (instead of a baked
+        # sampled pointcloud) and animates it with the per-frame ACTUAL sim door joints.
+        _v_door_urdf = os.path.abspath(str(asset_paths[_v_door_asset_idx]))
+        _v_door_root = base_env.door.data.root_state_w[_v_env_id, :7].detach().clone()  # world, on device
+        # Door is fixed-base, so its root pose is constant; store it env-relative (like the robot base)
+        # so the replay can place the URDF once and animate joints per frame.
+        _v_door_root_pos_rel = (_v_door_root[:3] - _v_env_origin).detach().cpu().clone()
+        _v_door_root_quat = _v_door_root[3:7].detach().cpu().clone()
         viser_pt_state = {
             "env_id": _v_env_id,
             "compact_names": _compact_names,
@@ -1110,16 +1146,16 @@ def main(env_cfg, agent_cfg: dict):
             "target_idx": torch.as_tensor([max(p, 0) for p in _target_pos], device=base_env.device, dtype=torch.long),
             "target_valid": torch.as_tensor([p >= 0 for p in _target_pos], device=base_env.device, dtype=torch.bool),
             "env_origin": _v_env_origin,
-            "door_sampler": _v_door_sampler,
-            "door_link_names": ["base", "link_0", "link_1", "link_2"],
-            "door_root_pos_w": _v_door_root[:3],
-            "door_root_quat_w": _v_door_root[3:7],
+            "door_urdf_path": _v_door_urdf,
+            "door_joint_names": list(base_env.door.data.joint_names),
+            "door_root_pos": _v_door_root_pos_rel,  # env-relative
+            "door_root_quat": _v_door_root_quat,
             "frames": [],
             "frame_dt": float(getattr(base_env, "step_dt", 0.025)),
         }
         print(
-            f"[INFO] Saving viser .pt (joint angles + PD targets + door pointcloud, env {viser_pt_state['env_id']}); "
-            f"joints={viser_pt_state['compact_names']}"
+            f"[INFO] Saving viser .pt (joint angles + PD targets + door URDF path + actual sim door joints, "
+            f"env {viser_pt_state['env_id']}); joints={viser_pt_state['compact_names']}; door={_v_door_urdf}"
         )
 
     if args_cli.video:
@@ -1375,6 +1411,8 @@ def main(env_cfg, agent_cfg: dict):
                         _tgt = base_env.applied_robot_dof_targets[_e, viser_pt_state["target_idx"]].detach().cpu().clone()
                         _tgt[~viser_pt_state["target_valid"].cpu()] = 0.0  # joints not in the controlled set
                         _rb = base_env.robot.data.root_state_w[_e, :7].detach()
+                        # ACTUAL sim door joints for this frame (NOT predicted): the replay poses the
+                        # door URDF (viser_pt_state["door_urdf_path"]) with these, in door_joint_names order.
                         _dj = base_env.door.data.joint_pos[_e].detach()
                         _frame = {
                             "compact_q": _q,
@@ -1383,19 +1421,35 @@ def main(env_cfg, agent_cfg: dict):
                             "robot_base_pos_w": (_rb[:3] - _org).cpu().clone(),
                             "robot_base_quat_w": _rb[3:7].cpu().clone(),
                         }
-                        # Deformed door pointcloud (env-relative world) for this frame's door joints.
-                        _sampler = viser_pt_state["door_sampler"]
-                        if _sampler is not None:
-                            try:
-                                _pb = _sampler.sample_link_set(_dj.unsqueeze(0), viser_pt_state["door_link_names"])[0]
-                                _rq = viser_pt_state["door_root_quat_w"].unsqueeze(0).expand(_pb.shape[0], -1)
-                                _pw = quat_apply(_rq, _pb) + viser_pt_state["door_root_pos_w"]
-                                _frame["door_points_world"] = (_pw - _org).detach().cpu().clone()
-                            except Exception as _exc:  # noqa: BLE001
-                                if not viser_pt_state.get("_warned_sampler"):
-                                    print(f"[WARN] door pointcloud sampling failed ({_exc}); robot-only frames.")
-                                    viser_pt_state["_warned_sampler"] = True
-                                viser_pt_state["door_sampler"] = None
+                        # Policy-input point cloud (the local_pcd_t the student network consumes),
+                        # cached on the dagger in _build_student_obs. Transform base-frame -> env-relative
+                        # world (same frame as robot_base_pos_w) so the replay shows it as the
+                        # 'policy_input' stream.
+                        _pcd_base = getattr(dagger, "_last_policy_input_pcd_base", None)
+                        if _pcd_base is not None and _pcd_base.shape[0] > _e:
+                            _local = _pcd_base[_e, ..., :3].detach().to(torch.float32)  # [N, 3] base frame
+                            _bq = _rb[3:7].to(torch.float32)                             # world wxyz
+                            _axis = _bq[1:].unsqueeze(0).expand(_local.shape[0], 3)
+                            _uv = torch.cross(_axis, _local, dim=-1)
+                            _uuv = torch.cross(_axis, _uv, dim=-1)
+                            _local_world = _local + 2.0 * (_bq[0] * _uv + _uuv)
+                            _local_world = _local_world + (_rb[:3] - _org).to(torch.float32).unsqueeze(0)
+                            _frame["policy_input_points_world"] = _local_world.cpu().clone()
+                        # Aux handle position (robot base frame): the network's PREDICTED handle pos
+                        # (aux_prediction) and the aux INPUT it received (aux_input). The replay
+                        # transforms these to world with the frame's base pose, exactly like the raw
+                        # viser path in run_multi_distillation.
+                        if (
+                            getattr(dagger, "has_aux_prediction", False)
+                            and isinstance(student_output, dict)
+                            and "aux" in student_output
+                        ):
+                            _aux_pred = dagger._decode_aux_prediction(student_output["aux"].detach())
+                            if _aux_pred is not None and _aux_pred.shape[0] > _e:
+                                _frame["aux_prediction"] = _aux_pred[_e].detach().cpu().to(torch.float32).clone()
+                        _aux_in = getattr(dagger, "latest_aux_input_vector", None)
+                        if _aux_in is not None and _aux_in.shape[0] > _e:
+                            _frame["aux_input"] = _aux_in[_e].detach().cpu().to(torch.float32).clone()
                         viser_pt_state["frames"].append(_frame)
                 if replay_runs is not None:
                     _run_applied_targets.append(base_env.applied_robot_dof_targets.detach().cpu().clone())
@@ -1471,16 +1525,18 @@ def main(env_cfg, agent_cfg: dict):
                 _print_progress(run_index, step, active, timed_out, drifted, last_metrics, action_loss=last_action_loss)
                 _print_mode_progress(run_index, step, mode_tracker, mode_step_summary)
                 # Contact-force readout over the ACTIVE envs: franka<->arx (franka arm self-collision
-                # vs the arx/x5 camera arm) and leap-fingers<->panel.
+                # vs the arx/x5 camera arm), leap-fingers<->panel, and leap-fingers<->handle.
                 _fa = getattr(base_env, "franka_arx_contact_force_norm", None)
                 _fp = getattr(base_env, "finger_panel_contact_force_norm", None)
-                if _fa is not None and _fp is not None and bool(active.any()):
+                _fh = getattr(base_env, "finger_handle_contact_force_norm", None)
+                if _fa is not None and _fp is not None and _fh is not None and bool(active.any()):
                     _am = active.to(_fa.device)
-                    _fa_a, _fp_a = _fa[_am], _fp[_am]
+                    _fa_a, _fp_a, _fh_a = _fa[_am], _fp[_am], _fh[_am]
                     print(
                         f"[CONTACT] run={run_index} step={step} "
                         f"franka<->arx force: mean={_fa_a.mean().item():.3f} max={_fa_a.max().item():.3f} N | "
-                        f"leap-fingers<->panel force: mean={_fp_a.mean().item():.3f} max={_fp_a.max().item():.3f} N"
+                        f"leap-fingers<->panel force: mean={_fp_a.mean().item():.3f} max={_fp_a.max().item():.3f} N | "
+                        f"leap-fingers<->handle force: mean={_fh_a.mean().item():.3f} max={_fh_a.max().item():.3f} N"
                     )
                 # Raw base velocity (physical joint velocities; ignores base_action_scale) for
                 # sim<->real comparison. lin speed = ||(base_x_vel, base_y_vel)|| in m/s.
@@ -1526,6 +1582,17 @@ def main(env_cfg, agent_cfg: dict):
                 f"preds={mode_tracker.format_pred_counts(mode_tracker.run_pred_counts)}"
             )
 
+        # Save at the END OF EACH RUN so artifacts land immediately (no waiting for all runs to
+        # finish). Attn jpgs are scoped per run (attn_run<r>_<step>.jpg) then cleared so runs never
+        # overwrite each other; the .pt files are re-written with every run completed so far.
+        if attn_state is not None and attn_state["snapshots"]:
+            _render_attention_jpgs(attn_state, run_index=run_index)
+            attn_state["snapshots"].clear()
+        if args_cli.save_replay and replay_runs:
+            _save_replay_pt(replay_runs, _replay_joint_names, base_env, args_cli.save_replay)
+        if args_cli.save_viser_pt and viser_pt_state is not None and viser_pt_state["frames"]:
+            _save_viser_pt(viser_pt_state, args_cli.save_viser_pt)
+
     total_rollouts = completed_runs * int(base_env.num_envs)
     print(
         "[RESULT] "
@@ -1542,48 +1609,17 @@ def main(env_cfg, agent_cfg: dict):
             f"runs={completed_runs} {mode_tracker.format_stats(mode_tracker.total_stats)} "
             f"preds={mode_tracker.format_pred_counts(mode_tracker.total_pred_counts)}"
         )
-    if args_cli.save_replay and replay_runs:
-        replay_path = pathlib.Path(args_cli.save_replay).expanduser()
-        if replay_path.is_dir():
-            replay_path = replay_path / "replay.pt"
-        replay_path = str(replay_path)
-        torch.save(
-            {
-                "runs": replay_runs,
-                "joint_names": _replay_joint_names,
-                "num_envs": int(base_env.num_envs),
-            },
-            replay_path,
-        )
-        print(f"[INFO] Replay saved to {replay_path}")
+    # NOTE: replay/viser .pt and attn jpgs are now written incrementally at the end of each run
+    # (see the per-run save block in the run loop above), so nothing is deferred to here.
+    if replay_runs:
         print(
             "[INFO] Replay layout: runs[i]['joint_pos'] shape = [T, num_envs, num_joints], "
             "runs[i]['applied_targets'] shape = [T, num_envs, num_dof]. "
             "Use runs[i]['active_mask'] to filter envs that were still tracking at each step."
         )
-
-    if args_cli.save_viser_pt and viser_pt_state is not None and viser_pt_state["frames"]:
-        viser_path = pathlib.Path(args_cli.save_viser_pt).expanduser()
-        if viser_path.is_dir():
-            viser_path = viser_path / "viser_replay.pt"
-        viser_path = str(viser_path)
-        os.makedirs(os.path.dirname(viser_path) or ".", exist_ok=True)
-        torch.save(
-            {
-                "frames": viser_pt_state["frames"],
-                "compact_target_joint_names": viser_pt_state["compact_names"],
-                "frame_dt": viser_pt_state["frame_dt"],
-            },
-            viser_path,
-        )
-        print(
-            f"[INFO] Saved {len(viser_pt_state['frames'])} viser frames (robot + door pointcloud) to {viser_path} "
-            f"(env {viser_pt_state['env_id']}, all runs concatenated)."
-        )
-
     if attn_state is not None:
+        # Final-run snapshots were already rendered + cleared per-run; just detach the capture hook.
         attn_state["capture"].remove()
-        _render_attention_jpgs(attn_state)
 
     dagger._close_viser_debug_tools()
     env.close()

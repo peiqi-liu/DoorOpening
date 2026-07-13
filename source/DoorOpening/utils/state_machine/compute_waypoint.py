@@ -1014,23 +1014,23 @@ def play_and_save_traj(
     if len(key_indices) > 5:
         hinge_contact_mask[key_indices[2]:key_indices[5]] = 1
 
-    # panel_contact_mask: gate a GRADED finger<->panel (Door/link_1) FORCE penalty. Unlike the old
-    # binary "no finger<->panel contact ever" penalty (which fought grasping + hinge rotation, where
-    # the fingers legitimately work the handle right next to the panel), this mask is ON ONLY during
-    # the phase where the hand DELIBERATELY PUSHES the panel. There we still want contact -- just a
-    # GENTLE one: the env leaves small forces free and penalizes only large forces. It is OFF for
-    # approach/grasp/rotate/pull so the penalty never touches those phases.
+    # panel_contact_mask: gates the unified finger<->door (panel Door/link_1 + handle Door/link_2)
+    # FORCE-PROTECTION penalty. It is ON ONLY during phases where the hand deliberately works the
+    # panel (and, for pull, retracts away from it), so the strong penalty protects the fingers there
+    # while staying OFF during approach/grasp/rotate/pull-open (where the fingers legitimately load
+    # the handle).
     #   push: the open-door + base-forward phase (keyframes 3..5) presses the panel open with the
     #         partly-open hand.
-    #   pull: the push-panel-open + hold-traverse phase (keyframes 7..9) drives the panel open with
-    #         the arm and then holds it against the frame while traversing.
+    #   pull: the retract-arm + push-panel-open + hold-traverse phase (keyframes 6..9): the arm first
+    #         RETRACTS off the door (fingers must come clear -- so it is penalized here too), then
+    #         pushes the panel open and holds it against the frame while traversing.
     panel_contact_mask = torch.zeros(len(robot_traj), dtype=torch.int8)
     if planner_opening_direction == "push":
         if len(key_indices) > 5:
             panel_contact_mask[key_indices[3]:key_indices[5]] = 1
-    else:
-        if len(key_indices) > 9:
-            panel_contact_mask[key_indices[7]:key_indices[9]] = 1
+    # else:
+    #     if len(key_indices) > 9:
+    #         panel_contact_mask[key_indices[6]:key_indices[9]] = 1
 
     # grasp_stage_mask: the PREGRASP -> GRASP window (keyframes 1..3: pregrasp, grasp, up to the
     # rotate keyframe). Used ONLY to gate the finger<->panel normal-force LOGGING (no reward) so we

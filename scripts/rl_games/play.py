@@ -655,11 +655,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 if contact_log_step % 30 == 0:
                     _fa = getattr(play_env, "franka_arx_contact_force_norm", None)
                     _fp = getattr(play_env, "finger_panel_contact_force_norm", None)
-                    if _fa is not None and _fp is not None:
+                    _fh = getattr(play_env, "finger_handle_contact_force_norm", None)
+                    if _fa is not None and _fp is not None and _fh is not None:
                         print(
                             f"[CONTACT] step={contact_log_step} "
                             f"franka<->arx force: mean={_fa.mean().item():.3f} max={_fa.max().item():.3f} N | "
-                            f"leap-fingers<->panel force: mean={_fp.mean().item():.3f} max={_fp.max().item():.3f} N"
+                            f"leap-fingers<->panel force: mean={_fp.mean().item():.3f} max={_fp.max().item():.3f} N | "
+                            f"leap-fingers<->handle force: mean={_fh.mean().item():.3f} max={_fh.max().item():.3f} N"
                         )
 
                 if viser_pt_state is not None and not viser_pt_state.get("done"):

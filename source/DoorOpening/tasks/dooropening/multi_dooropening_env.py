@@ -223,7 +223,7 @@ class DooropeningEnv(DirectRLEnv):
         self.joint_limit_penalty_w = self.cfg.joint_limit_penalty_w
         self.joint_limit_penalty_margin_ratio = self.cfg.joint_limit_penalty_margin_ratio
         self.self_collision_penalty_w = self.cfg.self_collision_penalty_w
-        self.panel_contact_penalty_w = self.cfg.panel_contact_penalty_w
+        self.finger_door_contact_penalty_w = self.cfg.finger_door_contact_penalty_w
         self.franka_box_contact_penalty_w = self.cfg.franka_box_contact_penalty_w
 
         self.reset_key_body_pos_delta_min = self.cfg.reset_key_body_pos_delta_min
@@ -1970,6 +1970,7 @@ class DooropeningEnv(DirectRLEnv):
         # eval/play scripts can read them before the first reward computation.
         self.franka_arx_contact_force_norm = torch.zeros(self.num_envs, device=self.device)
         self.finger_panel_contact_force_norm = torch.zeros(self.num_envs, device=self.device)
+        self.finger_handle_contact_force_norm = torch.zeros(self.num_envs, device=self.device)
 
         twist_len = len(self.twist_indices) if self.twist_indices is not None else 0
         twist_shape = (self.num_envs, twist_len)
@@ -2188,8 +2189,13 @@ class DooropeningEnv(DirectRLEnv):
             self.scene.sensors["contact_forces_door2"],
             expected_num_envs=self.num_envs,
         )
+        # finger<->handle force. Fed (together with the finger<->panel force below) into the unified
+        # finger<->door contact PROTECTION penalty. The hinge contact REWARD still uses this force but
+        # is binary (rewards ANY contact above 1 N), so it alone never stops the fingers from crushing
+        # the handle -- the protection penalty below does.
         handle_force_norm = torch.linalg.vector_norm(contact_forces_door2, dim=-1)
         self.extras["stats/filtered_handle_force_norm_mean"] = float(handle_force_norm.mean().detach().cpu().item())
+        self.extras["stats/filtered_handle_force_norm_max"] = float(handle_force_norm.max().detach().cpu().item())
         x5_body_force_norm = self._get_x5_body_contact_force_norm(include_franka_box=False)
         unsafe_x5_body_contact = x5_body_force_norm > self.cfg.x5_body_contact_force_threshold
         # Latch: this episode had at least one x5-arm door collision (reported per-rollout below).
@@ -2210,29 +2216,32 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["error/self_collision_penalty"] = weighted_self_collision_penalty.mean().item()
         self.extras["stats/self_collision_body_count_mean"] = self_collision_body_count.mean().item()
 
-        # Finger<->panel contact penalty: GRADED force penalty on LEAP-finger contact with the door
-        # panel (Door/link_1), applied ONLY while ref_panel_contact_mask is on (the panel-push
-        # phase: push open-door/base-forward, pull push-panel/hold-traverse). There the hand SHOULD
-        # touch the panel, so we penalize only how HARD it pushes: 0 below min_force (gentle pushing
-        # is free), ramping linearly to the full weight at/above max_force. Off outside the push
-        # phase so it never fights grasping or hinge rotation next to the panel.
+        # finger<->panel force (LEAP hand vs door panel Door/link_1).
         contact_forces_door_panel = self._get_filtered_contact_force_w(
             self.scene.sensors["contact_forces_door_panel"],
             expected_num_envs=self.num_envs,
         )
         panel_force_norm = torch.linalg.vector_norm(contact_forces_door_panel, dim=-1)
-        panel_penalty_frac = torch.clamp(
-            (panel_force_norm - self.cfg.panel_contact_penalty_min_force)
-            / (self.cfg.panel_contact_penalty_max_force - self.cfg.panel_contact_penalty_min_force),
-            min=0.0,
-            max=1.0,
-        )
-        panel_contact_active = (self.ref_panel_contact_mask.squeeze() > 0).to(panel_force_norm.dtype)
-        weighted_panel_contact_penalty = (
-            self.panel_contact_penalty_w * panel_penalty_frac * panel_contact_active
-        )
-        self.extras["error/panel_contact_penalty"] = weighted_panel_contact_penalty.mean().item()
         self.extras["stats/panel_contact_force_norm_max"] = float(panel_force_norm.max().detach().cpu().item())
+
+        # Finger<->door contact PROTECTION penalty: finger<->panel and finger<->handle are processed
+        # TOGETHER to protect the delicate LEAP fingers. Whenever the fingers press EITHER door body
+        # (panel link_1 OR handle link_2) harder than finger_door_contact_force_threshold, a strong
+        # penalty is applied -- but ONLY while ref_panel_contact_mask is on (push: open-door +
+        # base-forward, keyframes 3..5; pull: retract-arm + push-panel + hold-traverse, keyframes
+        # 6..9). Off elsewhere so it never fights grasping/rotating the handle. Replaces the old weak
+        # graded panel + handle penalties.
+        combined_finger_door_force_norm = torch.maximum(panel_force_norm, handle_force_norm)
+        finger_door_over_threshold = combined_finger_door_force_norm > self.cfg.finger_door_contact_force_threshold
+        finger_door_penalty_active = (self.ref_panel_contact_mask.squeeze() > 0).to(dtype=combined_finger_door_force_norm.dtype)
+        weighted_finger_door_contact_penalty = (
+            self.finger_door_contact_penalty_w
+            * finger_door_over_threshold.to(dtype=combined_finger_door_force_norm.dtype)
+            * finger_door_penalty_active
+        )
+        self.extras["error/finger_door_contact_penalty"] = weighted_finger_door_contact_penalty.mean().item()
+        self.extras["stats/finger_door_contact_force_norm_max"] = float(combined_finger_door_force_norm.max().detach().cpu().item())
+        self.extras["stats/finger_door_contact_frac"] = float(finger_door_over_threshold.float().mean().detach().cpu().item())
 
         # Diagnostic contact forces surfaced for the eval/play scripts to print: (1) franka<->arx
         # (self-collision of the franka arm against the arx/x5 camera arm) and (2) leap fingers
@@ -2240,6 +2249,7 @@ class DooropeningEnv(DirectRLEnv):
         franka_arx_force_norm = self._get_franka_arx_contact_force_norm()
         self.franka_arx_contact_force_norm = franka_arx_force_norm
         self.finger_panel_contact_force_norm = panel_force_norm
+        self.finger_handle_contact_force_norm = handle_force_norm
         self.extras["stats/franka_arx_contact_force_norm_max"] = float(franka_arx_force_norm.max().detach().cpu().item())
         self.extras["stats/franka_arx_contact_force_norm_mean"] = float(franka_arx_force_norm.mean().detach().cpu().item())
         self.extras["stats/finger_panel_contact_force_norm_mean"] = float(panel_force_norm.mean().detach().cpu().item())
@@ -2378,7 +2388,7 @@ class DooropeningEnv(DirectRLEnv):
             + total_alive_reward
             - weighted_joint_limit_penalty
             - weighted_self_collision_penalty
-            - weighted_panel_contact_penalty
+            - weighted_finger_door_contact_penalty
             - weighted_base_door_contact_penalty
             - weighted_x5_door_contact_penalty
             - weighted_franka_box_contact_penalty

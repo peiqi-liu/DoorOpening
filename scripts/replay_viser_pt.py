@@ -85,6 +85,16 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip rendering the URDF robot even when compact joint state is present.",
     )
+    parser.add_argument(
+        "--no-door",
+        action="store_true",
+        help="Skip rendering the door URDF even when door_urdf_path + per-frame door_joint_pos are present.",
+    )
+    parser.add_argument(
+        "--no-policy-input",
+        action="store_true",
+        help="Load the 'policy_input' point-cloud stream initially hidden (toggle back on in the GUI).",
+    )
     return parser.parse_args()
 
 
@@ -237,6 +247,23 @@ def _build_joint_index_pairs(payload: dict, actuated_names: list[str]) -> list[t
         actuated_idx = actuated_index.get(str(joint_name))
         if actuated_idx is not None:
             pairs.append((compact_idx, actuated_idx))
+    return pairs
+
+
+def _named_to_urdf_pairs(source_names: object, urdf_actuated_names: list[str]) -> list[tuple[int, int]]:
+    """Map (source_idx -> urdf_actuated_idx) pairs by joint name (used for the door URDF).
+
+    ``source_names`` is the payload's ``door_joint_names`` (the sim order of the saved
+    ``door_joint_pos`` vector); we align it to the door URDF's actuated-joint order.
+    """
+    if not isinstance(source_names, (list, tuple)):
+        return []
+    urdf_index = {str(name): idx for idx, name in enumerate(urdf_actuated_names)}
+    pairs: list[tuple[int, int]] = []
+    for src_idx, name in enumerate(source_names):
+        u = urdf_index.get(str(name))
+        if u is not None:
+            pairs.append((src_idx, u))
     return pairs
 
 
@@ -433,6 +460,8 @@ def main() -> None:
         requested_clouds = set(args.clouds)
         streams = [stream for stream in streams if stream["name"] in requested_clouds]
     hidden_clouds = set(args.hide_clouds)
+    if args.no_policy_input:
+        hidden_clouds.add("policy_input")
     has_aux_prediction = _has_aux_prediction(frames)
     has_aux_input = _has_aux_input(frames)
     has_door_joint_prediction = _has_door_joint_prediction(frames)
@@ -518,6 +547,39 @@ def main() -> None:
                 print(f"Failed to load robot URDF ({exc}); continuing without robot meshes.", file=sys.stderr)
                 robot_urdf = None
 
+    # --- Door URDF: render the door meshes from payload['door_urdf_path'] + per-frame
+    # 'door_joint_pos', placed at the env-relative door root (same frame as the robot base). This is
+    # what makes the door show up when the payload carries the URDF instead of a door point cloud. ---
+    door_urdf = None
+    door_frame = None
+    door_joint_pairs: list[tuple[int, int]] = []
+    door_urdf_path = payload.get("door_urdf_path")
+    has_door_joint = any(_to_numpy_vector(frame.get("door_joint_pos")) is not None for frame in frames)
+    if not args.no_door and door_urdf_path and has_door_joint:
+        door_path = Path(str(door_urdf_path)).expanduser()
+        if not door_path.exists():
+            print(f"Door URDF not found at {door_path}; skipping door meshes.", file=sys.stderr)
+        else:
+            try:
+                from viser.extras import ViserUrdf
+
+                door_frame = server.scene.add_frame("/door", show_axes=False)
+                # Door root is fixed across frames -> place it once. Position is env-relative (matches
+                # robot_base_pos_w); quaternion is the world wxyz orientation.
+                _dpos = _to_numpy_vector(payload.get("door_root_pos"))
+                _dquat = _to_numpy_vector(payload.get("door_root_quat"))
+                door_frame.position = _dpos if (_dpos is not None and _dpos.size == 3) else np.zeros(3, dtype=np.float32)
+                door_frame.wxyz = _dquat if (_dquat is not None and _dquat.size == 4) else _identity_quat()
+                door_urdf = ViserUrdf(server, door_path, root_node_name="/door")
+                door_joint_pairs = _named_to_urdf_pairs(
+                    payload.get("door_joint_names"), door_urdf.get_actuated_joint_names()
+                )
+                if not door_joint_pairs:
+                    print("No door_joint_names matched the door URDF; door will stay at its default pose.")
+            except Exception as exc:  # noqa: BLE001 - degrade gracefully to robot/pointcloud-only replay.
+                print(f"Failed to load door URDF ({exc}); continuing without door meshes.", file=sys.stderr)
+                door_urdf = None
+
     with server.gui.add_folder("Playback"):
         play = server.gui.add_checkbox("Play", initial_value=not args.start_paused)
         loop = server.gui.add_checkbox("Loop", initial_value=True)
@@ -553,6 +615,12 @@ def main() -> None:
     robot_label_to_key = {label: key for key, label in joint_sources}
     n_actuated = len(robot_urdf.get_actuated_joint_names()) if robot_urdf is not None else 0
 
+    show_door = None
+    if door_urdf is not None:
+        with server.gui.add_folder("Door"):
+            show_door = server.gui.add_checkbox("Show Door", initial_value=True)
+    n_door = len(door_urdf.get_actuated_joint_names()) if door_urdf is not None else 0
+
     def _update_robot(frame: dict) -> None:
         if robot_urdf is None or robot_frame is None or show_robot is None:
             return
@@ -567,6 +635,23 @@ def main() -> None:
         robot_frame.position = base_pose[0]
         robot_frame.wxyz = base_pose[1]
         robot_urdf.update_cfg(_compact_to_cfg(compact_vec, robot_joint_pairs, n_actuated))
+
+    def _update_door(frame: dict) -> None:
+        if door_urdf is None:
+            return
+        if show_door is not None:
+            if door_frame is not None:
+                door_frame.visible = bool(show_door.value)
+            if not show_door.value:
+                return
+        door_joint_vec = _to_numpy_vector(frame.get("door_joint_pos"))
+        if door_joint_vec is None:
+            return
+        cfg = np.zeros(n_door, dtype=np.float32)
+        for src_idx, urdf_idx in door_joint_pairs:
+            if src_idx < door_joint_vec.size:
+                cfg[urdf_idx] = door_joint_vec[src_idx]
+        door_urdf.update_cfg(cfg)
 
     def _apply_frame(frame_idx: int) -> None:
         frame = frames[frame_idx]
@@ -584,6 +669,7 @@ def main() -> None:
                 aux_input_points if show_aux_input.value else np.zeros((0, 3), dtype=np.float32)
             )
         _update_robot(frame)
+        _update_door(frame)
         if has_door_joint_prediction:
             door_joint_pred = _door_joint_prediction(frame)
             if door_joint_pred is not None:
@@ -644,6 +730,11 @@ def main() -> None:
             def _(_event):
                 _apply_frame(int(frame_slider.value))
 
+    if show_door is not None:
+        @show_door.on_update
+        def _(_event):
+            _apply_frame(int(frame_slider.value))
+
     _apply_frame(0)
     print(f"Loaded {len(frames)} frames from {recording}")
     if streams:
@@ -656,6 +747,8 @@ def main() -> None:
                 ", ".join(label for _, label in joint_sources),
             )
         )
+    if door_urdf is not None:
+        print(f"Door URDF: {door_urdf_path} ({len(door_joint_pairs)} joints driven from per-frame door_joint_pos)")
     if has_door_joint_prediction:
         dj0 = _door_joint_prediction(frames[0])
         dj_dim = 0 if dj0 is None else int(dj0.size)

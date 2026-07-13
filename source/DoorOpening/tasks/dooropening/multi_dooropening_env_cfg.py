@@ -512,11 +512,12 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         filter_prim_paths_expr=list(SELF_COLLISION_HAND_FILTER_PRIM_PATHS),
     )
     handle_contact_force_threshold = 1.0
-    # Finger<->panel contact penalty (ACTIVE only while panel_contact_mask is on -- the panel-push
-    # phase). Graded like the franka-box penalty: 0 below min_force (gentle pushing is free), then
-    # ramps linearly to the full weight at/above max_force. Encourages pushing the panel open SOFTLY.
-    panel_contact_penalty_min_force = 15.0
-    panel_contact_penalty_max_force = 60.0
+    # Finger<->door contact PROTECTION: finger<->panel (link_1) and finger<->handle (link_2) are
+    # processed TOGETHER. When the fingers press EITHER door body harder than this (N), a strong
+    # penalty (finger_door_contact_penalty_w) is applied -- but ONLY while the panel-contact mask is
+    # on (push: open-door + base-forward; pull: retract-arm + push-panel + hold-traverse). Below the
+    # threshold, or with the mask off, is free. Tune against stats/finger_door_contact_force_norm_max.
+    finger_door_contact_force_threshold = 10.0
     # Contact between a non-front base face and any door body above this (N) is penalized.
     base_door_contact_force_threshold = 5.0
     x5_body_contact_force_threshold = 1.5
@@ -686,10 +687,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     joint_limit_penalty_margin_ratio = 0.05
     # lambda_c in r = r_target - lambda_l*r_limit - lambda_c*r_contact
     self_collision_penalty_w = 5.0
-    # Penalty weight for the GRADED finger<->panel force penalty, applied only while
-    # panel_contact_mask is active (the panel-push phase). Ramps 0 -> w between
-    # panel_contact_penalty_min_force and _max_force. Starting guess -- tune it.
-    panel_contact_penalty_w = 5.0
+    # Penalty weight for the unified finger<->door protection penalty: applied while the panel-contact
+    # mask is on and the finger<->panel OR finger<->handle force exceeds finger_door_contact_force_threshold.
+    # Deliberately STRONG (this replaces the old weak graded panel/handle penalties). Tune it.
+    finger_door_contact_penalty_w = 10.0
     # Penalty weight (per non-front base face in contact with the door). High on purpose: a
     # base panel hitting the door in the real world means a securely-mounted robot is injured.
     base_door_contact_penalty_w = 10.0

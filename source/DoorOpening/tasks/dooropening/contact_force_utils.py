@@ -44,12 +44,12 @@ PANEL_CONTACT_FILTER_PRIM_PATHS = (
     "/World/envs/env_.*/Robot/dip_3",
     "/World/envs/env_.*/Robot/realtip_3",
     "/World/envs/env_.*/Robot/fingertip_3",
-    # Thumb (_4 digit).
-    "/World/envs/env_.*/Robot/mcp_joint_4",
-    "/World/envs/env_.*/Robot/pip_4",
-    "/World/envs/env_.*/Robot/dip_4",
-    "/World/envs/env_.*/Robot/realtip_4",
-    "/World/envs/env_.*/Robot/fingertip_4",
+    # # Thumb (_4 digit).
+    # "/World/envs/env_.*/Robot/mcp_joint_4",
+    # "/World/envs/env_.*/Robot/pip_4",
+    # "/World/envs/env_.*/Robot/dip_4",
+    # "/World/envs/env_.*/Robot/realtip_4",
+    # "/World/envs/env_.*/Robot/fingertip_4",
 )
 
 X5_BODY_NAMES = (

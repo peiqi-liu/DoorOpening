@@ -186,7 +186,7 @@ def state_machine_offline_right_pull_door(
     # Moved back (0.035 -> 0.05): larger palm<->door x gap compensates for removing the
     # finger<->panel penalty, so the grasp doesn't drive fingers into the panel.
     grasp_palm_x_offset = 0.05
-    grasp_palm_y_offset = -0.085
+    grasp_palm_y_offset = -0.065
     grasp_palm_z_offset = 0.10
     grasp_open_ratio = 0.70
 
@@ -264,7 +264,7 @@ def state_machine_offline_right_pull_door(
     pull_base_y_gain = -0.25 / 1.45
 
     pull_palm_x_offset_closed = 0.05
-    pull_palm_y_offset_closed = -0.10
+    pull_palm_y_offset_closed = -0.08
     pull_palm_z_offset = 0.08
 
     pull_rot_roll_base = math.pi
