@@ -57,7 +57,7 @@ temporal_state_encoders:
     # - target_err_arm
     # - push_pull_belief
     # - target_err_hand
-    - base_vel
+    # - base_vel
     # - aux_handle_pos
     # aux_handle_pos is intentionally NOT in the temporal stack: it is a standalone, recurrent
     # handle-pose input seeded from ground truth on reset (see dagger.aux_handle_input_mode).
