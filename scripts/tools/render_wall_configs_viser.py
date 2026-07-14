@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import random
 import sys
 from pathlib import Path
 
@@ -90,26 +91,71 @@ def _sample_scene_surface(robot, num_points, device):
     """Area-weighted surface sample of the posed URDF's concatenated visual mesh (root frame)."""
     import trimesh
 
-    mesh = robot.scene.dump(concatenate=True)
+    scene = robot.scene
+    mesh = scene.to_geometry() if hasattr(scene, "to_geometry") else scene.dump(concatenate=True)
     pts, _ = trimesh.sample.sample_surface(mesh, int(num_points))
     return torch.as_tensor(np.asarray(pts), dtype=torch.float32, device=device)
 
 
-def load_door_asset(urdf_path, num_points, device):
-    """Real door: mesh surface points + the link_1 (panel) bbox, both in the door-base frame.
+def build_robot_link_cache(robot, num_points):
+    """Sample each robot link's surface ONCE in its own frame (area-weighted to total num_points).
 
-    The door is loaded at its default (closed) joints; the panel bbox drives wall placement, exactly
-    as training does via door_board_bboxes / _sample_wall_pointcloud_local.
+    Re-posing then only needs the cheap per-link FK transforms applied to these cached points, instead
+    of re-concatenating + re-sampling the full ~1M-triangle robot mesh every config (~900ms -> ~12ms).
+    This is the same idea as Dagger's compose_cached_link_pointcloud_world.
+    """
+    import trimesh
+
+    scene = robot.scene
+    nodes = list(scene.graph.nodes_geometry)
+    areas = {n: float(scene.geometry[scene.graph.get(n)[1]].area) for n in nodes}
+    total = sum(areas.values()) or 1.0
+    cache = []
+    for n in nodes:
+        k = max(1, int(round(num_points * areas[n] / total)))
+        geom = scene.geometry[scene.graph.get(n)[1]]
+        pts, _ = trimesh.sample.sample_surface(geom, k)
+        cache.append((n, np.asarray(pts, dtype=np.float64)))
+    return cache
+
+
+def sample_robot_points_cached(robot, cache, device):
+    """Transform the cached per-link points by the CURRENT FK transforms -> base_link frame (M, 3).
+
+    Call after robot.update_cfg(cfg). ~70x faster than re-meshing + re-sampling the whole robot.
+    """
+    scene = robot.scene
+    parts = []
+    for node, local in cache:
+        T = scene.graph.get(node)[0]  # geometry -> scene root (== base_link)
+        parts.append(local @ T[:3, :3].T + T[:3, 3])
+    pts = np.concatenate(parts, axis=0) if parts else np.zeros((0, 3), dtype=np.float64)
+    return torch.as_tensor(pts, dtype=torch.float32, device=device)
+
+
+def load_door_asset(urdf_path, num_points, device):
+    """Real door: mesh surface points + the FULL door outer bbox (frame + panel + handle), base frame.
+
+    The door is loaded at its default (closed) joints. Walls are placed against the full door bbox --
+    the exact same `door_full_bbox_base` training now uses (via door_full_bboxes) -- so walls sit
+    outside the whole door, not just the link_1 panel.
     """
     robot = _load_urdf(urdf_path)
     door_pts = _sample_scene_surface(robot, num_points, device).unsqueeze(0)  # (1, N, 3)
     kp = compute_exact_door_keypoints(str(urdf_path))
-    bbox = torch.as_tensor(kp["link_1_bbox_base"], dtype=torch.float32, device=device).unsqueeze(0)  # (1, 2, 3)
-    return bbox, door_pts
+    full_bbox = kp.get("door_full_bbox_base", kp["link_1_bbox_base"])
+    bbox = torch.as_tensor(full_bbox, dtype=torch.float32, device=device).unsqueeze(0)  # (1, 2, 3)
+    handle_center = np.asarray(kp.get("link_2_center_base", [0.0, 0.0, 0.0]), dtype=np.float64)  # base frame
+    return bbox, door_pts, handle_center
 
 
 def load_robot_asset(num_points, device):
-    """Glorbot surface points (base_link frame) + the x5_camera_link transform in base_link frame."""
+    """Glorbot surface points (base_link frame) + x5_camera_link transform + the joint config used.
+
+    Returns (points, cam_T_base, joint_names, joint_cfg). The base_x/base_y/base_rotation joints stay
+    at 0 (the base is placed via base_pos/base_quat), so joint_cfg is already in the base frame -- the
+    same convention _get_robot_filter_joint_pos_base_frame uses for the self-point SDF filter.
+    """
     robot = _load_urdf(GLORBOT_URDF, {"glorbot": GLORBOT_DIR})
     names = list(robot.actuated_joint_names)
     cfg = np.zeros(len(names), dtype=np.float64)
@@ -120,7 +166,7 @@ def load_robot_asset(num_points, device):
     robot.update_cfg(cfg)
     pts = _sample_scene_surface(robot, num_points, device)  # (M, 3) in base_link frame
     cam_T_base = np.asarray(robot.get_transform("x5_camera_link", robot.base_link), dtype=np.float64)  # 4x4
-    return pts, cam_T_base
+    return pts, cam_T_base, names, cfg
 
 
 def _quat_wxyz_to_matrix(quat_wxyz):
@@ -265,13 +311,26 @@ def parse_args():
                    help="Door URDF whose meshes + link_1 (panel) bbox drive the scene and wall placement.")
     p.add_argument("--cube", action="store_true",
                    help="Use the simple cube board instead of a real door URDF (legacy).")
-    p.add_argument("--door-yaw-deg", type=float, default=-90.0,
-                   help="Yaw (deg about world z) applied to the door so its FACE normal points at the "
-                   "robot (+Y). Real scratch doors have thickness along base-x, so -90 turns the face "
-                   "toward the robot; flip by 180 if the handle ends up on the far side. Ignored for --cube.")
+    p.add_argument("--door-yaw-deg", type=float, default=None,
+                   help="Yaw (deg about world z) applied to the door. Default: AUTO -- pick -90 or +90 so "
+                   "the HANDLE faces the robot/camera (so its point cloud is visible). Pass a value to override; "
+                   "ignored for --cube.")
     p.add_argument("--robot", action="store_true",
-                   help="Include the glorbot robot in the scene; the camera is then the robot's own "
-                   "x5_camera_link (with the -45deg mount offset), so the robot self-occludes like training.")
+                   help="Include the glorbot robot in the scene; the camera is the robot's own "
+                   "x5_camera_link (-45deg mount). The franka arm + base pose are RE-SAMPLED every "
+                   "config, so you can see how different joint angles / base poses occlude the view.")
+    # Per-config robot pose sampling (only with --robot). The arm moves in front of the fixed
+    # base-mounted camera -> different franka angles occlude the door differently.
+    p.add_argument("--arm-jitter-rad", type=float, default=0.6,
+                   help="Per-config franka joint jitter (rad) around the forward 'reaching' pose. The "
+                   "arm reaches toward the door (in front of the base-mounted camera) and jitters by "
+                   "this much, so it occludes the view differently each config. 0 = fixed reach pose.")
+    p.add_argument("--standoff-range", type=float, nargs=2, default=[0.7, 1.3], metavar=("MIN", "MAX"),
+                   help="Per-config robot base distance from the door (m).")
+    p.add_argument("--lateral-range", type=float, nargs=2, default=[-0.25, 0.25], metavar=("MIN", "MAX"),
+                   help="Per-config robot base left/right offset along world X (m).")
+    p.add_argument("--yaw-jitter-deg", type=float, default=15.0,
+                   help="Per-config robot base yaw jitter (deg) around facing the door.")
     # Cube "door board" dimensions (m), only used with --cube. Defaults are the MEASURED means of the
     # real scratch_door panels (width 0.70-1.00, height 1.75-2.15, thickness 0.028-0.055); the wall
     # distractors attach to this panel's width edges, so panel size affects wall placement.
@@ -318,6 +377,7 @@ def build_camera_spec(width_px, height_px, device):
 def main():
     args = parse_args()
     torch.manual_seed(args.seed)
+    random.seed(args.seed)
     device = torch.device(args.device)
 
     cfg = yaml.safe_load(args.student_cfg.read_text()) or {}
@@ -370,16 +430,31 @@ def main():
     # --- Door geometry: real door URDF (default) or the legacy cube. Both live in the door-base
     # frame at the world origin; the panel (link_1) bbox drives wall placement. ---
     door_desc = "cube"
+    handle_center = None
     if args.cube:
         board_bbox, board_gt = build_board(args.panel_width, args.panel_height, args.panel_thickness)
         door_desc = f"cube {args.panel_width}x{args.panel_height}x{args.panel_thickness} m"
     else:
-        board_bbox, board_gt = load_door_asset(args.door, board_num_points, device)
+        # board_bbox is the FULL door outer bbox (frame + panel + handle) -- the same door_full_bboxes
+        # training now uses for wall placement, so walls sit outside the whole door with a real gap.
+        board_bbox, board_gt, handle_center = load_door_asset(args.door, board_num_points, device)
         door_desc = f"door urdf {args.door.parent.name}"
+    wall_bbox = board_bbox
 
-    # Orient the door in the world so its FACE normal points toward the robot (+Y). Walls are sampled
-    # in the door-base frame (from board_bbox) and rotated the same way, so they stay glued to the door.
-    door_yaw = 0.0 if args.cube else math.radians(args.door_yaw_deg)
+    # Orient the door in the world so its FACE points toward the robot (+Y). By default AUTO-pick the
+    # yaw (-90 or +90) that puts the HANDLE on the robot-facing (-Y) side, so its cloud is visible.
+    # Walls are sampled in the door-base frame and rotated the same way, so they stay glued to the door.
+    if args.cube:
+        door_yaw = 0.0
+    elif args.door_yaw_deg is not None:
+        door_yaw = math.radians(args.door_yaw_deg)
+    else:
+        def _handle_world_y(theta_deg):
+            th = math.radians(theta_deg)
+            return handle_center[0] * math.sin(th) + handle_center[1] * math.cos(th)  # world y after Rz
+
+        door_yaw = math.radians(-90.0 if _handle_world_y(-90.0) <= _handle_world_y(90.0) else 90.0)
+        door_desc += f" (auto yaw {round(math.degrees(door_yaw))}deg -> handle faces robot)"
     cos_y, sin_y = math.cos(door_yaw), math.sin(door_yaw)
     R_door = torch.tensor(
         [[cos_y, -sin_y, 0.0], [sin_y, cos_y, 0.0], [0.0, 0.0, 1.0]], dtype=torch.float32, device=device
@@ -396,20 +471,42 @@ def main():
     base_quat = yaw_quat_wxyz(math.pi / 2.0).to(device).unsqueeze(0)  # +90deg yaw: base +x -> world +Y
     base_R = _quat_wxyz_to_matrix(base_quat[0].detach().cpu().tolist())
 
-    # --- Robot geometry (optional) + camera. ---
-    robot_pts_base = None
-    robot_world = None
+    def base_to_world(pts):  # (1, N, 3) robot base frame -> world
+        return quat_apply(base_quat.unsqueeze(1).expand(-1, pts.shape[1], -1), pts) + base_pos.unsqueeze(1)
+
+    # --- Robot: loaded once; the ARM + BASE pose are re-sampled per config (in the loop), so the
+    # arm occludes the camera differently each frame. Camera = the robot's own x5_camera_link. ---
+    robot_obj = None
+    robot_joint_names = None
+    robot_link_cache = None
+    panda_joint_idx = None
+    panda_limits = None
+    robot_collision_checker = None
+    robot_pts_base = None            # (M, 3) base frame -- set per config
+    robot_world = None               # (1, M, 3) world -- set per config
+    robot_filter_joint_angles = None  # (1, num_joints) -- set per config
+    robot_filter_cfg = dict(dagger_cfg.get("robot_pointcloud_filter", {}))
+    robot_filter_enabled = bool(robot_filter_cfg.get("enabled", True))
+    robot_sdf_cutoff = float(robot_filter_cfg.get("sdf_cutoff", 0.02))
+    robot_filter_max_pts = int(robot_filter_cfg.get("max_points_per_process", 5000))
     if args.robot:
-        robot_pts_base, cam_T_base = load_robot_asset(scene_robot_num_points, device)  # base_link frame
-        num_robot = robot_pts_base.shape[0]
-        robot_world = (
-            quat_apply(base_quat.unsqueeze(1).expand(-1, num_robot, -1), robot_pts_base.unsqueeze(0))
-            + base_pos.unsqueeze(1)
-        )  # (1, M, 3)
-        # Camera IS the robot's x5_camera_link (with the -45deg mount offset) -> robot self-occludes.
-        cam_np = robot_camera_pose_world(cam_T_base, base_pos[0].detach().cpu().numpy(), base_R)
-        camera_pose = torch.from_numpy(cam_np).to(device).unsqueeze(0)
-        cam_desc = f"x5_camera_link @ {np.round(cam_np[:3], 3).tolist()} (mount -45deg roll)"
+        robot_obj = _load_urdf(GLORBOT_URDF, {"glorbot": GLORBOT_DIR})
+        robot_joint_names = list(robot_obj.actuated_joint_names)
+        robot_link_cache = build_robot_link_cache(robot_obj, scene_robot_num_points)  # sample links ONCE
+        panda_joint_idx = [robot_joint_names.index(f"panda_joint{i}") for i in range(1, 8)]
+        panda_limits = []
+        for i in range(1, 8):
+            lim = robot_obj.joint_map[f"panda_joint{i}"].limit
+            lo = float(lim.lower) if lim is not None and lim.lower is not None else -2.9
+            hi = float(lim.upper) if lim is not None and lim.upper is not None else 2.9
+            panda_limits.append((lo, hi))
+        if robot_filter_enabled:
+            from DoorOpening.utils.glorbot_collision_checker import GlorbotCollisionChecker
+
+            robot_collision_checker = GlorbotCollisionChecker(
+                str(GLORBOT_URDF), device, input_joint_names=robot_joint_names
+            )
+        cam_desc = "x5_camera_link (per-config base+arm pose, mount -45deg roll)"
     else:
         # Virtual look-at camera, shifted to the robot's right (real RealSense is right-mounted).
         eye = np.array([args.camera_right, -args.standoff, args.camera_height], dtype=np.float32)
@@ -435,7 +532,7 @@ def main():
     print(f"[INFO] student cfg     : {args.student_cfg}")
     print(f"[INFO] wall num_points : {wall_params.num_points}  (enabled={wall_params.enabled}, density={wall_params.point_density_per_m2})")
     print(f"[INFO] door            : {door_desc}  ({board_gt.shape[1]} pts)")
-    print(f"[INFO] robot           : {'on ('+str(robot_pts_base.shape[0])+' pts, +'+str(robot_model_policy_points)+' to policy)' if args.robot else 'off'}")
+    print(f"[INFO] robot           : {'on (%d pts, +%d to policy; arm+base RE-SAMPLED per config)' % (scene_robot_num_points, robot_model_policy_points) if args.robot else 'off'}")
     print(f"[INFO] base crop       : {base_crop_points} pts, range {local_pcd_range[0]} m, x_cutoff {x_direction_cutoff}")
     print(f"[INFO] camera          : {args.cam_width_px}x{args.cam_height_px}px, {cam_desc}")
     print(f"[INFO] rendering {args.num_configs} wall configs on {device}...")
@@ -447,8 +544,36 @@ def main():
             h = float(torch.empty(1).uniform_(*board_height_range).item())
             t = float(torch.empty(1).uniform_(*board_thickness_range).item())
             board_bbox, board_gt = build_board(w, h, t)
+            wall_bbox = board_bbox
 
-        wall_world = door_to_world(sample_walls(board_bbox))  # (1, Nw, 3) sampled in door frame, rotated to world
+        if args.robot:
+            # --- Re-sample the robot base pose + franka joint angles for THIS config. The camera is
+            # base-mounted (fixed relative to the base) while the arm swings in front of it, so
+            # different franka angles / base poses occlude the door differently in the render. ---
+            standoff = random.uniform(*args.standoff_range)
+            lateral = random.uniform(*args.lateral_range)
+            yaw = math.pi / 2.0 + math.radians(random.uniform(-args.yaw_jitter_deg, args.yaw_jitter_deg))
+            base_pos = torch.tensor([[lateral, -standoff, 0.0]], dtype=torch.float32, device=device)
+            base_quat = yaw_quat_wxyz(yaw).to(device).unsqueeze(0)
+            base_R = _quat_wxyz_to_matrix(base_quat[0].detach().cpu().tolist())
+            cfg = np.zeros(len(robot_joint_names), dtype=np.float64)  # base + leap + x5 stay at 0
+            # Franka = forward "reaching" pose + per-joint jitter, clamped to limits. This keeps the
+            # arm reaching toward the door (in front of the camera) while varying the exact occlusion.
+            for j, k in enumerate(panda_joint_idx):
+                lo, hi = panda_limits[j]
+                nominal = FRANKA_READY_JOINT_POS[j] if j < len(FRANKA_READY_JOINT_POS) else 0.0
+                val = nominal + random.uniform(-args.arm_jitter_rad, args.arm_jitter_rad)
+                cfg[k] = min(max(val, lo), hi)
+            robot_obj.update_cfg(cfg)
+            robot_pts_base = sample_robot_points_cached(robot_obj, robot_link_cache, device)  # (M, 3), cached links
+            robot_world = base_to_world(robot_pts_base.unsqueeze(0))
+            cam_T = np.asarray(robot_obj.get_transform("x5_camera_link", robot_obj.base_link), dtype=np.float64)
+            camera_pose = torch.from_numpy(
+                robot_camera_pose_world(cam_T, base_pos[0].detach().cpu().numpy(), base_R)
+            ).to(device).unsqueeze(0)
+            robot_filter_joint_angles = torch.as_tensor(cfg, dtype=torch.float32, device=device).unsqueeze(0)
+
+        wall_world = door_to_world(sample_walls(wall_bbox))  # (1, Nw, 3) sampled in door frame, rotated to world
         # Scene = door + walls (+ robot). Occluder = door + walls only (robot excluded, matching
         # Dagger._sample_scene_pointcloud_world_cached: the robot's thin links must not be dilated).
         scene_parts = [board_gt, wall_world]
@@ -459,14 +584,23 @@ def main():
 
         rendered_world, _ = simulate_depth_cam_render_from_pose(
             pcd=gt_world, camera_pose=camera_pose, occluder_pcd=occluder_world, **depth_render_kwargs
-        )
+        )  # RAW depth render: includes the robot's own body AND its occlusion of the door/walls.
 
-        # Policy input = base crop of the rendered cloud (mirrors Dagger._build_local_pcd base crop),
-        # then the robot-model points appended (append_robot_model_to_policy_cloud), like training.
         rendered_base = world_to_local(rendered_world, base_pos, base_quat)
+        # Filtered obs: drop the robot's own body points (Dagger._filter_robot_points_base). This is
+        # what training feeds forward; the raw-vs-filtered difference IS the robot's rendering influence.
+        filtered_base = rendered_base
+        if robot_collision_checker is not None:
+            filtered_base = robot_collision_checker.filter_pointcloud_outside_spheres(
+                pointclouds=filtered_base,
+                joint_angles=robot_filter_joint_angles,
+                sdf_cutoff=robot_sdf_cutoff,
+                max_points_per_process=robot_filter_max_pts,
+            )
+        # Policy input = base crop of the FILTERED cloud (Dagger._build_local_pcd) + robot-model points.
         crop_center = torch.zeros((1, 3), dtype=torch.float32, device=device)
         policy_base, _ = crop_local_pcd(
-            rendered_base,
+            filtered_base,
             local_range=float(local_pcd_range[0]),
             num_local_points=base_crop_points,
             is_cylindrical=True,
@@ -477,25 +611,23 @@ def main():
             m = robot_pts_base.shape[0]
             idx = torch.linspace(0, m - 1, steps=min(robot_model_policy_points, m), device=device).round().long()
             policy_base = torch.cat([policy_base, robot_pts_base[idx].unsqueeze(0)], dim=1)
-        policy_world = quat_apply(base_quat.unsqueeze(1).expand(-1, policy_base.shape[1], -1), policy_base) + base_pos.unsqueeze(1)
 
         gt_pts = downsample(drop_invalid_rows(gt_world[0]), args.max_points)
-        depth_pts = downsample(drop_zero_rows(rendered_world[0].nan_to_num()), args.max_points)
-        policy_pts = downsample(drop_zero_rows(policy_world[0].nan_to_num()), args.max_points)
-
-        frames.append(
-            {
-                "pointclouds": {
-                    "ground_truth": gt_pts.detach().cpu().to(torch.float16),
-                    "robot_depth_cam_obs": depth_pts.detach().cpu().to(torch.float16),
-                    "policy_input": policy_pts.detach().cpu().to(torch.float16),
-                }
-            }
-        )
+        raw_depth_pts = downsample(drop_invalid_rows(rendered_world[0]), args.max_points)
+        policy_pts = downsample(drop_invalid_rows(base_to_world(policy_base)[0]), args.max_points)
+        pointclouds = {
+            "ground_truth": gt_pts.detach().cpu().to(torch.float16),
+            "robot_depth_cam_obs": raw_depth_pts.detach().cpu().to(torch.float16),
+            "policy_input": policy_pts.detach().cpu().to(torch.float16),
+        }
+        if robot_collision_checker is not None:
+            filt_pts = downsample(drop_invalid_rows(base_to_world(filtered_base)[0]), args.max_points)
+            pointclouds["depth_filtered"] = filt_pts.detach().cpu().to(torch.float16)
+        frames.append({"pointclouds": pointclouds})
         if (config_idx + 1) % 10 == 0 or config_idx == args.num_configs - 1:
             print(
                 f"  config {config_idx + 1}/{args.num_configs}: "
-                f"gt={gt_pts.shape[0]} depth={depth_pts.shape[0]} policy={policy_pts.shape[0]}"
+                f"gt={gt_pts.shape[0]} depth_raw={raw_depth_pts.shape[0]} policy={policy_pts.shape[0]}"
             )
 
     payload = {
@@ -504,7 +636,8 @@ def main():
         "pointcloud_source": "depth",
         "pointcloud_streams": [
             {"name": "ground_truth", "label": "GT (sim: door + walls [+ robot])", "color": (120, 120, 120), "point_size_scale": 1.0},
-            {"name": "robot_depth_cam_obs", "label": "Depth Render", "color": (79, 195, 247), "point_size_scale": 1.0},
+            {"name": "robot_depth_cam_obs", "label": "Depth Render (raw, +robot self)", "color": (79, 195, 247), "point_size_scale": 1.0},
+            *([{"name": "depth_filtered", "label": "Depth (robot self-filtered)", "color": (255, 140, 0), "point_size_scale": 1.0}] if args.robot else []),
             {"name": "policy_input", "label": "Policy Input", "color": (0, 170, 120), "point_size_scale": 1.0},
         ],
         "frame_dt": 0.5,
