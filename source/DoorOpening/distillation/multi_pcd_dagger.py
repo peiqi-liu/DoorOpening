@@ -154,6 +154,19 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.log_interval = int(self.runtime_cfg.get("log_interval", 100))
         self.save_interval = int(self.runtime_cfg.get("save_interval", 5_000))
         self.pointcloud_source = str(self.runtime_cfg.get("pointcloud_source", "both")).lower()
+        # "measured" (default): base_vel obs is the actual sensed base joint velocity (matches the
+        # historical behavior and deploy's fused-odometry reading). "commanded": base_vel obs is the
+        # student's OWN last commanded base action, clamped to [-1, 1] in robot frame (normalized, NOT
+        # scaled by base_action_scale, so the channel's range stays fixed regardless of curriculum).
+        # This sidesteps noisy/laggy odometry and any world<->robot frame convention mismatch, at the
+        # cost of losing stall/slip feedback (measured ~= 0 while commanded != 0 tells the policy it
+        # is blocked). Must match between training and deploy -- this is a trained observation, not a
+        # runtime toggle.
+        self.base_vel_source = str(self.runtime_cfg.get("base_vel_source", "measured")).lower()
+        if self.base_vel_source not in ("measured", "commanded"):
+            raise ValueError(
+                f"dagger.base_vel_source must be 'measured' or 'commanded', got {self.base_vel_source!r}."
+            )
         self.scene_robot_pcd_num_points = self.runtime_cfg.get(
             "scene_robot_num_points",
             self.runtime_cfg.get("robot_num_points"),
@@ -316,6 +329,11 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.global_train_num_envs = 0
         self.global_validation_num_envs = 0
         self.latest_student_proprio_vector = None
+        # Student's own last commanded base action, clamped to [-1, 1] in robot frame [vx, vy, wz]
+        # (normalized, not scaled), used only when base_vel_source == "commanded". Lazily allocated
+        # to zeros; zeroed per-env on every reset (see _reset_commanded_base_vel) since a freshly
+        # spawned base has issued no command yet.
+        self.latest_commanded_base_vel_robot = None
         self.latest_aux_input_vector = None
         self.latest_aux_target_vector = None
         self.push_pull_condition_enabled = False
@@ -2002,6 +2020,9 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.temporal_push_pull_belief_history[env_ids, 0, :] = push_pull_belief[env_ids]
 
     def _seed_temporal_histories(self, env_ids=None):
+        # A freshly (re)spawned base has issued no command yet -- zero the commanded-base-velocity
+        # feedback for these envs before reading it below, regardless of base_vel_source.
+        self._reset_commanded_base_vel(env_ids)
         q = self._get_student_proprio_vector().detach()
         target = self._get_implemented_action_vector().detach()
         base_vel = self._get_student_base_velocity_vector().detach()
@@ -2117,10 +2138,42 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         # env [wz, vx_w, vy_w] frame. base_action_scale and dt are applied by the env in
         # _scale_actions/_pre_physics_step. Keep arm/hand untouched.
         env_actions[:, :3] = self._robot_base_vector_to_env_frame(student_actions[:, :3])
-        return env_actions.clamp(-1.0, 1.0)
+        env_actions = env_actions.clamp(-1.0, 1.0)
+
+        # Record the student's own commanded base velocity for base_vel_source == "commanded": the
+        # raw robot-frame base action clamped to [-1, 1], WITHOUT applying base_action_scale. Kept
+        # normalized (not physical units) so this observation channel has a fixed, hyperparameter-
+        # independent range, matching the other normalized action channels, and stays valid even if
+        # base_action_scale changes across a training curriculum. Clamped elementwise in ROBOT frame
+        # (matches how door_policy_node._process_student_base_velocity clamps the raw student base
+        # action at deploy), NOT the env-frame clamp above used for physics.
+        # Cheap, so compute unconditionally; _get_student_base_velocity_vector decides whether to use it.
+        commanded_base_robot = student_actions[:, :3].clamp(-1.0, 1.0).detach()
+        if self.latest_commanded_base_vel_robot is None:
+            self.latest_commanded_base_vel_robot = torch.zeros(
+                (self.num_envs, 3), device=self.device, dtype=commanded_base_robot.dtype
+            )
+        self.latest_commanded_base_vel_robot = commanded_base_robot
+        return env_actions
+
+    def _reset_commanded_base_vel(self, env_ids=None):
+        """Zero the commanded-base-velocity feedback for envs that just (re)spawned -- a fresh base
+        has issued no command yet, matching the physical/deploy semantics regardless of source."""
+        if self.latest_commanded_base_vel_robot is None:
+            self.latest_commanded_base_vel_robot = torch.zeros((self.num_envs, 3), device=self.device)
+            return
+        if env_ids is None:
+            self.latest_commanded_base_vel_robot.zero_()
+        elif env_ids.numel() > 0:
+            self.latest_commanded_base_vel_robot[env_ids] = 0.0
 
     def _get_student_base_velocity_vector(self):
-        # joint_vel is already per-second in env/base-joint order [wz, vx_w, vy_w].
+        if self.base_vel_source == "commanded":
+            if self.latest_commanded_base_vel_robot is None:
+                return torch.zeros((self.num_envs, 3), device=self.device)
+            return self.latest_commanded_base_vel_robot
+
+        # "measured": joint_vel is already per-second in env/base-joint order [wz, vx_w, vy_w].
         # Convert it to the deployment-facing robot-frame order [vx_robot, vy_robot, wz_robot].
         get_student_base_joint_vel_obs = getattr(self.ov_env, "get_student_base_joint_vel_obs", None)
         if callable(get_student_base_joint_vel_obs):

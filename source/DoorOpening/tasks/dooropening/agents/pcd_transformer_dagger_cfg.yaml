@@ -188,6 +188,12 @@ dagger:
   reset_progress_total: 50000
   adr_reset_progress_total: 10000
   pointcloud_source: "depth"
+  # "measured" (default): base_vel obs is the sensed base joint velocity (matches deploy's fused
+  # odometry). "commanded": base_vel obs is the student's own last commanded base action instead,
+  # clamped to [-1, 1] in robot frame (normalized, not scaled by base_action_scale) -- avoids odom
+  # noise/frame-convention issues but loses stall/slip feedback.
+  # MUST match door_policy.yaml's policy.base_vel_source on the deploy side; this is a trained input.
+  base_vel_source: "measured"
   scene_robot_num_points: 30000  # GT robot/model points concatenated into the renderable scene cloud.
   append_robot_model_to_policy_cloud: true
   robot_model_policy_points: 2000  # Robot model points appended to the policy input after the depth/lidar crops.
