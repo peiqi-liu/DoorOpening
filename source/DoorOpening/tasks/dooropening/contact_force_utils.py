@@ -21,9 +21,9 @@ HANDLE_CONTACT_FILTER_PRIM_PATHS = (
     "/World/envs/env_.*/Robot/fingertip_3",
 )
 
-# Penalize finger<->panel contact. Fingers ONLY -- the index/middle/ring digits (_1/_2/_3), every
-# link incl. tips. The palm (palm_center/palm_lower) and the thumb (_4 digit) are intentionally
-# EXCLUDED: pressing the panel (Door/link_1) with the palm or thumb is NOT penalized.
+# Penalize finger<->panel contact. Every LEAP finger link incl. tips, including the thumb
+# (_4 digit). The palm (palm_center/palm_lower) is intentionally EXCLUDED: pressing the panel
+# (Door/link_1) with the palm is NOT penalized.
 PANEL_CONTACT_FILTER_PRIM_PATHS = (
     "/World/envs/env_.*/Robot/mcp_joint_1",
     "/World/envs/env_.*/Robot/pip_1",
@@ -40,12 +40,11 @@ PANEL_CONTACT_FILTER_PRIM_PATHS = (
     "/World/envs/env_.*/Robot/dip_3",
     "/World/envs/env_.*/Robot/realtip_3",
     "/World/envs/env_.*/Robot/fingertip_3",
-    # # Thumb (_4 digit).
-    # "/World/envs/env_.*/Robot/mcp_joint_4",
-    # "/World/envs/env_.*/Robot/pip_4",
-    # "/World/envs/env_.*/Robot/dip_4",
-    # "/World/envs/env_.*/Robot/realtip_4",
-    # "/World/envs/env_.*/Robot/fingertip_4",
+    "/World/envs/env_.*/Robot/mcp_joint_4",
+    "/World/envs/env_.*/Robot/pip_4",
+    "/World/envs/env_.*/Robot/dip_4",
+    "/World/envs/env_.*/Robot/realtip_4",
+    "/World/envs/env_.*/Robot/fingertip_4",
 )
 
 X5_BODY_NAMES = (
