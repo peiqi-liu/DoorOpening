@@ -26,6 +26,7 @@ from DoorOpening.assets.door.multi_door_cfg import asset_family_ids as door_asse
 from DoorOpening.assets.door.multi_door_cfg import asset_paths as door_asset_paths
 from DoorOpening.assets.door.multi_door_cfg import board_bboxes as door_board_bboxes
 from DoorOpening.assets.door.multi_door_cfg import board_bboxes_link1 as door_board_bboxes_link1
+from DoorOpening.assets.door.multi_door_cfg import door_full_bboxes as door_full_door_bboxes
 from DoorOpening.assets.door.multi_door_cfg import motion_family_ids, motion_traj_paths
 from DoorOpening.assets.glorbot.glorbot_cfg import glorbot_urdf_path
 from DoorOpening.model.transformer import PCDTransformer, strip_prefix_from_state_dict
@@ -2537,14 +2538,20 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.env_board_bboxes_link1 = door_board_bboxes_link1.to(device=self.device, dtype=torch.float32)[
             self.env_asset_idx
         ]
+        # Full door outer bbox (frame + panel + handle) per env, used ONLY for wall placement so walls
+        # sit outside the whole door (the frame is wider than the link_1 panel). The link_1 panel bbox
+        # stays for door-hole aug etc.
+        self.env_full_door_bboxes = door_full_door_bboxes.to(device=self.device, dtype=torch.float32)[
+            self.env_asset_idx
+        ]
         # We do not assume a fixed asset axis convention across all door families. Instead, infer a
-        # stable local frame from the panel bbox extents (smallest -> thickness, middle -> width,
+        # stable local frame from the full door bbox extents (smallest -> thickness, middle -> width,
         # largest -> height). Shared with the offline tooling via DoorOpening.utils.wall_distractors.
         (
             self.wall_distractor_axis_order,
             self.wall_distractor_bbox_min_ordered,
             self.wall_distractor_bbox_max_ordered,
-        ) = compute_wall_bbox_ordering(self.env_board_bboxes)
+        ) = compute_wall_bbox_ordering(self.env_full_door_bboxes)
         unique_asset_idx = sorted(set(self.env_asset_idx.detach().cpu().tolist()))
         self.door_samplers = {
             idx: FrankaLeapSampler(

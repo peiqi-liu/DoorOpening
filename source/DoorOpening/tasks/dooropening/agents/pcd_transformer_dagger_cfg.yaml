@@ -197,7 +197,7 @@ dagger:
     max_points_per_process: 5000
   depth_cam_render:
     num_points: 12000
-    inflate_px: 2  # Was 4. Less silhouette dilation, so handle edges are less crisp and blend into the door surface, closer to real RealSense.
+    inflate_px: 1  # Silhouette/gap-fill dilation (px). Was 2. Lower = sharper edges (raise to 2 if the surface looks holey/sparse).
     jitter_std_m: 0.025  # Per-point depth noise std (~2.5cm), now applied ALONG the camera ray (see jitter_mode).
     clip_mode: "post"
     # "axial": perturb depth along the camera ray only, so points stay on their pixel rays and the
@@ -206,8 +206,8 @@ dagger:
     # noise (smears thin features); "tangent" = in-image-plane noise (non-compiled path only).
     jitter_mode: "axial"
     use_compile: true
-    blur_kernel_px: 5  # Spatial depth-image blur before unprojection, emulating the RealSense SDK spatial filter (handle bumps/rounds instead of mesh-sharp). 0/1 = off.
-    blur_sigma_px: 1.5  # Gaussian sigma in pixels; <=0 = box blur. Starting point — tune against real RealSense handle captures.
+    blur_kernel_px: 0  # Spatial depth-image blur before unprojection (RealSense SDK spatial filter). 0/1 = OFF. Was 5 -> 3 -> 0 (too soft); raise to 3 for some softening if the sim looks too mesh-sharp vs real captures.
+    blur_sigma_px: 1.0  # Gaussian sigma in pixels; <=0 = box blur. Only used when blur_kernel_px > 1.
     # Door panel + wall distractor points are rasterized a second time with this much larger
     # inflate_px and composited into the depth via a per-pixel min. At close range (near_m below)
     # a sparse occluder leaves per-pixel z-buffer gaps that let farther points (background, the far
@@ -215,7 +215,7 @@ dagger:
     # crisp, so it can't fix this on its own. 0 disables the pass. Tune against the viser point-cloud
     # replay: raise if rays still visibly punch through the wall/door, lower if occluder silhouettes
     # look too blocky.
-    occluder_inflate_px: 10
+    occluder_inflate_px: 5  # Anti-penetration dilation of the door/wall occluder (px). Was 10 (too blocky) -> 3 (~0.2% leaked, too much) -> 5 (0% penetration with jitter on, and far less blocky than 10). This only dilates occluder EDGES, so interior surfaces stay sharp (blur_kernel_px=0, inflate_px=1). Raise toward 6 if rays leak at closer standoffs; lower toward 4 (~0.01%) for slightly sharper edges.
   lidar_render:
     num_points: 9000
     num_azimuth: 128
@@ -238,7 +238,7 @@ dagger:
     # - thickness axis: through the panel, normal to the door slab
     # Each sampled point comes from either the left or right column.
     side_margin_m: [0.2, 0.8]  # Column width along the door width axis, i.e. how far each column extends outward from the left/right panel edge.
-    edge_gap_m: [0.0, 0.01]  # Empty gap between the panel side edge and the inner face of the wall column. Clamped to >= 0 in code: the wall must never overlap the door panel.
+    edge_gap_m: [0.02, 0.06]  # Empty gap (m) between the door side edge and the inner face of the wall column. Non-zero so the wall never sits flush against / overlapping the door (a zero gap is unrealistic). Clamped to >= 0 in code.
     depth_m: [0.1, 1.5]  # Extra thickness added beyond the door slab thickness along the door-thickness axis, independently per front/back segment.
     # Position of the seam where the front and back segments on one side butt together (see
     # sample_seam), relative to the door's mid-thickness plane. Pinned to 0 so all 4 walls start
