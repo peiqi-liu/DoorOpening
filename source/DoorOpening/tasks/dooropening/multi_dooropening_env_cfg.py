@@ -20,6 +20,7 @@ from DoorOpening.tasks.dooropening.contact_force_utils import (
     DOOR_BODY_CONTACT_FILTER_PRIM_PATHS,
     FRANKA_BOX_DOOR_CONTACT_PRIM_PATH,
     HANDLE_CONTACT_FILTER_PRIM_PATHS,
+    PALM_ONLY_HANDLE_CONTACT_FILTER_PRIM_PATHS,
     PANEL_CONTACT_FILTER_PRIM_PATHS,
     SELF_COLLISION_FRANKA_FILTER_PRIM_PATHS,
     SELF_COLLISION_FRANKA_PRIM_PATH,
@@ -425,6 +426,15 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         debug_vis=False,
         filter_prim_paths_expr=list(HANDLE_CONTACT_FILTER_PRIM_PATHS),
     )
+    # PUSH-door palm-only handle contact sensor: only palm_center/palm_lower vs the handle (link_2).
+    # Drives the push palm-handle reward (fingers excluded).
+    contact_forces_door2_palm = ContactSensorCfg(
+        prim_path="/World/envs/env_.*/Door/link_2",
+        update_period=0.0,
+        history_length=1,
+        debug_vis=False,
+        filter_prim_paths_expr=list(PALM_ONLY_HANDLE_CONTACT_FILTER_PRIM_PATHS),
+    )
     # Finger<->panel contact sensor: LEAP hand bodies against the door panel (Door/link_1).
     # Gated by panel_contact_mask, a force above threshold here is penalized (fingers should
     # grip the handle, not the panel) except where pushing the panel is the task.
@@ -681,6 +691,12 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_finger_joint_vel_w = 0.5
     door_joint_pos_w = 4.0
     hinge_contact_reward_w = 1.5
+    # PUSH-only palm-handle contact reward: +palm_handle_reward_w per step whenever palm_center/
+    # palm_lower press the handle (> handle_contact_force_threshold) during the grasp->push-open window
+    # (hinge_contact_mask, keyframes 2..5). Binary. For PULL this is inactive (is_push gate = 0), and
+    # for PUSH the old finger-inclusive hinge_contact reward is disabled -- fingers on the handle are
+    # no longer rewarded on push.
+    palm_handle_reward_w = 5.0
     robot_body_lin_vel_w = 1.0
     robot_body_ang_vel_w = 0.5
     joint_limit_penalty_w = 40.0

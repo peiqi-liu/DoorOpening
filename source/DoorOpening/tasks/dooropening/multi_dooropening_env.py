@@ -216,6 +216,7 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_arm_joint_vel_w = self.cfg.robot_arm_joint_vel_w
         self.robot_finger_joint_vel_w = self.cfg.robot_finger_joint_vel_w
         self.hinge_contact_reward_w = self.cfg.hinge_contact_reward_w
+        self.palm_handle_reward_w = self.cfg.palm_handle_reward_w
         self.base_door_contact_penalty_w = self.cfg.base_door_contact_penalty_w
         self.x5_door_contact_penalty_w = self.cfg.x5_door_contact_penalty_w
         self.robot_body_lin_vel_w = self.cfg.robot_body_lin_vel_w
@@ -845,6 +846,7 @@ class DooropeningEnv(DirectRLEnv):
             self.pointcloud_camera = Camera(self.cfg.pointcloud_camera_cfg)
             self.scene.sensors["pointcloud_camera"] = self.pointcloud_camera
         self.scene.sensors["contact_forces_door2"] = ContactSensor(self.cfg.contact_forces_door2)
+        self.scene.sensors["contact_forces_door2_palm"] = ContactSensor(self.cfg.contact_forces_door2_palm)
         self.scene.sensors["contact_forces_door_panel"] = ContactSensor(self.cfg.contact_forces_door_panel)
         # base<->door split one-sensor-per-body (filtered contacts need a single-body prim_path)
         for _name in BASE_DOOR_SENSOR_NAMES:
@@ -978,6 +980,26 @@ class DooropeningEnv(DirectRLEnv):
             torch.full_like(ref_dist_past, float(self.cfg.success_far_push_dist)),
             torch.full_like(ref_dist_past, float(self.cfg.success_far_pull_dist)),
         )
+
+    def _get_is_push_env(self) -> torch.Tensor:
+        """Per-env push flag as float [num_envs] (1.0 = push, 0.0 = pull), inferred the same way as
+        _far_side_target (push refs traverse far past the door). Static per assignment -> cached.
+
+        Gates the direction-specific handle rewards: the new palm-handle reward is push-only, the old
+        finger-inclusive hinge_contact reward is pull-only, so the pull pipeline is unchanged.
+        """
+        cached = getattr(self, "_is_push_env_cached", None)
+        if cached is not None:
+            return cached
+        if self.motion_final_base_rel_x is None:
+            is_push = torch.zeros(self.num_envs, device=self.device)
+        else:
+            env_motion_idx = self.ref_motion_lib.env_to_file_map.to(device=self.device, dtype=torch.long)
+            ref_final_base_x_joint = self.motion_final_base_rel_x[env_motion_idx]
+            ref_dist_past = self._base_dist_past_door(ref_final_base_x_joint)
+            is_push = (ref_dist_past > float(self.cfg.success_far_push_ref_dist)).to(dtype=torch.float32)
+        self._is_push_env_cached = is_push.reshape(self.num_envs)
+        return self._is_push_env_cached
 
     def _update_far_side_tracker(self):
         """Latch, each step, whether the base has traversed to the far side of the door."""
@@ -1440,6 +1462,7 @@ class DooropeningEnv(DirectRLEnv):
         targets = self.robot_dof_targets + self.dt * self.scaled_actions
         targets = self._pin_arx_targets_to_fixed_pose(targets)
         self.scene.sensors["contact_forces_door2"].update(self.cfg.sim_dt)
+        self.scene.sensors["contact_forces_door2_palm"].update(self.cfg.sim_dt)
         self.scene.sensors["contact_forces_door_x5_link2"].update(self.cfg.sim_dt)
         self.scene.sensors["contact_forces_door_x5_link3"].update(self.cfg.sim_dt)
         self.scene.sensors["contact_forces_door_x5_link4"].update(self.cfg.sim_dt)
@@ -2196,6 +2219,29 @@ class DooropeningEnv(DirectRLEnv):
         handle_force_norm = torch.linalg.vector_norm(contact_forces_door2, dim=-1)
         self.extras["stats/filtered_handle_force_norm_mean"] = float(handle_force_norm.mean().detach().cpu().item())
         self.extras["stats/filtered_handle_force_norm_max"] = float(handle_force_norm.max().detach().cpu().item())
+
+        # --- PUSH-only palm-handle contact reward ---------------------------------------------------
+        # Reward palm_center/palm_lower pressing the handle (link_2) during the grasp->push-open window
+        # (ref_hinge_contact_mask == keyframes 2..5). Binary bonus, push envs only. On PUSH the old
+        # finger-inclusive hinge_contact reward is gated off (see the compute_reward call below), so
+        # fingers touching the handle are no longer rewarded for pushing. Pull is untouched.
+        is_push_env = self._get_is_push_env()  # [num_envs] float (1 push / 0 pull)
+        contact_forces_door2_palm = self._get_filtered_contact_force_w(
+            self.scene.sensors["contact_forces_door2_palm"],
+            expected_num_envs=self.num_envs,
+        )
+        palm_handle_force_norm = torch.linalg.vector_norm(contact_forces_door2_palm, dim=-1)
+        palm_handle_contact = (palm_handle_force_norm > self.cfg.handle_contact_force_threshold).to(
+            dtype=palm_handle_force_norm.dtype
+        )
+        weighted_palm_handle_reward = (
+            self.palm_handle_reward_w
+            * self.ref_hinge_contact_mask.squeeze()
+            * is_push_env
+            * palm_handle_contact
+        )
+        self.extras["reward/palm_handle_push_reward"] = weighted_palm_handle_reward.mean().item()
+        self.extras["stats/palm_handle_force_norm_max"] = float(palm_handle_force_norm.max().detach().cpu().item())
         x5_body_force_norm = self._get_x5_body_contact_force_norm(include_franka_box=False)
         unsafe_x5_body_contact = x5_body_force_norm > self.cfg.x5_body_contact_force_threshold
         # Latch: this episode had at least one x5-arm door collision (reported per-rollout below).
@@ -2344,7 +2390,10 @@ class DooropeningEnv(DirectRLEnv):
             robot_body_ang_vel_w = self.robot_body_ang_vel_w,
 
             contact_forces = contact_forces_door2,
-            contact_force_w = self.hinge_contact_reward_w * self.ref_hinge_contact_mask,
+            # PULL-only now: the original palm+inner-finger handle-contact reward is gated to pull
+            # envs (1 - is_push). PUSH uses the palm-only reward above instead. Pull behavior is
+            # unchanged (is_push=0 -> factor 1).
+            contact_force_w = self.hinge_contact_reward_w * self.ref_hinge_contact_mask.squeeze() * (1.0 - is_push_env),
             contact_force_threshold = self.cfg.handle_contact_force_threshold,
         )
 
@@ -2386,9 +2435,10 @@ class DooropeningEnv(DirectRLEnv):
             deep_mimic_reward
             + weighted_arx_tuck_reward
             + total_alive_reward
+            + weighted_palm_handle_reward  # PUSH-only palm-handle contact reward
             - weighted_joint_limit_penalty
             - weighted_self_collision_penalty
-            - weighted_finger_door_contact_penalty
+            # finger<->door contact penalty REMOVED (hackable; pull never used it, push no longer uses it)
             - weighted_base_door_contact_penalty
             - weighted_x5_door_contact_penalty
             - weighted_franka_box_contact_penalty

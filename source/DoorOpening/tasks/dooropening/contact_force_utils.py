@@ -21,6 +21,14 @@ HANDLE_CONTACT_FILTER_PRIM_PATHS = (
     "/World/envs/env_.*/Robot/fingertip_3",
 )
 
+# PUSH-door palm-only handle-contact reward sensor: ONLY the two palm links (palm_center, palm_lower)
+# count. Fingers are excluded entirely -- the push reward is collected by pressing the handle with the
+# PALM, not by finger contact (which is no longer rewarded on push).
+PALM_ONLY_HANDLE_CONTACT_FILTER_PRIM_PATHS = (
+    "/World/envs/env_.*/Robot/palm_center",
+    "/World/envs/env_.*/Robot/palm_lower",
+)
+
 # Penalize finger<->panel contact. Every LEAP finger link incl. tips, including the thumb
 # (_4 digit). The palm (palm_center/palm_lower) is intentionally EXCLUDED: pressing the panel
 # (Door/link_1) with the palm is NOT penalized.
