@@ -163,6 +163,36 @@ def compute_exact_door_keypoints(urdf_path):
         handle_center_base = transform_points(handle_center_local[None, :], base_to_handle_closed)[0]
         keypoints["link_2_center_base"] = handle_center_base.tolist()
 
+    # --- Full door outer bbox (frame + board + handle) in the base frame at the closed pose. Used
+    # for wall-distractor placement so walls sit outside the WHOLE door, not just the link_1 panel:
+    # the frame (link_0) is typically wider than the panel, so referencing only the panel makes the
+    # walls overlap the frame (zero/negative gap). ---
+    joint_2_el = find_joint_by_child(root, "link_2")
+    board_to_handle_closed = origin_to_transform(None if joint_2_el is None else joint_2_el.find("origin"))
+    base_to_handle_closed = base_to_board_closed @ board_to_handle_closed
+    link_base_transforms = {
+        "link_0": base_to_frame,
+        "link_1": base_to_board_closed,
+        "link_2": base_to_handle_closed,
+    }
+    full_corners = []
+    for link_name, base_T in link_base_transforms.items():
+        link_el = root.find(f".//link[@name='{link_name}']")
+        if link_el is None:
+            continue
+        link_mesh = process_link_mesh(urdf_path, link_el)
+        if link_mesh is None:
+            continue
+        mn, mx = link_mesh.bounds
+        corners = np.array(
+            [[cx, cy, cz] for cx in (mn[0], mx[0]) for cy in (mn[1], mx[1]) for cz in (mn[2], mx[2])],
+            dtype=np.float64,
+        )
+        full_corners.append(transform_points(corners, base_T))
+    if full_corners:
+        full_pts = np.concatenate(full_corners, axis=0)
+        keypoints["door_full_bbox_base"] = np.stack([full_pts.min(axis=0), full_pts.max(axis=0)], axis=0).tolist()
+
     return keypoints
 
 

@@ -26,6 +26,7 @@ from DoorOpening.assets.door.multi_door_cfg import asset_family_ids as door_asse
 from DoorOpening.assets.door.multi_door_cfg import asset_paths as door_asset_paths
 from DoorOpening.assets.door.multi_door_cfg import board_bboxes as door_board_bboxes
 from DoorOpening.assets.door.multi_door_cfg import board_bboxes_link1 as door_board_bboxes_link1
+from DoorOpening.assets.door.multi_door_cfg import door_full_bboxes as door_full_door_bboxes
 from DoorOpening.assets.door.multi_door_cfg import motion_family_ids, motion_traj_paths
 from DoorOpening.assets.glorbot.glorbot_cfg import glorbot_urdf_path
 from DoorOpening.model.transformer import PCDTransformer, strip_prefix_from_state_dict
@@ -353,6 +354,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.aux_handle_init_noise_m = None
         self.aux_handle_init_bias_m = None
         self.aux_handle_bias = None
+        self.aux_feedback_noise_m = None
         self.push_pull_detach_predicted_condition = True
         self.push_pull_family_one_hot = None
         self.push_pull_condition_buffer = None
@@ -707,11 +709,15 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                     "dagger.aux_handle_init_source='ground_truth' requires aux_feedback_to_policy=true; "
                     "otherwise the policy never sees the seeded handle pose."
                 )
-        # Two perturbations on the handle-pose input (never on the aux regression target), modelling
-        # real detector error (e.g. np.median over a SAM3 handle mask vs. the true handle center):
-        #   noise -> fresh per-call isotropic jitter, resampled every step (frame-to-frame noise).
-        #   bias  -> a per-episode constant isotropic offset, resampled once per env reset
-        #            (systematic detection offset that persists for the whole episode).
+        # Perturbations on the handle-pose input (never on the aux regression target), modelling real
+        # detector error (e.g. np.median over a SAM3 handle mask vs. the true handle center):
+        #   noise    -> fresh per-call isotropic jitter, resampled every step (frame-to-frame noise).
+        #   bias     -> a per-episode constant isotropic offset, resampled once per env reset
+        #               (systematic detection offset that persists for the whole episode).
+        #   feedback -> fresh per-step isotropic jitter added to the aux prediction before it is
+        #               cached in aux_buffer (recurrent mode only), so the fed-back handle estimate
+        #               the policy sees is never a noiseless copy of its own last prediction and
+        #               error can compound across the rollout like a real drifting detector.
         # Each is a random direction x magnitude in [0, bound], so its total Euclidean error <= bound (m).
         self.aux_handle_init_noise_m = self._parse_aux_handle_offset_bound(
             self.runtime_cfg.get("aux_handle_init_noise_m", 0.0),
@@ -720,6 +726,10 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.aux_handle_init_bias_m = self._parse_aux_handle_offset_bound(
             self.runtime_cfg.get("aux_handle_init_bias_m", 0.0),
             "aux_handle_init_bias_m",
+        )
+        self.aux_feedback_noise_m = self._parse_aux_handle_offset_bound(
+            self.runtime_cfg.get("aux_feedback_noise_m", 0.0),
+            "aux_feedback_noise_m",
         )
         # Aux handle input mode:
         #   "recurrent"        -> legacy: policy input = previous step's aux prediction (aux_buffer).
@@ -2590,14 +2600,20 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.env_board_bboxes_link1 = door_board_bboxes_link1.to(device=self.device, dtype=torch.float32)[
             self.env_asset_idx
         ]
+        # Full door outer bbox (frame + panel + handle) per env, used ONLY for wall placement so walls
+        # sit outside the whole door (the frame is wider than the link_1 panel). The link_1 panel bbox
+        # stays for door-hole aug etc.
+        self.env_full_door_bboxes = door_full_door_bboxes.to(device=self.device, dtype=torch.float32)[
+            self.env_asset_idx
+        ]
         # We do not assume a fixed asset axis convention across all door families. Instead, infer a
-        # stable local frame from the panel bbox extents (smallest -> thickness, middle -> width,
+        # stable local frame from the full door bbox extents (smallest -> thickness, middle -> width,
         # largest -> height). Shared with the offline tooling via DoorOpening.utils.wall_distractors.
         (
             self.wall_distractor_axis_order,
             self.wall_distractor_bbox_min_ordered,
             self.wall_distractor_bbox_max_ordered,
-        ) = compute_wall_bbox_ordering(self.env_board_bboxes)
+        ) = compute_wall_bbox_ordering(self.env_full_door_bboxes)
         unique_asset_idx = sorted(set(self.env_asset_idx.detach().cpu().tolist()))
         self.door_samplers = {
             idx: FrankaLeapSampler(
@@ -3721,7 +3737,14 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                     # Recurrent feedback only: in closed_door_base mode the aux input is the fixed
                     # closed-door anchor, so the prediction is never fed back into the buffer.
                     if self.aux_handle_input_mode != "closed_door_base":
-                        self.aux_buffer[:] = aux_prediction_for_replay
+                        aux_feedback_value = aux_prediction_for_replay
+                        if self.aux_feedback_noise_m is not None:
+                            aux_feedback_value = aux_feedback_value + self._sample_isotropic_offset(
+                                aux_feedback_value.shape,
+                                self.aux_feedback_noise_m,
+                                dtype=aux_feedback_value.dtype,
+                            )
+                        self.aux_buffer[:] = aux_feedback_value
 
                 if self.viser_raw_enabled and self._viser_pending_debug_frame is not None:
                     self._maybe_update_viser_debug(
