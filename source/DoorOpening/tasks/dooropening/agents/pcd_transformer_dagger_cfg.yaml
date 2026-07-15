@@ -87,7 +87,7 @@ observation_lag:
 pcd_encoders_cfg:
   local_pcd_t:
     type: "pointnet"
-    num_output_tokens: 128
+    num_output_tokens: 32
     num_points: [2500, 0, 0]  # Policy crop counts [base_crop, palm_crop, (robot slot)]. For pointcloud_source="both" each crop is split evenly across realsense+lidar (e.g. 2500 -> 1250 realsense + 1250 lidar). Robot model points are configured below.
     use_pcd: true
 
@@ -163,6 +163,9 @@ dagger:
   # offsets bounded by their TOTAL Euclidean magnitude (m).
   aux_handle_init_noise_m: 0.1   # Isotropic jitter on the seeded handle pose (frame-to-frame detector noise).
   aux_handle_init_bias_m: 0.08   # Per-episode constant offset, redrawn at each reset (systematic detector bias).
+  aux_feedback_noise_m: 0.1      # Isotropic jitter added to the aux prediction before it's cached in aux_buffer
+                                  # (recurrent mode, steps >=1), so the fed-back handle estimate is never a
+                                  # noiseless copy of the policy's own last prediction.
   prediction_training:
     loss_window_start: 40
     loss_window_end: 100
@@ -250,7 +253,7 @@ dagger:
     # walls reach different heights. Lower stays below the policy's z-crop [0.55, 1.5] so coverage
     # never runs out at the bottom of the crop. Remove this key to fall back to the legacy behavior of
     # exactly matching the door panel's own bbox height.
-    height_range_m: [0.25, 1.80]
+    height_range_m: [0.25, 2.00]
     # Wall GT point count = total wall surface area * this density (points/m^2), capped at
     # wall_num_points. Keeps point density roughly constant as walls change size (esp. with the
     # randomized height above), instead of always emitting a fixed wall_num_points. Remove for the

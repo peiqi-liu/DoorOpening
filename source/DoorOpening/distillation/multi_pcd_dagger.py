@@ -336,6 +336,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.aux_handle_init_noise_m = None
         self.aux_handle_init_bias_m = None
         self.aux_handle_bias = None
+        self.aux_feedback_noise_m = None
         self.push_pull_detach_predicted_condition = True
         self.push_pull_family_one_hot = None
         self.push_pull_condition_buffer = None
@@ -690,11 +691,15 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                     "dagger.aux_handle_init_source='ground_truth' requires aux_feedback_to_policy=true; "
                     "otherwise the policy never sees the seeded handle pose."
                 )
-        # Two perturbations on the handle-pose input (never on the aux regression target), modelling
-        # real detector error (e.g. np.median over a SAM3 handle mask vs. the true handle center):
-        #   noise -> fresh per-call isotropic jitter, resampled every step (frame-to-frame noise).
-        #   bias  -> a per-episode constant isotropic offset, resampled once per env reset
-        #            (systematic detection offset that persists for the whole episode).
+        # Perturbations on the handle-pose input (never on the aux regression target), modelling real
+        # detector error (e.g. np.median over a SAM3 handle mask vs. the true handle center):
+        #   noise    -> fresh per-call isotropic jitter, resampled every step (frame-to-frame noise).
+        #   bias     -> a per-episode constant isotropic offset, resampled once per env reset
+        #               (systematic detection offset that persists for the whole episode).
+        #   feedback -> fresh per-step isotropic jitter added to the aux prediction before it is
+        #               cached in aux_buffer (recurrent mode only), so the fed-back handle estimate
+        #               the policy sees is never a noiseless copy of its own last prediction and
+        #               error can compound across the rollout like a real drifting detector.
         # Each is a random direction x magnitude in [0, bound], so its total Euclidean error <= bound (m).
         self.aux_handle_init_noise_m = self._parse_aux_handle_offset_bound(
             self.runtime_cfg.get("aux_handle_init_noise_m", 0.0),
@@ -703,6 +708,10 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.aux_handle_init_bias_m = self._parse_aux_handle_offset_bound(
             self.runtime_cfg.get("aux_handle_init_bias_m", 0.0),
             "aux_handle_init_bias_m",
+        )
+        self.aux_feedback_noise_m = self._parse_aux_handle_offset_bound(
+            self.runtime_cfg.get("aux_feedback_noise_m", 0.0),
+            "aux_feedback_noise_m",
         )
         # Aux handle input mode:
         #   "recurrent"        -> legacy: policy input = previous step's aux prediction (aux_buffer).
@@ -3675,7 +3684,14 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                     # Recurrent feedback only: in closed_door_base mode the aux input is the fixed
                     # closed-door anchor, so the prediction is never fed back into the buffer.
                     if self.aux_handle_input_mode != "closed_door_base":
-                        self.aux_buffer[:] = aux_prediction_for_replay
+                        aux_feedback_value = aux_prediction_for_replay
+                        if self.aux_feedback_noise_m is not None:
+                            aux_feedback_value = aux_feedback_value + self._sample_isotropic_offset(
+                                aux_feedback_value.shape,
+                                self.aux_feedback_noise_m,
+                                dtype=aux_feedback_value.dtype,
+                            )
+                        self.aux_buffer[:] = aux_feedback_value
 
                 if self.viser_raw_enabled and self._viser_pending_debug_frame is not None:
                     self._maybe_update_viser_debug(
