@@ -33,7 +33,7 @@ from DoorOpening.model.transformer import PCDTransformer, strip_prefix_from_stat
 from DoorOpening.utils.camera_utils import (
     build_pinhole_intrinsics,
     crop_local_pcd,
-    simulate_depth_cam_render_from_pose,
+    render_depth_roundtrip_from_pose,
     simulate_lidar_render_from_pose,
 )
 from DoorOpening.utils.door_window_dropout import (
@@ -178,16 +178,9 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             self.runtime_cfg.get("sampler_render", {}),
         )
         self.depth_cam_render_num_points = self.depth_cam_render_cfg.get("num_points")
-        self.depth_cam_render_inflate_px = int(self.depth_cam_render_cfg.get("inflate_px", 2))
-        self.depth_cam_render_jitter_std_m = float(self.depth_cam_render_cfg.get("jitter_std_m", 0.004))
+        self.depth_cam_render_inflate_px = int(self.depth_cam_render_cfg.get("inflate_px", 0))
         self.depth_cam_render_clip_mode = str(self.depth_cam_render_cfg.get("clip_mode", "post"))
-        self.depth_cam_render_jitter_mode = str(self.depth_cam_render_cfg.get("jitter_mode", "xyz"))
         self.depth_cam_render_use_compile = bool(self.depth_cam_render_cfg.get("use_compile", True))
-        # Spatial blur of the rendered depth image before unprojection, to emulate the RealSense
-        # SDK spatial filter (handle edges blur into the door surface instead of staying mesh-crisp).
-        # 0/1 = disabled. Kernel is in depth-image pixels; sigma<=0 falls back to a box blur.
-        self.depth_cam_render_blur_kernel_px = int(self.depth_cam_render_cfg.get("blur_kernel_px", 0))
-        self.depth_cam_render_blur_sigma_px = float(self.depth_cam_render_cfg.get("blur_sigma_px", 0.0))
         # Static occluders (door panel + wall distractors) are rasterized a second time with this much
         # larger inflate_px and composited via a per-pixel min with the main depth. Sparse occluders
         # (esp. the wall distractors) otherwise leave per-pixel z-buffer gaps at close range that let
@@ -3175,18 +3168,14 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             # Keep only the selected family envs on CPU so Viser debug does not retain an
             # extra full batched scene pointcloud on GPU during training/debug runs.
             self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(gt_scene_pcd_world)
-        rendered_pcd_world, _ = simulate_depth_cam_render_from_pose(
+        rendered_pcd_world, _ = render_depth_roundtrip_from_pose(
             pcd=gt_scene_pcd_world,
             camera_pose=self._get_sampler_camera_pose(),
             num_points=self.depth_cam_render_num_points,
-            inflate_px=self.depth_cam_render_inflate_px,
-            jitter_std_m=self.depth_cam_render_jitter_std_m,
             cam_spec_dict=self.sampler_camera_spec,
+            inflate_px=self.depth_cam_render_inflate_px,
             clip_mode=self.depth_cam_render_clip_mode,
-            jitter_mode=self.depth_cam_render_jitter_mode,
             use_compile=self.depth_cam_render_use_compile,
-            blur_kernel_px=self.depth_cam_render_blur_kernel_px,
-            blur_sigma_px=self.depth_cam_render_blur_sigma_px,
             occluder_pcd=occluder_pcd_world,
             occluder_inflate_px=self.depth_cam_render_occluder_inflate_px,
         )
@@ -3215,18 +3204,14 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         if self.viser_raw_enabled:
             self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(gt_scene_pcd_world)
 
-        rendered_depth_pcd_world, _ = simulate_depth_cam_render_from_pose(
+        rendered_depth_pcd_world, _ = render_depth_roundtrip_from_pose(
             pcd=gt_scene_pcd_world,
             camera_pose=self._get_sampler_camera_pose(),
             num_points=self.depth_cam_render_num_points,
-            inflate_px=self.depth_cam_render_inflate_px,
-            jitter_std_m=self.depth_cam_render_jitter_std_m,
             cam_spec_dict=self.sampler_camera_spec,
+            inflate_px=self.depth_cam_render_inflate_px,
             clip_mode=self.depth_cam_render_clip_mode,
-            jitter_mode=self.depth_cam_render_jitter_mode,
             use_compile=self.depth_cam_render_use_compile,
-            blur_kernel_px=self.depth_cam_render_blur_kernel_px,
-            blur_sigma_px=self.depth_cam_render_blur_sigma_px,
             occluder_pcd=occluder_pcd_world,
             occluder_inflate_px=self.depth_cam_render_occluder_inflate_px,
         )

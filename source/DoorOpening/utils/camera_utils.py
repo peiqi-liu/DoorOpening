@@ -831,6 +831,84 @@ def simulate_depth_cam_render_from_pose(
     return pcd_nan_padding, logs
 
 
+def render_depth_roundtrip_from_pose(
+    pcd: torch.Tensor,
+    camera_pose: torch.Tensor,
+    num_points: int,
+    cam_spec_dict: Optional[Dict] = None,
+    inflate_px: int = 0,
+    clip_mode: str = "post",
+    use_compile: bool = True,
+    compile_mode: str = "max-autotune",
+    occluder_pcd: Optional[torch.Tensor] = None,
+    occluder_inflate_px: int = 0,
+):
+    """True projection round-trip: 3D points -> 2D depth image -> 3D points.
+
+    Two steps, nothing else (this does NOT go through the simulate_depth_cam_render_from_pose ray-cast
+    wrapper -- it calls the same two primitives ``scripts/tools/render_depth_roundtrip_viser.py`` uses):
+
+        PROJECT     : ``rasterize_depth_zbuffer_from_pose`` z-buffers the 3D points into a 2D depth
+                      image (nearest surface per pixel), plus the ``occluder_pcd`` anti-penetration
+                      pass (``occluder_inflate_px``) so nothing leaks through the door/walls.
+        BACK-PROJECT: ``backproject_depth_to_world_from_pose`` unprojects every valid pixel back to a
+                      3D world point.
+
+    No sensor-noise augmentation (no jitter, no blur). ``inflate_px`` is the main-pass z-buffer dilation
+    (0 = plain round-trip: each point -> one pixel -> back). The variable-length valid points are then
+    shuffled and NaN-padded to a fixed ``num_points`` so the policy gets a constant-shape tensor.
+    ``use_compile`` runs the exact same project+back-project fused via torch.compile for speed. All
+    knobs (``inflate_px`` / ``occluder_inflate_px`` / ...) come from the caller (cfg), none hardcoded.
+    """
+    if cam_spec_dict is None:
+        raise ValueError("cam_spec_dict must be provided and must contain H/W/intrinsics/near_m/far_m.")
+    batch_size = pcd.shape[0]
+    device = pcd.device
+
+    if use_compile:
+        # Same two ops (rasterize z-buffer -> back-project), fused into one compiled kernel. jitter/blur
+        # are compiled out (std 0 / kernel 0), so this is purely the geometric round-trip.
+        renderer = get_compiled_renderer_fixed_shapes(
+            cam_spec_dict=cam_spec_dict,
+            inflate_px=inflate_px,
+            clip_mode=clip_mode,
+            jitter_mode="xyz",
+            compile_mode=compile_mode,
+            blur_kernel_px=0,
+            blur_sigma_px=0.0,
+            occluder_inflate_px=occluder_inflate_px,
+        )
+        if occluder_inflate_px > 0:
+            _, pcd_world, _ = renderer(pcd, camera_pose, 0.0, occluder_pcd)
+        else:
+            _, pcd_world, _ = renderer(pcd, camera_pose, 0.0)
+    else:
+        # PROJECT 3D -> 2D depth image ...
+        depth, intr = rasterize_depth_zbuffer_from_pose(
+            pcd,
+            camera_pose,
+            cam_spec_dict=cam_spec_dict,
+            inflate_px=inflate_px,
+            clip_mode=clip_mode,
+            occluder_pcd=occluder_pcd,
+            occluder_inflate_px=occluder_inflate_px,
+        )
+        # ... BACK-PROJECT 2D -> 3D world points.
+        pcd_world, _ = backproject_depth_to_world_from_pose(depth, camera_pose, intr)
+
+    # Fixed-N packing: flatten the pixels, shuffle, push NaN (invalid pixels) to the end, keep num_points.
+    rendered_pcd = shuffle_pcd(pcd_world.view(batch_size, -1, 3))
+    num_total_points = rendered_pcd.shape[1]
+    nan_mask = torch.isnan(rendered_pcd).any(dim=-1)
+    sort_idx = torch.argsort(nan_mask.int(), dim=-1)
+    batch_idx = torch.arange(batch_size, device=device)[:, None].expand(batch_size, num_total_points)
+    sorted_pcds = rendered_pcd[batch_idx, sort_idx]
+
+    avg_num_valid_points = num_total_points - nan_mask.sum().float() / float(batch_size)
+    logs = {"depth_roundtrip/avg_num_valid_points": float(avg_num_valid_points.item())}
+    return sorted_pcds[:, :num_points], logs
+
+
 _lidar_dir_cache: dict = {}
 _lidar_compiled_cache: dict = {}
 

@@ -196,7 +196,7 @@ dagger:
   # clamped to [-1, 1] in robot frame (normalized, not scaled by base_action_scale) -- avoids odom
   # noise/frame-convention issues but loses stall/slip feedback.
   # MUST match door_policy.yaml's policy.base_vel_source on the deploy side; this is a trained input.
-  base_vel_source: "measured"
+  base_vel_source: "commanded"
   scene_robot_num_points: 30000  # GT robot/model points concatenated into the renderable scene cloud.
   append_robot_model_to_policy_cloud: true
   robot_model_policy_points: 2000  # Robot model points appended to the policy input after the depth/lidar crops.
@@ -205,26 +205,20 @@ dagger:
     sdf_cutoff: 0.02
     max_points_per_process: 5000
   depth_cam_render:
+    # Clean geometric depth round-trip (3D points -> 2D z-buffer depth image -> 3D points), rendered by
+    # render_depth_roundtrip_from_pose. NO sensor-noise augmentation (depth jitter / spatial blur were
+    # removed) -- only the z-buffer, the occluder anti-penetration pass, and near/far clipping remain.
     num_points: 12000
-    inflate_px: 1  # Silhouette/gap-fill dilation (px). Was 2. Lower = sharper edges (raise to 2 if the surface looks holey/sparse).
-    jitter_std_m: 0.025  # Per-point depth noise std (~2.5cm), now applied ALONG the camera ray (see jitter_mode).
+    inflate_px: 0  # Main-pass z-buffer dilation (px). 0 = plain round-trip (each point -> one pixel -> back), which is what we want; the door/robot clouds are dense enough that the raw per-pixel z-buffer has no meaningful holes. Raise to 1-2 only if the surface looks holey/sparse.
     clip_mode: "post"
-    # "axial": perturb depth along the camera ray only, so points stay on their pixel rays and the
-    # lateral silhouette stays crisp -- thin features (the handle) are NOT smeared into a noise blob.
-    # This matches the RealSense depth-noise model (dominantly axial). "xyz" = isotropic world-space
-    # noise (smears thin features); "tangent" = in-image-plane noise (non-compiled path only).
-    jitter_mode: "axial"
     use_compile: true
-    blur_kernel_px: 0  # Spatial depth-image blur before unprojection (RealSense SDK spatial filter). 0/1 = OFF. Was 5 -> 3 -> 0 (too soft); raise to 3 for some softening if the sim looks too mesh-sharp vs real captures.
-    blur_sigma_px: 1.0  # Gaussian sigma in pixels; <=0 = box blur. Only used when blur_kernel_px > 1.
-    # Door panel + wall distractor points are rasterized a second time with this much larger
-    # inflate_px and composited into the depth via a per-pixel min. At close range (near_m below)
-    # a sparse occluder leaves per-pixel z-buffer gaps that let farther points (background, the far
-    # side of the wall) show through; inflate_px=2 above is deliberately small to keep the handle
-    # crisp, so it can't fix this on its own. 0 disables the pass. Tune against the viser point-cloud
-    # replay: raise if rays still visibly punch through the wall/door, lower if occluder silhouettes
-    # look too blocky.
-    occluder_inflate_px: 5  # Anti-penetration dilation of the door/wall occluder (px). Was 10 (too blocky) -> 3 (~0.2% leaked, too much) -> 5 (0% penetration with jitter on, and far less blocky than 10). This only dilates occluder EDGES, so interior surfaces stay sharp (blur_kernel_px=0, inflate_px=1). Raise toward 6 if rays leak at closer standoffs; lower toward 4 (~0.01%) for slightly sharper edges.
+    # Door panel + wall distractor points are rasterized a second time with this much larger dilation
+    # and composited into the depth via a per-pixel min. At close range (near_m below) a sparse occluder
+    # leaves per-pixel z-buffer gaps that let farther points (background, the far side of the wall) show
+    # through; this second pass seals them so the walls render as solid boxes. 0 disables the pass. Tune
+    # against the viser point-cloud replay: raise if rays still visibly punch through the wall/door,
+    # lower if occluder silhouettes look too blocky.
+    occluder_inflate_px: 5  # Anti-penetration dilation of the door/wall occluder (px). Was 10 (too blocky) -> 3 (~0.2% leaked, too much) -> 5 (0% penetration, far less blocky than 10). This only dilates occluder EDGES, so interior surfaces stay sharp. Raise toward 6 if rays leak at closer standoffs; lower toward 4 (~0.01%) for slightly sharper edges.
   lidar_render:
     num_points: 9000
     num_azimuth: 128

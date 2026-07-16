@@ -233,32 +233,38 @@ def sample_wall_points_local(
     col_thick_ext = (column_max_surface_stack - column_min_surface_stack).abs()
     col_width_ext = (column_width_hi_stack - column_width_lo_stack).abs()
     col_height_ext = (column_height_hi_stack - column_height_lo_stack).abs()
-    # Area of each of the 4 sampled faces per column, ordered [thickness_min, thickness_max,
-    # width_min, width_max]: thickness faces are (width x height), width faces are (thickness x height).
+    # Area of each of the 6 sampled faces per column, ordered [thickness_min, thickness_max,
+    # width_min, width_max, height_min (bottom cap), height_max (top cap)]: thickness faces are
+    # (width x height), width faces are (thickness x height), height caps are (thickness x width).
+    # The two height caps CLOSE the box -- without them short walls render open-topped (visible tops
+    # missing) since the camera looks slightly down onto them.
     face_area = torch.stack(
         [
             col_width_ext * col_height_ext,
             col_width_ext * col_height_ext,
             col_thick_ext * col_height_ext,
             col_thick_ext * col_height_ext,
+            col_thick_ext * col_width_ext,
+            col_thick_ext * col_width_ext,
         ],
         dim=-1,
-    )  # (E, C, 4)
+    )  # (E, C, 6)
+    num_faces = face_area.shape[-1]
 
     if params.point_density_per_m2 is not None:
         # Area-WEIGHTED selection of (column, face): each point picks a face with probability
         # proportional to that face's area, so the resulting density is uniform ACROSS every wall
         # face (constant points/m^2), not merely uniform in total. A big face and a small face then
         # get point counts proportional to their sizes. Flat index = column * 4 + face.
-        probs = face_area.reshape(env_count, num_columns * 4).clamp_min(1e-12)
+        probs = face_area.reshape(env_count, num_columns * num_faces).clamp_min(1e-12)
         probs = probs / probs.sum(dim=1, keepdim=True)
         flat_idx = torch.multinomial(probs, num_points, replacement=True)  # (E, num_points)
-        column_idx = flat_idx // 4
-        face_ids = flat_idx % 4
+        column_idx = flat_idx // num_faces
+        face_ids = flat_idx % num_faces
     else:
         # Legacy UNIFORM selection (equal expected points per column and per face, so smaller faces
         # end up denser). Kept for configs that do not set point_density_per_m2.
-        face_ids = torch.randint(0, 4, (env_count, num_points), device=device)
+        face_ids = torch.randint(0, num_faces, (env_count, num_points), device=device)
         column_idx = torch.randint(0, num_columns, (env_count, num_points), device=device)
         if num_points >= num_columns:
             # Keep every column (both jamb sides, both front/back) populated for each env.
@@ -286,19 +292,29 @@ def sample_wall_points_local(
     thickness_max_face = face_ids == 1
     width_min_face = face_ids == 2
     width_max_face = face_ids == 3
+    height_min_face = face_ids == 4  # bottom cap
+    height_max_face = face_ids == 5  # top cap
 
     wall_points_ordered[..., 0] = torch.where(thickness_min_face, column_min_surface, wall_points_ordered[..., 0])
     wall_points_ordered[..., 0] = torch.where(thickness_max_face, column_max_surface, wall_points_ordered[..., 0])
     wall_points_ordered[..., 1] = torch.where(width_min_face, column_width_lo, wall_points_ordered[..., 1])
     wall_points_ordered[..., 1] = torch.where(width_max_face, column_width_hi, wall_points_ordered[..., 1])
+    # Cap faces: snap the height coord to lo/hi so the box is CLOSED (the thickness/width coords stay
+    # uniform, so each cap spans the full thickness x width rectangle).
+    wall_points_ordered[..., 2] = torch.where(height_min_face, column_height_lo, wall_points_ordered[..., 2])
+    wall_points_ordered[..., 2] = torch.where(height_max_face, column_height_hi, wall_points_ordered[..., 2])
 
     if params.face_jitter_m > 0.0:
         thickness_face_mask = (thickness_min_face | thickness_max_face).to(torch.float32)
         width_face_mask = (width_min_face | width_max_face).to(torch.float32)
+        height_face_mask = (height_min_face | height_max_face).to(torch.float32)
         wall_points_ordered[..., 0] += thickness_face_mask * rand_range(
             -params.face_jitter_m, params.face_jitter_m, (env_count, num_points)
         )
         wall_points_ordered[..., 1] += width_face_mask * rand_range(
+            -params.face_jitter_m, params.face_jitter_m, (env_count, num_points)
+        )
+        wall_points_ordered[..., 2] += height_face_mask * rand_range(
             -params.face_jitter_m, params.face_jitter_m, (env_count, num_points)
         )
 
