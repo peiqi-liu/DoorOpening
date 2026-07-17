@@ -215,7 +215,6 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_base_joint_vel_w = self.cfg.robot_base_joint_vel_w
         self.robot_arm_joint_vel_w = self.cfg.robot_arm_joint_vel_w
         self.robot_finger_joint_vel_w = self.cfg.robot_finger_joint_vel_w
-        self.hinge_contact_reward_w = self.cfg.hinge_contact_reward_w
         self.palm_handle_reward_w = self.cfg.palm_handle_reward_w
         self.base_door_contact_penalty_w = self.cfg.base_door_contact_penalty_w
         self.x5_door_contact_penalty_w = self.cfg.x5_door_contact_penalty_w
@@ -2220,12 +2219,11 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["stats/filtered_handle_force_norm_mean"] = float(handle_force_norm.mean().detach().cpu().item())
         self.extras["stats/filtered_handle_force_norm_max"] = float(handle_force_norm.max().detach().cpu().item())
 
-        # --- PUSH-only palm-handle contact reward ---------------------------------------------------
-        # Reward palm_center/palm_lower pressing the handle (link_2) during the grasp->push-open window
-        # (ref_hinge_contact_mask == keyframes 2..5). Binary bonus, push envs only. On PUSH the old
-        # finger-inclusive hinge_contact reward is gated off (see the compute_reward call below), so
-        # fingers touching the handle are no longer rewarded for pushing. Pull is untouched.
-        is_push_env = self._get_is_push_env()  # [num_envs] float (1 push / 0 pull)
+        # --- Palm-handle contact reward (push AND pull) ---------------------------------------------
+        # Reward palm_center/palm_lower pressing the handle (link_2) during the grasp->open window
+        # (ref_hinge_contact_mask == keyframes 2..5). Binary bonus, ALL envs. The old finger-inclusive
+        # hinge_contact reward is now fully gated off (see the compute_reward call below) for both push
+        # and pull, so fingers touching the handle are no longer rewarded -- only the palm is.
         contact_forces_door2_palm = self._get_filtered_contact_force_w(
             self.scene.sensors["contact_forces_door2_palm"],
             expected_num_envs=self.num_envs,
@@ -2237,10 +2235,9 @@ class DooropeningEnv(DirectRLEnv):
         weighted_palm_handle_reward = (
             self.palm_handle_reward_w
             * self.ref_hinge_contact_mask.squeeze()
-            * is_push_env
             * palm_handle_contact
         )
-        self.extras["reward/palm_handle_push_reward"] = weighted_palm_handle_reward.mean().item()
+        self.extras["reward/palm_handle_reward"] = weighted_palm_handle_reward.mean().item()
         self.extras["stats/palm_handle_force_norm_max"] = float(palm_handle_force_norm.max().detach().cpu().item())
         x5_body_force_norm = self._get_x5_body_contact_force_norm(include_franka_box=False)
         unsafe_x5_body_contact = x5_body_force_norm > self.cfg.x5_body_contact_force_threshold
@@ -2388,13 +2385,6 @@ class DooropeningEnv(DirectRLEnv):
             robot_finger_joint_vel_w = self.robot_finger_joint_vel_w,
             robot_body_lin_vel_w = self.robot_body_lin_vel_w,
             robot_body_ang_vel_w = self.robot_body_ang_vel_w,
-
-            contact_forces = contact_forces_door2,
-            # PULL-only now: the original palm+inner-finger handle-contact reward is gated to pull
-            # envs (1 - is_push). PUSH uses the palm-only reward above instead. Pull behavior is
-            # unchanged (is_push=0 -> factor 1).
-            contact_force_w = self.hinge_contact_reward_w * self.ref_hinge_contact_mask.squeeze() * (1.0 - is_push_env),
-            contact_force_threshold = self.cfg.handle_contact_force_threshold,
         )
 
         joint_limit_penalty, joint_limit_active_fraction = compute_joint_limit_penalty(
@@ -2435,7 +2425,7 @@ class DooropeningEnv(DirectRLEnv):
             deep_mimic_reward
             + weighted_arx_tuck_reward
             + total_alive_reward
-            + weighted_palm_handle_reward  # PUSH-only palm-handle contact reward
+            + weighted_palm_handle_reward  # palm-handle contact reward (push AND pull)
             - weighted_joint_limit_penalty
             - weighted_self_collision_penalty
             # finger<->door contact penalty REMOVED (hackable; pull never used it, push no longer uses it)
@@ -2674,10 +2664,6 @@ def compute_deep_mimic_rewards(
     robot_finger_joint_vel_w: float,
     robot_body_lin_vel_w: float,
     robot_body_ang_vel_w: float,
-
-    contact_force_w: torch.Tensor,
-    contact_forces: torch.Tensor,
-    contact_force_threshold: float,
 ) -> torch.Tensor:
     # ----------------------------------
     # Robot body position error
@@ -2751,10 +2737,6 @@ def compute_deep_mimic_rewards(
     else:
         robot_body_ang_vel_r = torch.zeros_like(key_body_pos_r)
 
-    if contact_forces.dim() != 2 or contact_forces.size(-1) != 3:
-        raise RuntimeError("Expected filtered handle contact force shape [N, 3].")
-    contact_force_norm = torch.linalg.vector_norm(contact_forces, dim=-1)
-    contact_reward = (contact_force_norm > contact_force_threshold).to(dtype=key_body_pos_r.dtype)
     # ----------------------------------
     # Final reward
     # ----------------------------------
@@ -2769,8 +2751,7 @@ def compute_deep_mimic_rewards(
          + robot_arm_joint_vel_w * arm_joint_vel_r\
          + robot_finger_joint_vel_w * finger_joint_vel_r\
          + robot_body_lin_vel_w * robot_body_lin_vel_r\
-         + robot_body_ang_vel_w * robot_body_ang_vel_r\
-         + contact_force_w * contact_reward
+         + robot_body_ang_vel_w * robot_body_ang_vel_r
     return reward
 
 def compute_tracking_error(

@@ -690,12 +690,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_arm_joint_vel_w = 2.0
     robot_finger_joint_vel_w = 0.5
     door_joint_pos_w = 4.0
-    hinge_contact_reward_w = 1.5
-    # PUSH-only palm-handle contact reward: +palm_handle_reward_w per step whenever palm_center/
-    # palm_lower press the handle (> handle_contact_force_threshold) during the grasp->push-open window
-    # (hinge_contact_mask, keyframes 2..5). Binary. For PULL this is inactive (is_push gate = 0), and
-    # for PUSH the old finger-inclusive hinge_contact reward is disabled -- fingers on the handle are
-    # no longer rewarded on push.
+    # Palm-handle contact reward (push AND pull): +palm_handle_reward_w per step whenever palm_center/
+    # palm_lower press the handle (> handle_contact_force_threshold) during the grasp->open window
+    # (hinge_contact_mask, keyframes 2..5). Binary. Unified across modes -- finger<->hinge contact is
+    # no longer rewarded; only the palm is.
     palm_handle_reward_w = 5.0
     robot_body_lin_vel_w = 1.0
     robot_body_ang_vel_w = 0.5
