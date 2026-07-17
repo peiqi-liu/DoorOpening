@@ -247,13 +247,13 @@ dagger:
     # sample_seam), relative to the door's mid-thickness plane. Pinned to 0 so all 4 walls start
     # exactly at the door plane; kept as a config key (rather than removed) so sample_seam/
     # rand_range don't need a special zero-width-range code path.
-    center_offset_m: [0.0, 0.0]
+    center_offset_m: [-0.25, 0.25]
     # Wall vertical extent. Every wall starts at the lower bound (0.25); the UPPER bound is randomized
     # INDEPENDENTLY per wall (each of the four columns draws its own top in [lower, upper]), so the
     # walls reach different heights. Lower stays below the policy's z-crop [0.55, 1.5] so coverage
     # never runs out at the bottom of the crop. Remove this key to fall back to the legacy behavior of
     # exactly matching the door panel's own bbox height.
-    height_range_m: [0.25, 2.00]
+    height_range_m: [0.25, 2.10]
     # Wall GT point count = total wall surface area * this density (points/m^2), capped at
     # wall_num_points. Keeps point density roughly constant as walls change size (esp. with the
     # randomized height above), instead of always emitting a fixed wall_num_points. Remove for the
