@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import math
@@ -460,6 +461,10 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         student_cfg_data = self.load_yaml(cfg_path) or {}
         if not isinstance(student_cfg_data, dict):
             raise ValueError(f"Student config at '{cfg_path}' must be a YAML mapping.")
+        # Snapshot the untouched file contents before the .pop() calls below strip keys out of
+        # student_cfg_data for internal bookkeeping -- this is what gets embedded in the checkpoint
+        # sidecar YAML so a saved checkpoint can be traced back to the exact model config that trained it.
+        self.student_model_cfg_raw = copy.deepcopy(student_cfg_data)
         student_yaml_runtime_cfg = dict(student_cfg_data.pop("dagger", {}) or {})
         self.local_pcd_range = list(student_cfg_data.pop("local_pcd_range", [1.0, 0.35, 0.35]))
         self.local_pcd_x_direction_cutoff = student_cfg_data.pop("x_direction_cutoff", -0.5)
@@ -3877,9 +3882,23 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         }
         torch.save(checkpoint, filename)
         try:
+            # Dump the student model YAML (hidden_dim, transformer_cfg, state_encoders_cfg, etc.)
+            # exactly as loaded from the original student cfg file, before _init_student's .pop()
+            # calls stripped keys out of it -- except "dagger", which is replaced with self.runtime_cfg
+            # (the effective, post-CLI-override runtime config actually used for this run; the raw
+            # file's "dagger" section predates --max_iterations/--pointcloud_source/etc. overrides).
+            # This is the same schema run_multi_distillation.py / eval_multi_distillation.py expect
+            # from --student_cfg, so this sidecar file reproduces the run standalone, without needing
+            # to also point at the original cfg file or pass the same CLI overrides again.
+            config_to_dump = copy.deepcopy(self.student_model_cfg_raw)
+            config_to_dump["dagger"] = copy.deepcopy(self.runtime_cfg)
+            # wandb is nested under "dagger" in the student cfg file schema but gets popped out to
+            # top-level by the launch scripts before reaching self.runtime_cfg -- re-nest it here so
+            # a reload picks the same wandb settings back up instead of silently losing them.
+            config_to_dump["dagger"]["wandb"] = copy.deepcopy(self.wandb_cfg)
             config_filename = str(pathlib.Path(filename).with_suffix(".yaml"))
             with open(config_filename, "w", encoding="utf-8") as f:
-                yaml.safe_dump(self.config, f, sort_keys=False)
+                yaml.safe_dump(config_to_dump, f, sort_keys=False)
         except Exception as exc:
             if self.rank == 0:
                 print(f"Warning: failed to save checkpoint config YAML next to '{filename}': {exc}")
