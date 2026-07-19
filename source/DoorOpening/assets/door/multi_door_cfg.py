@@ -375,7 +375,7 @@ def edit_door_articulation(
     door: Articulation, 
     nominal_joint_stiffness: torch.Tensor | None = None,
     nominal_joint_damping: torch.Tensor | None = None,
-    door_closed_range = 0.01,     # radians
+    door_closed_range = 0.05,     # radians
     hinge_range = 0.8,
     locked_stiffness = 1e6,
     locked_damping = 1e5,
