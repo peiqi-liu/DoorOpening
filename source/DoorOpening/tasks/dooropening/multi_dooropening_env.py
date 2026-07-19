@@ -315,22 +315,10 @@ class DooropeningEnv(DirectRLEnv):
         self.episode_x5_collided = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.episode_franka_box_collided = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
-        # Task-based success: latch when the base reaches the FAR side of the door. We work in BASE-X
-        # JOINT space, NOT robot.data.root_state_w -- the articulation root is the fixed `base_link`
-        # spawned at ROBOT_INITIAL_POS; the mobile base moves *below* it via the base_x prismatic joint.
-        # The robot spawns facing the door, so base_x GROWS as it drives toward/through the door
-        # (traj.pkl: base_x ~0 at spawn -> ~1.5 pull / ~2.5 push). Hence base world x = ROBOT_INITIAL.x
-        # - base_x_joint, and the signed distance PAST the door plane (door at DOOR_INITIAL.x) is
-        #     dist_past = DOOR_INITIAL.x - world_x = base_x_joint + (DOOR_INITIAL.x - ROBOT_INITIAL.x)
-        # (= base_x_joint - 1.0 here: spawn base_x~0 -> ~-1.0 (not past); base_x=1.0 at the door plane;
-        # pull ends ~+0.5 past, push ends ~+1.5 past).
-        self.episode_reached_far_side = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        # Far-side task-success of the LAST completed episode per env, recorded at done and PERSISTED
-        # across reset. A distillation/eval loop reads this right after env.step() -- by then the live
-        # episode_reached_far_side latch has already been cleared in _reset_idx, so it can't be used.
-        self.last_far_side_success = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
-        self.completed_reached_last_frame = deque(maxlen=self.games_to_track)
-        self._base_x_dof_idx = int(self._robot_base_xy_dof_idx[0].item())
+        # Success of the LAST completed episode per env (reached the last reference frame), recorded at
+        # done and PERSISTED across reset so a distillation/eval loop can read it after env.step() --
+        # by then the live episode_reached_last_frame latch has already been cleared in _reset_idx.
+        self.last_success = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         self._door_minus_robot_x = float(DOOR_INITIAL_POS[0] - ROBOT_INITIAL_POS[0])
         # Per-motion reference FINAL base_x JOINT value. Push refs end far past the door (very negative
         # base_x), pull refs end near it -> tells us the door type per env for the far-side threshold.
@@ -975,22 +963,6 @@ class DooropeningEnv(DirectRLEnv):
         = base_x_joint - 1.0 here (positive => past the door on the far side)."""
         return base_x_joint + self._door_minus_robot_x
 
-    def _far_side_threshold(self) -> torch.Tensor:
-        """Per-env clearance the base must move PAST the door plane to count as success.
-        Push refs traverse far past the door (-> success_far_push_dist); pull refs end near it
-        (-> success_far_pull_dist). Door type is inferred from the reference's final base_x joint."""
-        if self.motion_final_base_rel_x is None:
-            return torch.full((self.num_envs,), float(self.cfg.success_far_pull_dist), device=self.device)
-        env_motion_idx = self.ref_motion_lib.env_to_file_map.to(device=self.device, dtype=torch.long)
-        ref_final_base_x_joint = self.motion_final_base_rel_x[env_motion_idx]
-        ref_dist_past = self._base_dist_past_door(ref_final_base_x_joint)
-        is_push = ref_dist_past > float(self.cfg.success_far_push_ref_dist)
-        return torch.where(
-            is_push,
-            torch.full_like(ref_dist_past, float(self.cfg.success_far_push_dist)),
-            torch.full_like(ref_dist_past, float(self.cfg.success_far_pull_dist)),
-        )
-
     def _get_is_push_env(self) -> torch.Tensor:
         """Per-env push flag as float [num_envs] (1.0 = push, 0.0 = pull), inferred the same way as
         _far_side_target (push refs traverse far past the door). Static per assignment -> cached.
@@ -1011,31 +983,17 @@ class DooropeningEnv(DirectRLEnv):
         self._is_push_env_cached = is_push.reshape(self.num_envs)
         return self._is_push_env_cached
 
-    def _update_far_side_tracker(self):
-        """Latch, each step, whether the base has traversed to the far side of the door."""
-        if self.motion_final_base_rel_x is None:
-            return
-        base_x_joint = self.robot.data.joint_pos[:, self._base_x_dof_idx]
-        actual_dist_past = self._base_dist_past_door(base_x_joint)
-        self.episode_reached_far_side |= actual_dist_past > self._far_side_threshold()
-
     def _update_success_metrics(self):
         self._update_last_frame_tracker()
-        self._update_far_side_tracker()
 
         done_mask = torch.nonzero(self.reset_buf, as_tuple=False).squeeze(-1)
         if done_mask.numel() > 0:
-            # Task success = the robot reached the FAR side of the door during the episode.
-            episode_successes_tensor = self.episode_reached_far_side[done_mask].to(dtype=torch.float32)
+            # Task success = the robot reached the last reference frame during the episode.
+            episode_successes_tensor = self.episode_reached_last_frame[done_mask].to(dtype=torch.float32)
             episode_successes = episode_successes_tensor.detach().cpu().tolist()
             self.completed_successes.extend(float(value) for value in episode_successes)
             # Persist for a distillation/eval loop to read after env.step() (survives _reset_idx).
-            self.last_far_side_success[done_mask] = episode_successes_tensor
-            # Keep the old imitation metric (reached last ref frame / timeout) logged for comparison.
-            self.completed_reached_last_frame.extend(
-                (self.episode_reached_last_frame[done_mask] | self.reset_time_outs[done_mask])
-                .to(dtype=torch.float32).detach().cpu().tolist()
-            )
+            self.last_success[done_mask] = episode_successes_tensor
             done_family_ids = self.env_family_ids[done_mask].detach().cpu().tolist()
             for family_id, value in zip(done_family_ids, episode_successes):
                 family_name = DOOR_FAMILY_NAMES[int(family_id)]
@@ -1051,10 +1009,6 @@ class DooropeningEnv(DirectRLEnv):
         success_rate = self._mean_completed_metric(self.completed_successes)
         if success_rate is not None:
             self.extras["success/success_rate"] = success_rate
-        # Old imitation-style success (reached last ref frame or timed out) kept for comparison.
-        reached_last_frame_rate = self._mean_completed_metric(self.completed_reached_last_frame)
-        if reached_last_frame_rate is not None:
-            self.extras["success/reached_last_frame_rate"] = reached_last_frame_rate
         # Fraction of completed rollouts that experienced ANY x5-arm / franka-box door collision.
         x5_collision_rate = self._mean_completed_metric(self.completed_x5_collisions)
         if x5_collision_rate is not None:
@@ -2165,6 +2119,86 @@ class DooropeningEnv(DirectRLEnv):
         self.ref_robot_body_ang_vel = ref_robot_body_ang_vel.index_select(1, ref_key_body_idx) / ref_motion_dt
         self._override_reference_arx_pose_for_fixed_mode()
 
+    def _compute_penalties(self) -> torch.Tensor:
+        """Compute every per-step penalty (each >= 0) and return their sum, to be SUBTRACTED from the
+        reward in _get_rewards. Grouped here (out of _get_rewards, which handles tracking + contact
+        rewards) for clarity. Each block also logs its own error/stats and updates its episode latch;
+        this must be called exactly once per _get_rewards so those latches/logs stay correct.
+
+        Terms: joint-limit, non-finger self-collision, base<->door, x5/arx-arm<->door, and franka
+        control-box<->door contact. The finger<->door protection penalty is intentionally NOT here --
+        it was removed from the reward (hackable; pull never used it, push no longer uses it)."""
+        # x5/arx camera arm <-> door contact penalty (frame/panel/handle). Harsh: the slender
+        # camera arm striking the door is a serious real-world failure.
+        x5_body_force_norm = self._get_x5_body_contact_force_norm(include_franka_box=False)
+        unsafe_x5_body_contact = x5_body_force_norm > self.cfg.x5_body_contact_force_threshold
+        # Latch: this episode had at least one x5-arm door collision (reported per-rollout at done).
+        self.episode_x5_collided |= unsafe_x5_body_contact
+        self.extras["stats/x5_body_contact_force_norm_max"] = float(x5_body_force_norm.max().detach().cpu().item())
+        self.extras["stats/x5_body_unsafe_contact_frac"] = float(
+            unsafe_x5_body_contact.float().mean().detach().cpu().item()
+        )
+        weighted_x5_door_contact_penalty = self.x5_door_contact_penalty_w * unsafe_x5_body_contact.to(dtype=x5_body_force_norm.dtype)
+        self.extras["error/x5_door_contact_penalty"] = weighted_x5_door_contact_penalty.mean().item()
+
+        # Self-collision penalty over non-finger links (franka arm + x5/arx arm + base chassis).
+        # The LEAP hand is excluded so finger poses are not driven conservative.
+        self_collision_body_count = self._get_self_collision_body_count()
+        weighted_self_collision_penalty = self.self_collision_penalty_w * self_collision_body_count
+        self.extras["error/self_collision_penalty"] = weighted_self_collision_penalty.mean().item()
+        self.extras["stats/self_collision_body_count_mean"] = self_collision_body_count.mean().item()
+
+        # Base<->door contact penalty: no base face should touch the door. Count the four
+        # vertical faces (front/back/left/right) whose contact force with any door body exceeds
+        # the threshold and penalize per face in contact.
+        base_door_force_norm = self._stacked_self_contact_force_norm(BASE_DOOR_SENSOR_NAMES)
+        base_door_contact_count = (base_door_force_norm > self.cfg.base_door_contact_force_threshold).sum(dim=-1)
+        weighted_base_door_contact_penalty = self.base_door_contact_penalty_w * base_door_contact_count.to(dtype=base_door_force_norm.dtype)
+        self.extras["error/base_door_contact_penalty"] = weighted_base_door_contact_penalty.mean().item()
+        self.extras["stats/base_door_contact_frac"] = float(
+            (base_door_contact_count > 0).float().mean().detach().cpu().item()
+        )
+
+        # Franka control-box <-> door contact: no longer episode-ending (the box is sturdy). A
+        # graded penalty ramps linearly from 0 at min_force (25 N -- light taps are free) to the
+        # full weight at max_force (75 N and above). Replaces the old hard-termination check.
+        franka_box_force_norm = self._get_franka_box_contact_force_norm()
+        # Latch: this episode had at least one franka-box door collision (> min_force).
+        self.episode_franka_box_collided |= franka_box_force_norm > self.cfg.franka_box_contact_penalty_min_force
+        franka_box_penalty_frac = torch.clamp(
+            (franka_box_force_norm - self.cfg.franka_box_contact_penalty_min_force)
+            / (self.cfg.franka_box_contact_penalty_max_force - self.cfg.franka_box_contact_penalty_min_force),
+            min=0.0,
+            max=1.0,
+        )
+        weighted_franka_box_contact_penalty = self.franka_box_contact_penalty_w * franka_box_penalty_frac
+        self.extras["error/franka_box_contact_penalty"] = weighted_franka_box_contact_penalty.mean().item()
+        self.extras["stats/franka_box_contact_force_norm_max"] = float(franka_box_force_norm.max().detach().cpu().item())
+        self.extras["fail/franka_box_contact_frac"] = float(
+            (franka_box_force_norm > self.cfg.franka_box_contact_penalty_min_force).float().mean().detach().cpu().item()
+        )
+
+        # Joint-limit penalty on the actuated robot DOFs (soft margin near each limit).
+        joint_limit_penalty, joint_limit_active_fraction = compute_joint_limit_penalty(
+            joint_pos=self.robot.data.joint_pos[:, self._robot_dof_idx],
+            joint_lower_limits=self.robot_dof_lower_limits,
+            joint_upper_limits=self.robot_dof_upper_limits,
+            soft_ratio=self.joint_limit_penalty_margin_ratio,
+        )
+        weighted_joint_limit_penalty = self.joint_limit_penalty_w * joint_limit_penalty
+        self.extras["error/joint_limit_penalty"] = weighted_joint_limit_penalty.reshape(self.num_envs, -1).mean().item()
+        self.extras["stats/joint_limit_active_fraction"] = (
+            joint_limit_active_fraction.reshape(self.num_envs, -1).mean().item()
+        )
+
+        return (
+            weighted_joint_limit_penalty
+            + weighted_self_collision_penalty
+            + weighted_base_door_contact_penalty
+            + weighted_x5_door_contact_penalty
+            + weighted_franka_box_contact_penalty
+        )
+
     def _get_rewards(self) -> torch.Tensor:
         self._get_intermediate_values()
         self._log_dr_metrics()
@@ -2252,25 +2286,23 @@ class DooropeningEnv(DirectRLEnv):
         )
         self.extras["reward/palm_handle_push_reward"] = weighted_palm_handle_reward.mean().item()
         self.extras["stats/palm_handle_force_norm_max"] = float(palm_handle_force_norm.max().detach().cpu().item())
-        x5_body_force_norm = self._get_x5_body_contact_force_norm(include_franka_box=False)
-        unsafe_x5_body_contact = x5_body_force_norm > self.cfg.x5_body_contact_force_threshold
-        # Latch: this episode had at least one x5-arm door collision (reported per-rollout below).
-        self.episode_x5_collided |= unsafe_x5_body_contact
-        self.extras["stats/x5_body_contact_force_norm_max"] = float(x5_body_force_norm.max().detach().cpu().item())
-        self.extras["stats/x5_body_unsafe_contact_frac"] = float(
-            unsafe_x5_body_contact.float().mean().detach().cpu().item()
-        )
-        # x5/arx camera arm <-> door contact penalty (frame/panel/handle). Harsh: the slender
-        # camera arm striking the door is a serious real-world failure.
-        weighted_x5_door_contact_penalty = self.x5_door_contact_penalty_w * unsafe_x5_body_contact.to(dtype=x5_body_force_norm.dtype)
-        self.extras["error/x5_door_contact_penalty"] = weighted_x5_door_contact_penalty.mean().item()
 
-        # Self-collision penalty over non-finger links (franka arm + x5/arx arm + base chassis).
-        # The LEAP hand is excluded so finger poses are not driven conservative.
-        self_collision_body_count = self._get_self_collision_body_count()
-        weighted_self_collision_penalty = self.self_collision_penalty_w * self_collision_body_count
-        self.extras["error/self_collision_penalty"] = weighted_self_collision_penalty.mean().item()
-        self.extras["stats/self_collision_body_count_mean"] = self_collision_body_count.mean().item()
+        # --- PULL-only hinge (handle) contact reward -----------------------------------------------
+        # Separated out of compute_deep_mimic_rewards (this is a task/contact reward, not a tracking
+        # term). Binary bonus for the hand contacting the handle (link_2) during the grasp/pull window
+        # (ref_hinge_contact_mask), gated to PULL envs (1 - is_push); PUSH uses the palm-only reward
+        # above instead. Reuses handle_force_norm computed above (||contact_forces_door2||); behavior
+        # is identical to the old contact_force_w * contact_reward term inside deep-mimic.
+        hinge_contact = (handle_force_norm > self.cfg.handle_contact_force_threshold).to(
+            dtype=handle_force_norm.dtype
+        )
+        weighted_hinge_contact_reward = (
+            self.hinge_contact_reward_w
+            * self.ref_hinge_contact_mask.squeeze()
+            * (1.0 - is_push_env)
+            * hinge_contact
+        )
+        self.extras["reward/hinge_contact_pull_reward"] = weighted_hinge_contact_reward.mean().item()
 
         # finger<->panel force (LEAP hand vs door panel Door/link_1).
         contact_forces_door_panel = self._get_filtered_contact_force_w(
@@ -2315,36 +2347,6 @@ class DooropeningEnv(DirectRLEnv):
         grasp_denom = grasp_stage.sum().clamp(min=1.0)
         self.extras["finger_panel_normal_forces_mean"] = float(
             ((panel_force_norm * grasp_stage).sum() / grasp_denom).detach().cpu().item()
-        )
-
-        # Base<->door contact penalty: no base face should touch the door. Count the four
-        # vertical faces (front/back/left/right) whose contact force with any door body exceeds
-        # the threshold and penalize per face in contact.
-        base_door_force_norm = self._stacked_self_contact_force_norm(BASE_DOOR_SENSOR_NAMES)
-        base_door_contact_count = (base_door_force_norm > self.cfg.base_door_contact_force_threshold).sum(dim=-1)
-        weighted_base_door_contact_penalty = self.base_door_contact_penalty_w * base_door_contact_count.to(dtype=base_door_force_norm.dtype)
-        self.extras["error/base_door_contact_penalty"] = weighted_base_door_contact_penalty.mean().item()
-        self.extras["stats/base_door_contact_frac"] = float(
-            (base_door_contact_count > 0).float().mean().detach().cpu().item()
-        )
-
-        # Franka control-box <-> door contact: no longer episode-ending (the box is sturdy). A
-        # graded penalty ramps linearly from 0 at min_force (25 N -- light taps are free) to the
-        # full weight at max_force (75 N and above). Replaces the old hard-termination check.
-        franka_box_force_norm = self._get_franka_box_contact_force_norm()
-        # Latch: this episode had at least one franka-box door collision (> min_force).
-        self.episode_franka_box_collided |= franka_box_force_norm > self.cfg.franka_box_contact_penalty_min_force
-        franka_box_penalty_frac = torch.clamp(
-            (franka_box_force_norm - self.cfg.franka_box_contact_penalty_min_force)
-            / (self.cfg.franka_box_contact_penalty_max_force - self.cfg.franka_box_contact_penalty_min_force),
-            min=0.0,
-            max=1.0,
-        )
-        weighted_franka_box_contact_penalty = self.franka_box_contact_penalty_w * franka_box_penalty_frac
-        self.extras["error/franka_box_contact_penalty"] = weighted_franka_box_contact_penalty.mean().item()
-        self.extras["stats/franka_box_contact_force_norm_max"] = float(franka_box_force_norm.max().detach().cpu().item())
-        self.extras["fail/franka_box_contact_frac"] = float(
-            (franka_box_force_norm > self.cfg.franka_box_contact_penalty_min_force).float().mean().detach().cpu().item()
         )
 
         deep_mimic_reward = compute_deep_mimic_rewards(
@@ -2398,21 +2400,8 @@ class DooropeningEnv(DirectRLEnv):
             robot_finger_joint_vel_w = self.robot_finger_joint_vel_w,
             robot_body_lin_vel_w = self.robot_body_lin_vel_w,
             robot_body_ang_vel_w = self.robot_body_ang_vel_w,
-
-            contact_forces = contact_forces_door2,
-            # PULL-only now: the original palm+inner-finger handle-contact reward is gated to pull
-            # envs (1 - is_push). PUSH uses the palm-only reward above instead. Pull behavior is
-            # unchanged (is_push=0 -> factor 1).
-            contact_force_w = self.hinge_contact_reward_w * self.ref_hinge_contact_mask.squeeze() * (1.0 - is_push_env),
-            contact_force_threshold = self.cfg.handle_contact_force_threshold,
         )
 
-        joint_limit_penalty, joint_limit_active_fraction = compute_joint_limit_penalty(
-            joint_pos=self.robot.data.joint_pos[:, self._robot_dof_idx],
-            joint_lower_limits=self.robot_dof_lower_limits,
-            joint_upper_limits=self.robot_dof_upper_limits,
-            soft_ratio=self.joint_limit_penalty_margin_ratio,
-        )
         arx_tuck_joint_pos_diff = hinge_angle_diff(
             self._robot_arx_tuck_joint_pos_target.unsqueeze(0),
             self.robot_arx_joint_pos,
@@ -2421,11 +2410,10 @@ class DooropeningEnv(DirectRLEnv):
         arx_tuck_reward = torch.exp(-self.robot_arx_tuck_joint_pos_scale * arx_tuck_joint_pos_err)
         weighted_arx_tuck_reward = self.robot_arx_tuck_joint_pos_w * arx_tuck_reward
         self.extras["reward/arx_tuck_reward"] = weighted_arx_tuck_reward.mean().item()
-        weighted_joint_limit_penalty = self.joint_limit_penalty_w * joint_limit_penalty
-        self.extras["error/joint_limit_penalty"] = weighted_joint_limit_penalty.reshape(self.num_envs, -1).mean().item()
-        self.extras["stats/joint_limit_active_fraction"] = (
-            joint_limit_active_fraction.reshape(self.num_envs, -1).mean().item()
-        )
+
+        # All per-step penalties (joint-limit, self-collision, base/x5/franka-box door contact),
+        # summed. Grouped in one method so the reward assembly below reads as reward - penalties.
+        total_penalty = self._compute_penalties()
         self._update_success_metrics()
 
         # 1. Base alive reward: small constant for remaining active
@@ -2445,13 +2433,9 @@ class DooropeningEnv(DirectRLEnv):
             deep_mimic_reward
             + weighted_arx_tuck_reward
             + total_alive_reward
-            + weighted_palm_handle_reward  # PUSH-only palm-handle contact reward
-            - weighted_joint_limit_penalty
-            - weighted_self_collision_penalty
-            # finger<->door contact penalty REMOVED (hackable; pull never used it, push no longer uses it)
-            - weighted_base_door_contact_penalty
-            - weighted_x5_door_contact_penalty
-            - weighted_franka_box_contact_penalty
+            + weighted_palm_handle_reward    # PUSH-only palm-handle contact reward
+            + weighted_hinge_contact_reward  # PULL-only handle contact reward (was inside deep-mimic)
+            - total_penalty
         )
         final_reward = torch.where(is_killed, final_reward + termination_penalty, final_reward)
 
@@ -2559,7 +2543,6 @@ class DooropeningEnv(DirectRLEnv):
             self.applied_robot_dof_targets[env_ids, :] = self.robot_dof_targets[env_ids, :]
             self._action_target_history[env_ids] = self.robot_dof_targets[env_ids].unsqueeze(1)
             self.episode_reached_last_frame[env_ids] = False
-            self.episode_reached_far_side[env_ids] = False
             self.episode_x5_collided[env_ids] = False
             self.episode_franka_box_collided[env_ids] = False
             super()._reset_idx(env_ids)
@@ -2619,7 +2602,6 @@ class DooropeningEnv(DirectRLEnv):
         self.applied_robot_dof_targets[env_ids, :] = self.robot_dof_targets[env_ids, :]
         self._action_target_history[env_ids] = self.robot_dof_targets[env_ids].unsqueeze(1)
         self.episode_reached_last_frame[env_ids] = False
-        self.episode_reached_far_side[env_ids] = False
         self.episode_x5_collided[env_ids] = False
         self.episode_franka_box_collided[env_ids] = False
         super()._reset_idx(env_ids)
@@ -2684,10 +2666,6 @@ def compute_deep_mimic_rewards(
     robot_finger_joint_vel_w: float,
     robot_body_lin_vel_w: float,
     robot_body_ang_vel_w: float,
-
-    contact_force_w: torch.Tensor,
-    contact_forces: torch.Tensor,
-    contact_force_threshold: float,
 ) -> torch.Tensor:
     # ----------------------------------
     # Robot body position error
@@ -2761,12 +2739,8 @@ def compute_deep_mimic_rewards(
     else:
         robot_body_ang_vel_r = torch.zeros_like(key_body_pos_r)
 
-    if contact_forces.dim() != 2 or contact_forces.size(-1) != 3:
-        raise RuntimeError("Expected filtered handle contact force shape [N, 3].")
-    contact_force_norm = torch.linalg.vector_norm(contact_forces, dim=-1)
-    contact_reward = (contact_force_norm > contact_force_threshold).to(dtype=key_body_pos_r.dtype)
     # ----------------------------------
-    # Final reward
+    # Final reward (pure DeepMimic tracking; contact/handle rewards live in _get_rewards)
     # ----------------------------------
     reward = robot_key_body_pos_w * key_body_pos_r\
          + robot_key_body_quat_w * key_body_quat_r\
@@ -2779,8 +2753,7 @@ def compute_deep_mimic_rewards(
          + robot_arm_joint_vel_w * arm_joint_vel_r\
          + robot_finger_joint_vel_w * finger_joint_vel_r\
          + robot_body_lin_vel_w * robot_body_lin_vel_r\
-         + robot_body_ang_vel_w * robot_body_ang_vel_r\
-         + contact_force_w * contact_reward
+         + robot_body_ang_vel_w * robot_body_ang_vel_r
     return reward
 
 def compute_tracking_error(
