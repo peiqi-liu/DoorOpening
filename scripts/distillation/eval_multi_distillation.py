@@ -12,7 +12,6 @@ import pathlib
 import sys
 import time
 import types
-from collections import OrderedDict
 
 import yaml
 from isaaclab.app import AppLauncher
@@ -139,7 +138,17 @@ def _resolve_multi_teacher_checkpoints():
 
 parser = argparse.ArgumentParser(description="Evaluate a distilled DooropeningMulti point-cloud policy.")
 parser.add_argument("--video", action="store_true", default=False, help="Record a video during evaluation.")
-parser.add_argument("--viser", action="store_true", default=False, help="Save raw Viser `.pt` replays for 8 random eval envs.")
+parser.add_argument(
+    "--viser",
+    action="store_true",
+    default=False,
+    help=(
+        "Save replay_viser_pt.py-compatible .pt files (robot + door URDF meshes, joint angles, PD "
+        "targets, actual sim door joints, and the policy-input point cloud) for several randomly "
+        "selected eval envs, one file per env, into <experiment_dir>/viser. Play any of them with "
+        "scripts/replay_viser_pt.py to see the real URDF meshes."
+    ),
+)
 parser.add_argument("--video_length", type=int, default=600, help="Length of the recorded video in env steps.")
 parser.add_argument("--video_folder", type=str, default=None, help="Optional folder for recorded videos.")
 parser.add_argument("--num_envs", type=int, default=64, help="Number of environments to evaluate.")
@@ -236,24 +245,12 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
-    "--save-viser-pt",
-    "--save_viser_pt",
-    dest="save_viser_pt",
-    type=str,
-    default=None,
-    help=(
-        "Save a replay_viser_pt.py-compatible .pt of robot joint angles (compact_q) + PD targets "
-        "(compact_target) for one env, ordered [base_x, base_y, base_rotation, panda_1..7, "
-        "finger_0..N]. Play it with scripts/replay_viser_pt.py."
-    ),
-)
-parser.add_argument(
     "--viser-env-id",
     "--viser_env_id",
     dest="viser_env_id",
     type=int,
     default=0,
-    help="Env index to record for --save-viser-pt.",
+    help="Env index to capture for --attn-viz.",
 )
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
@@ -914,81 +911,142 @@ def _save_replay_pt(replay_runs, joint_names, base_env, save_replay_arg):
     print(f"[INFO] Replay saved to {replay_path} ({len(replay_runs)} run(s) so far).")
 
 
-def _save_viser_pt(viser_pt_state, save_viser_arg):
-    """Write the accumulated viser frames to a .pt. Called after each run for incremental saves."""
-    viser_path = pathlib.Path(save_viser_arg).expanduser()
-    if viser_path.is_dir():
-        viser_path = viser_path / "viser_replay.pt"
-    viser_path = str(viser_path)
-    os.makedirs(os.path.dirname(viser_path) or ".", exist_ok=True)
-    torch.save(
-        {
-            "frames": viser_pt_state["frames"],
-            "compact_target_joint_names": viser_pt_state["compact_names"],
-            "frame_dt": viser_pt_state["frame_dt"],
-            "door_urdf_path": viser_pt_state["door_urdf_path"],
-            "door_joint_names": viser_pt_state["door_joint_names"],
-            "door_root_pos": viser_pt_state["door_root_pos"],  # env-relative
-            "door_root_quat": viser_pt_state["door_root_quat"],
-        },
-        viser_path,
-    )
-    print(f"[INFO] Saved {len(viser_pt_state['frames'])} viser frames to {viser_path} (all runs so far).")
+NUM_VISER_ENVS = 8
+
+
+def _build_viser_meta(base_env):
+    """Compact-joint layout shared by every per-env viser recorder (built once)."""
+    compact_names, compact_idx = _build_compact_joint_layout(list(base_env.robot.data.joint_names))
+    # applied_robot_dof_targets is stored in _robot_dof_idx order (NOT joint_names order) -> map each
+    # compact joint's full-dof index to its position within _robot_dof_idx for the target.
+    dof_to_target_pos = {int(d): k for k, d in enumerate(base_env._robot_dof_idx.detach().cpu().tolist())}
+    target_pos = [int(dof_to_target_pos.get(int(j), -1)) for j in compact_idx]
+    return {
+        "compact_names": compact_names,
+        "compact_idx": torch.as_tensor(compact_idx, device=base_env.device, dtype=torch.long),
+        "target_idx": torch.as_tensor([max(p, 0) for p in target_pos], device=base_env.device, dtype=torch.long),
+        "target_valid": torch.as_tensor([p >= 0 for p in target_pos], device=base_env.device, dtype=torch.bool),
+        "frame_dt": float(getattr(base_env, "step_dt", 0.025)),
+    }
+
+
+def _viser_env_label(base_env, env_id):
+    """(family_name, asset_name) used to name a per-env viser file."""
+    asset_idx = int(base_env.env_asset_indices[env_id].item())
+    family_name = DOOR_FAMILY_NAMES[int(asset_family_ids[asset_idx])]
+    asset_name = pathlib.Path(asset_paths[asset_idx]).resolve().parent.name
+    return family_name, asset_name
+
+
+def _build_viser_recorder(base_env, env_id):
+    """Per-env recorder: the static door pose/URDF + an empty frame list.
+
+    Keeps the original raw-viser design (one file per selected env) but records the
+    replay_viser_pt.py URDF payload (compact joints + door URDF) so the meshes render.
+    """
+    env_origin = base_env.scene.env_origins[env_id].detach().clone()  # on device
+    asset_idx = int(base_env.env_asset_indices[env_id].item())
+    # Save the door's GLOBAL urdf path so the replay loads the real door mesh and animates it with the
+    # per-frame ACTUAL sim door joints. Door is fixed-base, so store its root pose env-relative once.
+    door_urdf = os.path.abspath(str(asset_paths[asset_idx]))
+    door_root = base_env.door.data.root_state_w[env_id, :7].detach().clone()  # world, on device
+    return {
+        "env_id": int(env_id),
+        "env_origin": env_origin,
+        "door_urdf_path": door_urdf,
+        "door_joint_names": list(base_env.door.data.joint_names),
+        "door_root_pos": (door_root[:3] - env_origin).detach().cpu().clone(),  # env-relative
+        "door_root_quat": door_root[3:7].detach().cpu().clone(),
+        "frames": [],
+    }
+
+
+def _select_viser_recorders(base_env, num_envs=NUM_VISER_ENVS):
+    """Pick several random eval envs and build a recorder for each (matches the original design)."""
+    n = max(1, min(int(num_envs), int(base_env.num_envs)))
+    env_ids = torch.randperm(base_env.num_envs, device=base_env.device)[:n].detach().cpu().tolist()
+    recorders = [_build_viser_recorder(base_env, int(env_id)) for env_id in env_ids]
+    labels = [f"env{r['env_id']}:{_viser_env_label(base_env, r['env_id'])[1]}" for r in recorders]
+    print("[INFO] Viser envs (URDF replay, one .pt each):", ", ".join(labels))
+    return recorders
+
+
+def _append_viser_frame(recorder, viser_meta, base_env, dagger, student_output):
+    """Append one replay frame for the recorder's env. Call only while that env is active."""
+    env_id = recorder["env_id"]
+    org = recorder["env_origin"]  # device (3,)
+    q = base_env.robot.data.joint_pos[env_id, viser_meta["compact_idx"]].detach().cpu().clone()
+    tgt = base_env.applied_robot_dof_targets[env_id, viser_meta["target_idx"]].detach().cpu().clone()
+    tgt[~viser_meta["target_valid"].cpu()] = 0.0  # joints not in the controlled set
+    rb = base_env.robot.data.root_state_w[env_id, :7].detach()
+    # ACTUAL sim door joints for this frame (NOT predicted); the replay poses the door URDF with these.
+    dj = base_env.door.data.joint_pos[env_id].detach()
+    frame = {
+        "compact_q": q,
+        "compact_target": tgt,
+        "door_joint_pos": dj.cpu().clone(),
+        "robot_base_pos_w": (rb[:3] - org).cpu().clone(),
+        "robot_base_quat_w": rb[3:7].cpu().clone(),
+    }
+    # Policy-input point cloud (the local_pcd_t the student consumes), cached on the dagger in
+    # _build_student_obs. Transform base-frame -> env-relative world (same frame as robot_base_pos_w).
+    pcd_base = getattr(dagger, "_last_policy_input_pcd_base", None)
+    if pcd_base is not None and pcd_base.shape[0] > env_id:
+        local = pcd_base[env_id, ..., :3].detach().to(torch.float32)  # [N, 3] base frame
+        bq = rb[3:7].to(torch.float32)                                # world wxyz
+        axis = bq[1:].unsqueeze(0).expand(local.shape[0], 3)
+        uv = torch.cross(axis, local, dim=-1)
+        uuv = torch.cross(axis, uv, dim=-1)
+        local_world = local + 2.0 * (bq[0] * uv + uuv)
+        local_world = local_world + (rb[:3] - org).to(torch.float32).unsqueeze(0)
+        frame["policy_input_points_world"] = local_world.cpu().clone()
+    # Aux handle position (robot base frame): the network's PREDICTED handle pos and the aux INPUT it
+    # received. The replay transforms these to world with the frame's base pose.
+    if (
+        getattr(dagger, "has_aux_prediction", False)
+        and isinstance(student_output, dict)
+        and "aux" in student_output
+    ):
+        aux_pred = dagger._decode_aux_prediction(student_output["aux"].detach())
+        if aux_pred is not None and aux_pred.shape[0] > env_id:
+            frame["aux_prediction"] = aux_pred[env_id].detach().cpu().to(torch.float32).clone()
+    aux_in = getattr(dagger, "latest_aux_input_vector", None)
+    if aux_in is not None and aux_in.shape[0] > env_id:
+        frame["aux_input"] = aux_in[env_id].detach().cpu().to(torch.float32).clone()
+    recorder["frames"].append(frame)
+
+
+def _save_viser_recorders(recorders, viser_meta, base_env, out_dir, run_index):
+    """Write one replay_viser_pt.py-compatible .pt per env into out_dir (called after each run)."""
+    os.makedirs(out_dir, exist_ok=True)
+    saved = 0
+    for recorder in recorders:
+        if not recorder["frames"]:
+            continue
+        env_id = recorder["env_id"]
+        family_name, asset_name = _viser_env_label(base_env, env_id)
+        path = os.path.join(out_dir, f"run{int(run_index):02d}_{family_name}_env{env_id:03d}_{asset_name}.pt")
+        torch.save(
+            {
+                "frames": recorder["frames"],
+                "compact_target_joint_names": viser_meta["compact_names"],
+                "frame_dt": viser_meta["frame_dt"],
+                "door_urdf_path": recorder["door_urdf_path"],
+                "door_joint_names": recorder["door_joint_names"],
+                "door_root_pos": recorder["door_root_pos"],  # env-relative
+                "door_root_quat": recorder["door_root_quat"],
+            },
+            path,
+        )
+        print(f"[INFO] Saved {len(recorder['frames'])} viser frames (env {env_id}) to {path}.")
+        saved += 1
+    if saved == 0:
+        print("[INFO] Viser: no active frames captured this run; nothing saved.")
 
 
 def _build_teacher_actions(dagger, obs):
     teacher_output = dagger._get_teacher_actions(obs)
     return teacher_output["actions"], None
-
-
-def _configure_eval_viser_raw_streams(dagger, run_index, num_streams=8):
-    if not getattr(dagger, "viser_raw_enabled", False):
-        return
-
-    num_streams = max(1, min(int(num_streams), int(dagger.num_envs)))
-    selected_env_ids = torch.randperm(dagger.num_envs, device=dagger.device)[:num_streams].detach().cpu().tolist()
-    streams = OrderedDict()
-    selected_labels = []
-    for env_id in selected_env_ids:
-        family_id = int(dagger.env_family_ids[env_id].detach().cpu().item())
-        family_name = DOOR_FAMILY_NAMES[family_id]
-        asset_idx = int(dagger.env_asset_idx[env_id].detach().cpu().item())
-        asset_name = pathlib.Path(asset_paths[asset_idx]).resolve().parent.name
-        stream_name = f"run{int(run_index):02d}_{family_name}_env{env_id:03d}_{asset_name}"
-        streams[stream_name] = {
-            "family_id": family_id,
-            "family_name": stream_name,
-            "env_id": int(env_id),
-            "frames": [],
-            "frame_count": 0,
-            "chunk_index": 0,
-            "latest_iteration": None,
-        }
-        selected_labels.append(f"{env_id}:{asset_name}")
-    dagger._viser_raw_streams = streams
-    print("[INFO] Eval viser_raw envs:", ", ".join(selected_labels))
-
-
-def _flush_finished_eval_viser_raw_streams(dagger, newly_finished):
-    if not getattr(dagger, "viser_raw_enabled", False):
-        return
-    if newly_finished is None or newly_finished.numel() == 0:
-        return
-    if not getattr(dagger, "_viser_raw_streams", None):
-        return
-    finished_env_ids = set(int(env_id) for env_id in newly_finished.detach().cpu().tolist())
-    completed_stream_keys = []
-    for stream_name, stream in dagger._viser_raw_streams.items():
-        if int(stream["env_id"]) not in finished_env_ids:
-            continue
-        dagger._flush_viser_raw_stream(
-            stream,
-            chunk_complete=True,
-            reason=f"eval env {int(stream['env_id'])} finished",
-        )
-        completed_stream_keys.append(stream_name)
-    for stream_name in completed_stream_keys:
-        del dagger._viser_raw_streams[stream_name]
 
 
 def _compute_eval_action_loss(dagger, obs, student_output, active_mask):
@@ -1090,16 +1148,9 @@ def main(env_cfg, agent_cfg: dict):
     print(f"[INFO] Eval output directory: {experiment_dir}")
     print(f"[INFO] pointcloud_source={pointcloud_source}, render_mode={env_cfg.pointcloud_render_mode}")
 
-    viser_cfg = dagger_runtime_cfg.get("viser", {})
-    if not isinstance(viser_cfg, dict):
-        viser_cfg = {}
-    raw_cfg = viser_cfg.get("raw", {})
-    if not isinstance(raw_cfg, dict):
-        raw_cfg = {}
-    raw_cfg["enabled"] = bool(args_cli.viser)
-    raw_cfg.setdefault("path", "eval_viser_replay.pt")
-    viser_cfg["raw"] = raw_cfg
-    dagger_runtime_cfg["viser"] = viser_cfg
+    # Eval never streams the raw per-env viser recordings; the only viser output is the single-env
+    # URDF replay written below when --viser is set. Force the dagger's raw viser recorder off.
+    dagger_runtime_cfg["viser"] = {"raw": {"enabled": False}}
 
     preconvert_shared_urdf_assets(
         door_configs=MULTI_DOOR_CONFIGS,
@@ -1121,41 +1172,19 @@ def main(env_cfg, agent_cfg: dict):
     except Exception:
         _replay_joint_names = None
 
-    viser_pt_state = None
-    if args_cli.save_viser_pt is not None:
-        _compact_names, _compact_idx = _build_compact_joint_layout(list(base_env.robot.data.joint_names))
-        # applied_robot_dof_targets is stored in _robot_dof_idx order (NOT joint_names order) -> map
-        # each compact joint's full-dof index to its position within _robot_dof_idx for the target.
-        _dof_to_target_pos = {int(d): k for k, d in enumerate(base_env._robot_dof_idx.detach().cpu().tolist())}
-        _target_pos = [int(_dof_to_target_pos.get(int(j), -1)) for j in _compact_idx]
-        _v_env_id = max(0, min(int(args_cli.viser_env_id), int(base_env.num_envs) - 1))
-        _v_env_origin = base_env.scene.env_origins[_v_env_id].detach().clone()  # on device
-        _v_door_asset_idx = int(base_env.env_asset_indices[_v_env_id].item())
-        # Save the door's GLOBAL urdf path so the replay loads the real door mesh (instead of a baked
-        # sampled pointcloud) and animates it with the per-frame ACTUAL sim door joints.
-        _v_door_urdf = os.path.abspath(str(asset_paths[_v_door_asset_idx]))
-        _v_door_root = base_env.door.data.root_state_w[_v_env_id, :7].detach().clone()  # world, on device
-        # Door is fixed-base, so its root pose is constant; store it env-relative (like the robot base)
-        # so the replay can place the URDF once and animate joints per frame.
-        _v_door_root_pos_rel = (_v_door_root[:3] - _v_env_origin).detach().cpu().clone()
-        _v_door_root_quat = _v_door_root[3:7].detach().cpu().clone()
-        viser_pt_state = {
-            "env_id": _v_env_id,
-            "compact_names": _compact_names,
-            "compact_idx": torch.as_tensor(_compact_idx, device=base_env.device, dtype=torch.long),
-            "target_idx": torch.as_tensor([max(p, 0) for p in _target_pos], device=base_env.device, dtype=torch.long),
-            "target_valid": torch.as_tensor([p >= 0 for p in _target_pos], device=base_env.device, dtype=torch.bool),
-            "env_origin": _v_env_origin,
-            "door_urdf_path": _v_door_urdf,
-            "door_joint_names": list(base_env.door.data.joint_names),
-            "door_root_pos": _v_door_root_pos_rel,  # env-relative
-            "door_root_quat": _v_door_root_quat,
-            "frames": [],
-            "frame_dt": float(getattr(base_env, "step_dt", 0.025)),
-        }
+    # --viser: record several random envs to replay_viser_pt.py-compatible .pt files (robot + door
+    # URDF meshes), one file per env, into <experiment_dir>/viser. viser_meta holds the shared compact
+    # joint layout; per-env recorders are (re)selected at the start of each eval run below.
+    viser_meta = None
+    viser_dir = None
+    viser_recorders = None
+    if args_cli.viser:
+        viser_meta = _build_viser_meta(base_env)
+        viser_dir = os.path.join(experiment_dir, "viser")
+        os.makedirs(viser_dir, exist_ok=True)
         print(
-            f"[INFO] Saving viser .pt (joint angles + PD targets + door URDF path + actual sim door joints, "
-            f"env {viser_pt_state['env_id']}); joints={viser_pt_state['compact_names']}; door={_v_door_urdf}"
+            f"[INFO] Saving viser URDF replays (joint angles + PD targets + door URDF + actual sim door "
+            f"joints) for up to {NUM_VISER_ENVS} envs -> {viser_dir}; joints={viser_meta['compact_names']}"
         )
 
     if args_cli.video:
@@ -1311,17 +1340,12 @@ def main(env_cfg, agent_cfg: dict):
     for run_index in range(1, num_eval_runs + 1):
         if not simulation_app.is_running():
             break
-        if args_cli.viser:
-            if run_index > 1:
-                dagger._flush_viser_raw_recording(
-                    chunk_complete=False,
-                    reason=f"eval run {run_index - 1} ended before selected envs finished",
-                )
-            _configure_eval_viser_raw_streams(dagger, run_index=run_index, num_streams=8)
         if run_index > 1:
             obs, _ = env.reset()
             frozen_state.reset_from_env()
             _reset_dagger_rollout_state(dagger)
+        if args_cli.viser:
+            viser_recorders = _select_viser_recorders(base_env)
         if mode_tracker is not None:
             mode_tracker.reset_run()
         if replay_runs is not None:
@@ -1354,7 +1378,9 @@ def main(env_cfg, agent_cfg: dict):
             with torch.no_grad():
                 frozen_state.restore()
                 if args_cli.use_teacher:
-                    if dagger.viser_raw_enabled:
+                    if args_cli.viser:
+                        # Populate dagger._last_policy_input_pcd_base so viser frames still get the
+                        # policy-input cloud even when the teacher supplies the actions.
                         dagger._build_student_obs(iteration=step)
                     actions, student_output = _build_teacher_actions(dagger, obs)
                 else:
@@ -1401,56 +1427,12 @@ def main(env_cfg, agent_cfg: dict):
                     _run_active.append(active.detach().cpu().clone())
                 obs, _, _, _, _ = env.step(actions)
                 frozen_state.restore()
-                if viser_pt_state is not None:
-                    # Record the tracked env while it is ACTIVE (skip frozen frames), across every
-                    # eval run -> --num_eval_runs continuous rollouts concatenated in save order.
-                    _e = viser_pt_state["env_id"]
-                    if bool(active[_e].item()):
-                        _org = viser_pt_state["env_origin"]  # device (3,)
-                        _q = base_env.robot.data.joint_pos[_e, viser_pt_state["compact_idx"]].detach().cpu().clone()
-                        _tgt = base_env.applied_robot_dof_targets[_e, viser_pt_state["target_idx"]].detach().cpu().clone()
-                        _tgt[~viser_pt_state["target_valid"].cpu()] = 0.0  # joints not in the controlled set
-                        _rb = base_env.robot.data.root_state_w[_e, :7].detach()
-                        # ACTUAL sim door joints for this frame (NOT predicted): the replay poses the
-                        # door URDF (viser_pt_state["door_urdf_path"]) with these, in door_joint_names order.
-                        _dj = base_env.door.data.joint_pos[_e].detach()
-                        _frame = {
-                            "compact_q": _q,
-                            "compact_target": _tgt,
-                            "door_joint_pos": _dj.cpu().clone(),
-                            "robot_base_pos_w": (_rb[:3] - _org).cpu().clone(),
-                            "robot_base_quat_w": _rb[3:7].cpu().clone(),
-                        }
-                        # Policy-input point cloud (the local_pcd_t the student network consumes),
-                        # cached on the dagger in _build_student_obs. Transform base-frame -> env-relative
-                        # world (same frame as robot_base_pos_w) so the replay shows it as the
-                        # 'policy_input' stream.
-                        _pcd_base = getattr(dagger, "_last_policy_input_pcd_base", None)
-                        if _pcd_base is not None and _pcd_base.shape[0] > _e:
-                            _local = _pcd_base[_e, ..., :3].detach().to(torch.float32)  # [N, 3] base frame
-                            _bq = _rb[3:7].to(torch.float32)                             # world wxyz
-                            _axis = _bq[1:].unsqueeze(0).expand(_local.shape[0], 3)
-                            _uv = torch.cross(_axis, _local, dim=-1)
-                            _uuv = torch.cross(_axis, _uv, dim=-1)
-                            _local_world = _local + 2.0 * (_bq[0] * _uv + _uuv)
-                            _local_world = _local_world + (_rb[:3] - _org).to(torch.float32).unsqueeze(0)
-                            _frame["policy_input_points_world"] = _local_world.cpu().clone()
-                        # Aux handle position (robot base frame): the network's PREDICTED handle pos
-                        # (aux_prediction) and the aux INPUT it received (aux_input). The replay
-                        # transforms these to world with the frame's base pose, exactly like the raw
-                        # viser path in run_multi_distillation.
-                        if (
-                            getattr(dagger, "has_aux_prediction", False)
-                            and isinstance(student_output, dict)
-                            and "aux" in student_output
-                        ):
-                            _aux_pred = dagger._decode_aux_prediction(student_output["aux"].detach())
-                            if _aux_pred is not None and _aux_pred.shape[0] > _e:
-                                _frame["aux_prediction"] = _aux_pred[_e].detach().cpu().to(torch.float32).clone()
-                        _aux_in = getattr(dagger, "latest_aux_input_vector", None)
-                        if _aux_in is not None and _aux_in.shape[0] > _e:
-                            _frame["aux_input"] = _aux_in[_e].detach().cpu().to(torch.float32).clone()
-                        viser_pt_state["frames"].append(_frame)
+                if viser_recorders is not None:
+                    # Record each selected env while it is ACTIVE (skip frozen frames). One file per env
+                    # is written at the end of the run.
+                    for _recorder in viser_recorders:
+                        if bool(active[_recorder["env_id"]].item()):
+                            _append_viser_frame(_recorder, viser_meta, base_env, dagger, student_output)
                 if replay_runs is not None:
                     _run_applied_targets.append(base_env.applied_robot_dof_targets.detach().cpu().clone())
                 if mode_tracker is not None:
@@ -1467,33 +1449,6 @@ def main(env_cfg, agent_cfg: dict):
                     base_vel=base_vel_after_step,
                 )
 
-                if dagger.viser_raw_enabled and dagger._viser_pending_debug_frame is not None:
-                    aux_prediction_for_replay = None
-                    if (
-                        student_output is not None
-                        and dagger.has_aux_prediction
-                        and isinstance(student_output, dict)
-                        and "aux" in student_output
-                    ):
-                        aux_prediction_for_replay = dagger._decode_aux_prediction(student_output["aux"].detach())
-                    pending_debug_frame = dagger._viser_pending_debug_frame
-                    sensor_obs_pcd_base_by_name = pending_debug_frame.get("sensor_obs_pcd_base_by_name")
-                    if sensor_obs_pcd_base_by_name is None and "robot_obs_pcd_base" in pending_debug_frame:
-                        sensor_obs_pcd_base_by_name = {
-                            "robot_obs": pending_debug_frame["robot_obs_pcd_base"],
-                        }
-                    dagger._maybe_update_viser_debug(
-                        iteration=pending_debug_frame["iteration"],
-                        robot_base_pos_w=pending_debug_frame["robot_base_pos_w"],
-                        robot_base_quat_w=pending_debug_frame["robot_base_quat_w"],
-                        ground_truth_pcd_world=pending_debug_frame["ground_truth_pcd_world"],
-                        sensor_obs_pcd_base_by_name=sensor_obs_pcd_base_by_name,
-                        policy_input_pcd_base=pending_debug_frame["policy_input_pcd_base"],
-                        aux_prediction=aux_prediction_for_replay,
-                        aux_input=dagger.latest_aux_input_vector,
-                    )
-                    dagger._viser_pending_debug_frame = None
-
                 drift_mask, timeout_mask = _get_eval_done_status(base_env)
                 last_metrics = _compute_tracking_metrics(base_env)
                 new_timeouts = timeout_mask & active
@@ -1504,10 +1459,6 @@ def main(env_cfg, agent_cfg: dict):
                     drifted |= new_drifts
                     active &= ~newly_finished
                     frozen_state.capture(torch.nonzero(newly_finished, as_tuple=False).squeeze(-1))
-                    _flush_finished_eval_viser_raw_streams(
-                        dagger,
-                        torch.nonzero(newly_finished, as_tuple=False).squeeze(-1),
-                    )
 
                 if mode_tracker is not None:
                     mode_step_summary = mode_tracker.update(
@@ -1547,9 +1498,9 @@ def main(env_cfg, agent_cfg: dict):
                         f"[BASE-VEL] run={run_index} step={step} "
                         f"lin_speed_m_s mean={_bs.mean().item():.3f} max={_bs.max().item():.3f}"
                     )
-                    if viser_pt_state is not None:
-                        _e = viser_pt_state["env_id"]
-                        _msg += f" tracked_env[{_e}]={_base_speed[_e].item():.3f}"
+                    if viser_recorders:
+                        _e = viser_recorders[0]["env_id"]
+                        _msg += f" viser_env[{_e}]={_base_speed[_e].item():.3f}"
                     print(_msg)
 
         if replay_runs is not None and _run_joint_pos:
@@ -1590,8 +1541,8 @@ def main(env_cfg, agent_cfg: dict):
             attn_state["snapshots"].clear()
         if args_cli.save_replay and replay_runs:
             _save_replay_pt(replay_runs, _replay_joint_names, base_env, args_cli.save_replay)
-        if args_cli.save_viser_pt and viser_pt_state is not None and viser_pt_state["frames"]:
-            _save_viser_pt(viser_pt_state, args_cli.save_viser_pt)
+        if args_cli.viser and viser_recorders is not None:
+            _save_viser_recorders(viser_recorders, viser_meta, base_env, viser_dir, run_index)
 
     total_rollouts = completed_runs * int(base_env.num_envs)
     print(

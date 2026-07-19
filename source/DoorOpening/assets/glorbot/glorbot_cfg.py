@@ -38,6 +38,16 @@ ROBOT_CONTACT_OFFSET = 0.005
 ROBOT_REST_OFFSET = 0.001
 ROBOT_MAX_DEPENETRATION_VELOCITY = 500.0
 
+# LEAP hand finger PD gains. The three abduction ("MCP Side") DOFs -- finger_joint_0/4/8 -- are run at
+# ABDUCTION_GAIN_SCALE of the flexion gains to mirror the real hand, whose leap_hand_node.py drives
+# motor IDs 0/4/8 at 0.75x the P/D gain of every other joint. That softer PD is what makes those
+# joints droop ~0.3 rad under grasp load on hardware; matching the asymmetry here reproduces the
+# steady-state tracking error in sim instead of tracking the target cleanly. Set to 1.0 for the old
+# uniform-stiffness behavior.
+FINGER_STIFFNESS = 600
+FINGER_DAMPING = 40
+ABDUCTION_GAIN_SCALE = 0.75
+
 
 def disable_collision_scope_instancing(robot_prim_path_expr: str = "/World/envs/env_.*/Robot") -> int:
     """De-instance each link's ``collisions`` scope so the collider debug viz renders.
@@ -94,8 +104,8 @@ GLORBOT_CONFIG = ArticulationCfg(
         # Decompose collision meshes into convex pieces (default is a single convex_hull, which
         # would turn the chassis + tall lidar-mast mesh into one solid wedge). Needed so the
         # tidybot2_base_link mast collision approximates the real thin stick, not a big blob.
-        # collider_type="convex_decomposition",
-        collider_type="convex_hull",
+        collider_type="convex_decomposition",
+        # collider_type="convex_hull",
         # scale = (0.8, 0.8, 0.8),
         activate_contact_sensors=True,
     ),
@@ -141,13 +151,14 @@ GLORBOT_CONFIG = ArticulationCfg(
             stiffness=1000.0,
             damping=80.0,
         ),
-        # Index + middle + ring fingers (finger_joint_0..11). Thumb (finger_joint_12..15) is split
-        # into its own group below so it can carry a higher effort limit.
+        # Index + middle + ring FLEXION joints. The abduction ("MCP Side") DOFs finger_joint_0/4/8 are
+        # split into the "finger_abduction" group below so they can run at the softer real-hand gains.
+        # Thumb (finger_joint_12..15) is a separate group so it can carry a higher effort limit.
         "finger": ImplicitActuatorCfg(
-            joint_names_expr=["finger_joint_([0-9]|1[01])"],
+            joint_names_expr=["finger_joint_(1|2|3|5|6|7|9|1[01])"],
             effort_limit_sim=1.0,
-            stiffness=600,
-            damping=40,
+            stiffness=FINGER_STIFFNESS,
+            damping=FINGER_DAMPING,
             # Joint friction for the LEAP fingers (was unset -> 0). Matches the real geared-Dynamixel
             # finger friction and damps overshoot alongside the armature below.
             friction=0.01,
@@ -157,6 +168,17 @@ GLORBOT_CONFIG = ArticulationCfg(
             # capping the per-step acceleration. NOTE: this is only the nominal / ADR-increment-0 value;
             # at training time the `robot_finger_armature` EventTerm (see multi_dooropening_env_cfg.py)
             # randomizes it per-episode -- lower that ADR range too if you want 0.002 to hold in training.
+            armature=0.002,
+        ),
+        # Abduction ("MCP Side") DOFs finger_joint_0/4/8 (real motor IDs 0/4/8). Same params as the
+        # flexion "finger" group EXCEPT the P/D gains are scaled by ABDUCTION_GAIN_SCALE to mirror the
+        # real hand's softer side-to-side PD (kp/kd 0.75x), reproducing its grasp-load droop in sim.
+        "finger_abduction": ImplicitActuatorCfg(
+            joint_names_expr=["finger_joint_(0|4|8)"],
+            effort_limit_sim=1.0,
+            stiffness=FINGER_STIFFNESS * ABDUCTION_GAIN_SCALE,
+            damping=FINGER_DAMPING * ABDUCTION_GAIN_SCALE,
+            friction=0.01,
             armature=0.002,
         ),
         # Thumb (finger_joint_12..15). Split out from the other fingers with a HIGHER effort limit:
