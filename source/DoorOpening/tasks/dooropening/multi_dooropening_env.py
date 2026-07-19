@@ -167,6 +167,16 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_dof_lower_limits = self.robot.data.soft_joint_pos_limits[0, self._robot_dof_idx, 0].to(device=self.device)
         self.robot_dof_upper_limits = self.robot.data.soft_joint_pos_limits[0, self._robot_dof_idx, 1].to(device=self.device)
 
+        # TEMP DIAGNOSTIC (revert before commit): mirror deploy's HAND_ABDUCTION_JOINT_LIMITS extra clamp
+        # (finger_joint_0 upper->0.0, finger_joint_8 lower->0.0) to test the sim-to-real splayed-hand hypothesis.
+        joint_name_to_dof_pos = {name: i for i, name in enumerate(joint_names)}
+        i0 = joint_name_to_dof_pos["finger_joint_0"]
+        i8 = joint_name_to_dof_pos["finger_joint_8"]
+        self.robot_dof_upper_limits[i0] = min(self.robot_dof_upper_limits[i0], 0.0)
+        self.robot_dof_lower_limits[i8] = max(self.robot_dof_lower_limits[i8], 0.0)
+        print(f"[TEMP-CLAMP] finger_joint_0 upper -> {float(self.robot_dof_upper_limits[i0]):.3f}, "
+              f"finger_joint_8 lower -> {float(self.robot_dof_lower_limits[i8]):.3f}")
+
         # We are going to update this variables to control the robot
         self.robot_dof_targets = torch.zeros((self.num_envs, len(self._robot_dof_idx)), device=self.device)
         self.applied_robot_dof_targets = torch.zeros_like(self.robot_dof_targets)
