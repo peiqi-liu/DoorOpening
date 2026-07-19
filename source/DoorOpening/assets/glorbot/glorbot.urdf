@@ -1465,27 +1465,10 @@
       </material>
     </visual>
     <collision>
-      <origin xyz="0 -0.0085 -0.015" rpy="0 0 0" />
+      <origin xyz="0.062559538462667388381 0.078459682911396988469 0.048992911807332215068"
+        rpy="4.3790577010156367543e-47 -3.3306690738754701143e-16 1.2042408677791935383e-46" />
       <geometry>
-        <box size="0.02 0.036 0.024" />
-      </geometry>
-    </collision>
-    <collision>
-      <origin xyz="0 -0.029 -0.014" rpy="0 0 0" />
-      <geometry>
-        <box size="0.02 0.004 0.03" />
-      </geometry>
-    </collision>
-    <collision>
-      <origin xyz="0.015 -0.0175 -0.0115" rpy="0 0 0" />
-      <geometry>
-        <box size="0.008 0.024 0.018" />
-      </geometry>
-    </collision>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0" />
-      <geometry>
-        <mesh filename="package://glorbot/meshes/leap/collision/white_tip_thumb.obj" />
+        <mesh filename="package://glorbot/meshes/leap/thumb_fingertip.stl" />
       </geometry>
     </collision>
     <inertial>
