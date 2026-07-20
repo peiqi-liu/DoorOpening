@@ -87,7 +87,7 @@ observation_lag:
 pcd_encoders_cfg:
   local_pcd_t:
     type: "pointnet"
-    num_output_tokens: 32
+    num_output_tokens: 128
     num_points: [2500, 0, 0]  # Policy crop counts [base_crop, palm_crop, (robot slot)]. For pointcloud_source="both" each crop is split evenly across realsense+lidar (e.g. 2500 -> 1250 realsense + 1250 lidar). Robot model points are configured below.
     use_pcd: true
 
