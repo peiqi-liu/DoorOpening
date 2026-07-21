@@ -247,7 +247,7 @@ def state_machine_offline_push_right_door(
     # -------------------------
     # Step 3: Rotate hinge (unlatch)
     # -------------------------
-    q_door = torch.tensor([0.0, 1.0], device=device)
+    q_door = torch.tensor([0.0, 1.05], device=device)
 
     palm_target_pose = palm_target_pose.clone()
     palm_target_pose[:, 1] += 0
@@ -279,7 +279,7 @@ def state_machine_offline_push_right_door(
     # -------------------------
     # Step 4: Open the door farther while holding the handle and keeping base clearance
     # -------------------------
-    push_theta_start = 0.20
+    push_theta_start = 0.30
     push_theta_stop = 1.50
     push_theta_step = 0.10
     hold_palm_rot_roll_base = math.pi
@@ -584,7 +584,7 @@ def state_machine_offline_push_left_door(
     # -------------------------
     # Step 3: Rotate hinge (unlatch)
     # -------------------------
-    q_door = torch.tensor([0.0, 1.0], device=device)
+    q_door = torch.tensor([0.0, 1.05], device=device)
 
     palm_target_pose = palm_target_pose.clone()
     palm_target_pose[:, 1] += 0.00
@@ -616,7 +616,7 @@ def state_machine_offline_push_left_door(
     # -------------------------
     # Step 4: Open the door farther while holding the handle and keeping base clearance
     # -------------------------
-    push_theta_start = 0.20
+    push_theta_start = 0.30
     push_theta_stop = 1.50
     push_theta_step = 0.10
     hold_palm_rot_roll_base = math.pi

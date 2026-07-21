@@ -80,6 +80,10 @@ class DooropeningEnv(DirectRLEnv):
 
         self._robot_key_body_idx, robot_key_body_names = self.robot.find_bodies(self.cfg.robot_key_bodies)
         self._robot_reset_key_body_idx, robot_reset_key_body_names = self.robot.find_bodies(self.cfg.robot_reset_key_bodies)
+        # Kept for offline drift diagnosis (test_teacher_diagnose.py): the names behind the per-body
+        # position/orientation errors that drive the tracking-drift termination in _get_dones.
+        self._robot_reset_key_body_names = list(robot_reset_key_body_names)
+        self._robot_key_body_names = list(robot_key_body_names)
         self._robot_base_id_in_key_body_idx = robot_key_body_names.index(self.cfg.robot_base_body_link_name)
         self._robot_palm_id_in_key_body_idx = robot_key_body_names.index(self.cfg.robot_palm_link_name)
 
@@ -2448,6 +2452,12 @@ class DooropeningEnv(DirectRLEnv):
             return torch.zeros_like(time_out), time_out
         self._get_intermediate_values()
         progress = min(self._get_curriculum_step_count() / self.reset_progress_total, 1.0)
+        # Diagnostic override: force the drift-threshold curriculum to a fixed progress in [0, 1]
+        # (e.g. 1.0 = loosest/highest thresholds) so a teacher test isn't killed by the tight
+        # early-schedule deltas. Set via base_env.drift_threshold_progress_override; None = normal.
+        _progress_override = getattr(self, "drift_threshold_progress_override", None)
+        if _progress_override is not None:
+            progress = min(max(float(_progress_override), 0.0), 1.0)
         reset_key_body_pos_delta = self.reset_key_body_pos_delta_min + (self.reset_key_body_pos_delta_max - self.reset_key_body_pos_delta_min) * progress
         reset_key_body_quat_delta = self.reset_key_body_quat_delta_min + (self.reset_key_body_quat_delta_max - self.reset_key_body_quat_delta_min) * progress
         reset_door_joint_pos_delta = self.reset_door_joint_pos_delta_min + (self.reset_door_joint_pos_delta_max - self.reset_door_joint_pos_delta_min) * progress
@@ -2500,6 +2510,34 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["fail/door_drift_frac"] = float(fail_door_drift.float().mean().detach().cpu().item())
         # Logged-only (NOT a termination): fraction of envs with unsafe x5-arm door contact.
         self.extras["fail/x5_collision_frac"] = float(unsafe_x5_arm_contact.float().mean().detach().cpu().item())
+        # Per-env termination-reason masks + the raw drift magnitudes vs their (curriculum) thresholds.
+        # These let an offline diagnostic (scripts/rl_games/test_teacher_diagnose.py) attribute each
+        # kill to robot-pose drift vs door-angle drift and see how far over threshold it went.
+        self.extras["fail/robot_drift"] = fail_robot_drift.detach()
+        self.extras["fail/door_drift"] = fail_door_drift.detach()
+        self.extras["fail/key_body_pos_err"] = key_body_pos_err.detach()
+        self.extras["fail/key_body_quat_err"] = key_body_quat_err.detach()
+        self.extras["fail/door_err"] = door_err.detach()
+        self.extras["fail/reset_key_body_pos_delta"] = float(reset_key_body_pos_delta)
+        self.extras["fail/reset_key_body_quat_delta"] = float(reset_key_body_quat_delta)
+        self.extras["fail/reset_door_joint_pos_delta"] = float(reset_door_joint_pos_delta)
+        # Per-body / per-joint drift breakdown (BEFORE the max-reduction that compute_tracking_error
+        # applies) so a single-env trace can name WHICH body/joint drifted and by how much. Errors are
+        # squared (matching the thresholds above): pos in m^2, door in rad^2.
+        pos_diff = self.ref_robot_reset_key_body_pos - self.robot_reset_key_body_pos          # [B, N, 3]
+        self.extras["diag/key_body_pos_err_per_body"] = (pos_diff * pos_diff).sum(dim=-1).detach()  # [B, N]
+        # Actual (measured) vs desired (reference) world positions per reset key body, so a trace can
+        # print exactly where the body IS vs where the reference wants it.
+        self.extras["diag/key_body_pos"] = self.robot_reset_key_body_pos.detach()             # [B, N, 3]
+        self.extras["diag/ref_key_body_pos"] = self.ref_robot_reset_key_body_pos.detach()     # [B, N, 3]
+        quat_diff = quat_diff_angle(self.robot_key_body_quat, self.ref_robot_key_body_quat)   # [B, M]
+        self.extras["diag/key_body_quat_err_per_body"] = (quat_diff * quat_diff).detach()     # [B, M]
+        door_diff = self.ref_door_joint_pos - self.door_joint_pos                             # [B, D]
+        self.extras["diag/door_joint_pos"] = self.door_joint_pos.detach()
+        self.extras["diag/ref_door_joint_pos"] = self.ref_door_joint_pos.detach()
+        self.extras["diag/door_joint_err_per_joint"] = (door_diff * door_diff).detach()       # [B, D]
+        self.extras["diag/reset_key_body_names"] = list(self._robot_reset_key_body_names)
+        self.extras["diag/key_body_names"] = list(self._robot_key_body_names)
         return fail_robot_drift | fail_door_drift, time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
