@@ -345,10 +345,9 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         # "zeros" -> seed the aux feedback buffer with zeros; "ground_truth" -> seed with the
         # sim handle pose. After the first step the predicted aux overwrites the buffer either way.
         self.aux_handle_init_source = "zeros"
-        self.aux_handle_init_noise_m = None
-        self.aux_handle_init_bias_m = None
-        self.aux_handle_bias = None
-        self.aux_feedback_noise_m = None
+        self.aux_handle_noise_m = None
+        self.aux_handle_gt_bias_m = None
+        self.aux_handle_gt_bias = None
         self.push_pull_detach_predicted_condition = True
         self.push_pull_family_one_hot = None
         self.push_pull_condition_buffer = None
@@ -707,27 +706,24 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                     "dagger.aux_handle_init_source='ground_truth' requires aux_feedback_to_policy=true; "
                     "otherwise the policy never sees the seeded handle pose."
                 )
-        # Perturbations on the handle-pose input (never on the aux regression target), modelling real
-        # detector error (e.g. np.median over a SAM3 handle mask vs. the true handle center):
-        #   noise    -> fresh per-call isotropic jitter, resampled every step (frame-to-frame noise).
-        #   bias     -> a per-episode constant isotropic offset, resampled once per env reset
-        #               (systematic detection offset that persists for the whole episode).
-        #   feedback -> fresh per-step isotropic jitter added to the aux prediction before it is
-        #               cached in aux_buffer (recurrent mode only), so the fed-back handle estimate
-        #               the policy sees is never a noiseless copy of its own last prediction and
-        #               error can compound across the rollout like a real drifting detector.
-        # Each is a random direction x magnitude in [0, bound], so its total Euclidean error <= bound (m).
-        self.aux_handle_init_noise_m = self._parse_aux_handle_offset_bound(
-            self.runtime_cfg.get("aux_handle_init_noise_m", 0.0),
-            "aux_handle_init_noise_m",
+        # Two-term detector-error model on the aux handle pose. Applied to the INPUT the policy sees,
+        # never used to un-bias the aux regression target beyond what the bias already bakes in.
+        #
+        # NOISE (aux_handle_noise_m): fresh per-step isotropic (ball) jitter added to EVERY aux input --
+        # the reset seed AND the recurrent fed-back prediction. Random direction x magnitude in
+        # [0, bound]. Models frame-to-frame detector jitter. 0.0 disables it.
+        self.aux_handle_noise_m = self._parse_aux_handle_offset_bound(
+            self.runtime_cfg.get("aux_handle_noise_m", 0.0),
+            "aux_handle_noise_m",
         )
-        self.aux_handle_init_bias_m = self._parse_aux_handle_offset_bound(
-            self.runtime_cfg.get("aux_handle_init_bias_m", 0.0),
-            "aux_handle_init_bias_m",
-        )
-        self.aux_feedback_noise_m = self._parse_aux_handle_offset_bound(
-            self.runtime_cfg.get("aux_feedback_noise_m", 0.0),
-            "aux_feedback_noise_m",
+        # BIAS (aux_handle_gt_bias_m): per-episode constant offset added to the GROUND-TRUTH handle, so
+        # it feeds BOTH the aux target and the seed and therefore PERSISTS on every input for the whole
+        # episode (a real systematic per-door offset, redrawn per reset -- off downward on one door,
+        # up/sideways on another). Sampled as an axis-aligned CUBE: each of x/y/z is independent uniform
+        # in [-bound, +bound] (per-dimension threshold, NOT a ball). 0.0 disables it.
+        self.aux_handle_gt_bias_m = self._parse_aux_handle_offset_bound(
+            self.runtime_cfg.get("aux_handle_gt_bias_m", 0.0),
+            "aux_handle_gt_bias_m",
         )
         # Aux handle input mode:
         #   "recurrent"        -> legacy: policy input = previous step's aux prediction (aux_buffer).
@@ -758,11 +754,11 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.aux_buffer = None
         if self.has_aux_input:
             self.aux_buffer = torch.zeros((self.num_envs, self.aux_input_dim), dtype=torch.float32, device=self.device)
-        # Per-episode constant handle-pose bias (resampled at each reset). Only the handle position
-        # is perturbed, so this is a [num_envs, 3] buffer regardless of the full aux input dim.
-        self.aux_handle_bias = None
+        # Per-episode SYSTEMATIC ground-truth handle bias (see aux_handle_gt_bias_m). A [num_envs, 3]
+        # base-frame offset, redrawn per reset, added to the true handle for BOTH target and seed.
+        self.aux_handle_gt_bias = None
         if self.has_aux_input and "aux_handle_pos" in self.aux_state_specs:
-            self.aux_handle_bias = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
+            self.aux_handle_gt_bias = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
         self.temporal_aux_handle_enabled = (
             self.proprio_temporal_field_state_keys.get("aux_handle_pos") == "aux_handle_pos"
         )
@@ -2371,7 +2367,12 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
     def _get_handle_position_base(self):
         getter = getattr(self.ov_env, "get_handle_position_in_base_frame", None)
         if callable(getter):
-            return getter()
+            handle_pos = getter()
+            # Add the per-episode systematic handle bias so it flows into BOTH the aux target and the
+            # policy input seed (constant within an episode -> persists; see aux_handle_gt_bias).
+            if self.aux_handle_gt_bias is not None:
+                handle_pos = handle_pos + self.aux_handle_gt_bias
+            return handle_pos
         raise RuntimeError(
             "Expected environment to expose get_handle_position_in_base_frame() "
             "for aux handle position prediction."
@@ -2382,7 +2383,11 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         # one-shot SAM3 detection of the closed handle, re-expressed in the base frame as it moves.
         getter = getattr(self.ov_env, "get_closed_handle_position_in_base_frame", None)
         if callable(getter):
-            return getter()
+            handle_pos = getter()
+            # Same per-episode systematic bias as the live handle getter, so the closed-door seed agrees.
+            if self.aux_handle_gt_bias is not None:
+                handle_pos = handle_pos + self.aux_handle_gt_bias
+            return handle_pos
         raise RuntimeError(
             "Expected environment to expose get_closed_handle_position_in_base_frame() "
             "for closed_door_base aux handle input."
@@ -2443,47 +2448,50 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         return value
 
     def _sample_isotropic_offset(self, shape, bound, dtype=torch.float32):
-        # Random direction (uniform on the unit sphere) x magnitude in [0, bound], so the total
-        # Euclidean error of each sampled offset is at most `bound`. `shape[-1]` is the vector dim.
+        # NOISE sampler: random direction (uniform on the unit sphere) x magnitude in [0, bound] -- a
+        # BALL of radius `bound`, so the total Euclidean error of each sample is at most `bound`.
         direction = torch.randn(shape, dtype=dtype, device=self.device)
         direction = direction / direction.norm(dim=-1, keepdim=True).clamp_min(1e-8)
         magnitude = torch.rand(shape[:-1] + (1,), dtype=dtype, device=self.device) * float(bound)
         return direction * magnitude
 
-    def _resample_aux_handle_bias(self, env_ids=None):
-        # Per-episode constant handle-pose bias, redrawn for the resetting envs. When the bias is
-        # disabled the buffer stays zeroed so _apply_aux_handle_init_perturbation is a no-op for it.
-        if self.aux_handle_bias is None:
+    def _sample_box_offset(self, shape, bound, dtype=torch.float32):
+        # BIAS sampler: each dimension independently uniform in [-bound, +bound] -- an axis-aligned
+        # CUBE, not a ball. Per-dimension threshold `bound`; a corner reaches sqrt(dim)*bound total.
+        return (torch.rand(shape, dtype=dtype, device=self.device) * 2.0 - 1.0) * float(bound)
+
+    def _resample_aux_handle_gt_bias(self, env_ids=None):
+        # Per-episode SYSTEMATIC ground-truth handle bias, redrawn for the resetting envs as a CUBE
+        # (each of x/y/z uniform in [-aux_handle_gt_bias_m, +aux_handle_gt_bias_m]). Held constant for
+        # the episode and added to the true handle for BOTH the aux target and the seed, so it persists
+        # (models SAM3 being consistently off in a per-door direction). Zeroed when the bias is off.
+        if self.aux_handle_gt_bias is None:
             return
-        if self.aux_handle_init_bias_m is None:
+        if self.aux_handle_gt_bias_m is None:
             if env_ids is None:
-                self.aux_handle_bias.zero_()
+                self.aux_handle_gt_bias.zero_()
             elif env_ids.numel() > 0:
-                self.aux_handle_bias[env_ids] = 0.0
+                self.aux_handle_gt_bias[env_ids] = 0.0
             return
         if env_ids is None:
-            self.aux_handle_bias[:] = self._sample_isotropic_offset(
-                (self.num_envs, 3), self.aux_handle_init_bias_m
+            self.aux_handle_gt_bias[:] = self._sample_box_offset(
+                (self.num_envs, 3), self.aux_handle_gt_bias_m
             )
         elif env_ids.numel() > 0:
-            self.aux_handle_bias[env_ids] = self._sample_isotropic_offset(
-                (int(env_ids.numel()), 3), self.aux_handle_init_bias_m
+            self.aux_handle_gt_bias[env_ids] = self._sample_box_offset(
+                (int(env_ids.numel()), 3), self.aux_handle_gt_bias_m
             )
 
     def _apply_aux_handle_init_perturbation(self, handle_pos):
-        # Add the per-episode constant bias (if any) and fresh per-call isotropic noise (if any) to a
-        # handle-pose tensor. Used only for policy INPUT seeds/anchors, never for the regression target.
-        if handle_pos is None:
+        # Add fresh per-call isotropic NOISE (aux_handle_noise_m) to a handle-pose input seed/anchor.
+        # The systematic BIAS is already baked into the ground-truth handle (aux_handle_gt_bias), so it
+        # is NOT re-added here. Used only for the policy INPUT, never for the regression target.
+        if handle_pos is None or self.aux_handle_noise_m is None:
             return handle_pos
-        perturbed = handle_pos
-        if self.aux_handle_bias is not None and self.aux_handle_init_bias_m is not None:
-            perturbed = perturbed + self.aux_handle_bias.to(dtype=handle_pos.dtype)
-        if self.aux_handle_init_noise_m is not None:
-            noise = self._sample_isotropic_offset(
-                handle_pos.shape, self.aux_handle_init_noise_m, dtype=handle_pos.dtype
-            )
-            perturbed = perturbed + noise
-        return perturbed
+        noise = self._sample_isotropic_offset(
+            handle_pos.shape, self.aux_handle_noise_m, dtype=handle_pos.dtype
+        )
+        return handle_pos + noise
 
     def _build_seed_aux_buffer_values(self):
         # Value the aux feedback buffer is reset to at the first rollout step after each reset.
@@ -2884,8 +2892,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
       height = int(camera_cfg.height) // 2
       width = int(camera_cfg.width) // 2
 
-      fov_x_deg = 85.2
-      fov_y_deg = 58.0
+      fov_x_deg = 80
+      fov_y_deg = 55
       near_m = 0.3
       far_m = 3.0
 
@@ -3704,7 +3712,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             self.latest_aux_target_vector = None
             self._resample_wall_distractors()
             self.temporal_current_time_s = self._iteration_to_time_s(start_iteration)
-            self._resample_aux_handle_bias()
+            self._resample_aux_handle_gt_bias()
             self._seed_temporal_histories()
             self._seed_aux_buffer()
             self._seed_push_pull_condition_buffer()
@@ -3728,10 +3736,11 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                     # closed-door anchor, so the prediction is never fed back into the buffer.
                     if self.aux_handle_input_mode != "closed_door_base":
                         aux_feedback_value = aux_prediction_for_replay
-                        if self.aux_feedback_noise_m is not None:
+                        # Same single NOISE term as the seed, so noise is applied to EVERY aux input.
+                        if self.aux_handle_noise_m is not None:
                             aux_feedback_value = aux_feedback_value + self._sample_isotropic_offset(
                                 aux_feedback_value.shape,
-                                self.aux_feedback_noise_m,
+                                self.aux_handle_noise_m,
                                 dtype=aux_feedback_value.dtype,
                             )
                         self.aux_buffer[:] = aux_feedback_value
@@ -3822,7 +3831,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                     self.current_rewards[done_mask] = 0.0
                     self.current_lengths[done_mask] = 0.0
                     self._resample_wall_distractors(done_mask)
-                    self._resample_aux_handle_bias(done_mask)
+                    # Redraw the systematic GT bias BEFORE seeding, since the seed reads the biased GT.
+                    self._resample_aux_handle_gt_bias(done_mask)
                     self._seed_temporal_histories(done_mask)
                     self._seed_aux_buffer(done_mask)
                     self._seed_push_pull_condition_buffer(done_mask)

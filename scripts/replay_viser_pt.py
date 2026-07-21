@@ -141,6 +141,12 @@ def _quat_rotate_points(quat_wxyz: np.ndarray, points: np.ndarray) -> np.ndarray
 def _aux_prediction_world_points(
     frame: dict, base_pose: tuple[np.ndarray, np.ndarray] | None = None
 ) -> np.ndarray:
+    # Newer recordings pre-transform the aux prediction into env-relative world coords (the base-body
+    # frame it lives in differs from the URDF-root pose stored in robot_base_pos_w), so use it directly.
+    aux_world = _to_numpy_vector(frame.get("aux_prediction_world"))
+    if aux_world is not None and aux_world.size == 3:
+        return aux_world.reshape(1, 3).astype(np.float32, copy=False)
+
     aux_prediction = _to_numpy_vector(frame.get("aux_prediction"))
     if aux_prediction is None or aux_prediction.size != 3:
         return np.zeros((0, 3), dtype=np.float32)
@@ -370,6 +376,11 @@ def _first_nonempty_cloud(frames: list[dict], streams: list[dict]) -> np.ndarray
 
 
 def _aux_input_world_points(frame: dict) -> np.ndarray:
+    # Newer recordings pre-transform the aux input into env-relative world coords; use it directly.
+    aux_world = _to_numpy_vector(frame.get("aux_input_world"))
+    if aux_world is not None and aux_world.size == 3:
+        return aux_world.reshape(1, 3).astype(np.float32, copy=False)
+
     aux_input = _to_numpy_vector(frame.get("aux_input"))
     if aux_input is None or aux_input.size != 3:
         return np.zeros((0, 3), dtype=np.float32)
@@ -387,11 +398,19 @@ def _aux_input_world_points(frame: dict) -> np.ndarray:
 
 
 def _has_aux_prediction(frames: list[dict]) -> bool:
-    return any(_to_numpy_vector(frame.get("aux_prediction")) is not None for frame in frames)
+    return any(
+        _to_numpy_vector(frame.get("aux_prediction_world")) is not None
+        or _to_numpy_vector(frame.get("aux_prediction")) is not None
+        for frame in frames
+    )
 
 
 def _has_aux_input(frames: list[dict]) -> bool:
-    return any(_to_numpy_vector(frame.get("aux_input")) is not None for frame in frames)
+    return any(
+        _to_numpy_vector(frame.get("aux_input_world")) is not None
+        or _to_numpy_vector(frame.get("aux_input")) is not None
+        for frame in frames
+    )
 
 
 def _door_joint_prediction(frame: dict) -> np.ndarray | None:

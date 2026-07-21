@@ -978,30 +978,49 @@ def _append_viser_frame(recorder, viser_meta, base_env, dagger, student_output):
     q = base_env.robot.data.joint_pos[env_id, viser_meta["compact_idx"]].detach().cpu().clone()
     tgt = base_env.applied_robot_dof_targets[env_id, viser_meta["target_idx"]].detach().cpu().clone()
     tgt[~viser_meta["target_valid"].cpu()] = 0.0  # joints not in the controlled set
-    rb = base_env.robot.data.root_state_w[env_id, :7].detach()
+    # Two DIFFERENT robot poses matter here, and mixing them up is what makes the meshes drift:
+    #   * root_state_w  -> the articulation root, which is the URDF root link `base_link`. The replay
+    #     places `/robot` here and then drives base_x/base_y/base_rotation from compact_q, so the base
+    #     travel is replayed by the URDF itself. The robot does NOT start at the world origin, so this
+    #     spawn/root offset must be kept -- dropping it double-counts (or drops) the base motion.
+    #   * tidybot2_base_link (body_pos_w/body_quat_w at _robot_base_body_link_idx) -> the frame the
+    #     policy point cloud and aux vectors are actually expressed in (this is the pose
+    #     _build_student_obs feeds to world_to_local). Base-frame quantities must be un-transformed with
+    #     THIS pose so they land in the world next to the door URDF, not at the root.
+    rb_root = base_env.robot.data.root_state_w[env_id, :7].detach()
+    base_body_idx = base_env._robot_base_body_link_idx
+    rb_base_pos = base_env.robot.data.body_pos_w[env_id, base_body_idx].detach()
+    rb_base_quat = base_env.robot.data.body_quat_w[env_id, base_body_idx].detach()
+
+    def _base_to_world(points_base):
+        """Rotate+translate base-body-frame points [N, 3] into env-relative world coords."""
+        pts = points_base.detach().to(torch.float32)
+        bq = rb_base_quat.to(torch.float32)  # world wxyz
+        axis = bq[1:].unsqueeze(0).expand(pts.shape[0], 3)
+        uv = torch.cross(axis, pts, dim=-1)
+        uuv = torch.cross(axis, uv, dim=-1)
+        world = pts + 2.0 * (bq[0] * uv + uuv)
+        return world + (rb_base_pos - org).to(torch.float32).unsqueeze(0)
+
     # ACTUAL sim door joints for this frame (NOT predicted); the replay poses the door URDF with these.
     dj = base_env.door.data.joint_pos[env_id].detach()
     frame = {
         "compact_q": q,
         "compact_target": tgt,
         "door_joint_pos": dj.cpu().clone(),
-        "robot_base_pos_w": (rb[:3] - org).cpu().clone(),
-        "robot_base_quat_w": rb[3:7].cpu().clone(),
+        # URDF root (`base_link`) pose; base_x/base_y/base_rotation are replayed from compact_q.
+        "robot_base_pos_w": (rb_root[:3] - org).cpu().clone(),
+        "robot_base_quat_w": rb_root[3:7].cpu().clone(),
     }
     # Policy-input point cloud (the local_pcd_t the student consumes), cached on the dagger in
-    # _build_student_obs. Transform base-frame -> env-relative world (same frame as robot_base_pos_w).
+    # _build_student_obs. Pre-transform base-body-frame -> env-relative world here so the replay just
+    # displays it (the `_points_world` suffix marks an already-world cloud stream).
     pcd_base = getattr(dagger, "_last_policy_input_pcd_base", None)
     if pcd_base is not None and pcd_base.shape[0] > env_id:
-        local = pcd_base[env_id, ..., :3].detach().to(torch.float32)  # [N, 3] base frame
-        bq = rb[3:7].to(torch.float32)                                # world wxyz
-        axis = bq[1:].unsqueeze(0).expand(local.shape[0], 3)
-        uv = torch.cross(axis, local, dim=-1)
-        uuv = torch.cross(axis, uv, dim=-1)
-        local_world = local + 2.0 * (bq[0] * uv + uuv)
-        local_world = local_world + (rb[:3] - org).to(torch.float32).unsqueeze(0)
-        frame["policy_input_points_world"] = local_world.cpu().clone()
-    # Aux handle position (robot base frame): the network's PREDICTED handle pos and the aux INPUT it
-    # received. The replay transforms these to world with the frame's base pose.
+        frame["policy_input_points_world"] = _base_to_world(pcd_base[env_id, ..., :3]).cpu().clone()
+    # Aux handle position: the network's PREDICTED handle pos and the aux INPUT it received are both in
+    # the base-body frame. Pre-transform to env-relative world here (the replay renders *_world directly)
+    # so they track the point cloud instead of the root.
     if (
         getattr(dagger, "has_aux_prediction", False)
         and isinstance(student_output, dict)
@@ -1009,10 +1028,10 @@ def _append_viser_frame(recorder, viser_meta, base_env, dagger, student_output):
     ):
         aux_pred = dagger._decode_aux_prediction(student_output["aux"].detach())
         if aux_pred is not None and aux_pred.shape[0] > env_id:
-            frame["aux_prediction"] = aux_pred[env_id].detach().cpu().to(torch.float32).clone()
+            frame["aux_prediction_world"] = _base_to_world(aux_pred[env_id].reshape(1, 3))[0].cpu().clone()
     aux_in = getattr(dagger, "latest_aux_input_vector", None)
     if aux_in is not None and aux_in.shape[0] > env_id:
-        frame["aux_input"] = aux_in[env_id].detach().cpu().to(torch.float32).clone()
+        frame["aux_input_world"] = _base_to_world(aux_in[env_id].reshape(1, 3))[0].cpu().clone()
     recorder["frames"].append(frame)
 
 

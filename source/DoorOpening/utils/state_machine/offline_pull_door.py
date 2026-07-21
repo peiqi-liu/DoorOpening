@@ -143,8 +143,8 @@ def state_machine_offline_right_pull_door(
     pregrasp_base_y_offset = -0.35
     # Moved back (0.40 -> 0.45): larger palm<->door x gap to compensate for removing the
     # finger<->panel contact penalty (the demo grasps from further out so fingers don't press panel).
-    pregrasp_palm_x_offset = 0.45
-    pregrasp_palm_y_offset = -0.20
+    pregrasp_palm_x_offset = 0.4
+    pregrasp_palm_y_offset = -0.15
     pregrasp_palm_z_offset = 0.25
 
     base_target_pos = handle_pos.clone()
@@ -185,7 +185,7 @@ def state_machine_offline_right_pull_door(
     # (-x, toward the handle/door). Robot faces -x, so right=+y / left=-y / forward=-x.
     # Moved back (0.035 -> 0.05): larger palm<->door x gap compensates for removing the
     # finger<->panel penalty, so the grasp doesn't drive fingers into the panel.
-    grasp_palm_x_offset = 0.05
+    grasp_palm_x_offset = 0.035
     grasp_palm_y_offset = -0.065
     grasp_palm_z_offset = 0.10
     grasp_open_ratio = 0.70
@@ -217,7 +217,7 @@ def state_machine_offline_right_pull_door(
     # -------------------------
     # Step 3: Rotate hinge (unlatch)
     # -------------------------
-    unlatch_hinge_angle = 1.0
+    unlatch_hinge_angle = 1.05
     unlatch_palm_y_delta = 0.0
     unlatch_palm_z_delta = -0.08
     unlatch_rot_roll = math.pi
@@ -256,8 +256,8 @@ def state_machine_offline_right_pull_door(
     # -------------------------
     # Step 4: Pull door open
     # -------------------------
-    pull_theta_start = 0.25
-    pull_theta_stop = 1.35
+    pull_theta_start = 0.3
+    pull_theta_stop = 1.25
     pull_theta_step = 0.10
 
     pull_base_x_offset = 0.55
@@ -776,7 +776,7 @@ def state_machine_offline_left_pull_door(
     # -------------------------
     # Step 3: Rotate hinge (unlatch)
     # -------------------------
-    unlatch_hinge_angle = 1.0
+    unlatch_hinge_angle = 1.05
     unlatch_palm_y_delta = 0.0
     unlatch_palm_z_delta = -0.08
     unlatch_rot_roll = math.pi
@@ -815,7 +815,7 @@ def state_machine_offline_left_pull_door(
     # -------------------------
     # Step 4: Pull door open
     # -------------------------
-    pull_theta_start = 0.25
+    pull_theta_start = 0.30
     pull_theta_stop = 1.25
     pull_theta_step = 0.10
 

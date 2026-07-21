@@ -158,14 +158,17 @@ dagger:
   aux_handle_input_mode: recurrent
   aux_feedback_to_policy: true  # Recurrent feedback: previous step's aux prediction is fed back as the next-step input.
   aux_handle_init_source: ground_truth  # First-step seed: feed the (noised/biased) sim handle pose only on the first step after each reset. Requires aux_feedback_to_policy: true.
-  # Detector-error model applied to the ground_truth handle-pose seed BEFORE it is cached in the aux
-  # buffer (input seed only, never the aux regression target). Both are isotropic random-direction
-  # offsets bounded by their TOTAL Euclidean magnitude (m).
-  aux_handle_init_noise_m: 0.1   # Isotropic jitter on the seeded handle pose (frame-to-frame detector noise).
-  aux_handle_init_bias_m: 0.08   # Per-episode constant offset, redrawn at each reset (systematic detector bias).
-  aux_feedback_noise_m: 0.1      # Isotropic jitter added to the aux prediction before it's cached in aux_buffer
-                                  # (recurrent mode, steps >=1), so the fed-back handle estimate is never a
-                                  # noiseless copy of the policy's own last prediction.
+  # Two-term detector-error model on the aux handle pose (input only, never the aux target beyond what
+  # the bias bakes in). Both are redrawn/added to EVERY aux input the policy sees (reset seed + the
+  # recurrent fed-back prediction).
+  # BIAS: per-episode constant offset baked into the ground-truth handle (feeds target + seed together)
+  # so it PERSISTS all episode -- a real systematic per-door offset (off downward on one door, up/left
+  # on another). Sampled as a CUBE: each of x/y/z independently uniform in [-this, +this] (per-dim
+  # threshold in m, NOT a ball). 0.0 disables it.
+  aux_handle_gt_bias_m: 0.05
+  # NOISE: fresh per-step isotropic (ball) jitter, random direction x magnitude in [0, this] (m), added
+  # to every aux input -- frame-to-frame detector noise. 0.0 disables it.
+  aux_handle_noise_m: 0.1
   prediction_training:
     loss_window_start: 40
     loss_window_end: 100
@@ -241,7 +244,7 @@ dagger:
     # - thickness axis: through the panel, normal to the door slab
     # Each sampled point comes from either the left or right column.
     side_margin_m: [0.2, 0.8]  # Column width along the door width axis, i.e. how far each column extends outward from the left/right panel edge.
-    edge_gap_m: [0.02, 0.06]  # Empty gap (m) between the door side edge and the inner face of the wall column. Non-zero so the wall never sits flush against / overlapping the door (a zero gap is unrealistic). Clamped to >= 0 in code.
+    edge_gap_m: [0.0, 0.04]  # Empty gap (m) between the door side edge and the inner face of the wall column. Non-zero so the wall never sits flush against / overlapping the door (a zero gap is unrealistic). Clamped to >= 0 in code.
     depth_m: [0.1, 1.5]  # Extra thickness added beyond the door slab thickness along the door-thickness axis, independently per front/back segment.
     # Position of the seam where the front and back segments on one side butt together (see
     # sample_seam), relative to the door's mid-thickness plane. Pinned to 0 so all 4 walls start
