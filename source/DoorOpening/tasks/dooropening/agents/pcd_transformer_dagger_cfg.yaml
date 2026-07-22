@@ -165,10 +165,10 @@ dagger:
   # so it PERSISTS all episode -- a real systematic per-door offset (off downward on one door, up/left
   # on another). Sampled as a CUBE: each of x/y/z independently uniform in [-this, +this] (per-dim
   # threshold in m, NOT a ball). 0.0 disables it.
-  aux_handle_gt_bias_m: 1.0
+  aux_handle_gt_bias_m: 0.15
   # NOISE: fresh per-step isotropic (ball) jitter, random direction x magnitude in [0, this] (m), added
   # to every aux input -- frame-to-frame detector noise. 0.0 disables it.
-  aux_handle_noise_m: 0.1
+  aux_handle_noise_m: 0.15
   prediction_training:
     loss_window_start: 40
     loss_window_end: 100
