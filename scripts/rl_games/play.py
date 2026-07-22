@@ -162,6 +162,76 @@ parser.add_argument(
     choices=("rgb", "depth"),
     help="Which pointcloud camera stream to visualize or save during evaluation.",
 )
+parser.add_argument(
+    "--probe-pointcloud-camera",
+    action="store_true",
+    default=False,
+    help=(
+        "Record a same-frame comparison for one env: the multi_pcd_dagger simulated round-trip cloud "
+        "and the ground-truth mesh cloud (at the synced D435 spec), plus the IsaacLab RGB image as a "
+        "reference to eyeball against. Saves a .pt for scripts/replay_pointcloud_probe_viser.py."
+    ),
+)
+parser.add_argument(
+    "--probe-save-path",
+    type=str,
+    default="pointcloud_probe.pt",
+    help="Where to write the --probe-pointcloud-camera comparison payload.",
+)
+parser.add_argument(
+    "--probe-env-id",
+    type=int,
+    default=0,
+    help="Env index tracked by --probe-pointcloud-camera.",
+)
+parser.add_argument(
+    "--probe-num-frames",
+    type=int,
+    default=400,
+    help=(
+        "Capture this many frames, then save the --probe-pointcloud-camera .pt and KEEP playing the "
+        "policy (capture stops, playback continues). At --probe-capture-every=1 this is a step count."
+    ),
+)
+parser.add_argument(
+    "--probe-capture-every",
+    type=int,
+    default=1,
+    help="Record every Nth env step for --probe-pointcloud-camera.",
+)
+parser.add_argument(
+    "--probe-door-num-points",
+    type=int,
+    default=4096,
+    help="Points sampled on the door mesh (link_1 panel + link_2 handle) for --probe-pointcloud-camera.",
+)
+parser.add_argument(
+    "--probe-robot-num-points",
+    type=int,
+    default=16384,
+    help=(
+        "Points sampled on the robot mesh for --probe-pointcloud-camera. Denser than the door because "
+        "the robot covers more surface; raise it if background leaks through the robot (penetration)."
+    ),
+)
+parser.add_argument(
+    "--probe-render-num-points",
+    type=int,
+    default=0,
+    help="Output size of the simulated round-trip cloud (0 = keep all: door + robot points).",
+)
+parser.add_argument(
+    "--probe-inflate-px",
+    type=int,
+    default=0,
+    help="z-buffer dilation (px) for the simulated round-trip render in --probe-pointcloud-camera.",
+)
+parser.add_argument(
+    "--probe-occluder-inflate-px",
+    type=int,
+    default=0,
+    help="Door-occluder z-buffer dilation (px) for the simulated round-trip render.",
+)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -176,6 +246,7 @@ if (
     or args_cli.track_pointcloud_camera
     or args_cli.pointcloud_camera_show_window
     or args_cli.pointcloud_camera_save_dir is not None
+    or args_cli.probe_pointcloud_camera
 ):
     args_cli.enable_cameras = True
 
@@ -462,6 +533,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             requested_data_types.append("distance_to_image_plane")
         env_cfg.pointcloud_camera_cfg.data_types = requested_data_types
 
+    if args_cli.probe_pointcloud_camera and hasattr(env_cfg, "pointcloud_camera_cfg"):
+        from DoorOpening.utils.camera_utils import REALSENSE_D435_FAR_M, REALSENSE_D435_NEAR_M
+
+        # The point cloud comes purely from multi_pcd_dagger's renderer; the IsaacLab camera only
+        # supplies a REFERENCE RGB image. Drive it to the D435 model (same half resolution, near/far
+        # clipping, FOV pinned after the env is built) so the RGB roughly matches the simulated cloud's
+        # view. Render mode "depth" is what instantiates the x5 camera sensor; rgb is the only stream.
+        env_cfg.pointcloud_render_mode = "depth"
+        env_cfg.pointcloud_camera_cfg.height = int(env_cfg.pointcloud_camera_cfg.height) // 2
+        env_cfg.pointcloud_camera_cfg.width = int(env_cfg.pointcloud_camera_cfg.width) // 2
+        env_cfg.pointcloud_camera_cfg.update_period = 0.0
+        env_cfg.pointcloud_camera_cfg.data_types = ["rgb"]
+        env_cfg.pointcloud_camera_cfg.spawn.clipping_range = (REALSENSE_D435_NEAR_M, REALSENSE_D435_FAR_M)
+
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
     play_env = env.unwrapped
@@ -579,6 +664,51 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             f"save_dir={save_dir})."
         )
 
+    probe_state = None
+
+    def _save_probe_payload():
+        _probe_path = os.path.abspath(args_cli.probe_save_path)
+        os.makedirs(os.path.dirname(_probe_path) or ".", exist_ok=True)
+        torch.save(
+            probe_state["probe"].payload(probe_state["frames"], frame_dt=float(play_env.step_dt)),
+            _probe_path,
+        )
+        probe_state["saved"] = True
+        print(
+            f"[PROBE] Saved {len(probe_state['frames'])} pointcloud-probe frames "
+            f"(sim_roundtrip + ground_truth clouds + reference rgb) to {_probe_path}"
+        )
+
+    if args_cli.probe_pointcloud_camera:
+        from DoorOpening.utils.pointcloud_camera_probe import PointcloudCameraProbe
+
+        probe_env_id = max(0, min(int(args_cli.probe_env_id), int(play_env.num_envs) - 1))
+        probe = PointcloudCameraProbe(
+            play_env,
+            door_num_points=int(args_cli.probe_door_num_points),
+            robot_num_points=int(args_cli.probe_robot_num_points),
+            render_num_points=int(args_cli.probe_render_num_points) or None,
+            inflate_px=int(args_cli.probe_inflate_px),
+            occluder_inflate_px=int(args_cli.probe_occluder_inflate_px),
+        )
+        probe_state = {
+            "probe": probe,
+            "env_id": probe_env_id,
+            "frames": [],
+            "num_frames": max(1, int(args_cli.probe_num_frames)),
+            "capture_every": max(1, int(args_cli.probe_capture_every)),
+            "step": 0,
+            "configured": False,
+            "done": False,
+            "saved": False,
+        }
+        print(
+            f"[PROBE] Pointcloud camera probe enabled (env_id={probe_env_id}, "
+            f"num_frames={probe_state['num_frames']}, spec {probe.sampler_camera_spec['W']}x"
+            f"{probe.sampler_camera_spec['H']} @ [{probe.sampler_camera_spec['near_m']}, "
+            f"{probe.sampler_camera_spec['far_m']}] m). Playback CONTINUES after saving."
+        )
+
     # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)
@@ -628,6 +758,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         obs = obs["obs"]
     timestep = 0
     contact_log_step = 0
+    if probe_state is not None and not probe_state["configured"]:
+        # The sensor prims exist only after the first reset -> pin the D435 intrinsics now.
+        probe_state["probe"].configure_isaac_camera_intrinsics()
+        probe_state["configured"] = True
+        print("[PROBE] IsaacLab camera intrinsics pinned to the simulated D435 spec.")
     # required: enables the flag for batched observations
     _ = agent.get_batch_size(obs, 1)
     # initialize RNN states if used
@@ -663,6 +798,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                             f"leap-fingers<->panel force: mean={_fp.mean().item():.3f} max={_fp.max().item():.3f} N | "
                             f"leap-fingers<->handle force: mean={_fh.mean().item():.3f} max={_fh.max().item():.3f} N"
                         )
+
+                if probe_state is not None and not probe_state["done"]:
+                    probe_env_id = probe_state["env_id"]
+                    if probe_state["step"] % probe_state["capture_every"] == 0:
+                        probe_state["frames"].append(probe_state["probe"].capture(probe_env_id))
+                        if len(probe_state["frames"]) % 50 == 0:
+                            print(
+                                f"[PROBE] captured {len(probe_state['frames'])}/"
+                                f"{probe_state['num_frames']} frames."
+                            )
+                    probe_state["step"] += 1
+                    if len(probe_state["frames"]) >= probe_state["num_frames"]:
+                        # Save once, then keep playing the policy (stop capturing further frames).
+                        _save_probe_payload()
+                        probe_state["done"] = True
+                        print("[PROBE] Capture complete; continuing policy playback.")
 
                 if viser_pt_state is not None and not viser_pt_state.get("done"):
                     _e = viser_pt_state["env_id"]
@@ -821,6 +972,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 _viser_path,
             )
             print(f"[INFO] Saved {len(viser_pt_state['frames'])} viser frames (robot + door pointcloud) to {_viser_path}")
+
+        # If we were interrupted before the frame target (so no save happened yet), save what we have.
+        if probe_state is not None and probe_state["frames"] and not probe_state["saved"]:
+            _save_probe_payload()
 
         if pointcloud_camera_state is not None and pointcloud_camera_state["viewer"] is not None:
             pointcloud_camera_state["viewer"].close()
