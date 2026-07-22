@@ -734,11 +734,16 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_body_lin_vel_scale = 10.0
     robot_body_ang_vel_scale = 10.0
 
-    reset_key_body_pos_delta_min = 0.5
-    reset_key_body_quat_delta_min = 1.5
+    # Curriculum drift-termination thresholds (larger = looser = less likely to reset on drift). The
+    # `_min` end is the EARLY-exploration setting (curriculum progress 0); the POSITION mins were
+    # relaxed (key-body pos 0.5->0.7, door 0.5->0.7) so the policy is not killed so aggressively while
+    # exploring, but the quat min was left at 1.8. The `_max` end (progress 1) is what distillation
+    # pins to directly.
+    reset_key_body_pos_delta_min = 0.7
+    reset_key_body_quat_delta_min = 1.8
     reset_key_body_pos_delta_max = 0.9
     reset_key_body_quat_delta_max = 3.0
-    reset_door_joint_pos_delta_min = 0.5
+    reset_door_joint_pos_delta_min = 0.7
     reset_door_joint_pos_delta_max = 0.8
     # Task-based success: the robot must end up traversed to the FAR side of the door (measured as
     # distance the base has moved past the door plane along the approach axis, +x -> door -> far side).

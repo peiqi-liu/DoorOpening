@@ -5,6 +5,60 @@ import torch
 import torch.nn.functional as F
 
 
+# --- On-robot depth camera model (Intel RealSense D435 depth stream) --------------------------
+# These are the single source of truth for the simulated depth-camera intrinsics/range used by the
+# distillation pointcloud renderer (see multi_pcd_dagger._build_sampler_camera_spec) AND for driving
+# the real IsaacLab camera to matching intrinsics in scripts/rl_games/play.py. Keep them here so the
+# two never drift apart.
+REALSENSE_D435_FOV_X_DEG = 85.0
+REALSENSE_D435_FOV_Y_DEG = 58.0
+REALSENSE_D435_NEAR_M = 0.3
+REALSENSE_D435_FAR_M = 3.0
+
+
+def build_realsense_sampler_spec(
+    height: int,
+    width: int,
+    device=None,
+    dtype=torch.float32,
+    fov_x_deg: float = REALSENSE_D435_FOV_X_DEG,
+    fov_y_deg: float = REALSENSE_D435_FOV_Y_DEG,
+    near_m: float = REALSENSE_D435_NEAR_M,
+    far_m: float = REALSENSE_D435_FAR_M,
+) -> Dict:
+    """Build the D435 depth-camera ``cam_spec_dict`` ({H, W, intrinsics, near_m, far_m}).
+
+    ``height``/``width`` are the ACTUAL render resolution (already halved, if the caller halves the
+    sensor resolution). The intrinsics are a centred pinhole derived from the requested horizontal /
+    vertical field of view, exactly matching the historical inline math in
+    ``multi_pcd_dagger._build_sampler_camera_spec`` so the two stay in sync.
+    """
+    height = int(height)
+    width = int(width)
+    fx = width / (2.0 * math.tan(math.radians(fov_x_deg) * 0.5))
+    fy = height / (2.0 * math.tan(math.radians(fov_y_deg) * 0.5))
+    cx = (width - 1.0) * 0.5
+    cy = (height - 1.0) * 0.5
+
+    intrinsics = torch.tensor(
+        [
+            [fx, 0.0, cx],
+            [0.0, fy, cy],
+            [0.0, 0.0, 1.0],
+        ],
+        device=device,
+        dtype=dtype,
+    )
+
+    return {
+        "H": height,
+        "W": width,
+        "intrinsics": intrinsics,
+        "near_m": float(near_m),
+        "far_m": float(far_m),
+    }
+
+
 def build_pinhole_intrinsics(
     height: int,
     width: int,

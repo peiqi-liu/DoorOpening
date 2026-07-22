@@ -710,7 +710,15 @@ def state_machine_offline_left_pull_door(
     base_target_pos = handle_pos.clone()
     base_target_pos[:, 0] += pregrasp_base_x_offset
     base_target_pos[:, 1] += pregrasp_base_y_offset
-    base_target_pose = _make_pose(base_target_pos, base_target_rot)
+    # Left-door camera FOV: tilt the base a little toward the handle for pregrasp -> unlatch, so the
+    # ARX/x5 camera arm keeps the handle in good view. A positive yaw delta turns the base toward the
+    # handle here; flip the sign if the camera looks the wrong way. base_target_rot (untilted) is
+    # restored from Step 4 onward, so only pregrasp/grasp/unlatch (which reuse this base_target_pose)
+    # are tilted.
+    pregrasp_base_tilt_yaw = 0.3
+    _, _, _base_yaw = euler_xyz_from_quat(base_target_rot)
+    pregrasp_tilt_base_rot = get_rotation_quat(0.0, 0.0, _base_yaw.item() + pregrasp_base_tilt_yaw, device)
+    base_target_pose = _make_pose(base_target_pos, pregrasp_tilt_base_rot)
 
     palm_target_pos = handle_pos.clone()
     palm_target_pos[:, 0] += pregrasp_palm_x_offset

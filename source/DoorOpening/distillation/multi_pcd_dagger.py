@@ -32,6 +32,7 @@ from DoorOpening.assets.glorbot.glorbot_cfg import glorbot_urdf_path
 from DoorOpening.model.transformer import PCDTransformer, strip_prefix_from_state_dict
 from DoorOpening.utils.camera_utils import (
     build_pinhole_intrinsics,
+    build_realsense_sampler_spec,
     crop_local_pcd,
     render_depth_roundtrip_from_pose,
     simulate_lidar_render_from_pose,
@@ -136,6 +137,18 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.runtime_cfg = self.config.get("dagger", {})
         self.wall_distractor_cfg = dict(self.runtime_cfg.get("wall_distractors", {}))
         self.door_hole_aug_cfg = dict(self.runtime_cfg.get("door_hole_aug", {}))
+
+        # Distillation starts directly at the LOOSEST reset/termination drift thresholds
+        # (reset_key_body_pos/quat_delta_max + reset_door_joint_pos_delta_max in
+        # multi_dooropening_env_cfg) instead of ramping the whole reset_progress_total curriculum
+        # again: the teacher already solves the task, so the student should imitate under the full
+        # drift tolerance from step 0 rather than being killed by the tight early-schedule deltas.
+        # This forces the env's drift-threshold curriculum to a fixed progress (1.0 = max thresholds)
+        # via the same base_env.drift_threshold_progress_override hook the teacher diagnostic uses.
+        # Set dagger.drift_threshold_progress_override to null in the config for the normal min->max ramp.
+        drift_threshold_progress_override = self.runtime_cfg.get("drift_threshold_progress_override", 1.0)
+        if drift_threshold_progress_override is not None:
+            self.ov_env.drift_threshold_progress_override = float(drift_threshold_progress_override)
 
         self.lr = float(self.runtime_cfg.get("learning_rate", 1e-4))
         self.lr_schedule = str(self.runtime_cfg.get("lr_schedule", "cosine")).lower()
@@ -2881,39 +2894,14 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         return mean_ms
 
     def _build_sampler_camera_spec(self):
-      camera_cfg = self.ov_env.cfg.pointcloud_camera_cfg
-
-      # Keep the render cheap, but match the IsaacGymEnvs D435 FOV/range.
-      height = int(camera_cfg.height) // 2
-      width = int(camera_cfg.width) // 2
-
-      fov_x_deg = 80
-      fov_y_deg = 55
-      near_m = 0.3
-      far_m = 3.0
-
-      fx = width / (2.0 * math.tan(math.radians(fov_x_deg) * 0.5))
-      fy = height / (2.0 * math.tan(math.radians(fov_y_deg) * 0.5))
-      cx = (width - 1.0) * 0.5
-      cy = (height - 1.0) * 0.5
-
-      intrinsics = torch.tensor(
-          [
-              [fx, 0.0, cx],
-              [0.0, fy, cy],
-              [0.0, 0.0, 1.0],
-          ],
-          device=self.device,
-          dtype=torch.float32,
-      )
-
-      return {
-          "H": height,
-          "W": width,
-          "intrinsics": intrinsics,
-          "near_m": near_m,
-          "far_m": far_m,
-      }
+        camera_cfg = self.ov_env.cfg.pointcloud_camera_cfg
+        # Half-res D435 model. The intrinsics/range live in DoorOpening.utils.camera_utils so that
+        # scripts/rl_games/play.py can drive the real IsaacLab camera to the identical spec.
+        return build_realsense_sampler_spec(
+            int(camera_cfg.height) // 2,
+            int(camera_cfg.width) // 2,
+            device=self.device,
+        )
 
     def _get_sampler_camera_pose(self):
         camera_link_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_camera_body_idx]

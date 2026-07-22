@@ -2,7 +2,7 @@ import math
 from typing import Literal
 
 import torch
-from isaaclab.utils.math import quat_from_euler_xyz
+from isaaclab.utils.math import euler_xyz_from_quat, quat_from_euler_xyz
 
 from DoorOpening.constants.robot_constants import FRANKA_DEFAULT_JOINT_POS, FRANKA_END_JOINT_POS, FRANKA_JOINT_NAMES, CAMERA_JOINT_DEFAULT_VALUES, CAMERA_JOINT_VALUES_WHEN_SEARCHING_HINGE, CAMERA_JOINT_VALUES_WHEN_OBSERVING_LEFT
 from DoorOpening.utils.state_machine.api import get_board_edge, get_hinge_pos, open_hand, solve_ik
@@ -523,7 +523,15 @@ def state_machine_offline_push_left_door(
     base_target_pos[:, 0] += 0.55
     # Base moved a little inward toward the door center (+y; was 0.25) so it doesn't sit out by the wall.
     base_target_pos[:, 1] += 0.3
-    base_target_pose = _make_pose(base_target_pos, base_target_rot)
+    # Left-door camera FOV: tilt the base a little toward the handle for pregrasp -> unlatch, so the
+    # ARX/x5 camera arm keeps the handle in good view. A positive yaw delta turns the base toward the
+    # handle here; flip the sign if the camera looks the wrong way. base_target_rot (untilted) is
+    # restored from Step 4 onward, so only pregrasp/grasp/unlatch (which reuse this base_target_pose)
+    # are tilted.
+    pregrasp_base_tilt_yaw = 0.3
+    _, _, _base_yaw = euler_xyz_from_quat(base_target_rot)
+    pregrasp_tilt_base_rot = get_rotation_quat(0.0, 0.0, _base_yaw.item() + pregrasp_base_tilt_yaw, device)
+    base_target_pose = _make_pose(base_target_pos, pregrasp_tilt_base_rot)
 
     palm_target_pos = handle_pos.clone()
     # Moved back (0.35 -> 0.40): wider palm<->door x gap to compensate for removing the
