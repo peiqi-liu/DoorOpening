@@ -208,13 +208,30 @@ dagger:
     sdf_cutoff: 0.02
     max_points_per_process: 5000
   depth_cam_render:
-    # Clean geometric depth round-trip (3D points -> 2D z-buffer depth image -> 3D points), rendered by
-    # render_depth_roundtrip_from_pose. NO sensor-noise augmentation (depth jitter / spatial blur were
-    # removed) -- only the z-buffer, the occluder anti-penetration pass, and near/far clipping remain.
+    # Geometric depth round-trip (3D points -> 2D z-buffer depth image -> 3D points), rendered by
+    # render_depth_roundtrip_from_pose. z-buffer + occluder anti-penetration pass + near/far clipping,
+    # plus an OPTIONAL RealSense-style spatial blur (blur_kernel_px/blur_sigma_px below) so thin features
+    # like the handle bleed into a blurry "bump" instead of rendering as a crisp lever.
     num_points: 12000
     inflate_px: 0  # Main-pass z-buffer dilation (px). 0 = plain round-trip (each point -> one pixel -> back), which is what we want; the door/robot clouds are dense enough that the raw per-pixel z-buffer has no meaningful holes. Raise to 1-2 only if the surface looks holey/sparse.
     clip_mode: "post"
     use_compile: true
+    # Edge-bleeding spatial blur of the depth image before back-projection (mimics the RealSense SDK
+    # spatial filter). Flat surfaces are unchanged; thin features (the handle) smear into the door/plate
+    # behind them, so a crisp lever renders as the indistinct bump a real depth camera returns. Verified:
+    # kernel 5 already erases the handle's crisp plane. blur_kernel_px <= 1 disables it (0 = current
+    # behaviour). Recommended starting point to make the handle a bump: blur_kernel_px 5-7, blur_sigma_px
+    # 2-3 (larger sigma = softer). Set per-run; left off here so existing runs are unchanged.
+    blur_kernel_px: 11
+    blur_sigma_px: 3.0
+    # After the blur, drop SCENE (door+wall) pixels sitting on a depth discontinuity larger than this
+    # (m). The blur bleeds wall/door silhouettes into floating "flying pixel" smears; this removes them
+    # (a real depth camera drops edge returns rather than bleeding them), so the walls stay clean. The
+    # ROBOT is rendered in a separate crisp pass and is NOT blurred/edge-dropped. 0 disables it.
+    edge_drop_m: 0.05
+    # GT robot/model points rendered as a SEPARATE crisp z-buffer pass and composited by nearest-surface
+    # min, so the robot self-occludes / occludes the door but never gets blur/edge-drop noise on its own
+    # body (unfaithful near-robot depth noise). See multi_pcd_dagger._render_depth_scene_with_crisp_robot.
     # Door panel + wall distractor points are rasterized a second time with this much larger dilation
     # and composited into the depth via a per-pixel min. At close range (near_m below) a sparse occluder
     # leaves per-pixel z-buffer gaps that let farther points (background, the far side of the wall) show

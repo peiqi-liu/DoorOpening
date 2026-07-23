@@ -43,7 +43,10 @@ if str(SOURCE_ROOT) not in sys.path:
 import yaml
 
 from DoorOpening.utils.camera_utils import (
+    apply_depth_spatial_blur,
     backproject_depth_to_world_from_pose,
+    build_depth_blur_kernel2d,
+    drop_depth_edges,
     rasterize_depth_zbuffer_from_pose,
 )
 from DoorOpening.utils.urdf_utils import compute_exact_door_keypoints
@@ -205,28 +208,48 @@ def build_camera_spec(width_px, height_px, near_m, far_m, device):
 # --------------------------------------------------------------------------------------
 # The round-trip: points -> depth image -> points
 # --------------------------------------------------------------------------------------
-def render_batch(clouds, camera_pose, cam_spec, jitter_std_m,
-                 inflate_px, clip_mode, occluder_clouds, occluder_inflate_px):
+def render_batch(scene_clouds, robot_clouds, camera_pose, cam_spec, jitter_std_m,
+                 inflate_px, clip_mode, occluder_clouds, occluder_inflate_px,
+                 blur_kernel_px=0, blur_sigma_px=0.0, edge_drop_m=0.0):
     """Batched points -> RealSense depth image -> world points for B configs at once.
 
-    clouds: (B, N, 3), camera_pose: (B, 7). Returns (list_of_(Mi,3) world clouds, n_px_per_image).
-    Rendering all B configs in one launch is what makes this fast -- the z-buffer/backproject cost is
-    dominated by the B*H*W pixel work, which the GPU does in parallel instead of one config per call.
+    scene_clouds: (B, N, 3) door + walls. robot_clouds: (B, M, 3) or None. camera_pose: (B, 7).
+    Returns (list_of_(Mi,3) world clouds, n_px_per_image). Rendering all B configs in one launch is what
+    makes this fast -- the z-buffer/backproject cost is dominated by the B*H*W pixel work.
 
     ``inflate_px`` is the MAIN-pass z-buffer dilation (0 = plain round-trip). The anti-penetration work
     is the SECOND pass: ``occluder_clouds`` (the solid door + walls) rasterized with
     ``occluder_inflate_px`` dilation and per-pixel-min composited, so points behind a surface can't leak
-    through it ("penetration") and the walls render as solid boxes. Both ``inflate_px`` and
-    ``occluder_inflate_px`` are passed in from the cfg (no hardcoded numbers), matching the training
-    render (render_depth_roundtrip_from_pose).
+    through it and the walls render as solid boxes.
+
+    IMPORTANT (faithfulness): blur + jitter are applied to the SCENE depth only. The robot is rasterized
+    in a SEPARATE crisp pass and composited by nearest-surface ``minimum`` -- so it still self-occludes
+    and occludes the door, but carries NO unfaithful sensor noise on its own body. (The old code merged
+    the robot into the rendered cloud, so the blur/jitter smeared the robot silhouette too.)
     """
     depth, intr = rasterize_depth_zbuffer_from_pose(
-        clouds, camera_pose, cam_spec, inflate_px=inflate_px, clip_mode=clip_mode,
+        scene_clouds, camera_pose, cam_spec, inflate_px=inflate_px, clip_mode=clip_mode,
         occluder_pcd=occluder_clouds, occluder_inflate_px=occluder_inflate_px,
     )
+    # RealSense-style edge-bleeding blur on the SCENE only: thin features like the handle smear into the
+    # door behind them, so a crisp lever renders as a bump (matches training's depth render).
+    if int(blur_kernel_px) > 1:
+        kernel2d, pad = build_depth_blur_kernel2d(blur_kernel_px, blur_sigma_px, depth.device, depth.dtype)
+        depth = apply_depth_spatial_blur(depth, kernel2d, pad)
     if jitter_std_m > 0.0:
         finite = torch.isfinite(depth)
         depth = torch.where(finite, depth + torch.randn_like(depth) * jitter_std_m, depth)
+    # Edge dropout on the SCENE: remove the blur's flying-pixel smears on wall/door silhouettes.
+    if edge_drop_m and edge_drop_m > 0.0:
+        depth = drop_depth_edges(depth, edge_drop_m)
+    # Crisp robot pass, composited by nearest-surface min so the robot occludes/gets occluded but is
+    # never blurred, jittered or edge-dropped.
+    if robot_clouds is not None:
+        robot_depth, _ = rasterize_depth_zbuffer_from_pose(
+            robot_clouds, camera_pose, cam_spec, inflate_px=inflate_px, clip_mode=clip_mode,
+            occluder_pcd=None, occluder_inflate_px=0,
+        )
+        depth = torch.minimum(depth, robot_depth)
     world, valid = backproject_depth_to_world_from_pose(depth, camera_pose, intr)  # (B,H,W,3), (B,H,W)
     n_px = int(valid.shape[1] * valid.shape[2])
     out = []
@@ -299,6 +322,14 @@ def parse_args():
                    "composited to stop back-surface points leaking through gaps (0 disables). Default: "
                    "read from the cfg's dagger.depth_cam_render.occluder_inflate_px (locked to training).")
     p.add_argument("--jitter-std-m", type=float, default=0.0, help="Optional gaussian range noise on the depth (m).")
+    p.add_argument("--blur-kernel-px", type=int, default=None,
+                   help="RealSense-style edge-bleeding blur kernel (px); smears the handle into a bump. "
+                   "Default: read from the cfg's dagger.depth_cam_render.blur_kernel_px. <=1 disables.")
+    p.add_argument("--blur-sigma-px", type=float, default=None,
+                   help="Gaussian sigma for the depth blur (px); larger = softer. Default: cfg value.")
+    p.add_argument("--edge-drop-m", type=float, default=None,
+                   help="Drop SCENE pixels on a depth discontinuity > this (m) to remove the blur's "
+                   "flying-pixel smears on wall/door edges. Default: cfg dagger.depth_cam_render.edge_drop_m.")
     p.add_argument("--batch-size", type=int, default=32, help="Configs rendered per GPU launch (higher = faster, more VRAM).")
     p.add_argument("--max-points", type=int, default=8000, help="Per-cloud point cap for viser display.")
     return p.parse_args()
@@ -325,6 +356,10 @@ def main():
         else int(depth_cfg.get("occluder_inflate_px", 0))
     )
     clip_mode = str(depth_cfg.get("clip_mode", "post"))
+    # Depth blur defaults to the same cfg block training reads; CLI overrides win.
+    blur_kernel_px = args.blur_kernel_px if args.blur_kernel_px is not None else int(depth_cfg.get("blur_kernel_px", 0))
+    blur_sigma_px = args.blur_sigma_px if args.blur_sigma_px is not None else float(depth_cfg.get("blur_sigma_px", 0.0))
+    edge_drop_m = args.edge_drop_m if args.edge_drop_m is not None else float(depth_cfg.get("edge_drop_m", 0.0))
 
     # --- GT door geometry (door-base frame at world origin) ---
     board_bbox, board_gt, handle_center = load_door_asset(args.door, board_num_points, device)
@@ -403,36 +438,42 @@ def main():
           f"range [{args.near_m}, {args.far_m}] m, {cam_desc}")
     print(f"[INFO] gt_scale       : {args.gt_scale}  (door {board_num_points} pts, walls {wall_params.num_points} pts cap)")
     print(f"[INFO] inflate_px     : {inflate_px}  occluder_inflate_px: {occluder_inflate_px}  (from cfg depth_cam_render)")
+    print(f"[INFO] depth blur     : kernel {blur_kernel_px}px sigma {blur_sigma_px}px  ({'ON -> handle blurs to a bump' if blur_kernel_px>1 else 'off'})")
+    print(f"[INFO] edge drop      : {edge_drop_m} m  ({'ON -> scene edge smears dropped' if edge_drop_m>0 else 'off'})")
     print(f"[INFO] round-trip: GT points -> depth image -> points, {args.num_configs} configs")
 
     frames = [None] * args.num_configs
     for start in range(0, args.num_configs, args.batch_size):
         idxs = list(range(start, min(start + args.batch_size, args.num_configs)))
-        # Stack this chunk of configs into one (Bc, N, 3) batch: shared door (+ robot) with per-config
-        # walls. The occluder cloud (door + walls, NO robot) drives the anti-penetration second pass;
-        # the robot stays out of it so its thin links aren't dilated away (matches training).
-        clouds, occluders = [], []
+        # Stack this chunk of configs into one (Bc, N, 3) SCENE batch: shared door with per-config walls.
+        # The robot is kept SEPARATE (crisp pass) so blur/jitter never touch it. The occluder cloud
+        # (door + walls, NO robot) drives the anti-penetration second pass; the robot stays out of it so
+        # its thin links aren't dilated away (matches training).
+        scene_clouds, occluders, gt_clouds = [], [], []
         for _ in idxs:
             occ_parts = [board_gt_world]
             if walls_on:
                 occ_parts.append(door_to_world(sample_walls()))
             occ = torch.cat(occ_parts, dim=1) if len(occ_parts) > 1 else occ_parts[0]
             occluders.append(occ)
-            clouds.append(torch.cat([occ, robot_world], dim=1) if robot_world is not None else occ)
-        clouds = torch.cat(clouds, dim=0)  # (Bc, N, 3)
+            scene_clouds.append(occ)  # rendered (blurred) cloud = door + walls, NO robot
+            gt_clouds.append(torch.cat([occ, robot_world], dim=1) if robot_world is not None else occ)
+        scene_clouds = torch.cat(scene_clouds, dim=0)  # (Bc, No, 3)
         occluders = torch.cat(occluders, dim=0)  # (Bc, No, 3)
+        robot_b = robot_world.expand(len(idxs), -1, -1) if robot_world is not None else None
         cam_b = camera_pose.expand(len(idxs), -1)
 
         rep_list, n_px = render_batch(
-            clouds, cam_b, cam_spec, args.jitter_std_m,
+            scene_clouds, robot_b, cam_b, cam_spec, args.jitter_std_m,
             inflate_px=inflate_px, clip_mode=clip_mode,
             occluder_clouds=occluders, occluder_inflate_px=occluder_inflate_px,
+            blur_kernel_px=blur_kernel_px, blur_sigma_px=blur_sigma_px, edge_drop_m=edge_drop_m,
         )
 
         for j, config_idx in enumerate(idxs):
             frames[config_idx] = {
                 "pointclouds": {
-                    "ground_truth": pack(drop_invalid_rows(clouds[j]), args.max_points),
+                    "ground_truth": pack(drop_invalid_rows(gt_clouds[j]), args.max_points),
                     "reprojected": pack(rep_list[j], args.max_points),
                 }
             }

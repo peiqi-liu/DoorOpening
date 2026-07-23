@@ -36,20 +36,53 @@ training. They preserve the expected IsaacLab naming:
 DEFAULT_PANEL_WIDTH_RANGE_M = (0.7, 1.0)
 DEFAULT_PANEL_HEIGHT_RANGE_M = (1.75, 2.15)
 DEFAULT_PANEL_THICKNESS_RANGE_M = (0.028, 0.055)
-DEFAULT_FRAME_POST_WIDTH_RANGE_M = (0.04, 0.16)
-DEFAULT_FRAME_HEAD_HEIGHT_RANGE_M = (0.04, 0.16)
-DEFAULT_FRAME_DEPTH_SCALE_RANGE = (1.05, 2.6)
+# Frame BORDER (post width / head height) around the opening. Range STARTS AT 0 so it spans the full
+# spectrum: near-0 = effectively NO frame (panel flush in the wall), up to a chunky surround. When both
+# post width and head height sample near 0 the frame boxes vanish entirely (degenerate -> skipped).
+DEFAULT_FRAME_POST_WIDTH_RANGE_M = (0.0, 0.18)
+DEFAULT_FRAME_HEAD_HEIGHT_RANGE_M = (0.0, 0.18)
+# Frame DEPTH (front-to-back thickness) as a multiple of the panel thickness. Wide range: from a thin
+# normal jamb (~1x) up to a THICK WALL the door is set into (deep reveal). Only visible where the
+# border above is non-zero.
+DEFAULT_FRAME_DEPTH_SCALE_RANGE = (1.0, 8.0)
 DEFAULT_FRAME_CLEARANCE_RANGE_M = (0.003, 0.015)
 
 DEFAULT_HANDLE_HEIGHT_RANGE_M = (0.75, 1.0)
 DEFAULT_HANDLE_EDGE_DISTANCE_RANGE_M = (0.03, 0.15)
 DEFAULT_HANDLE_RADIUS_RANGE_M = (0.006, 0.018)
+# Vertical thickness (height) of the lever grip bar, DECOUPLED from the stem radius. Real lever grips
+# are thin flat bars, so the point cloud of the lever should be thin in height -- if this is left at
+# 0 the lever falls back to a square 2*radius cross-section (the old, too-tall behaviour).
+DEFAULT_HANDLE_LEVER_THICKNESS_RANGE_M = (0.010, 0.016)
 DEFAULT_HANDLE_STEM_LENGTH_RANGE_M = (0.055, 0.10)
 DEFAULT_HANDLE_LENGTH_RANGE_M = (0.09, 0.14)
 DEFAULT_HANDLE_RETURN_LENGTH_RANGE_M = (0.035, 0.08)
 DEFAULT_HANDLE_RETURN_TIP_CLEARANCE_RANGE_M = (0.025, 0.050)
 DEFAULT_HANDLE_NUM_SEGMENTS = 16
 DEFAULT_RETURN_HANDLE_PROB = 0.7
+
+# "Bump" = a raised mount (like a hotel rose/escutcheon) at the handle base that the lever sits on.
+# Two shapes are supported:
+#   - "box"      : a tall rectangular escutcheon plate (matches real hotel door plates). It is fixed
+#                  to the door panel (link_1) so it does NOT rotate when the lever (link_2) turns.
+#                  Sized by height (vertical y), width (horizontal x) and protrusion (outward z).
+#   - "cylinder" : a round mounting boss co-axial with the stem, on link_2. Rotationally symmetric so
+#                  it stays put under the joint_2 sweep. Sized by radius and protrusion (length).
+# In both cases the handle stem now starts at the OUTER face of the mount, so handle_stem_length is
+# the guaranteed clear gap the fingers get above the mount. Disabled by default (prob 0.0).
+DEFAULT_HANDLE_BUMP_PROB = 0.0
+DEFAULT_HANDLE_BUMP_SHAPE = "box"
+# Outward protrusion (z) of the mount out of the door face. Range starts near ZERO so a small draw is
+# effectively "no bump" (nearly flush), up to a modest plate -- deliberately NOT too thick. This lets a
+# single always-on sample cover the whole no-bump..bump spectrum via SIZE instead of a hard prob.
+DEFAULT_HANDLE_BUMP_LENGTH_RANGE_M = (0.001, 0.015)
+# Box plate only: vertical extent (y) and horizontal extent (x) of the escutcheon plate. Start small
+# (~2 cm ≈ no visible plate) up to a MODEST escutcheon -- deliberately capped so we never suddenly
+# show a huge plate the (not-yet-trained) policy has never seen.
+DEFAULT_HANDLE_BUMP_HEIGHT_RANGE_M = (0.02, 0.14)
+DEFAULT_HANDLE_BUMP_WIDTH_RANGE_M = (0.02, 0.08)
+# Cylinder boss only: radius of the round mount.
+DEFAULT_HANDLE_BUMP_RADIUS_RANGE_M = (0.022, 0.035)
 
 DEFAULT_NUM_VARIANTS = 512
 DEFAULT_DEBUG_FIRST_N = 0
@@ -98,6 +131,9 @@ MIN_HANDLE_BOTTOM_CLEARANCE_M = 0.15
 MIN_HANDLE_TOP_CLEARANCE_M = 0.15
 MIN_HANDLE_EDGE_CLEARANCE_M = 0.02
 MIN_RETURN_TIP_CLEARANCE_M = 0.010
+# Minimum clear grasp space kept between the escutcheon plate/boss outer face and the lever bar, so the
+# mount can never be so thick that it reaches the lever (the handle-panel gap is measured from the panel).
+MIN_HANDLE_PLATE_GRASP_GAP_M = 0.02
 
 REQUIRED_LINK_NAMES = {"base", "link_0", "link_1", "link_2"}
 REQUIRED_JOINT_NAMES = {"joint_0", "joint_1", "joint_2"}
@@ -210,6 +246,15 @@ def parse_args():
         default=DEFAULT_HANDLE_RADIUS_RANGE_M,
     )
     parser.add_argument(
+        "--handle-lever-thickness-range",
+        type=float,
+        nargs=2,
+        metavar=("MIN_M", "MAX_M"),
+        default=DEFAULT_HANDLE_LEVER_THICKNESS_RANGE_M,
+        help="Vertical thickness (height) of the lever grip bar, decoupled from the stem radius. "
+        "Set both to 0 to fall back to the old square 2*radius lever cross-section.",
+    )
+    parser.add_argument(
         "--handle-stem-length-range",
         type=float,
         nargs=2,
@@ -239,6 +284,52 @@ def parse_args():
         help="Minimum remaining gap between the return lever tip and the door face.",
     )
     parser.add_argument("--return-handle-prob", type=float, default=DEFAULT_RETURN_HANDLE_PROB)
+    parser.add_argument(
+        "--handle-bump-prob",
+        type=float,
+        default=DEFAULT_HANDLE_BUMP_PROB,
+        help="Probability a variant gets a raised mount (bump) at the handle base that the lever "
+        "sits on. 0.0 disables it (default); 1.0 forces it on every variant.",
+    )
+    parser.add_argument(
+        "--handle-bump-shape",
+        choices=("box", "cylinder", "random"),
+        default=DEFAULT_HANDLE_BUMP_SHAPE,
+        help="Mount shape: 'box' = rectangular escutcheon plate on the panel (default); 'cylinder' = "
+        "round boss on the handle; 'random' picks per variant.",
+    )
+    parser.add_argument(
+        "--handle-bump-length-range",
+        type=float,
+        nargs=2,
+        metavar=("MIN_M", "MAX_M"),
+        default=DEFAULT_HANDLE_BUMP_LENGTH_RANGE_M,
+        help="How far the mount protrudes out of the door face, meters (both shapes).",
+    )
+    parser.add_argument(
+        "--handle-bump-height-range",
+        type=float,
+        nargs=2,
+        metavar=("MIN_M", "MAX_M"),
+        default=DEFAULT_HANDLE_BUMP_HEIGHT_RANGE_M,
+        help="Box plate only: vertical extent (meters) of the escutcheon plate.",
+    )
+    parser.add_argument(
+        "--handle-bump-width-range",
+        type=float,
+        nargs=2,
+        metavar=("MIN_M", "MAX_M"),
+        default=DEFAULT_HANDLE_BUMP_WIDTH_RANGE_M,
+        help="Box plate only: horizontal extent (meters) of the escutcheon plate.",
+    )
+    parser.add_argument(
+        "--handle-bump-radius-range",
+        type=float,
+        nargs=2,
+        metavar=("MIN_M", "MAX_M"),
+        default=DEFAULT_HANDLE_BUMP_RADIUS_RANGE_M,
+        help="Cylinder boss only: radius (meters); should be wider than the handle stem radius.",
+    )
     parser.add_argument("--handle-num-segments", type=int, default=DEFAULT_HANDLE_NUM_SEGMENTS)
     parser.add_argument("--debug-first-n", type=int, default=DEFAULT_DEBUG_FIRST_N)
     parser.add_argument(
@@ -594,11 +685,18 @@ def sample_variant_spec(rng, args):
     handle_height = sample_uniform(rng, args.handle_height_range)
     handle_edge_distance = sample_uniform(rng, args.handle_edge_distance_range)
     handle_radius = sample_uniform(rng, args.handle_radius_range)
+    handle_lever_thickness = sample_uniform(rng, args.handle_lever_thickness_range)
     handle_stem_length = sample_uniform(rng, args.handle_stem_length_range)
     handle_length = sample_uniform(rng, args.handle_length_range)
     handle_return_length = sample_uniform(rng, args.handle_return_length_range)
     handle_return_tip_clearance = sample_uniform(rng, args.handle_return_tip_clearance_range)
     handle_has_return = rng.random() < args.return_handle_prob
+    handle_bump_length = sample_uniform(rng, args.handle_bump_length_range)
+    handle_bump_height = sample_uniform(rng, args.handle_bump_height_range)
+    handle_bump_width = sample_uniform(rng, args.handle_bump_width_range)
+    handle_bump_radius = sample_uniform(rng, args.handle_bump_radius_range)
+    handle_bump_shape = choose_mode(rng, args.handle_bump_shape, options=("box", "cylinder"))
+    handle_has_bump = rng.random() < args.handle_bump_prob
 
     return {
         "panel_width_m": panel_width,
@@ -614,11 +712,18 @@ def sample_variant_spec(rng, args):
         "handle_height_m": handle_height,
         "handle_edge_distance_m": handle_edge_distance,
         "handle_radius_m": handle_radius,
+        "handle_lever_thickness_m": handle_lever_thickness,
         "handle_stem_length_m": handle_stem_length,
         "handle_length_m": handle_length,
         "handle_return_length_m": handle_return_length,
         "handle_return_tip_clearance_m": handle_return_tip_clearance,
         "handle_has_return": handle_has_return,
+        "handle_bump_length_m": handle_bump_length,
+        "handle_bump_height_m": handle_bump_height,
+        "handle_bump_width_m": handle_bump_width,
+        "handle_bump_radius_m": handle_bump_radius,
+        "handle_bump_shape": handle_bump_shape,
+        "handle_has_bump": handle_has_bump,
     }
 
 
@@ -729,6 +834,10 @@ def build_handle_spec(spec, board_min, board_max):
     ]
 
     radius = spec["handle_radius_m"]
+    # Lever grip bar vertical half-thickness, decoupled from the stem radius so the lever reads thin.
+    # Falls back to the old square 2*radius cross-section when the thickness is left at 0.
+    lever_thickness = float(spec.get("handle_lever_thickness_m", 0.0))
+    lever_half_h = 0.5 * lever_thickness if lever_thickness > 0.0 else radius
     stem_length = spec["handle_stem_length_m"]
     lever_length = spec["handle_length_m"]
     min_tip_clearance = max(MIN_RETURN_TIP_CLEARANCE_M, spec["handle_return_tip_clearance_m"])
@@ -737,19 +846,71 @@ def build_handle_spec(spec, board_min, board_max):
     return_length = min(spec["handle_return_length_m"], max_return_length)
     outward_sign = face_sign
 
+    # Raised mount ("bump"): a plate/boss protruding from the door face at the handle base. IMPORTANT:
+    # `stem_length` is the gap between the handle and the door PANEL, measured from the PANEL FACE -- NOT
+    # from the mount. The mount sits WITHIN that gap, behind the lever, and does NOT push the lever
+    # further out. We clamp the mount protrusion so it always stays behind the lever, keeping at least
+    # MIN_HANDLE_PLATE_GRASP_GAP_M of clear grasp space between the plate/boss and the lever.
+    has_bump = bool(spec.get("handle_has_bump", False))
+    bump_shape = str(spec.get("handle_bump_shape", "box")) if has_bump else "none"
+    bump_protrusion = float(spec.get("handle_bump_length_m", 0.0)) if has_bump else 0.0
+    bump_protrusion = min(bump_protrusion, max(0.0, stem_length - MIN_HANDLE_PLATE_GRASP_GAP_M))
+    bump_radius = max(float(spec.get("handle_bump_radius_m", 0.0)), radius * 1.5)
+    mount_out = outward_sign * bump_protrusion  # signed z of the mount's outer face
+
+    # Stem/lever standoff is measured from the PANEL face (z=0), so the handle<->panel gap == stem_length.
     stem_start = [0.0, 0.0, 0.0]
     stem_end = [0.0, 0.0, outward_sign * stem_length]
     lever_start = list(stem_end)
     lever_tip = [lever_direction_x * lever_length, 0.0, outward_sign * stem_length]
     return_tip = [lever_tip[0], 0.0, outward_sign * (stem_length - return_length)]
 
+    # Round boss (cylinder) lives on link_2 co-axial with the stem: from the door face out to its outer face.
+    bump_start = [0.0, 0.0, 0.0]
+    bump_end = [0.0, 0.0, mount_out]
+
+    # Box escutcheon plate lives on link_1 (the panel) so it does NOT rotate with the lever. It is a
+    # tall, thin rectangular slab centred on the handle joint, protruding out of the handle face. We
+    # embed it a few mm into the panel to avoid a coplanar seam, and clamp it to the board bounds.
+    plate_min_link1 = None
+    plate_max_link1 = None
+    if has_bump and bump_shape == "box":
+        bump_height = float(spec.get("handle_bump_height_m", 0.0))
+        bump_width = float(spec.get("handle_bump_width_m", 0.0))
+        cx = joint_x
+        cy = joint_origin_link1[1]
+        face_z = joint_origin_link1[2]  # outer (handle) face of the panel
+        embed = 0.003
+        px0 = clamp(cx - 0.5 * bump_width, board_min[0], board_max[0])
+        px1 = clamp(cx + 0.5 * bump_width, board_min[0], board_max[0])
+        py0 = clamp(cy - 0.5 * bump_height, board_min[1] + 0.01, board_max[1] - 0.01)
+        py1 = clamp(cy + 0.5 * bump_height, board_min[1] + 0.01, board_max[1] - 0.01)
+        inner_z = face_z - outward_sign * embed
+        outer_z = face_z + mount_out
+        pz0, pz1 = (inner_z, outer_z) if outer_z >= inner_z else (outer_z, inner_z)
+        plate_min_link1 = [px0, py0, pz0]
+        plate_max_link1 = [px1, py1, pz1]
+
     return {
         "type": "return" if spec["handle_has_return"] else "straight",
+        "has_bump": has_bump,
+        "bump_shape": bump_shape,
+        "bump_protrusion_m": bump_protrusion,
+        "bump_height_m": float(spec.get("handle_bump_height_m", 0.0)),
+        "bump_width_m": float(spec.get("handle_bump_width_m", 0.0)),
+        "bump_radius_m": bump_radius,
+        "mount_out_m": bump_protrusion,
+        "bump_start_link2": bump_start,
+        "bump_end_link2": bump_end,
+        "plate_min_link1": plate_min_link1,
+        "plate_max_link1": plate_max_link1,
         "joint_origin_link1": joint_origin_link1,
         "joint_axis_link1": [0.0, 0.0, -lever_direction_x],
         "lever_direction_link2": [lever_direction_x, 0.0, 0.0],
         "return_direction_link2": [0.0, 0.0, -outward_sign],
         "radius_m": radius,
+        "lever_thickness_m": lever_thickness,
+        "lever_half_height_m": lever_half_h,
         "stem_length_m": stem_length,
         "lever_length_m": lever_length,
         "return_length_m": return_length,
@@ -762,9 +923,13 @@ def build_handle_spec(spec, board_min, board_max):
     }
 
 
-def write_board_mesh(mesh_path, board_min, board_max):
+def write_board_mesh(mesh_path, board_min, board_max, plate_box=None):
     builder = ObjMeshBuilder()
     builder.add_box_bounds(board_min, board_max)
+    if plate_box is not None:
+        # Escutcheon plate is baked into the panel mesh so it is fixed to link_1 (visual + collision).
+        plate_min, plate_max = plate_box
+        builder.add_box_bounds(plate_min, plate_max)
     builder.write(mesh_path)
 
 
@@ -778,6 +943,19 @@ def write_frame_mesh(mesh_path, frame_boxes):
 def write_handle_mesh(mesh_path, handle_spec, num_segments):
     builder = ObjMeshBuilder()
     radius = handle_spec["radius_m"]
+    if (
+        handle_spec.get("has_bump")
+        and handle_spec.get("bump_shape") == "cylinder"
+        and handle_spec.get("bump_protrusion_m", 0.0) > 0.0
+    ):
+        # Round mounting boss the lever sits on. Drawn first so it reads as the base of the handle.
+        # (The box plate is instead baked into the panel mesh; see write_board_mesh.)
+        builder.add_cylinder(
+            handle_spec["bump_start_link2"],
+            handle_spec["bump_end_link2"],
+            handle_spec["bump_radius_m"],
+            num_segments,
+        )
     builder.add_cylinder(
         handle_spec["stem_start_link2"],
         handle_spec["stem_end_link2"],
@@ -789,9 +967,10 @@ def write_handle_mesh(mesh_path, handle_spec, num_segments):
     # purpose: point-cloud policies do not need a photorealistic handle.
     lever_start = handle_spec["lever_start_link2"]
     lever_tip = handle_spec["lever_tip_link2"]
+    half_h = handle_spec.get("lever_half_height_m", radius)
     builder.add_box_bounds(
-        [min(lever_start[0], lever_tip[0]), -radius, lever_start[2] - radius],
-        [max(lever_start[0], lever_tip[0]), radius, lever_start[2] + radius],
+        [min(lever_start[0], lever_tip[0]), -half_h, lever_start[2] - half_h],
+        [max(lever_start[0], lever_tip[0]), half_h, lever_start[2] + half_h],
     )
 
     if handle_spec["type"] == "return":
@@ -806,7 +985,22 @@ def write_handle_mesh(mesh_path, handle_spec, num_segments):
 
 def build_handle_collision_primitives(handle_spec):
     radius = handle_spec["radius_m"]
-    collisions = [
+    collisions = []
+    if (
+        handle_spec.get("has_bump")
+        and handle_spec.get("bump_shape") == "cylinder"
+        and handle_spec.get("bump_protrusion_m", 0.0) > 0.0
+    ):
+        # Only the round boss is a link_2 collision; the box plate is collision on link_1 (panel mesh).
+        bump_radius = handle_spec["bump_radius_m"]
+        collisions.append(
+            {
+                "name": "handle_bump",
+                "origin_xyz": midpoint(handle_spec["bump_start_link2"], handle_spec["bump_end_link2"]),
+                "size": [2.0 * bump_radius, 2.0 * bump_radius, handle_spec["bump_protrusion_m"]],
+            }
+        )
+    collisions += [
         {
             "name": "handle_stem",
             "origin_xyz": midpoint(handle_spec["stem_start_link2"], handle_spec["stem_end_link2"]),
@@ -815,7 +1009,11 @@ def build_handle_collision_primitives(handle_spec):
         {
             "name": "handle_main_lever",
             "origin_xyz": midpoint(handle_spec["lever_start_link2"], handle_spec["lever_tip_link2"]),
-            "size": [handle_spec["lever_length_m"], 2.0 * radius, 2.0 * radius],
+            "size": [
+                handle_spec["lever_length_m"],
+                2.0 * handle_spec.get("lever_half_height_m", radius),
+                2.0 * handle_spec.get("lever_half_height_m", radius),
+            ],
         },
     ]
     if handle_spec["type"] == "return":
@@ -1017,10 +1215,19 @@ def write_variant_meta(meta_path, variant_name, spec, board_min, board_max, hand
             "lever_direction_link2": handle_spec["lever_direction_link2"],
             "return_direction_link2": handle_spec["return_direction_link2"],
             "radius_m": handle_spec["radius_m"],
+            "lever_thickness_m": handle_spec.get("lever_thickness_m", 0.0),
             "stem_length_m": handle_spec["stem_length_m"],
             "lever_length_m": handle_spec["lever_length_m"],
             "return_length_m": handle_spec["return_length_m"],
             "return_tip_clearance_m": handle_spec["return_tip_clearance_m"],
+            "has_bump": handle_spec.get("has_bump", False),
+            "bump_shape": handle_spec.get("bump_shape", "none"),
+            "bump_protrusion_m": handle_spec.get("bump_protrusion_m", 0.0),
+            "bump_height_m": handle_spec.get("bump_height_m", 0.0),
+            "bump_width_m": handle_spec.get("bump_width_m", 0.0),
+            "bump_radius_m": handle_spec.get("bump_radius_m", 0.0),
+            "plate_min_link1": handle_spec.get("plate_min_link1"),
+            "plate_max_link1": handle_spec.get("plate_max_link1"),
             "collision_primitives": collisions,
         },
     }
@@ -1061,7 +1268,10 @@ def generate_variants(args):
         joint_1_origin = build_joint_1_origin(spec)
         initial_state = sample_initial_state(rng, variant_name, args)
 
-        write_board_mesh(texture_dir / "board.obj", board_min, board_max)
+        plate_box = None
+        if handle_spec.get("plate_min_link1") is not None and handle_spec.get("plate_max_link1") is not None:
+            plate_box = (handle_spec["plate_min_link1"], handle_spec["plate_max_link1"])
+        write_board_mesh(texture_dir / "board.obj", board_min, board_max, plate_box=plate_box)
         write_frame_mesh(texture_dir / "frame.obj", frame_boxes)
         handle_mesh_name = f"handle_{handle_spec['type']}.obj"
         write_handle_mesh(texture_dir / handle_mesh_name, handle_spec, args.handle_num_segments)
@@ -1119,6 +1329,9 @@ def main():
     args.handle_height_range = resolve_range(args.handle_height_range, "handle_height_range")
     args.handle_edge_distance_range = resolve_range(args.handle_edge_distance_range, "handle_edge_distance_range")
     args.handle_radius_range = resolve_range(args.handle_radius_range, "handle_radius_range")
+    args.handle_lever_thickness_range = resolve_range(
+        args.handle_lever_thickness_range, "handle_lever_thickness_range"
+    )
     args.handle_stem_length_range = resolve_range(args.handle_stem_length_range, "handle_stem_length_range")
     args.handle_length_range = resolve_range(args.handle_length_range, "handle_length_range")
     args.handle_return_length_range = resolve_range(args.handle_return_length_range, "handle_return_length_range")
@@ -1126,6 +1339,11 @@ def main():
         args.handle_return_tip_clearance_range, "handle_return_tip_clearance_range"
     )
     args.return_handle_prob = resolve_probability(args.return_handle_prob, "return_handle_prob")
+    args.handle_bump_length_range = resolve_range(args.handle_bump_length_range, "handle_bump_length_range")
+    args.handle_bump_height_range = resolve_range(args.handle_bump_height_range, "handle_bump_height_range")
+    args.handle_bump_width_range = resolve_range(args.handle_bump_width_range, "handle_bump_width_range")
+    args.handle_bump_radius_range = resolve_range(args.handle_bump_radius_range, "handle_bump_radius_range")
+    args.handle_bump_prob = resolve_probability(args.handle_bump_prob, "handle_bump_prob")
     args.handle_num_segments = max(3, int(args.handle_num_segments))
     args.debug_first_n = max(0, int(args.debug_first_n))
     args.num_variants = max(1, int(args.num_variants))

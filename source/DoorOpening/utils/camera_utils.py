@@ -556,6 +556,39 @@ def apply_depth_spatial_blur(depth: torch.Tensor, kernel2d: torch.Tensor, pad: i
 
 
 @torch.no_grad()
+def drop_depth_edges(depth: torch.Tensor, grad_thresh_m: float):
+    """Invalidate depth pixels sitting on a depth discontinuity (a real depth-camera artifact).
+
+    For each valid pixel, take the max abs depth difference to its 4 neighbours (ignoring invalid
+    neighbours); if it exceeds ``grad_thresh_m`` the pixel straddles an edge and is set to +inf. This
+    removes the smeared "flying pixel" points the spatial blur leaves along wall / door silhouettes --
+    a real depth camera drops edge returns rather than bleeding them. ``grad_thresh_m <= 0`` is a no-op.
+    """
+    if grad_thresh_m is None or float(grad_thresh_m) <= 0.0:
+        return depth
+    valid = torch.isfinite(depth)
+    inf = torch.full((), float("inf"), device=depth.device, dtype=depth.dtype)
+    grad = torch.zeros_like(depth)
+
+    # Non-wrapping neighbour diffs (image borders must NOT wrap onto the opposite edge -- that would
+    # falsely drop the border pixels). Each interior diff is written to BOTH straddling pixels.
+    dh = (depth[..., :, 1:] - depth[..., :, :-1]).abs()
+    vh = valid[..., :, 1:] & valid[..., :, :-1]
+    dh = torch.where(vh, dh, torch.zeros_like(dh))
+    grad[..., :, :-1] = torch.maximum(grad[..., :, :-1], dh)
+    grad[..., :, 1:] = torch.maximum(grad[..., :, 1:], dh)
+
+    dv = (depth[..., 1:, :] - depth[..., :-1, :]).abs()
+    vv = valid[..., 1:, :] & valid[..., :-1, :]
+    dv = torch.where(vv, dv, torch.zeros_like(dv))
+    grad[..., :-1, :] = torch.maximum(grad[..., :-1, :], dv)
+    grad[..., 1:, :] = torch.maximum(grad[..., 1:, :], dv)
+
+    edge = valid & (grad > float(grad_thresh_m))
+    return torch.where(edge, inf, depth)
+
+
+@torch.no_grad()
 def render_points_to_world_grid_from_pose(
     pcd: torch.Tensor,
     camera_pose: torch.Tensor,
@@ -896,6 +929,8 @@ def render_depth_roundtrip_from_pose(
     compile_mode: str = "max-autotune",
     occluder_pcd: Optional[torch.Tensor] = None,
     occluder_inflate_px: int = 0,
+    blur_kernel_px: int = 0,
+    blur_sigma_px: float = 0.0,
 ):
     """True projection round-trip: 3D points -> 2D depth image -> 3D points.
 
@@ -908,11 +943,16 @@ def render_depth_roundtrip_from_pose(
         BACK-PROJECT: ``backproject_depth_to_world_from_pose`` unprojects every valid pixel back to a
                       3D world point.
 
-    No sensor-noise augmentation (no jitter, no blur). ``inflate_px`` is the main-pass z-buffer dilation
-    (0 = plain round-trip: each point -> one pixel -> back). The variable-length valid points are then
-    shuffled and NaN-padded to a fixed ``num_points`` so the policy gets a constant-shape tensor.
-    ``use_compile`` runs the exact same project+back-project fused via torch.compile for speed. All
-    knobs (``inflate_px`` / ``occluder_inflate_px`` / ...) come from the caller (cfg), none hardcoded.
+    ``blur_kernel_px`` / ``blur_sigma_px`` optionally apply the RealSense-style edge-bleeding spatial
+    blur (``apply_depth_spatial_blur``) to the depth image before back-projection: each valid pixel is
+    replaced by a (Gaussian if sigma>0, else box) weighted average of its valid neighbours. Flat
+    surfaces are unchanged, but thin features (the door handle) bleed into the door/plate behind them,
+    so a crisp lever renders as an indistinct bump -- matching what a real depth camera returns.
+    ``blur_kernel_px <= 1`` disables it (default), so this is a no-op unless the cfg turns it on.
+    ``inflate_px`` is the main-pass z-buffer dilation (0 = plain round-trip: each point -> one pixel ->
+    back). The variable-length valid points are then shuffled and NaN-padded to a fixed ``num_points``
+    so the policy gets a constant-shape tensor. ``use_compile`` runs the exact same project+back-project
+    (and blur) fused via torch.compile for speed. All knobs come from the caller (cfg), none hardcoded.
     """
     if cam_spec_dict is None:
         raise ValueError("cam_spec_dict must be provided and must contain H/W/intrinsics/near_m/far_m.")
@@ -920,16 +960,16 @@ def render_depth_roundtrip_from_pose(
     device = pcd.device
 
     if use_compile:
-        # Same two ops (rasterize z-buffer -> back-project), fused into one compiled kernel. jitter/blur
-        # are compiled out (std 0 / kernel 0), so this is purely the geometric round-trip.
+        # Same two ops (rasterize z-buffer -> back-project), fused into one compiled kernel. Jitter is
+        # still compiled out (std 0); the optional spatial blur is baked in when blur_kernel_px > 1.
         renderer = get_compiled_renderer_fixed_shapes(
             cam_spec_dict=cam_spec_dict,
             inflate_px=inflate_px,
             clip_mode=clip_mode,
             jitter_mode="xyz",
             compile_mode=compile_mode,
-            blur_kernel_px=0,
-            blur_sigma_px=0.0,
+            blur_kernel_px=blur_kernel_px,
+            blur_sigma_px=blur_sigma_px,
             occluder_inflate_px=occluder_inflate_px,
         )
         if occluder_inflate_px > 0:
@@ -947,6 +987,10 @@ def render_depth_roundtrip_from_pose(
             occluder_pcd=occluder_pcd,
             occluder_inflate_px=occluder_inflate_px,
         )
+        # ... optional RealSense-style edge-bleeding blur (thin features smear into a bump) ...
+        if int(blur_kernel_px) > 1:
+            kernel2d, pad = build_depth_blur_kernel2d(blur_kernel_px, blur_sigma_px, depth.device, depth.dtype)
+            depth = apply_depth_spatial_blur(depth, kernel2d, pad)
         # ... BACK-PROJECT 2D -> 3D world points.
         pcd_world, _ = backproject_depth_to_world_from_pose(depth, camera_pose, intr)
 

@@ -139,7 +139,9 @@ def state_machine_offline_right_pull_door(
 
     # Unified with the push-right planner so pregrasp/grasp base + palm offsets match
     # (keeps the base off the side wall, like the push planner).
-    pregrasp_base_x_offset = 0.6
+    # Base pulled back for more grasp standoff (0.67); the robot grasps from a bit more standoff (palm offsets
+    # unchanged -> the arm just reaches slightly further forward).
+    pregrasp_base_x_offset = 0.67
     pregrasp_base_y_offset = -0.35
     # Moved back (0.40 -> 0.45): larger palm<->door x gap to compensate for removing the
     # finger<->panel contact penalty (the demo grasps from further out so fingers don't press panel).
@@ -166,7 +168,6 @@ def state_machine_offline_right_pull_door(
         robot_initial_pose=robot_initial_pose,
     )[0]
     
-    q_robot[-6:] = torch.tensor(list(CAMERA_JOINT_DEFAULT_VALUES.values()))
 
     _append_state(
         robot_traj,
@@ -698,7 +699,9 @@ def state_machine_offline_left_pull_door(
 
     # Unified with the push-left planner so pregrasp/grasp base + palm offsets match
     # (keeps the base off the side wall, like the push planner).
-    pregrasp_base_x_offset = 0.55
+    # Base standoff kept CONSTANT with the right-door planner (0.67) so left/right grasp the same
+    # distance out; palm offsets unchanged -> the arm just reaches slightly further forward.
+    pregrasp_base_x_offset = 0.67
     # Pulled 5cm back off the +y side so the left door pregrasp doesn't reach so far right.
     pregrasp_base_y_offset = 0.25
     # Moved back (0.35 -> 0.40): larger palm<->door x gap to compensate for removing the
@@ -715,7 +718,7 @@ def state_machine_offline_left_pull_door(
     # handle here; flip the sign if the camera looks the wrong way. base_target_rot (untilted) is
     # restored from Step 4 onward, so only pregrasp/grasp/unlatch (which reuse this base_target_pose)
     # are tilted.
-    pregrasp_base_tilt_yaw = 0.3
+    pregrasp_base_tilt_yaw = 0.35
     _, _, _base_yaw = euler_xyz_from_quat(base_target_rot)
     pregrasp_tilt_base_rot = get_rotation_quat(0.0, 0.0, _base_yaw.item() + pregrasp_base_tilt_yaw, device)
     base_target_pose = _make_pose(base_target_pos, pregrasp_tilt_base_rot)
@@ -734,7 +737,6 @@ def state_machine_offline_left_pull_door(
         robot_initial_pose=robot_initial_pose,
     )[0]
     
-    q_robot[-6:] = torch.tensor(list(CAMERA_JOINT_VALUES_WHEN_OBSERVING_LEFT.values()))
 
     _append_state(
         robot_traj,
@@ -847,7 +849,6 @@ def state_machine_offline_left_pull_door(
     )
     
     # Retract active perception arms to safe range
-    q_robot[-6:] = torch.tensor(list(CAMERA_JOINT_DEFAULT_VALUES.values()))
 
     for theta in theta_values:
         q_door = torch.tensor([theta.item(), 0.0], device=device)

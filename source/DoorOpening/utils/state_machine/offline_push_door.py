@@ -182,7 +182,8 @@ def state_machine_offline_push_right_door(
     ).to(device)
 
     base_target_pos = handle_pos.clone()
-    base_target_pos[:, 0] += 0.6
+    # Base pulled back for more grasp standoff (0.67); palm offsets unchanged.
+    base_target_pos[:, 0] += 0.67
     # Base moved a little inward (toward door center, -y; was -0.3) so it doesn't sit out by the wall.
     base_target_pos[:, 1] += -0.35
     base_target_pose = _make_pose(base_target_pos, base_target_rot)
@@ -204,7 +205,6 @@ def state_machine_offline_push_right_door(
         robot_initial_pose=robot_initial_pose,
     )[0]
 
-    q_robot[-6:] = torch.tensor(list(CAMERA_JOINT_DEFAULT_VALUES.values()))
 
     _append_state(
         robot_traj,
@@ -520,7 +520,9 @@ def state_machine_offline_push_left_door(
     ).to(device)
 
     base_target_pos = handle_pos.clone()
-    base_target_pos[:, 0] += 0.55
+    # Base standoff kept CONSTANT with the right-door planner (0.67) so left/right grasp the same
+    # distance out; palm offsets unchanged.
+    base_target_pos[:, 0] += 0.67
     # Base moved a little inward toward the door center (+y; was 0.25) so it doesn't sit out by the wall.
     base_target_pos[:, 1] += 0.3
     # Left-door camera FOV: tilt the base a little toward the handle for pregrasp -> unlatch, so the
@@ -528,7 +530,7 @@ def state_machine_offline_push_left_door(
     # handle here; flip the sign if the camera looks the wrong way. base_target_rot (untilted) is
     # restored from Step 4 onward, so only pregrasp/grasp/unlatch (which reuse this base_target_pose)
     # are tilted.
-    pregrasp_base_tilt_yaw = 0.3
+    pregrasp_base_tilt_yaw = 0.35
     _, _, _base_yaw = euler_xyz_from_quat(base_target_rot)
     pregrasp_tilt_base_rot = get_rotation_quat(0.0, 0.0, _base_yaw.item() + pregrasp_base_tilt_yaw, device)
     base_target_pose = _make_pose(base_target_pos, pregrasp_tilt_base_rot)
@@ -549,7 +551,6 @@ def state_machine_offline_push_left_door(
         robot_initial_pose=robot_initial_pose,
     )[0]
 
-    q_robot[-6:] = torch.tensor(list(CAMERA_JOINT_VALUES_WHEN_OBSERVING_LEFT.values()))
 
     _append_state(
         robot_traj,
@@ -630,7 +631,6 @@ def state_machine_offline_push_left_door(
     hold_palm_rot_roll_base = math.pi
 
     # Retract active perception arms to safe range
-    q_robot[-6:] = torch.tensor(list(CAMERA_JOINT_DEFAULT_VALUES.values()))
 
     for theta in torch.arange(
         push_theta_start,

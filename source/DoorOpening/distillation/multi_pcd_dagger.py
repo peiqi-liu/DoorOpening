@@ -32,10 +32,17 @@ from DoorOpening.assets.door.multi_door_cfg import motion_family_ids, motion_tra
 from DoorOpening.assets.glorbot.glorbot_cfg import glorbot_urdf_path
 from DoorOpening.model.transformer import PCDTransformer, strip_prefix_from_state_dict
 from DoorOpening.utils.camera_utils import (
+    apply_depth_spatial_blur,
+    backproject_depth_to_world_from_pose,
+    build_depth_blur_kernel2d,
     build_pinhole_intrinsics,
     build_realsense_sampler_spec,
     crop_local_pcd,
+    drop_depth_edges,
+    get_compiled_renderer_fixed_shapes,
+    rasterize_depth_zbuffer_from_pose,
     render_depth_roundtrip_from_pose,
+    shuffle_pcd,
     simulate_lidar_render_from_pose,
 )
 from DoorOpening.utils.door_window_dropout import (
@@ -200,6 +207,13 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         # (esp. the wall distractors) otherwise leave per-pixel z-buffer gaps at close range that let
         # farther points (background, the other side of the wall) show through. 0 disables the pass.
         self.depth_cam_render_occluder_inflate_px = int(self.depth_cam_render_cfg.get("occluder_inflate_px", 0))
+        # RealSense-style edge-bleeding spatial blur on the depth image before back-projection. Smears
+        # thin features (the handle) into the door/plate so the rendered cloud looks like the blurry
+        # "bump" a real depth camera returns instead of a crisp lever. blur_kernel_px <= 1 disables it.
+        self.depth_cam_render_blur_kernel_px = int(self.depth_cam_render_cfg.get("blur_kernel_px", 0))
+        self.depth_cam_render_blur_sigma_px = float(self.depth_cam_render_cfg.get("blur_sigma_px", 0.0))
+        # Edge dropout on the SCENE depth (after blur) to remove flying-pixel smears on wall/door edges.
+        self.depth_cam_render_edge_drop_m = float(self.depth_cam_render_cfg.get("edge_drop_m", 0.0))
         self.lidar_render_cfg = self.runtime_cfg.get("lidar_render", {})
         self.lidar_num_points = self.lidar_render_cfg.get("num_points")
         self.lidar_num_azimuth = int(self.lidar_render_cfg.get("num_azimuth", 512))
@@ -3124,16 +3138,15 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         door_pcd_world = self._sample_cached_door_pointcloud_world(hole_metadata=hole_metadata)
         robot_pcd_world = self._sample_robot_pointcloud_world_sampler()
         wall_pcd_world = self._sample_wall_pointcloud_world()
-        # Occluder set = static scene geometry only (door panel + wall distractors), excluding the
-        # robot: the robot's own thin links (fingers) should stay crisp, not get dilated/bloated by
-        # the occluder-fill render pass.
-        occluder_parts = [door_pcd_world]
-        scene_parts = [door_pcd_world, robot_pcd_world]
+        # scene-MINUS-robot = static scene geometry (door panel + wall distractors). This is both the
+        # main (blurred + edge-dropped) depth cloud AND the occluder set: the robot is rendered in a
+        # SEPARATE crisp pass so blur/edge-drop never touch it, and it stays out of the occluder-fill
+        # pass so its thin links (fingers) aren't dilated/bloated. See _render_depth_scene_with_crisp_robot.
+        scene_parts = [door_pcd_world]
         if wall_pcd_world.shape[1] > 0:
-            occluder_parts.append(wall_pcd_world)
             scene_parts.append(wall_pcd_world)
-        occluder_pcd_world = torch.cat(occluder_parts, dim=1)
-        return torch.cat(scene_parts, dim=1), occluder_pcd_world
+        door_walls_pcd_world = torch.cat(scene_parts, dim=1)
+        return door_walls_pcd_world, robot_pcd_world
 
     def _render_lidar_scene_pointcloud_base(
         self, scene_pcd_world, robot_base_pos_w, robot_base_quat_w, occluder_pcd_world=None
@@ -3156,72 +3169,122 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         )
         return world_to_local(rendered_pcd_world, robot_base_pos_w, robot_base_quat_w)
 
+    def _render_depth_scene_with_crisp_robot(self, door_walls_pcd_world, robot_pcd_world, camera_pose):
+        """Depth-cam obs render (world frame) with the robot kept CRISP -- the same logic as the viser
+        tool's render_batch, so training and that preview stay identical.
+
+        The SCENE (door + walls) goes through the z-buffer + occluder anti-penetration pass + RealSense
+        edge-bleed blur; edge-drop then removes the blur's flying-pixel smears on wall/door silhouettes.
+        The ROBOT is rasterized in a SEPARATE crisp pass (NO blur / edge-drop / jitter) and composited by
+        nearest-surface ``minimum``, so it self-occludes / occludes the door but carries no unfaithful
+        sensor noise on its own body. door+walls is BOTH the main and the occluder cloud here.
+
+        Returns (B, num_points, 3) world points, NaN-padded to a fixed count.
+        """
+        cam_spec = self.sampler_camera_spec
+        occ_inflate = self.depth_cam_render_occluder_inflate_px
+        # --- Scene depth: door + walls, z-buffer + occluder pass + edge-bleed blur. ---
+        if self.depth_cam_render_use_compile:
+            renderer = get_compiled_renderer_fixed_shapes(
+                cam_spec_dict=cam_spec,
+                inflate_px=self.depth_cam_render_inflate_px,
+                clip_mode=self.depth_cam_render_clip_mode,
+                jitter_mode="xyz",
+                blur_kernel_px=self.depth_cam_render_blur_kernel_px,
+                blur_sigma_px=self.depth_cam_render_blur_sigma_px,
+                occluder_inflate_px=occ_inflate,
+            )
+            if occ_inflate > 0:
+                scene_depth, _, _ = renderer(door_walls_pcd_world, camera_pose, 0.0, door_walls_pcd_world)
+            else:
+                scene_depth, _, _ = renderer(door_walls_pcd_world, camera_pose, 0.0)
+        else:
+            scene_depth, _ = rasterize_depth_zbuffer_from_pose(
+                door_walls_pcd_world, camera_pose, cam_spec,
+                inflate_px=self.depth_cam_render_inflate_px, clip_mode=self.depth_cam_render_clip_mode,
+                occluder_pcd=door_walls_pcd_world if occ_inflate > 0 else None,
+                occluder_inflate_px=occ_inflate,
+            )
+            if int(self.depth_cam_render_blur_kernel_px) > 1:
+                kernel2d, pad = build_depth_blur_kernel2d(
+                    self.depth_cam_render_blur_kernel_px, self.depth_cam_render_blur_sigma_px,
+                    scene_depth.device, scene_depth.dtype,
+                )
+                scene_depth = apply_depth_spatial_blur(scene_depth, kernel2d, pad)
+        # --- Edge dropout on the scene: remove the blur's flying-pixel smears at wall/door edges. ---
+        if self.depth_cam_render_edge_drop_m > 0.0:
+            scene_depth = drop_depth_edges(scene_depth, self.depth_cam_render_edge_drop_m)
+        # --- Robot: crisp z-buffer, composited by nearest-surface min (no blur / edge-drop / jitter). ---
+        robot_depth, intr = rasterize_depth_zbuffer_from_pose(
+            robot_pcd_world, camera_pose, cam_spec,
+            inflate_px=self.depth_cam_render_inflate_px, clip_mode=self.depth_cam_render_clip_mode,
+        )
+        depth = torch.minimum(scene_depth, robot_depth)
+        pcd_world, _ = backproject_depth_to_world_from_pose(depth, camera_pose, intr)
+        # --- Fixed-N packing (same as render_depth_roundtrip_from_pose): shuffle, push NaN to the end. ---
+        batch = pcd_world.shape[0]
+        rendered = shuffle_pcd(pcd_world.view(batch, -1, 3))
+        num_total = rendered.shape[1]
+        nan_mask = torch.isnan(rendered).any(dim=-1)
+        sort_idx = torch.argsort(nan_mask.int(), dim=-1)
+        batch_idx = torch.arange(batch, device=rendered.device)[:, None].expand(batch, num_total)
+        return rendered[batch_idx, sort_idx][:, : self.depth_cam_render_num_points]
+
     def _sample_scene_obs_pointcloud_base_sampler(self):
         return self._sample_scene_obs_pointcloud_base_depth()
 
     def _sample_scene_obs_pointcloud_base_depth(self):
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
-        gt_scene_pcd_world, occluder_pcd_world = self._sample_scene_pointcloud_world_cached(
+        door_walls_pcd_world, robot_pcd_world = self._sample_scene_pointcloud_world_cached(
             hole_metadata=getattr(self, "_current_door_hole_aug_metadata", None)
         )
         if self.viser_raw_enabled:
             # Keep only the selected family envs on CPU so Viser debug does not retain an
             # extra full batched scene pointcloud on GPU during training/debug runs.
-            self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(gt_scene_pcd_world)
-        rendered_pcd_world, _ = render_depth_roundtrip_from_pose(
-            pcd=gt_scene_pcd_world,
-            camera_pose=self._get_sampler_camera_pose(),
-            num_points=self.depth_cam_render_num_points,
-            cam_spec_dict=self.sampler_camera_spec,
-            inflate_px=self.depth_cam_render_inflate_px,
-            clip_mode=self.depth_cam_render_clip_mode,
-            use_compile=self.depth_cam_render_use_compile,
-            occluder_pcd=occluder_pcd_world,
-            occluder_inflate_px=self.depth_cam_render_occluder_inflate_px,
+            self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(
+                torch.cat([door_walls_pcd_world, robot_pcd_world], dim=1)
+            )
+        rendered_pcd_world = self._render_depth_scene_with_crisp_robot(
+            door_walls_pcd_world, robot_pcd_world, self._get_sampler_camera_pose()
         )
-        scene_pointcloud_base = world_to_local(rendered_pcd_world, robot_base_pos_w, robot_base_quat_w)
-        return scene_pointcloud_base
+        return world_to_local(rendered_pcd_world, robot_base_pos_w, robot_base_quat_w)
 
     def _sample_scene_obs_pointcloud_base_lidar(self):
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
-        gt_scene_pcd_world, occluder_pcd_world = self._sample_scene_pointcloud_world_cached(
+        door_walls_pcd_world, robot_pcd_world = self._sample_scene_pointcloud_world_cached(
             hole_metadata=getattr(self, "_current_door_hole_aug_metadata", None)
         )
+        # Lidar renders the full scene (robot included, for self-occlusion); it does not blur, so the
+        # crisp-robot split only matters for the depth camera. Occluder set stays door+walls (no robot).
+        scene_full_pcd_world = torch.cat([door_walls_pcd_world, robot_pcd_world], dim=1)
         if self.viser_raw_enabled:
-            self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(gt_scene_pcd_world)
+            self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(scene_full_pcd_world)
 
         return self._render_lidar_scene_pointcloud_base(
-            gt_scene_pcd_world, robot_base_pos_w, robot_base_quat_w, occluder_pcd_world=occluder_pcd_world
+            scene_full_pcd_world, robot_base_pos_w, robot_base_quat_w, occluder_pcd_world=door_walls_pcd_world
         )
 
     def _sample_scene_obs_pointcloud_base_both(self):
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
-        gt_scene_pcd_world, occluder_pcd_world = self._sample_scene_pointcloud_world_cached(
+        door_walls_pcd_world, robot_pcd_world = self._sample_scene_pointcloud_world_cached(
             hole_metadata=getattr(self, "_current_door_hole_aug_metadata", None)
         )
+        scene_full_pcd_world = torch.cat([door_walls_pcd_world, robot_pcd_world], dim=1)
         if self.viser_raw_enabled:
-            self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(gt_scene_pcd_world)
+            self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(scene_full_pcd_world)
 
-        rendered_depth_pcd_world, _ = render_depth_roundtrip_from_pose(
-            pcd=gt_scene_pcd_world,
-            camera_pose=self._get_sampler_camera_pose(),
-            num_points=self.depth_cam_render_num_points,
-            cam_spec_dict=self.sampler_camera_spec,
-            inflate_px=self.depth_cam_render_inflate_px,
-            clip_mode=self.depth_cam_render_clip_mode,
-            use_compile=self.depth_cam_render_use_compile,
-            occluder_pcd=occluder_pcd_world,
-            occluder_inflate_px=self.depth_cam_render_occluder_inflate_px,
+        rendered_depth_pcd_world = self._render_depth_scene_with_crisp_robot(
+            door_walls_pcd_world, robot_pcd_world, self._get_sampler_camera_pose()
         )
         depth_pcd_base = world_to_local(rendered_depth_pcd_world, robot_base_pos_w, robot_base_quat_w)
         lidar_pcd_base = self._render_lidar_scene_pointcloud_base(
-            gt_scene_pcd_world,
+            scene_full_pcd_world,
             robot_base_pos_w,
             robot_base_quat_w,
-            occluder_pcd_world=occluder_pcd_world,
+            occluder_pcd_world=door_walls_pcd_world,
         )
         return depth_pcd_base, lidar_pcd_base
 
@@ -3527,9 +3590,10 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             # State-only policy (no sensor cloud fed to the policy): still show the ground-truth
             # scene cloud in Viser, but compose it from cached link clouds ONLY on capture
             # iterations -- no per-step depth/lidar rendering.
-            gt_scene_pcd_world, _ = self._sample_scene_pointcloud_world_cached(
+            door_walls_pcd_world, robot_pcd_world = self._sample_scene_pointcloud_world_cached(
                 hole_metadata=getattr(self, "_current_door_hole_aug_metadata", None)
             )
+            gt_scene_pcd_world = torch.cat([door_walls_pcd_world, robot_pcd_world], dim=1)
             self._viser_pending_debug_frame = {
                 "iteration": iteration,
                 "robot_base_pos_w": robot_base_pos_w,
