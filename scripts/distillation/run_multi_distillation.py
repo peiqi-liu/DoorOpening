@@ -3,6 +3,7 @@
 import argparse
 import os
 import pathlib
+import re
 import sys
 import time
 from datetime import datetime
@@ -366,24 +367,22 @@ def main(env_cfg, agent_cfg: dict):
         return os.path.join(parent_path, "pretrained_ckpts", path_value)
 
     def resolve_multi_teacher_checkpoints():
-        cli_values = {
-            "PartNetv5": args_cli.teacher_partnetv5,
-            "PartNetv5_plus": args_cli.teacher_partnetv5,
-            "PartNetv5_plusplus": args_cli.teacher_partnetv5,
-            "PartNetv5_pro": args_cli.teacher_partnetv5,
-            "PartNetv6": args_cli.teacher_partnetv6,
-            "PartNetv6_plus": args_cli.teacher_partnetv6,
-            "PartNetv6_plusplus": args_cli.teacher_partnetv6,
-            "PartNetv6_pro": args_cli.teacher_partnetv6,
-            "PartNetv7": args_cli.teacher_partnetv7,
-            "PartNetv7_plus": args_cli.teacher_partnetv7,
-            "PartNetv7_plusplus": args_cli.teacher_partnetv7,
-            "PartNetv7_pro": args_cli.teacher_partnetv7,
-            "PartNetv8": args_cli.teacher_partnetv8,
-            "PartNetv8_plus": args_cli.teacher_partnetv8,
-            "PartNetv8_plusplus": args_cli.teacher_partnetv8,
-            "PartNetv8_pro": args_cli.teacher_partnetv8,
+        # Map each ACTUAL door family (from --door-families / DOOR_FAMILY_NAMES) to its teacher CLI flag
+        # by the PartNetv<N> version prefix, so EVERY suffix variant -- _plus, _plusplus, _pro, _v1,
+        # _pro_v1, ... -- routes to the right --teacher-partnetvN. (The old hardcoded name list silently
+        # missed _v1 etc., leaving those families with no CLI teacher and falling back to a single one.)
+        teacher_by_version = {
+            "5": args_cli.teacher_partnetv5,
+            "6": args_cli.teacher_partnetv6,
+            "7": args_cli.teacher_partnetv7,
+            "8": args_cli.teacher_partnetv8,
         }
+
+        def _cli_teacher_for(family_name):
+            match = re.match(r"PartNetv(\d+)", family_name)
+            return teacher_by_version.get(match.group(1)) if match else None
+
+        cli_values = {name: _cli_teacher_for(name) for name in MULTI_TEACHER_FAMILY_NAMES}
         any_family_cli = any(value is not None for value in cli_values.values())
         discovered_values = {}
         for family_name in MULTI_TEACHER_FAMILY_NAMES:
