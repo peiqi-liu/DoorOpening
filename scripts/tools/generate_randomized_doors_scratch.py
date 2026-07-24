@@ -37,14 +37,14 @@ DEFAULT_PANEL_WIDTH_RANGE_M = (0.7, 1.0)
 DEFAULT_PANEL_HEIGHT_RANGE_M = (1.75, 2.15)
 DEFAULT_PANEL_THICKNESS_RANGE_M = (0.028, 0.055)
 # Frame BORDER (post width / head height) around the opening. Range STARTS AT 0 so it spans the full
-# spectrum: near-0 = effectively NO frame (panel flush in the wall), up to a chunky surround. When both
+# spectrum: near-0 = effectively NO frame (panel flush in the wall), up to a modest surround. When both
 # post width and head height sample near 0 the frame boxes vanish entirely (degenerate -> skipped).
-DEFAULT_FRAME_POST_WIDTH_RANGE_M = (0.0, 0.18)
-DEFAULT_FRAME_HEAD_HEIGHT_RANGE_M = (0.0, 0.18)
-# Frame DEPTH (front-to-back thickness) as a multiple of the panel thickness. Wide range: from a thin
-# normal jamb (~1x) up to a THICK WALL the door is set into (deep reveal). Only visible where the
-# border above is non-zero.
-DEFAULT_FRAME_DEPTH_SCALE_RANGE = (1.0, 8.0)
+# Upper bound kept modest -- even the "large" end should look like a normal door frame, not a slab.
+DEFAULT_FRAME_POST_WIDTH_RANGE_M = (0.0, 0.10)
+DEFAULT_FRAME_HEAD_HEIGHT_RANGE_M = (0.0, 0.10)
+# Frame DEPTH (front-to-back thickness) as a multiple of the panel thickness. From a thin normal jamb
+# (~1x) up to a moderately thick wall reveal. Upper bound reduced so the deepest frame is not too large.
+DEFAULT_FRAME_DEPTH_SCALE_RANGE = (1.0, 4.0)
 DEFAULT_FRAME_CLEARANCE_RANGE_M = (0.003, 0.015)
 
 DEFAULT_HANDLE_HEIGHT_RANGE_M = (0.75, 1.0)
@@ -54,7 +54,7 @@ DEFAULT_HANDLE_RADIUS_RANGE_M = (0.006, 0.018)
 # are thin flat bars, so the point cloud of the lever should be thin in height -- if this is left at
 # 0 the lever falls back to a square 2*radius cross-section (the old, too-tall behaviour).
 DEFAULT_HANDLE_LEVER_THICKNESS_RANGE_M = (0.010, 0.016)
-DEFAULT_HANDLE_STEM_LENGTH_RANGE_M = (0.055, 0.10)
+DEFAULT_HANDLE_STEM_LENGTH_RANGE_M = (0.045, 0.095)
 DEFAULT_HANDLE_LENGTH_RANGE_M = (0.09, 0.14)
 DEFAULT_HANDLE_RETURN_LENGTH_RANGE_M = (0.035, 0.08)
 DEFAULT_HANDLE_RETURN_TIP_CLEARANCE_RANGE_M = (0.025, 0.050)
@@ -68,9 +68,11 @@ DEFAULT_RETURN_HANDLE_PROB = 0.7
 #                  Sized by height (vertical y), width (horizontal x) and protrusion (outward z).
 #   - "cylinder" : a round mounting boss co-axial with the stem, on link_2. Rotationally symmetric so
 #                  it stays put under the joint_2 sweep. Sized by radius and protrusion (length).
-# In both cases the handle stem now starts at the OUTER face of the mount, so handle_stem_length is
-# the guaranteed clear gap the fingers get above the mount. Disabled by default (prob 0.0).
-DEFAULT_HANDLE_BUMP_PROB = 0.0
+# In both cases the handle stem starts at the OUTER face of the mount, so handle_stem_length is the
+# clear gap the fingers get above the mount. On for ~70% of doors by default; when on, the SIZE varies
+# down to nearly-flush (smallest plate ≈ no plate), so the no-plate..plate spectrum is covered by both
+# the 30% hard-off share AND the size variation of the 70% that are on.
+DEFAULT_HANDLE_BUMP_PROB = 0.7
 DEFAULT_HANDLE_BUMP_SHAPE = "box"
 # Outward protrusion (z) of the mount out of the door face. Range starts near ZERO so a small draw is
 # effectively "no bump" (nearly flush), up to a modest plate -- deliberately NOT too thick. This lets a
@@ -289,7 +291,8 @@ def parse_args():
         type=float,
         default=DEFAULT_HANDLE_BUMP_PROB,
         help="Probability a variant gets a raised mount (bump) at the handle base that the lever "
-        "sits on. 0.0 disables it (default); 1.0 forces it on every variant.",
+        "sits on (default 0.7). When on, the plate SIZE still varies down to nearly-flush, so the "
+        "smallest plate is ~no plate. 0.0 disables it entirely; 1.0 forces a (possibly tiny) plate on all.",
     )
     parser.add_argument(
         "--handle-bump-shape",

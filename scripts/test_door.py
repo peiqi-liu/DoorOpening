@@ -176,7 +176,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             (joint_upper[:, joint_2_idx] - joint_lower[:, joint_2_idx]) * ((count % 500) / 500)
             + joint_lower[:, joint_2_idx]
         )
-        door.write_joint_position_to_sim(door_target_pos)
+        # door.write_joint_position_to_sim(door_target_pos)
         if count % 100 == 0:
             # print("joint_pos: ", scene["door"].data.joint_pos)
             print("door pos: ", scene["door"].data.body_pos_w[..., 2, 2].max(), scene["door"].data.body_pos_w[..., 2, 2].min())

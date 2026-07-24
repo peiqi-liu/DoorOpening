@@ -1,8 +1,43 @@
+import json
 import os
 import trimesh
 import numpy as np
 import xml.etree.ElementTree as ET
 from scipy.spatial.transform import Rotation as R
+
+
+# Which z-plane the link_1 keypoints (fed to the teacher as the door reference) sit on, in the link_1
+# thickness axis. "panel_center" = the panel mid-plane (plate-free, matches pre-plate behaviour).
+# "plate_top" = the plate's outer face (the surface a depth camera actually sees), so the door reference
+# lines up with the visible bump instead of the panel behind it. "mesh_center" = the raw link_1 mesh
+# bbox center (the old plate-shifted value; kept only for reference).
+LINK1_KEYPOINT_Z_MODE = "plate_top"
+
+
+def _load_link1_panel_and_plate(urdf_path):
+    """Plate-free PANEL bbox + plate outer-face z (link_1 frame) from variant_meta.json, if present.
+
+    Scratch doors bake the escutcheon PLATE into link_1's mesh, so mesh_1.bounds includes the plate.
+    variant_meta.json records the plate-free panel bbox and the plate box, letting us place the link_1
+    keypoints deliberately (see LINK1_KEYPOINT_Z_MODE) rather than at the drifted mesh center. Returns
+    (panel_min3, panel_max3, plate_top_z_or_None) or None (e.g. PartNet doors with no meta)."""
+    meta_path = os.path.join(os.path.dirname(str(urdf_path)), "variant_meta.json")
+    if not os.path.exists(meta_path):
+        return None
+    try:
+        with open(meta_path, encoding="utf-8") as f:
+            meta = json.load(f)
+    except (ValueError, OSError):
+        return None
+    bbox = meta.get("panel", {}).get("bbox_link1")
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 6:
+        return None
+    handle = meta.get("handle", {})
+    plate_max = handle.get("plate_max_link1")
+    plate_top_z = None
+    if handle.get("has_bump") and isinstance(plate_max, (list, tuple)) and len(plate_max) == 3:
+        plate_top_z = float(plate_max[2])  # plate's outer (handle-facing) face
+    return np.asarray(bbox[:3], dtype=np.float64), np.asarray(bbox[3:], dtype=np.float64), plate_top_z
 
 
 def origin_to_transform(origin_element):
@@ -102,16 +137,30 @@ def compute_exact_door_keypoints(urdf_path):
     if mesh_1 is not None:
         bounds = mesh_1.bounds # Returns [[min_x, min_y, min_z], [max_x, max_y, max_z]]
         min_b, max_b = bounds[0], bounds[1]
-        
-        # In this local frame, the joint origin is exactly (0,0,0).
-        # We find the center in Y (height) and Z (thickness)
-        center_y = (min_b[1] + max_b[1]) / 2.0
-        center_z = (min_b[2] + max_b[2]) / 2.0
-        
+
+        # link_1 keypoints (fed to the teacher as the door reference) must NOT drift with the escutcheon
+        # plate baked into link_1's mesh. Use the plate-free panel bbox for the x/y extents, and place the
+        # thickness-axis plane per LINK1_KEYPOINT_Z_MODE. Falls back to the raw mesh bounds for doors
+        # without a meta (e.g. PartNet).
+        info = _load_link1_panel_and_plate(urdf_path)
+        if info is None:
+            kp_min, kp_max, plate_top_z = min_b, max_b, None
+        else:
+            kp_min, kp_max, plate_top_z = info
+
+        center_y = (kp_min[1] + kp_max[1]) / 2.0
+        panel_center_z = (kp_min[2] + kp_max[2]) / 2.0
+        if LINK1_KEYPOINT_Z_MODE == "plate_top" and plate_top_z is not None:
+            center_z = plate_top_z            # door reference on the plate's outer (camera-facing) face
+        elif LINK1_KEYPOINT_Z_MODE == "mesh_center":
+            center_z = (min_b[2] + max_b[2]) / 2.0  # old plate-shifted value (reference only)
+        else:
+            center_z = panel_center_z          # "panel_center": panel mid-plane (pre-plate behaviour)
+
         keypoints["link_1"] = [
-            [min_b[0], center_y, center_z],
-            [(min_b[0] + max_b[0]) / 2.0, center_y, center_z],
-            [max_b[0], center_y, center_z]
+            [kp_min[0], center_y, center_z],
+            [(kp_min[0] + kp_max[0]) / 2.0, center_y, center_z],
+            [kp_max[0], center_y, center_z]
         ]
 
         board_bbox_corners = np.array(
