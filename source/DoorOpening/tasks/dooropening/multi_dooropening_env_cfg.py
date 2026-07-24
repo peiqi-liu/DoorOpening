@@ -22,6 +22,7 @@ from DoorOpening.tasks.dooropening.contact_force_utils import (
     HANDLE_CONTACT_FILTER_PRIM_PATHS,
     PALM_ONLY_HANDLE_CONTACT_FILTER_PRIM_PATHS,
     PANEL_CONTACT_FILTER_PRIM_PATHS,
+    PULL_HINGE_HOOK_FILTER_PRIM_PATHS,
     SELF_COLLISION_FRANKA_FILTER_PRIM_PATHS,
     SELF_COLLISION_FRANKA_PRIM_PATH,
     SELF_COLLISION_HAND_FILTER_PRIM_PATHS,
@@ -425,6 +426,17 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         history_length=1,
         debug_vis=False,
         filter_prim_paths_expr=list(HANDLE_CONTACT_FILTER_PRIM_PATHS),
+    )
+    # PULL-door hinge hook sensor: only the distal hooking links (dip/realtip/fingertip of fingers
+    # 1/2/3) vs the handle (link_2). Drives the pull hinge_contact reward -- palm/pip/mcp excluded so
+    # the reward only pays for the distal segments curling behind the lever (they can't reach it
+    # otherwise). See PULL_HINGE_HOOK_FILTER_PRIM_PATHS.
+    contact_forces_door2_hook = ContactSensorCfg(
+        prim_path="/World/envs/env_.*/Door/link_2",
+        update_period=0.0,
+        history_length=1,
+        debug_vis=False,
+        filter_prim_paths_expr=list(PULL_HINGE_HOOK_FILTER_PRIM_PATHS),
     )
     # PUSH-door palm-only handle contact sensor: only palm_center/palm_lower vs the handle (link_2).
     # Drives the push palm-handle reward (fingers excluded).

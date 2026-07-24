@@ -46,9 +46,11 @@ from DoorOpening.utils.camera_utils import (
     apply_depth_spatial_blur,
     backproject_depth_to_world_from_pose,
     build_depth_blur_kernel2d,
+    crop_local_pcd,
     drop_depth_edges,
     rasterize_depth_zbuffer_from_pose,
 )
+from DoorOpening.utils.extract_pointcloud_from_articulation import FrankaLeapSampler
 from DoorOpening.utils.urdf_utils import compute_exact_door_keypoints
 from DoorOpening.utils.wall_distractors import (
     WallDistractorParams,
@@ -101,13 +103,36 @@ def _sample_scene_surface(robot, num_points, device):
 
 
 def load_door_asset(urdf_path, num_points, device):
-    """Real door: mesh surface points + the link_1 (panel) bbox + handle center, in the door-base frame."""
-    robot = _load_urdf(urdf_path)
-    door_pts = _sample_scene_surface(robot, num_points, device).unsqueeze(0)  # (1, N, 3)
+    """Real door in the door-base frame, split to match multi_pcd_dagger's door point cloud exactly.
+
+    Returns ``(bbox, panel_handle_pts, frame_pts, handle_center)``:
+      * ``panel_handle_pts`` -- link_1 (panel) + link_2 (handle), the geometry training ALWAYS renders.
+      * ``frame_pts`` -- link_0 (casing/jamb), which training renders only when ``door_frame_aug`` is on
+        and the per-env coin flip includes it. Kept separate so this preview can toggle it the same way.
+
+    Sourced from the SAME FrankaLeapSampler cache the training/probe pipelines use (points sampled in
+    each link's frame, then FK'd into the door base frame at the closed-door config), so the preview
+    cloud is faithful to what the renderer actually ingests -- not a whole-mesh dump that always bakes
+    the frame in.
+    """
+    sampler = FrankaLeapSampler(str(urdf_path), device=device, num_points=int(num_points))
+    zero_joints = torch.zeros((1, len(sampler.robot.actuated_joint_names)), device=device, dtype=torch.float32)
+    panel_handle_pts = sampler.sample_link_set(zero_joints, ["link_1", "link_2"])  # (1, N, 3) base frame
+    frame_local = sampler.points.get("link_0")
+    if frame_local is not None and frame_local.shape[1] > 0:
+        frame_pts = sampler.sample_link_set(zero_joints, ["link_0"])  # (1, Nf, 3) base frame
+    else:
+        frame_pts = torch.zeros((1, 0, 3), dtype=torch.float32, device=device)
     kp = compute_exact_door_keypoints(str(urdf_path))
-    bbox = torch.as_tensor(kp["link_1_bbox_base"], dtype=torch.float32, device=device).unsqueeze(0)  # (1, 2, 3)
+    # BOX walls use the FULL door outer bbox (frame + panel + handle), EXACTLY like training
+    # (multi_door_cfg.door_full_bboxes -> multi_pcd_dagger.env_full_door_bboxes), so they sit outside
+    # the whole door. The FLUSH slab uses the PANEL (link_1) bbox so it stays coplanar with the panel
+    # face -- again matching training (multi_pcd_dagger.wall_distractor_panel_bbox_*). Same fallbacks.
+    full_bbox = kp.get("door_full_bbox_base", kp["link_1_bbox_base"])
+    bbox = torch.as_tensor(full_bbox, dtype=torch.float32, device=device).unsqueeze(0)  # (1, 2, 3)
+    panel_bbox = torch.as_tensor(kp["link_1_bbox_base"], dtype=torch.float32, device=device).unsqueeze(0)  # (1, 2, 3)
     handle_center = np.asarray(kp.get("link_2_center_base", [0.0, 0.0, 0.0]), dtype=np.float64)  # base frame
-    return bbox, door_pts, handle_center
+    return bbox, panel_bbox, panel_handle_pts, frame_pts, handle_center
 
 
 def load_robot_asset(num_points, device):
@@ -306,7 +331,7 @@ def parse_args():
                    "camera, so the robot is IN the ray cast and self-occludes -- exactly like "
                    f"render_wall_configs_viser --robot / training. Lateral offset ROBOT_RIGHT_M={ROBOT_RIGHT_M} m.")
     # Camera placement (virtual front look-at, like render_wall_configs_viser's non-robot branch).
-    p.add_argument("--standoff", type=float, default=1.0, help="Robot/camera distance from the door along -Y (m).")
+    p.add_argument("--standoff", type=float, default=0.8, help="Robot/camera distance from the door along -Y (m).")
     p.add_argument("--camera-height", type=float, default=1.0)
     p.add_argument("--camera-look-z", type=float, default=1.0, help="World z the camera aims at on the panel.")
     p.add_argument("--camera-right", type=float, default=0.12, help="Lateral camera offset to the robot's RIGHT (world +X).")
@@ -342,7 +367,13 @@ def main():
 
     cfg = yaml.safe_load(args.student_cfg.read_text()) or {}
     wall_cfg = dict(cfg.get("dagger", {}).get("wall_distractors", {}))
+    frame_cfg = dict(cfg.get("dagger", {}).get("door_frame_aug", {}))
     depth_cfg = dict(cfg.get("dagger", {}).get("depth_cam_render", {}))
+    # Policy-input crop knobs, read from the SAME student cfg multi_pcd_dagger uses (_build_local_pcd ->
+    # crop_local_pcd base cylindrical crop). Height bounds [0.55, 1.5] are crop_local_pcd's own defaults.
+    student_cfg = dict(cfg.get("student", {}))
+    policy_crop_range = float(student_cfg.get("local_pcd_range", [1.0, 0.35, 0.35])[0])
+    policy_x_cutoff = float(student_cfg.get("x_direction_cutoff", -0.5))
     scene_door_num_points = int(cfg.get("scene_door_num_points", cfg.get("door_pcd_num_points", 30000)))
     scene_robot_num_points = int(cfg.get("dagger", {}).get("scene_robot_num_points", 30000))
     # GT density: scale down BOTH door + wall points (see --gt-scale) to see how the round-trip degrades.
@@ -362,7 +393,7 @@ def main():
     edge_drop_m = args.edge_drop_m if args.edge_drop_m is not None else float(depth_cfg.get("edge_drop_m", 0.0))
 
     # --- GT door geometry (door-base frame at world origin) ---
-    board_bbox, board_gt, handle_center = load_door_asset(args.door, board_num_points, device)
+    board_bbox, panel_bbox, board_gt, frame_gt, handle_center = load_door_asset(args.door, board_num_points, device)
 
     # Orient the door so the HANDLE faces the robot/camera (world -Y). Default AUTO-picks -90 or +90
     # exactly like render_wall_configs_viser (mine used to hardcode -90, which faced the handle AWAY and
@@ -383,6 +414,12 @@ def main():
         return pts @ R_door.T
 
     board_gt_world = door_to_world(board_gt)
+    frame_gt_world = door_to_world(frame_gt)
+
+    # --- Door-frame (link_0) aug: same knobs multi_pcd_dagger reads. When on, the frame is included
+    # in a per-config fraction (env_prob) of frames, exactly like the per-env episode coin flip. ---
+    frame_aug_enabled = bool(frame_cfg.get("enabled", False)) and frame_gt_world.shape[1] > 0
+    frame_env_prob = float(frame_cfg.get("env_prob", 0.5))
 
     # --- Wall distractor sampler (same code the training pipeline uses) ---
     wall_params = WallDistractorParams.from_cfg(wall_cfg, scene_door_num_points)
@@ -391,8 +428,12 @@ def main():
     if wall_params.point_density_per_m2 is not None:
         wall_params.point_density_per_m2 = wall_params.point_density_per_m2 * args.gt_scale
 
+    axis_order, bbox_min_ordered, bbox_max_ordered = compute_wall_bbox_ordering(board_bbox)
+    # Flush slab is driven by the PANEL bbox, reordered by the SAME axis order (matches training).
+    panel_bbox_min_ordered = torch.gather(panel_bbox[:, 0], 1, axis_order)
+    panel_bbox_max_ordered = torch.gather(panel_bbox[:, 1], 1, axis_order)
+
     def sample_walls():
-        axis_order, bbox_min_ordered, bbox_max_ordered = compute_wall_bbox_ordering(board_bbox)
         return sample_wall_points_local(
             axis_order=axis_order,
             bbox_min_ordered=bbox_min_ordered,
@@ -400,23 +441,28 @@ def main():
             num_points=wall_params.num_points,
             params=wall_params,
             device=device,
+            flush_bbox_min_ordered=panel_bbox_min_ordered,
+            flush_bbox_max_ordered=panel_bbox_max_ordered,
         )
 
     # --- Robot (optional): stand the glorbot in front of the door and make its x5_camera_link the
     # camera, so the robot is part of the rasterized cloud and self-occludes (matches render_wall_configs).
     # Base at (0, -standoff, 0), +90deg yaw so base +x -> world +Y (robot faces the door). ---
+    # Robot base pose in world (base at (ROBOT_RIGHT_M, -standoff, 0), +90deg yaw so base +x -> world +Y).
+    # Computed unconditionally: it also defines the frame for the policy-input crop below, so that crop
+    # matches multi_pcd_dagger (which crops in the robot base frame) whether or not the robot is drawn.
+    base_pos = np.array([ROBOT_RIGHT_M, -args.standoff, 0.0], dtype=np.float64)
+    base_R = _quat_wxyz_to_matrix(yaw_quat_wxyz(math.pi / 2.0))
+    base_R_t = torch.tensor(base_R, dtype=torch.float32, device=device)
+    base_pos_t = torch.tensor(base_pos, dtype=torch.float32, device=device)
+
     robot_world = None
     if args.robot:
         # Scale the robot too, so --gt-scale thins the WHOLE input cloud. The robot is not in the
         # occluder pass, so its surface is where reduced density actually shows up as holes.
         robot_num_points = max(1, int(scene_robot_num_points * args.gt_scale))
         robot_pts_base, cam_T_base = load_robot_asset(robot_num_points, device)  # base_link frame
-        base_pos = np.array([ROBOT_RIGHT_M, -args.standoff, 0.0], dtype=np.float64)
-        base_R = _quat_wxyz_to_matrix(yaw_quat_wxyz(math.pi / 2.0))
-        base_R_t = torch.tensor(base_R, dtype=torch.float32, device=device)
-        robot_world = (
-            robot_pts_base @ base_R_t.T + torch.tensor(base_pos, dtype=torch.float32, device=device)
-        ).unsqueeze(0)  # (1, M, 3) world
+        robot_world = (robot_pts_base @ base_R_t.T + base_pos_t).unsqueeze(0)  # (1, M, 3) world
         cam_np = robot_camera_pose_world(cam_T_base, base_pos, base_R)
         camera_pose = torch.from_numpy(cam_np).to(device).unsqueeze(0)
         cam_desc = f"x5_camera_link @ {np.round(cam_np[:3], 3).tolist()} (mount -45deg roll)"
@@ -433,6 +479,7 @@ def main():
     print(f"[INFO] device        : {device}")
     print(f"[INFO] door           : {args.door.parent.name}  ({board_gt_world.shape[1]} pts, yaw {round(math.degrees(door_yaw))}deg -> handle faces robot)")
     print(f"[INFO] walls          : {'on (' + str(wall_params.num_points) + ' pts)' if walls_on else 'off'}")
+    print(f"[INFO] door frame     : {'on (link_0, env_prob=' + str(frame_env_prob) + ', ' + str(frame_gt_world.shape[1]) + ' pts)' if frame_aug_enabled else 'off (panel+handle only, matches training default)'}")
     print(f"[INFO] robot          : {'on (' + str(robot_world.shape[1]) + ' pts, in ray cast)' if robot_world is not None else 'off'}")
     print(f"[INFO] camera         : {args.cam_width_px}x{args.cam_height_px}px RealSense, "
           f"range [{args.near_m}, {args.far_m}] m, {cam_desc}")
@@ -440,7 +487,29 @@ def main():
     print(f"[INFO] inflate_px     : {inflate_px}  occluder_inflate_px: {occluder_inflate_px}  (from cfg depth_cam_render)")
     print(f"[INFO] depth blur     : kernel {blur_kernel_px}px sigma {blur_sigma_px}px  ({'ON -> handle blurs to a bump' if blur_kernel_px>1 else 'off'})")
     print(f"[INFO] edge drop      : {edge_drop_m} m  ({'ON -> scene edge smears dropped' if edge_drop_m>0 else 'off'})")
+    print(f"[INFO] policy input   : base-frame crop -> z[0.55,1.5], cyl r<{policy_crop_range}, x>{policy_x_cutoff} "
+          f"(multi_pcd_dagger._build_local_pcd / crop_local_pcd)")
     print(f"[INFO] round-trip: GT points -> depth image -> points, {args.num_configs} configs")
+
+    def policy_input_from_world(cloud_world):
+        """Apply multi_pcd_dagger's EXACT policy-input crop to a world cloud, return the surviving points
+        (world frame). Crop happens in the robot base frame (z = height above floor), so tall walls stay
+        and boxes whose top < 0.55 vanish -- what the policy actually receives."""
+        if cloud_world is None or cloud_world.shape[0] == 0:
+            return cloud_world
+        base_pts = (cloud_world - base_pos_t) @ base_R_t  # world -> robot base frame
+        cropped, _ = crop_local_pcd(
+            base_pts.unsqueeze(0),
+            local_range=policy_crop_range,
+            num_local_points=base_pts.shape[0],
+            is_cylindrical=True,
+            crop_center=torch.zeros((1, 3), device=device, dtype=torch.float32),
+            x_direction_cutoff=policy_x_cutoff,
+            log_name="policy",
+        )
+        cropped = cropped[0]
+        valid = cropped.abs().sum(-1) > 1e-9  # crop_local_pcd zero-pads; base-frame origin => padding
+        return cropped[valid] @ base_R_t.T + base_pos_t  # base -> world
 
     frames = [None] * args.num_configs
     for start in range(0, args.num_configs, args.batch_size):
@@ -452,6 +521,8 @@ def main():
         scene_clouds, occluders, gt_clouds = [], [], []
         for _ in idxs:
             occ_parts = [board_gt_world]
+            if frame_aug_enabled and torch.rand((), device=device).item() < frame_env_prob:
+                occ_parts.append(frame_gt_world)
             if walls_on:
                 occ_parts.append(door_to_world(sample_walls()))
             occ = torch.cat(occ_parts, dim=1) if len(occ_parts) > 1 else occ_parts[0]
@@ -475,6 +546,7 @@ def main():
                 "pointclouds": {
                     "ground_truth": pack(drop_invalid_rows(gt_clouds[j]), args.max_points),
                     "reprojected": pack(rep_list[j], args.max_points),
+                    "policy_input": pack(policy_input_from_world(rep_list[j]), args.max_points),
                 }
             }
         last = idxs[-1]
@@ -488,6 +560,7 @@ def main():
         "pointcloud_streams": [
             {"name": "ground_truth", "label": "GT (door + walls [+ robot])", "color": (120, 120, 120), "point_size_scale": 1.0},
             {"name": "reprojected", "label": "Depth round-trip", "color": (79, 195, 247), "point_size_scale": 1.4},
+            {"name": "policy_input", "label": "Policy input (cropped)", "color": (124, 240, 130), "point_size_scale": 1.8},
         ],
         "frame_dt": 0.5,
         "frame_fps": 2.0,

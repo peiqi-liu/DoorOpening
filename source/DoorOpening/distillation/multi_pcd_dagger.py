@@ -145,6 +145,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.runtime_cfg = self.config.get("dagger", {})
         self.wall_distractor_cfg = dict(self.runtime_cfg.get("wall_distractors", {}))
         self.door_hole_aug_cfg = dict(self.runtime_cfg.get("door_hole_aug", {}))
+        self.door_frame_aug_cfg = dict(self.runtime_cfg.get("door_frame_aug", {}))
 
         # Distillation starts directly at the LOOSEST reset/termination drift thresholds
         # (reset_key_body_pos/quat_delta_max + reset_door_joint_pos_delta_max in
@@ -2647,6 +2648,15 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             self.wall_distractor_bbox_min_ordered,
             self.wall_distractor_bbox_max_ordered,
         ) = compute_wall_bbox_ordering(self.env_full_door_bboxes)
+        # The flush slab must stay coplanar with the PANEL face, so it is driven by the link_1 panel
+        # bbox (the full door bbox above includes the handle's protrusion, which would thicken the slab
+        # and pull its center off the panel). Reorder the panel bbox by the SAME axis order as the walls.
+        self.wall_distractor_panel_bbox_min_ordered = torch.gather(
+            self.env_board_bboxes[:, 0], 1, self.wall_distractor_axis_order
+        )
+        self.wall_distractor_panel_bbox_max_ordered = torch.gather(
+            self.env_board_bboxes[:, 1], 1, self.wall_distractor_axis_order
+        )
         unique_asset_idx = sorted(set(self.env_asset_idx.detach().cpu().tolist()))
         self.door_samplers = {
             idx: FrankaLeapSampler(
@@ -2668,6 +2678,34 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             idx: build_first_visual_link_pointcloud_cache(sampler, link_names=("link_1", "link_2"), device=self.device)
             for idx, sampler in self.door_samplers.items()
         }
+        # --- Optional door-frame (link_0 = casing/jamb) augmentation -------------------------------
+        # The frame is fused into the door base (merge_fixed_joints=True), so it is NOT a separate sim
+        # body and is normally absent from the door point cloud (only link_1/link_2 are composed). When
+        # enabled, we cache each asset's frame points expressed in the door BASE frame (frame is rigidly
+        # fixed to the base) and, per env, RANDOMLY include or drop them -- domain randomization for the
+        # frequently-thick casings in the PartNetv5_plusplus family. Frame points are posed at runtime
+        # with the live door base body pose in _sample_cached_door_pointcloud_world.
+        self.door_frame_aug_enabled = bool(self.door_frame_aug_cfg.get("enabled", False))
+        self.door_frame_aug_env_prob = float(self.door_frame_aug_cfg.get("env_prob", 0.5))
+        if not 0.0 <= self.door_frame_aug_env_prob <= 1.0:
+            raise ValueError("door_frame_aug.env_prob must be in [0, 1].")
+        self.door_frame_points_base = {}
+        if self.door_frame_aug_enabled:
+            for asset_idx, sampler in self.door_samplers.items():
+                frame_local = sampler.points.get("link_0")
+                if frame_local is None or frame_local.shape[1] == 0:
+                    continue
+                num_joints = len(sampler.robot.actuated_joint_names)
+                zero_joints = torch.zeros((1, num_joints), device=self.device, dtype=torch.float32)
+                # sample_link_set FKs link_0 into the root ("base") frame; joint values are irrelevant
+                # since link_0 precedes every actuated joint. Keeps all cached frame points (no subsample).
+                frame_base = sampler.sample_link_set(zero_joints, ["link_0"]).squeeze(0).contiguous()
+                self.door_frame_points_base[int(asset_idx)] = frame_base.to(device=self.device, dtype=torch.float32)
+            if not self.door_frame_points_base:
+                print("[WARN] door_frame_aug enabled but no asset exposed link_0 frame points; disabling.")
+                self.door_frame_aug_enabled = False
+        self.env_door_frame_visible = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.latest_door_frame_aug_stats = {}
         if self.scene_robot_pcd_num_points is None:
             self.scene_robot_pcd_num_points = self.scene_door_pcd_num_points
 
@@ -2960,6 +2998,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             num_points=num_points,
             params=self.wall_distractor_params,
             device=self.device,
+            flush_bbox_min_ordered=self.wall_distractor_panel_bbox_min_ordered[env_ids],
+            flush_bbox_max_ordered=self.wall_distractor_panel_bbox_max_ordered[env_ids],
         )
 
     def _resample_wall_distractors(self, env_ids=None):
@@ -2982,6 +3022,25 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         if env_ids.numel() == 0:
             return
         self._wall_distractor_local_points[env_ids] = self._sample_wall_pointcloud_local(env_ids=env_ids)
+
+    def _resample_door_frame_visibility(self, env_ids=None):
+        """Redraw the per-env boolean deciding whether the door frame (link_0) is rendered this episode."""
+        if not self.door_frame_aug_enabled:
+            return
+        if env_ids is None:
+            self.env_door_frame_visible[:] = (
+                torch.rand(self.num_envs, device=self.device) < self.door_frame_aug_env_prob
+            )
+        else:
+            env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+            if env_ids.numel() == 0:
+                return
+            self.env_door_frame_visible[env_ids] = (
+                torch.rand(env_ids.numel(), device=self.device) < self.door_frame_aug_env_prob
+            )
+        self.latest_door_frame_aug_stats = {
+            "door_frame_aug/env_fraction": float(self.env_door_frame_visible.to(torch.float32).mean().detach().cpu()),
+        }
 
     def _sample_robot_pointcloud_world_sampler(self):
         return compose_cached_link_pointcloud_world(
@@ -3110,20 +3169,40 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 env_ids = torch.nonzero(self.env_asset_idx == asset_idx, as_tuple=False).squeeze(-1)
             if env_ids.numel() == 0:
                 continue
+            link_pos_w_by_name = {
+                link_name: self.ov_env.door.data.body_pos_w[env_ids, self.door_link_body_indices[link_name]]
+                for link_name in ("link_1", "link_2")
+                if link_name in self.door_link_body_indices
+            }
+            link_quat_w_by_name = {
+                link_name: self.ov_env.door.data.body_quat_w[env_ids, self.door_link_body_indices[link_name]]
+                for link_name in ("link_1", "link_2")
+                if link_name in self.door_link_body_indices
+            }
             asset_pcd_world = compose_cached_link_pointcloud_world(
                 link_points_by_name=link_points_by_name,
-                link_pos_w_by_name={
-                    link_name: self.ov_env.door.data.body_pos_w[env_ids, self.door_link_body_indices[link_name]]
-                    for link_name in ("link_1", "link_2")
-                    if link_name in self.door_link_body_indices
-                },
-                link_quat_w_by_name={
-                    link_name: self.ov_env.door.data.body_quat_w[env_ids, self.door_link_body_indices[link_name]]
-                    for link_name in ("link_1", "link_2")
-                    if link_name in self.door_link_body_indices
-                },
+                link_pos_w_by_name=link_pos_w_by_name,
+                link_quat_w_by_name=link_quat_w_by_name,
                 num_points=self.scene_door_pcd_num_points,
             )
+            # Optionally mix in the (base-fixed) door frame for the envs whose frame is visible this
+            # episode. The frame is posed with the door base body pose; composing panel+handle+frame and
+            # resampling to the same budget gives the frame an area-proportional share of the points.
+            frame_points_base = self.door_frame_points_base.get(int(asset_idx)) if self.door_frame_aug_enabled else None
+            if frame_points_base is not None:
+                frame_visible = self.env_door_frame_visible[env_ids]
+                if bool(frame_visible.any()):
+                    base_pos_w = self.ov_env.door.data.body_pos_w[env_ids, self.door_base_body_idx]
+                    base_quat_w = self.ov_env.door.data.body_quat_w[env_ids, self.door_base_body_idx]
+                    asset_pcd_world_with_frame = compose_cached_link_pointcloud_world(
+                        link_points_by_name={**link_points_by_name, "link_0": frame_points_base},
+                        link_pos_w_by_name={**link_pos_w_by_name, "link_0": base_pos_w},
+                        link_quat_w_by_name={**link_quat_w_by_name, "link_0": base_quat_w},
+                        num_points=self.scene_door_pcd_num_points,
+                    )
+                    asset_pcd_world = torch.where(
+                        frame_visible.view(-1, 1, 1), asset_pcd_world_with_frame, asset_pcd_world
+                    )
             if hole_metadata is not None:
                 asset_pcd_world = self._apply_door_hole_aug_to_world(
                     asset_pcd_world,
@@ -3763,6 +3842,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             self.latest_aux_input_vector = None
             self.latest_aux_target_vector = None
             self._resample_wall_distractors()
+            self._resample_door_frame_visibility()
             self.temporal_current_time_s = self._iteration_to_time_s(start_iteration)
             self._resample_aux_handle_gt_bias()
             self._seed_temporal_histories()
@@ -3883,6 +3963,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                     self.current_rewards[done_mask] = 0.0
                     self.current_lengths[done_mask] = 0.0
                     self._resample_wall_distractors(done_mask)
+                    self._resample_door_frame_visibility(done_mask)
                     # Redraw the systematic GT bias BEFORE seeding, since the seed reads the biased GT.
                     self._resample_aux_handle_gt_bias(done_mask)
                     self._seed_temporal_histories(done_mask)

@@ -21,6 +21,23 @@ HANDLE_CONTACT_FILTER_PRIM_PATHS = (
     "/World/envs/env_.*/Robot/fingertip_3",
 )
 
+# PULL-door hinge (handle) grasp reward sensor: ONLY the distal hooking links -- dip / realtip /
+# fingertip of the three fingers (1/2/3). The palm, pip, and the bulky ~5.3 cm mcp_joint knuckle are
+# excluded because none of them fit into the handle<->board gap; the only way these distal links reach
+# the lever is by curling at the MCP-flex/DIP joints, so contact here implies an actual curled hook
+# rather than a flat palm/pip push. Thumb (_4) is not part of the pull hook.
+PULL_HINGE_HOOK_FILTER_PRIM_PATHS = (
+    "/World/envs/env_.*/Robot/dip_1",
+    "/World/envs/env_.*/Robot/realtip_1",
+    "/World/envs/env_.*/Robot/fingertip_1",
+    "/World/envs/env_.*/Robot/dip_2",
+    "/World/envs/env_.*/Robot/realtip_2",
+    "/World/envs/env_.*/Robot/fingertip_2",
+    "/World/envs/env_.*/Robot/dip_3",
+    "/World/envs/env_.*/Robot/realtip_3",
+    "/World/envs/env_.*/Robot/fingertip_3",
+)
+
 # PUSH-door palm-only handle-contact reward sensor: ONLY the two palm links (palm_center, palm_lower)
 # count. Fingers are excluded entirely -- the push reward is collected by pressing the handle with the
 # PALM, not by finger contact (which is no longer rewarded on push).

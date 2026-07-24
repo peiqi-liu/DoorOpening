@@ -380,6 +380,9 @@ class LoggingMixin:
         if self.latest_door_hole_aug_stats:
             for key, value in self.latest_door_hole_aug_stats.items():
                 metrics[key] = value
+        if getattr(self, "latest_door_frame_aug_stats", None):
+            for key, value in self.latest_door_frame_aug_stats.items():
+                metrics[key] = value
         if self.latest_env_log_metrics:
             for key, value in self.latest_env_log_metrics.items():
                 if key == "stats/success_rate" or key.startswith("stats/success_rate/"):

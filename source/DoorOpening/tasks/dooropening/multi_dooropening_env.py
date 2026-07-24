@@ -848,6 +848,7 @@ class DooropeningEnv(DirectRLEnv):
             self.pointcloud_camera = Camera(self.cfg.pointcloud_camera_cfg)
             self.scene.sensors["pointcloud_camera"] = self.pointcloud_camera
         self.scene.sensors["contact_forces_door2"] = ContactSensor(self.cfg.contact_forces_door2)
+        self.scene.sensors["contact_forces_door2_hook"] = ContactSensor(self.cfg.contact_forces_door2_hook)
         self.scene.sensors["contact_forces_door2_palm"] = ContactSensor(self.cfg.contact_forces_door2_palm)
         self.scene.sensors["contact_forces_door_panel"] = ContactSensor(self.cfg.contact_forces_door_panel)
         # base<->door split one-sensor-per-body (filtered contacts need a single-body prim_path)
@@ -1430,6 +1431,7 @@ class DooropeningEnv(DirectRLEnv):
         targets = self.robot_dof_targets + self.dt * self.scaled_actions
         targets = self._pin_arx_targets_to_fixed_pose(targets)
         self.scene.sensors["contact_forces_door2"].update(self.cfg.sim_dt)
+        self.scene.sensors["contact_forces_door2_hook"].update(self.cfg.sim_dt)
         self.scene.sensors["contact_forces_door2_palm"].update(self.cfg.sim_dt)
         self.scene.sensors["contact_forces_door_x5_link2"].update(self.cfg.sim_dt)
         self.scene.sensors["contact_forces_door_x5_link3"].update(self.cfg.sim_dt)
@@ -2293,12 +2295,20 @@ class DooropeningEnv(DirectRLEnv):
 
         # --- PULL-only hinge (handle) contact reward -----------------------------------------------
         # Separated out of compute_deep_mimic_rewards (this is a task/contact reward, not a tracking
-        # term). Binary bonus for the hand contacting the handle (link_2) during the grasp/pull window
+        # term). Binary bonus for the hand HOOKING the handle (link_2) during the grasp/pull window
         # (ref_hinge_contact_mask), gated to PULL envs (1 - is_push); PUSH uses the palm-only reward
-        # above instead. Reuses handle_force_norm computed above (||contact_forces_door2||); behavior
-        # is identical to the old contact_force_w * contact_reward term inside deep-mimic.
-        hinge_contact = (handle_force_norm > self.cfg.handle_contact_force_threshold).to(
-            dtype=handle_force_norm.dtype
+        # above instead. Uses the DISTAL-ONLY hook sensor (dip/realtip/fingertip of fingers 1/2/3) --
+        # NOT the palm/pip. The bulky ~5.3 cm mcp_joint can't enter the handle<->board gap, so only the
+        # distal segments curling at the MCP-flex/DIP joints reach the lever; rewarding their contact
+        # (instead of any palm/pip touch) forces a curled hook grasp rather than a flat push.
+        contact_forces_door2_hook = self._get_filtered_contact_force_w(
+            self.scene.sensors["contact_forces_door2_hook"],
+            expected_num_envs=self.num_envs,
+        )
+        hook_force_norm = torch.linalg.vector_norm(contact_forces_door2_hook, dim=-1)
+        self.extras["stats/filtered_hook_force_norm_max"] = float(hook_force_norm.max().detach().cpu().item())
+        hinge_contact = (hook_force_norm > self.cfg.handle_contact_force_threshold).to(
+            dtype=hook_force_norm.dtype
         )
         weighted_hinge_contact_reward = (
             self.hinge_contact_reward_w

@@ -38,6 +38,23 @@ class WallDistractorParams:
     height_max_m: Optional[float]
     face_jitter_m: float
     point_density_per_m2: Optional[float]
+    # Flush mounting wall -- a SEPARATE, existence-gated component (NOT a mode that replaces the side
+    # boxes). With probability ``flush_prob`` per env a thin slab, centered on the door panel's own
+    # thickness band and butted against the panel side edges (no gap), flanks the panel left+right and
+    # runs floor-to-above-door -- the flat drywall surface a door is set into. With probability
+    # 1-flush_prob it is absent (the glass / open-frame case). It coexists with the box side walls;
+    # ``flush_point_fraction`` of the wall point budget is reserved for it. Slab thickness comes from
+    # ``flush_thickness_(min|max)_m`` (None -> exactly the panel thickness); the outward spread from
+    # each panel edge from ``flush_extent_(min|max)_m``; its vertical span from ``flush_height_(min|max)_m``
+    # (None -> floor to just above the panel top, so it fills the policy z-crop).
+    flush_prob: float
+    flush_point_fraction: float
+    flush_thickness_min_m: Optional[float]
+    flush_thickness_max_m: Optional[float]
+    flush_extent_min_m: float
+    flush_extent_max_m: float
+    flush_height_min_m: Optional[float]
+    flush_height_max_m: Optional[float]
 
     @classmethod
     def from_cfg(cls, cfg: dict, scene_door_num_points: int) -> "WallDistractorParams":
@@ -72,6 +89,30 @@ class WallDistractorParams:
         wall_point_density = cfg.get("point_density_per_m2")
         point_density_per_m2 = None if wall_point_density is None else float(wall_point_density)
         resample_each_step = bool(cfg.get("resample_each_step", False))
+        flush_prob = float(cfg.get("flush_prob", 0.7))
+        if not 0.0 <= flush_prob <= 1.0:
+            raise ValueError("wall_distractors.flush_prob must be in [0, 1].")
+        flush_point_fraction = float(cfg.get("flush_point_fraction", 0.5))
+        if not 0.0 <= flush_point_fraction <= 1.0:
+            raise ValueError("wall_distractors.flush_point_fraction must be in [0, 1].")
+        flush_thickness_range = cfg.get("flush_thickness_m")
+        if flush_thickness_range is None:
+            flush_thickness_min_m = None
+            flush_thickness_max_m = None
+        else:
+            flush_thickness_min_m, flush_thickness_max_m = map(float, flush_thickness_range)
+            flush_thickness_min_m = max(1e-4, flush_thickness_min_m)
+            flush_thickness_max_m = max(flush_thickness_min_m, flush_thickness_max_m)
+        flush_extent_min_m, flush_extent_max_m = map(float, cfg.get("flush_extent_m", [0.6, 1.6]))
+        flush_extent_min_m = max(1e-3, flush_extent_min_m)
+        flush_extent_max_m = max(flush_extent_min_m, flush_extent_max_m)
+        flush_height_range = cfg.get("flush_height_range_m")
+        if flush_height_range is None:
+            flush_height_min_m = None
+            flush_height_max_m = None
+        else:
+            flush_height_min_m, flush_height_max_m = map(float, flush_height_range)
+            flush_height_max_m = max(flush_height_min_m, flush_height_max_m)
         return cls(
             enabled=enabled,
             num_points=num_points,
@@ -90,6 +131,14 @@ class WallDistractorParams:
             height_max_m=height_max_m,
             face_jitter_m=face_jitter_m,
             point_density_per_m2=point_density_per_m2,
+            flush_prob=flush_prob,
+            flush_point_fraction=flush_point_fraction,
+            flush_thickness_min_m=flush_thickness_min_m,
+            flush_thickness_max_m=flush_thickness_max_m,
+            flush_extent_min_m=flush_extent_min_m,
+            flush_extent_max_m=flush_extent_max_m,
+            flush_height_min_m=flush_height_min_m,
+            flush_height_max_m=flush_height_max_m,
         )
 
 
@@ -111,133 +160,37 @@ def compute_wall_bbox_ordering(board_bbox: torch.Tensor):
     return axis_order, bbox_min_ordered, bbox_max_ordered
 
 
-def sample_wall_points_local(
-    axis_order: torch.Tensor,
-    bbox_min_ordered: torch.Tensor,
-    bbox_max_ordered: torch.Tensor,
-    num_points: int,
-    params: WallDistractorParams,
+def _sample_columns_ordered(
+    col_min_surface,
+    col_max_surface,
+    col_width_lo,
+    col_width_hi,
+    col_height_lo,
+    col_height_hi,
+    is_right_col,
+    num_points,
+    face_jitter_m,
+    suppress_thickness_jitter,
+    point_density_per_m2,
+    rand_range,
     device,
-) -> torch.Tensor:
-    """Sample wall-distractor surface points in the door-base local frame.
+):
+    """Sample surface points on a set of axis-aligned boxes ("columns") in the ordered frame.
 
-    Args:
-        axis_order / bbox_min_ordered / bbox_max_ordered: per-env (E, 3), from
-            :func:`compute_wall_bbox_ordering` (already sliced to the requested envs).
-        num_points: buffer width (also the per-env hard cap when density mode is on).
-        params: geometry knobs.
-    Returns:
-        (E, num_points, 3) points in the door-base frame. In density mode, slots beyond each env's
-        area-scaled target are NaN.
+    All ``col_*`` inputs are (E, C) stacks giving each column's [min,max] along thickness (axis 0),
+    width (axis 1) and height (axis 2). ``is_right_col`` is a (C,) bool marking columns that attach on
+    the panel's +width side (used by the anti-penetration clamp). Returns (E, num_points, 3) ordered
+    points; in density mode, slots beyond each env's area-scaled target are NaN.
     """
-    num_points = int(num_points)
-    env_count = int(axis_order.shape[0])
-    if num_points <= 0 or env_count == 0:
-        return torch.zeros((env_count, 0, 3), dtype=torch.float32, device=device)
+    env_count, num_columns = col_min_surface.shape
+    num_faces = 6
 
-    # From here on, the ordered coordinates are:
-    #   axis 0 = thickness (normal to the door slab)
-    #   axis 1 = width (left/right of the panel)
-    #   axis 2 = height (bottom/top)
-    thickness_min, width_min, height_min = bbox_min_ordered.unbind(dim=-1)
-    thickness_max, width_max, height_max = bbox_max_ordered.unbind(dim=-1)
-    thickness_extent = (thickness_max - thickness_min).clamp_min(1e-4)
-    width_extent = (width_max - width_min).clamp_min(1e-4)
-
-    def rand_range(low, high, shape):
-        return torch.empty(shape, device=device, dtype=torch.float32).uniform_(float(low), float(high))
-
-    thickness_center = 0.5 * (thickness_min + thickness_max)
-
-    def sample_seam():
-        # Where the front and back segments on one side meet. Randomizing this (instead of
-        # pinning it to thickness_center) preserves the old single-column "recessed/protruding"
-        # variety while still guaranteeing the two segments butt together exactly.
-        return thickness_center + rand_range(
-            params.center_offset_min_m, params.center_offset_max_m, (env_count,)
-        )
-
-    def sample_column_surfaces(seam, is_front):
-        column_depth = thickness_extent + rand_range(params.depth_min_m, params.depth_max_m, (env_count,))
-        # Front and back share the seam as a hard boundary (front's min == back's max == seam),
-        # so the two segments on a side are always exactly attached: no gap, no overlap.
-        if is_front:
-            return seam, seam + column_depth
-        return seam - column_depth, seam
-
-    def sample_column_width():
-        if params.side_margin_abs_min_m is not None:
-            # In column mode, the side margin range becomes the column width range.
-            column_width = rand_range(params.side_margin_abs_min_m, params.side_margin_abs_max_m, (env_count,))
-        else:
-            column_width = width_extent * rand_range(
-                params.side_margin_scale_min, params.side_margin_scale_max, (env_count,)
-            )
-        return column_width.clamp_min(1e-4)
-
-    def sample_column_bounds(attach_on_right, seam, is_front):
-        edge_gap = rand_range(params.gap_min_m, params.gap_max_m, (env_count,))
-        column_width = sample_column_width()
-        column_min_surface, column_max_surface = sample_column_surfaces(seam, is_front)
-        # The inner face starts just outside the panel side edge.
-        # Right column: panel right edge + gap, then extends further in +width.
-        # Left column:  panel left edge  - gap, then extends further in -width.
-        if attach_on_right:
-            column_inner_width = width_max + edge_gap
-            column_outer_width = column_inner_width + column_width
-        else:
-            column_inner_width = width_min - edge_gap
-            column_outer_width = column_inner_width - column_width
-        column_width_lo = torch.minimum(column_inner_width, column_outer_width)
-        column_width_hi = torch.maximum(column_inner_width, column_outer_width)
-        # Every column starts at the fixed lower bound; its UPPER bound is randomized INDEPENDENTLY
-        # per column (sample_column_bounds runs once per column), so the four walls reach different
-        # heights. When height_range_m is unset, fall back to the door panel's own bbox height.
-        if params.height_min_m is not None:
-            column_height_lo = torch.full((env_count,), params.height_min_m, device=device, dtype=torch.float32)
-            column_height_hi = rand_range(params.height_min_m, params.height_max_m, (env_count,))
-        else:
-            column_height_lo = height_min
-            column_height_hi = height_max
-        return (
-            column_min_surface,
-            column_max_surface,
-            column_width_lo,
-            column_width_hi,
-            column_height_lo,
-            column_height_hi,
-        )
-
-    # Four wall segments: {left, right} x {front, back} of the door plane. Front/back share a
-    # seam sampled once per side, so each side's pair butts together exactly (see sample_seam).
-    left_seam = sample_seam()
-    right_seam = sample_seam()
-    column_variants = [
-        sample_column_bounds(attach_on_right, seam, is_front)
-        for attach_on_right, seam in ((False, left_seam), (True, right_seam))
-        for is_front in (False, True)
-    ]
-    num_columns = len(column_variants)
-    # Each stack has shape (env_count, num_columns); column order is
-    # [left-back, left-front, right-back, right-front].
-    column_min_surface_stack = torch.stack([v[0] for v in column_variants], dim=1)
-    column_max_surface_stack = torch.stack([v[1] for v in column_variants], dim=1)
-    column_width_lo_stack = torch.stack([v[2] for v in column_variants], dim=1)
-    column_width_hi_stack = torch.stack([v[3] for v in column_variants], dim=1)
-    column_height_lo_stack = torch.stack([v[4] for v in column_variants], dim=1)
-    column_height_hi_stack = torch.stack([v[5] for v in column_variants], dim=1)
-
-    wall_points_ordered = torch.empty((env_count, num_points, 3), dtype=torch.float32, device=device)
-
-    # Per-column extents (E, C), reused for area-weighted sampling and the density cap.
-    col_thick_ext = (column_max_surface_stack - column_min_surface_stack).abs()
-    col_width_ext = (column_width_hi_stack - column_width_lo_stack).abs()
-    col_height_ext = (column_height_hi_stack - column_height_lo_stack).abs()
-    # Area of each of the 6 sampled faces per column, ordered [thickness_min, thickness_max,
-    # width_min, width_max, height_min (bottom cap), height_max (top cap)]: thickness faces are
-    # (width x height), width faces are (thickness x height), height caps are (thickness x width).
-    # The two height caps CLOSE the box -- without them short walls render open-topped (visible tops
-    # missing) since the camera looks slightly down onto them.
+    col_thick_ext = (col_max_surface - col_min_surface).abs()
+    col_width_ext = (col_width_hi - col_width_lo).abs()
+    col_height_ext = (col_height_hi - col_height_lo).abs()
+    # Area of each of the 6 faces per column, ordered [thickness_min, thickness_max, width_min,
+    # width_max, height_min (bottom cap), height_max (top cap)]. The two height caps CLOSE the box so
+    # short walls don't render open-topped when the camera looks slightly down onto them.
     face_area = torch.stack(
         [
             col_width_ext * col_height_ext,
@@ -249,44 +202,33 @@ def sample_wall_points_local(
         ],
         dim=-1,
     )  # (E, C, 6)
-    num_faces = face_area.shape[-1]
 
-    if params.point_density_per_m2 is not None:
-        # Area-WEIGHTED selection of (column, face): each point picks a face with probability
-        # proportional to that face's area, so the resulting density is uniform ACROSS every wall
-        # face (constant points/m^2), not merely uniform in total. A big face and a small face then
-        # get point counts proportional to their sizes. Flat index = column * 4 + face.
+    if point_density_per_m2 is not None:
+        # Area-WEIGHTED (column, face) selection -> constant points/m^2 across every face.
         probs = face_area.reshape(env_count, num_columns * num_faces).clamp_min(1e-12)
         probs = probs / probs.sum(dim=1, keepdim=True)
         flat_idx = torch.multinomial(probs, num_points, replacement=True)  # (E, num_points)
         column_idx = flat_idx // num_faces
         face_ids = flat_idx % num_faces
     else:
-        # Legacy UNIFORM selection (equal expected points per column and per face, so smaller faces
-        # end up denser). Kept for configs that do not set point_density_per_m2.
+        # Legacy UNIFORM selection (kept for configs without point_density_per_m2).
         face_ids = torch.randint(0, num_faces, (env_count, num_points), device=device)
         column_idx = torch.randint(0, num_columns, (env_count, num_points), device=device)
         if num_points >= num_columns:
-            # Keep every column (both jamb sides, both front/back) populated for each env.
             for column_id in range(num_columns):
                 column_idx[:, column_id] = column_id
 
-    column_min_surface = torch.gather(column_min_surface_stack, 1, column_idx)
-    column_max_surface = torch.gather(column_max_surface_stack, 1, column_idx)
-    column_width_lo = torch.gather(column_width_lo_stack, 1, column_idx)
-    column_width_hi = torch.gather(column_width_hi_stack, 1, column_idx)
-    column_height_lo = torch.gather(column_height_lo_stack, 1, column_idx)
-    column_height_hi = torch.gather(column_height_hi_stack, 1, column_idx)
+    cms = torch.gather(col_min_surface, 1, column_idx)
+    cMs = torch.gather(col_max_surface, 1, column_idx)
+    cwlo = torch.gather(col_width_lo, 1, column_idx)
+    cwhi = torch.gather(col_width_hi, 1, column_idx)
+    chlo = torch.gather(col_height_lo, 1, column_idx)
+    chhi = torch.gather(col_height_hi, 1, column_idx)
 
-    wall_points_ordered[..., 0] = column_min_surface + torch.rand(
-        (env_count, num_points), device=device
-    ) * (column_max_surface - column_min_surface).clamp_min(1e-4)
-    wall_points_ordered[..., 1] = column_width_lo + torch.rand(
-        (env_count, num_points), device=device
-    ) * (column_width_hi - column_width_lo).clamp_min(1e-4)
-    wall_points_ordered[..., 2] = column_height_lo + torch.rand(
-        (env_count, num_points), device=device
-    ) * (column_height_hi - column_height_lo).clamp_min(1e-4)
+    pts = torch.empty((env_count, num_points, 3), dtype=torch.float32, device=device)
+    pts[..., 0] = cms + torch.rand((env_count, num_points), device=device) * (cMs - cms).clamp_min(1e-4)
+    pts[..., 1] = cwlo + torch.rand((env_count, num_points), device=device) * (cwhi - cwlo).clamp_min(1e-4)
+    pts[..., 2] = chlo + torch.rand((env_count, num_points), device=device) * (chhi - chlo).clamp_min(1e-4)
 
     thickness_min_face = face_ids == 0
     thickness_max_face = face_ids == 1
@@ -295,60 +237,220 @@ def sample_wall_points_local(
     height_min_face = face_ids == 4  # bottom cap
     height_max_face = face_ids == 5  # top cap
 
-    wall_points_ordered[..., 0] = torch.where(thickness_min_face, column_min_surface, wall_points_ordered[..., 0])
-    wall_points_ordered[..., 0] = torch.where(thickness_max_face, column_max_surface, wall_points_ordered[..., 0])
-    wall_points_ordered[..., 1] = torch.where(width_min_face, column_width_lo, wall_points_ordered[..., 1])
-    wall_points_ordered[..., 1] = torch.where(width_max_face, column_width_hi, wall_points_ordered[..., 1])
-    # Cap faces: snap the height coord to lo/hi so the box is CLOSED (the thickness/width coords stay
-    # uniform, so each cap spans the full thickness x width rectangle).
-    wall_points_ordered[..., 2] = torch.where(height_min_face, column_height_lo, wall_points_ordered[..., 2])
-    wall_points_ordered[..., 2] = torch.where(height_max_face, column_height_hi, wall_points_ordered[..., 2])
+    pts[..., 0] = torch.where(thickness_min_face, cms, pts[..., 0])
+    pts[..., 0] = torch.where(thickness_max_face, cMs, pts[..., 0])
+    pts[..., 1] = torch.where(width_min_face, cwlo, pts[..., 1])
+    pts[..., 1] = torch.where(width_max_face, cwhi, pts[..., 1])
+    pts[..., 2] = torch.where(height_min_face, chlo, pts[..., 2])
+    pts[..., 2] = torch.where(height_max_face, chhi, pts[..., 2])
 
-    if params.face_jitter_m > 0.0:
+    if face_jitter_m > 0.0:
         thickness_face_mask = (thickness_min_face | thickness_max_face).to(torch.float32)
         width_face_mask = (width_min_face | width_max_face).to(torch.float32)
         height_face_mask = (height_min_face | height_max_face).to(torch.float32)
-        wall_points_ordered[..., 0] += thickness_face_mask * rand_range(
-            -params.face_jitter_m, params.face_jitter_m, (env_count, num_points)
-        )
-        wall_points_ordered[..., 1] += width_face_mask * rand_range(
-            -params.face_jitter_m, params.face_jitter_m, (env_count, num_points)
-        )
-        wall_points_ordered[..., 2] += height_face_mask * rand_range(
-            -params.face_jitter_m, params.face_jitter_m, (env_count, num_points)
-        )
+        # A flush slab is only ~panel-thickness deep, so a large face_jitter on the thickness faces
+        # would balloon it back into a thick fuzzy cloud and destroy the flat look -- suppress it there.
+        t_scale = 0.0 if suppress_thickness_jitter else 1.0
+        pts[..., 0] += thickness_face_mask * t_scale * rand_range(-face_jitter_m, face_jitter_m, (env_count, num_points))
+        pts[..., 1] += width_face_mask * rand_range(-face_jitter_m, face_jitter_m, (env_count, num_points))
+        pts[..., 2] += height_face_mask * rand_range(-face_jitter_m, face_jitter_m, (env_count, num_points))
 
-    # Keep walls from penetrating the door panel: the inner width face sits only `edge_gap` (<=1cm)
-    # outside the panel edge, but face_jitter (up to ~10cm) can push inner-face points across that gap
-    # into the slab. Clamp every point to its column's inner edge -- right columns (idx >= num/2) stay
-    # at/beyond column_width_lo (= panel_right + gap), left columns stay at/within column_width_hi
-    # (= panel_left - gap). This preserves the outward jitter but nothing crosses into the panel width
-    # span (walls span the panel's thickness range, but only ever OUTSIDE its width, so no 3D overlap).
-    is_right_column = column_idx >= (num_columns // 2)
-    wall_points_ordered[..., 1] = torch.where(
-        is_right_column,
-        torch.maximum(wall_points_ordered[..., 1], column_width_lo),
-        torch.minimum(wall_points_ordered[..., 1], column_width_hi),
-    )
+    # Anti-penetration clamp: right columns stay at/beyond their inner (width_lo) edge, left columns
+    # at/within their inner (width_hi) edge, so jitter never pushes a point into the panel's width span.
+    is_right = torch.gather(is_right_col.view(1, -1).expand(env_count, num_columns), 1, column_idx)
+    pts[..., 1] = torch.where(is_right, torch.maximum(pts[..., 1], cwlo), torch.minimum(pts[..., 1], cwhi))
 
+    if point_density_per_m2 is not None:
+        # Keep a per-env count scaling with total wall area (constant points/m^2); NaN the rest.
+        total_area = face_area.sum(dim=(1, 2))
+        target_counts = torch.round(total_area * float(point_density_per_m2))
+        target_counts = target_counts.clamp(min=float(min(num_columns, num_points)), max=float(num_points)).long()
+        slot_valid = torch.arange(num_points, device=device).unsqueeze(0) < target_counts.unsqueeze(1)
+        pts = torch.where(slot_valid.unsqueeze(-1), pts, torch.full_like(pts, float("nan")))
+
+    return pts
+
+
+def sample_wall_points_local(
+    axis_order: torch.Tensor,
+    bbox_min_ordered: torch.Tensor,
+    bbox_max_ordered: torch.Tensor,
+    num_points: int,
+    params: WallDistractorParams,
+    device,
+    flush_bbox_min_ordered: torch.Tensor = None,
+    flush_bbox_max_ordered: torch.Tensor = None,
+) -> torch.Tensor:
+    """Sample wall-distractor surface points in the door-base local frame.
+
+    Two independent components share the point budget:
+      * **Box side walls** -- thick left/right columns (front+back per side), ALWAYS sampled. Their
+        height range (``height_range_m``) is deliberately low so they often fall below the policy's
+        z-crop and vanish from the policy input, while still often poking into it.
+      * **Flush mounting wall** -- a thin slab coplanar with the panel, flanking it left+right, present
+        per env with ``flush_prob`` (else absent = glass/open). Gets ``flush_point_fraction`` of the
+        budget; absent envs leave those slots NaN.
+
+    Args:
+        axis_order / bbox_min_ordered / bbox_max_ordered: per-env (E, 3), from
+            :func:`compute_wall_bbox_ordering` (already sliced to the requested envs). Drives the BOX
+            side walls -- pass the FULL door bbox (frame+panel+handle) so boxes sit outside the door.
+        num_points: buffer width (also the per-env hard cap when density mode is on).
+        params: geometry knobs.
+        flush_bbox_(min|max)_ordered: optional per-env (E, 3), ordered by the SAME ``axis_order``. Drives
+            the FLUSH slab -- pass the PANEL (link_1) bbox so the slab stays coplanar with the panel face
+            (the full door bbox includes the handle's ~10 cm protrusion, which would make the slab thick
+            and pull its center off the panel). Defaults to the box bbox when not given.
+    Returns:
+        (E, num_points, 3) points in the door-base frame; empty/absent slots are NaN.
+    """
+    num_points = int(num_points)
+    env_count = int(axis_order.shape[0])
+    if num_points <= 0 or env_count == 0:
+        return torch.zeros((env_count, 0, 3), dtype=torch.float32, device=device)
+
+    # Ordered coordinates: axis 0 = thickness (normal to slab), 1 = width (L/R), 2 = height.
+    thickness_min, width_min, height_min = bbox_min_ordered.unbind(dim=-1)
+    thickness_max, width_max, height_max = bbox_max_ordered.unbind(dim=-1)
+    thickness_extent = (thickness_max - thickness_min).clamp_min(1e-4)
+    width_extent = (width_max - width_min).clamp_min(1e-4)
+    thickness_center = 0.5 * (thickness_min + thickness_max)
+
+    # Flush slab frame: the panel bbox when supplied (coplanar with the panel face), else the box bbox.
+    if flush_bbox_min_ordered is not None and flush_bbox_max_ordered is not None:
+        f_thick_min, f_width_min, f_height_min = flush_bbox_min_ordered.unbind(dim=-1)
+        f_thick_max, f_width_max, f_height_max = flush_bbox_max_ordered.unbind(dim=-1)
+    else:
+        f_thick_min, f_width_min, f_height_min = thickness_min, width_min, height_min
+        f_thick_max, f_width_max, f_height_max = thickness_max, width_max, height_max
+    f_thick_extent = (f_thick_max - f_thick_min).clamp_min(1e-4)
+    f_thick_center = 0.5 * (f_thick_min + f_thick_max)
+
+    def rand_range(low, high, shape):
+        return torch.empty(shape, device=device, dtype=torch.float32).uniform_(float(low), float(high))
+
+    # --- Budget split: flush wall (existence-gated) + box side walls (always on). ---
+    flush_active = params.flush_prob > 0.0 and params.flush_point_fraction > 0.0
+    flush_np = min(num_points, int(round(num_points * params.flush_point_fraction))) if flush_active else 0
+    box_np = num_points - flush_np
+
+    parts = []
+
+    # ---- Box side walls: {left, right} x {front, back}, each side's pair butted at a shared seam. ----
+    if box_np > 0:
+        def sample_seam():
+            return thickness_center + rand_range(params.center_offset_min_m, params.center_offset_max_m, (env_count,))
+
+        def sample_column_width():
+            if params.side_margin_abs_min_m is not None:
+                cw = rand_range(params.side_margin_abs_min_m, params.side_margin_abs_max_m, (env_count,))
+            else:
+                cw = width_extent * rand_range(params.side_margin_scale_min, params.side_margin_scale_max, (env_count,))
+            return cw.clamp_min(1e-4)
+
+        def sample_side_height():
+            # ONE height per side (a physical wall has a single top), shared by that side's front+back
+            # columns. Drawing it per side (not per column) is what lets a whole side drop below the
+            # policy z-crop and vanish from the input -- so "no wall on this side" happens often, while
+            # the two sides stay independent so a wall is also often present.
+            if params.height_min_m is not None:
+                hlo = torch.full((env_count,), params.height_min_m, device=device, dtype=torch.float32)
+                hhi = rand_range(params.height_min_m, params.height_max_m, (env_count,))
+            else:
+                hlo = height_min
+                hhi = height_max
+            return hlo, hhi
+
+        def sample_box_column(attach_on_right, seam, is_front, hlo, hhi):
+            depth = thickness_extent + rand_range(params.depth_min_m, params.depth_max_m, (env_count,))
+            if is_front:
+                cmin_s, cmax_s = seam, seam + depth
+            else:
+                cmin_s, cmax_s = seam - depth, seam
+            edge_gap = rand_range(params.gap_min_m, params.gap_max_m, (env_count,))
+            column_width = sample_column_width()
+            if attach_on_right:
+                inner = width_max + edge_gap
+                outer = inner + column_width
+            else:
+                inner = width_min - edge_gap
+                outer = inner - column_width
+            wlo = torch.minimum(inner, outer)
+            whi = torch.maximum(inner, outer)
+            return cmin_s, cmax_s, wlo, whi, hlo, hhi
+
+        left_seam = sample_seam()
+        right_seam = sample_seam()
+        left_hlo, left_hhi = sample_side_height()
+        right_hlo, right_hhi = sample_side_height()
+        variants = [
+            sample_box_column(attach_on_right, seam, is_front, hlo, hhi)
+            for attach_on_right, seam, (hlo, hhi) in (
+                (False, left_seam, (left_hlo, left_hhi)),
+                (True, right_seam, (right_hlo, right_hhi)),
+            )
+            for is_front in (False, True)
+        ]  # order [left-back, left-front, right-back, right-front]
+        box_pts = _sample_columns_ordered(
+            *[torch.stack([v[i] for v in variants], dim=1) for i in range(6)],
+            is_right_col=torch.tensor([False, False, True, True], device=device),
+            num_points=box_np,
+            face_jitter_m=params.face_jitter_m,
+            suppress_thickness_jitter=False,
+            point_density_per_m2=params.point_density_per_m2,
+            rand_range=rand_range,
+            device=device,
+        )
+        parts.append(box_pts)
+
+    # ---- Flush mounting wall: thin coplanar slab, left+right of the panel, existence-gated. ----
+    if flush_np > 0:
+        if params.flush_thickness_min_m is not None:
+            flush_t = rand_range(params.flush_thickness_min_m, params.flush_thickness_max_m, (env_count,))
+        else:
+            flush_t = f_thick_extent  # exactly the panel thickness -> both faces coplanar
+        half_t = 0.5 * flush_t
+        f_tmin = f_thick_center - half_t
+        f_tmax = f_thick_center + half_t
+        extent = rand_range(params.flush_extent_min_m, params.flush_extent_max_m, (env_count,)).clamp_min(1e-3)
+        if params.flush_height_min_m is not None:
+            f_hlo = torch.full((env_count,), params.flush_height_min_m, device=device, dtype=torch.float32)
+            f_hhi = torch.full((env_count,), params.flush_height_max_m, device=device, dtype=torch.float32)
+        else:
+            f_hlo = torch.minimum(f_height_min, torch.zeros_like(f_height_min))  # down to the floor
+            f_hhi = f_height_max + 0.3  # just above the door top -> fills the policy z-crop
+        # Two columns [left-flush, right-flush]; slab butts the panel edge (no gap) and extends outward.
+        cmin = torch.stack([f_tmin, f_tmin], dim=1)
+        cmax = torch.stack([f_tmax, f_tmax], dim=1)
+        wlo = torch.stack([f_width_min - extent, f_width_max], dim=1)
+        whi = torch.stack([f_width_min, f_width_max + extent], dim=1)
+        hlo = torch.stack([f_hlo, f_hlo], dim=1)
+        hhi = torch.stack([f_hhi, f_hhi], dim=1)
+        flush_pts = _sample_columns_ordered(
+            cmin, cmax, wlo, whi, hlo, hhi,
+            is_right_col=torch.tensor([False, True], device=device),
+            num_points=flush_np,
+            face_jitter_m=params.face_jitter_m,
+            suppress_thickness_jitter=True,
+            point_density_per_m2=params.point_density_per_m2,
+            rand_range=rand_range,
+            device=device,
+        )
+        # Existence gate: absent (glass/open) envs get all-NaN flush points this episode.
+        flush_present = torch.rand((env_count,), device=device) < params.flush_prob
+        flush_pts = torch.where(
+            flush_present.view(env_count, 1, 1), flush_pts, torch.full_like(flush_pts, float("nan"))
+        )
+        parts.append(flush_pts)
+
+    wall_points_ordered = parts[0] if len(parts) == 1 else torch.cat(parts, dim=1)
+
+    # Scatter ordered (thickness, width, height) axes back to the original door-base axes. NaN slots
+    # scatter to NaN, which every downstream consumer treats as "no point".
     wall_points_base = torch.zeros_like(wall_points_ordered)
     wall_points_base.scatter_(
         2,
         axis_order.unsqueeze(1).expand(-1, wall_points_ordered.shape[1], -1),
         wall_points_ordered,
     )
-
-    # Density mode: instead of always emitting `num_points` wall points, keep a count that scales
-    # with each env's total wall surface area (points/m^2), so point density stays roughly constant
-    # as the walls change size (esp. now that wall height is randomized). The buffer width stays
-    # `num_points` (a hard cap); slots beyond the per-env target are set to NaN, which every
-    # downstream consumer (depth/lidar render, crops, viser) already treats as "no point".
-    if params.point_density_per_m2 is not None:
-        total_area = face_area.sum(dim=(1, 2))  # (env_count,) total wall surface area
-        target_counts = torch.round(total_area * float(params.point_density_per_m2))
-        target_counts = target_counts.clamp(min=float(min(num_columns, num_points)), max=float(num_points)).long()
-        slot_valid = torch.arange(num_points, device=device).unsqueeze(0) < target_counts.unsqueeze(1)
-        wall_points_base = torch.where(
-            slot_valid.unsqueeze(-1), wall_points_base, torch.full_like(wall_points_base, float("nan"))
-        )
     return wall_points_base

@@ -268,18 +268,34 @@ dagger:
     # exactly at the door plane; kept as a config key (rather than removed) so sample_seam/
     # rand_range don't need a special zero-width-range code path.
     center_offset_m: [-0.25, 0.25]
-    # Wall vertical extent. Every wall starts at the lower bound (0.25); the UPPER bound is randomized
-    # INDEPENDENTLY per wall (each of the four columns draws its own top in [lower, upper]), so the
-    # walls reach different heights. Lower stays below the policy's z-crop [0.55, 1.5] so coverage
-    # never runs out at the bottom of the crop. Remove this key to fall back to the legacy behavior of
-    # exactly matching the door panel's own bbox height.
-    height_range_m: [0.25, 2.10]
+    # BOX side-wall vertical extent [bottom, max-top] (m). Each box draws its own top in [bottom, max-top].
+    # Kept LOW on purpose: with the policy z-crop [0.55, 1.5], a box whose top < 0.55 vanishes from the
+    # policy input entirely, so many boxes are "not there" after processing while others (top up to 1.8)
+    # still fill the whole crop height. Remove this key to fall back to matching the door panel's bbox height.
+    height_range_m: [0.1, 1.8]
     # Wall GT point count = total wall surface area * this density (points/m^2), capped at
     # wall_num_points. Keeps point density roughly constant as walls change size (esp. with the
     # randomized height above), instead of always emitting a fixed wall_num_points. Remove for the
     # legacy fixed-count behavior.
     point_density_per_m2: 3000
     face_jitter_m: 0.1  # Small noise added only on the snapped outer faces so the walls do not look perfectly planar.
+    # --- Flush mounting wall (SEPARATE, existence-gated component; coexists with the box walls above) ---
+    # A thin slab coplanar with the door panel, flanking it left+right and running floor-to-above-door --
+    # the flat drywall surface a door sits flush in (very common). Present per-env with flush_prob; when
+    # absent that's the glass / open-frame case.
+    flush_prob: 0.7
+    flush_point_fraction: 0.5   # Share of the wall point budget reserved for the flush wall (when present).
+    # Flush slab thickness range (m). null -> match the door panel's own thickness exactly (both faces coplanar).
+    flush_thickness_m: null
+    flush_extent_m: [0.6, 1.6]  # How far the flat surface spreads outward from each panel side edge (m).
+    flush_height_range_m: null  # [bottom, top] of the flat wall; null -> floor to just above the door top.
+  # Door-frame (link_0 casing/jamb) augmentation. The frame is fused into the door base and is normally
+  # ABSENT from the point cloud (only panel+handle are rendered). When enabled, each episode randomly
+  # includes or drops the frame per env (domain randomization for the often-thick PartNetv5_plusplus
+  # casings). Disabled by default -- set enabled: true to activate.
+  door_frame_aug:
+    enabled: false
+    env_prob: 0.5  # Per-env probability the frame IS rendered this episode.
   door_hole_aug:
     enabled: true # When enabled, drop points from link_1 to simulate a window/open hole in the door panel.
     env_prob: 0.35
