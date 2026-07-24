@@ -1498,6 +1498,15 @@ class DooropeningEnv(DirectRLEnv):
             self.robot_base_body_pos,
             self.robot_base_body_quat,
         ).reshape(self.num_envs, 1, -1)
+        # Door geometry fed to the teacher = 5 keypoints (2 handle + 3 board) in the robot base frame,
+        # REPLACING the raw link_1/link_2 poses (the abstract link frames were not helpful). Computed
+        # once in world, then expressed in both the clean (critic) and noised policy base frames below.
+        door_keypoints_w = self.compute_door_keypoints()  # [B, 5, 3] world
+        door_keypoints_to_base = world_to_local(
+            door_keypoints_w,
+            self.robot_base_body_pos,
+            self.robot_base_body_quat,
+        ).reshape(self.num_envs, 1, -1)
         door_twist_in_robot_base_frame = world_to_local(
             self.ref_door_body_pos_twist,
             self.robot_base_body_pos,
@@ -1594,6 +1603,18 @@ class DooropeningEnv(DirectRLEnv):
             "door_pos_noise",
             "door_pos_bias",
         )
+        # 5 door keypoints in the (noised) policy base frame, with the same door pos noise/bias as the
+        # old link poses. This is the door term actually fed to the actor (replaces the link poses).
+        policy_door_keypoints_to_base = world_to_local(
+            door_keypoints_w,
+            policy_robot_base_body_pos,
+            policy_robot_base_body_quat,
+        ).reshape(self.num_envs, 1, -1)
+        policy_door_keypoints_to_base = self._uniform_door_noise_like(
+            policy_door_keypoints_to_base,
+            "door_pos_noise",
+            "door_pos_bias",
+        )
         policy_door_joint_pos = self._uniform_door_noise_like(
             self.door_joint_pos[:, self._door_joint_idx].clone(),
             "door_joint_pos_noise",
@@ -1653,10 +1674,14 @@ class DooropeningEnv(DirectRLEnv):
                 policy_robot_key_body_euler.reshape(self.num_envs, 1, -1),
                 policy_base_lin_vel_local.reshape(self.num_envs, 1, -1),
                 policy_base_ang_vel_local.reshape(self.num_envs, 1, -1),
-                policy_door_to_base_link_pos,
+                # Door link_1/link_2 poses REPLACED by the 5 door keypoints (2 handle + 3 board). Must
+                # stay in sync with critic_obs below and the cfg observation_space (door_keypoint_*).
+                policy_door_keypoints_to_base,
                 policy_door_joint_pos,
                 self.ref_door_joint_pos[:, self._door_joint_idx].to(self.door_joint_pos).unsqueeze(dim = 1),
-                self.ref_robot_arx_joint_pos.to(self.robot_arx_joint_pos).unsqueeze(dim=1),
+                # REMOVED: reference ARX/x5 joint positions (arx_joint_reference_observation_space) --
+                # the ARX joints are not actuated. Keep in sync with critic_obs and the cfg.
+                # self.ref_robot_arx_joint_pos.to(self.robot_arx_joint_pos).unsqueeze(dim=1),
                 # twist_obs,
             ),
             dim=-1,
@@ -1685,10 +1710,12 @@ class DooropeningEnv(DirectRLEnv):
                 robot_key_body_euler.reshape(self.num_envs, 1, -1),
                 base_lin_vel_local.reshape(self.num_envs, 1, -1),
                 base_ang_vel_local.reshape(self.num_envs, 1, -1),
-                door_to_base_link_pos,
+                # Door link_1/link_2 poses REPLACED by the 5 door keypoints (see policy_obs).
+                door_keypoints_to_base,
                 self.door_joint_pos[:, self._door_joint_idx].unsqueeze(dim = 1),
                 self.ref_door_joint_pos[:, self._door_joint_idx].to(self.door_joint_pos).unsqueeze(dim = 1),
-                self.ref_robot_arx_joint_pos.to(self.robot_arx_joint_pos).unsqueeze(dim=1),
+                # REMOVED: reference ARX/x5 joint positions -- ARX not actuated (see policy_obs).
+                # self.ref_robot_arx_joint_pos.to(self.robot_arx_joint_pos).unsqueeze(dim=1),
                 # twist_obs,
             ),
             dim=-1,

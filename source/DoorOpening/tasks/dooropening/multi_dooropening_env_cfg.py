@@ -653,6 +653,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_pose_observation_space = (len(robot_key_bodies) - 1) * (3 + 6)
     base_velocity_observation_space = 6
     door_body_observation_space = len(door_body_names) * 3
+    # Door is fed to the teacher as 5 keypoints (2 handle + 3 board) in the base frame, replacing the
+    # raw link_1/link_2 poses. See _build_observations / compute_door_keypoints.
+    door_keypoint_observation_space = 5 * 3
     door_joint_observation_space = len(door_joint_names) * 2
     arx_joint_reference_observation_space = len(arx_joints)
 
@@ -662,9 +665,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         + key_body_error_observation_space
         + robot_pose_observation_space
         + base_velocity_observation_space
-        + door_body_observation_space
+        # door link_1/link_2 poses (door_body_observation_space) replaced by the 5 door keypoints:
+        + door_keypoint_observation_space
         + door_joint_observation_space
-        + arx_joint_reference_observation_space
+        # + arx_joint_reference_observation_space  # REMOVED: ARX/x5 joints are not actuated
     )
     state_space = observation_space
     num_observations = observation_space
