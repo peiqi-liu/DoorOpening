@@ -49,12 +49,16 @@ DEFAULT_FRAME_CLEARANCE_RANGE_M = (0.003, 0.015)
 
 DEFAULT_HANDLE_HEIGHT_RANGE_M = (0.75, 1.0)
 DEFAULT_HANDLE_EDGE_DISTANCE_RANGE_M = (0.03, 0.15)
-DEFAULT_HANDLE_RADIUS_RANGE_M = (0.006, 0.018)
+DEFAULT_HANDLE_RADIUS_RANGE_M = (0.006, 0.015)
 # Vertical thickness (height) of the lever grip bar, DECOUPLED from the stem radius. Real lever grips
 # are thin flat bars, so the point cloud of the lever should be thin in height -- if this is left at
 # 0 the lever falls back to a square 2*radius cross-section (the old, too-tall behaviour).
 DEFAULT_HANDLE_LEVER_THICKNESS_RANGE_M = (0.010, 0.016)
-DEFAULT_HANDLE_STEM_LENGTH_RANGE_M = (0.045, 0.095)
+# CLEAR underside gap the fingers get between the door PANEL face and the panel-facing (near) surface
+# of the lever grip bar. This already ACCOUNTS FOR the lever bar half-thickness -- the stem cylinder is
+# extended by that half-thickness so the lever's near surface sits exactly this far above the panel (see
+# build_handle_spec). So this range IS the finger clearance under the lever, not the lever-center offset.
+DEFAULT_HANDLE_STEM_LENGTH_RANGE_M = (0.043, 0.085)
 DEFAULT_HANDLE_LENGTH_RANGE_M = (0.09, 0.14)
 DEFAULT_HANDLE_RETURN_LENGTH_RANGE_M = (0.035, 0.08)
 DEFAULT_HANDLE_RETURN_TIP_CLEARANCE_RANGE_M = (0.025, 0.050)
@@ -75,9 +79,10 @@ DEFAULT_RETURN_HANDLE_PROB = 0.7
 DEFAULT_HANDLE_BUMP_PROB = 0.7
 DEFAULT_HANDLE_BUMP_SHAPE = "box"
 # Outward protrusion (z) of the mount out of the door face. Range starts near ZERO so a small draw is
-# effectively "no bump" (nearly flush), up to a modest plate -- deliberately NOT too thick. This lets a
-# single always-on sample cover the whole no-bump..bump spectrum via SIZE instead of a hard prob.
-DEFAULT_HANDLE_BUMP_LENGTH_RANGE_M = (0.001, 0.015)
+# effectively "no bump" (nearly flush), up to a chunky escutcheon (30 mm). This lets a single always-on
+# sample cover the whole no-bump..bump spectrum via SIZE instead of a hard prob. The protrusion is
+# always clamped so at least MIN_HANDLE_PLATE_GRASP_GAP_M of clear finger space stays above the plate.
+DEFAULT_HANDLE_BUMP_LENGTH_RANGE_M = (0.001, 0.030)
 # Box plate only: vertical extent (y) and horizontal extent (x) of the escutcheon plate. Start small
 # (~2 cm ≈ no visible plate) up to a MODEST escutcheon -- deliberately capped so we never suddenly
 # show a huge plate the (not-yet-trained) policy has never seen.
@@ -133,9 +138,11 @@ MIN_HANDLE_BOTTOM_CLEARANCE_M = 0.15
 MIN_HANDLE_TOP_CLEARANCE_M = 0.15
 MIN_HANDLE_EDGE_CLEARANCE_M = 0.02
 MIN_RETURN_TIP_CLEARANCE_M = 0.010
-# Minimum clear grasp space kept between the escutcheon plate/boss outer face and the lever bar, so the
-# mount can never be so thick that it reaches the lever (the handle-panel gap is measured from the panel).
-MIN_HANDLE_PLATE_GRASP_GAP_M = 0.02
+# Minimum CLEAR underside gap kept between the escutcheon plate/boss outer face and the lever bar's near
+# surface -- i.e. the finger clearance under the lever when a plate is present. The mount protrusion is
+# clamped so it can never eat into this, so the plate-referenced underside gap never drops below it (the
+# panel-referenced underside gap is the larger DEFAULT_HANDLE_STEM_LENGTH_RANGE_M value).
+MIN_HANDLE_PLATE_GRASP_GAP_M = 0.040
 
 REQUIRED_LINK_NAMES = {"base", "link_0", "link_1", "link_2"}
 REQUIRED_JOINT_NAMES = {"joint_0", "joint_1", "joint_2"}
@@ -262,6 +269,10 @@ def parse_args():
         nargs=2,
         metavar=("MIN_M", "MAX_M"),
         default=DEFAULT_HANDLE_STEM_LENGTH_RANGE_M,
+        help="CLEAR underside gap (m) between the door PANEL face and the lever bar's near surface -- the "
+        "actual finger clearance under the lever (already accounts for the bar half-thickness). With a "
+        "plate/bump present the plate-referenced gap is this minus the mount protrusion (>= "
+        "MIN_HANDLE_PLATE_GRASP_GAP_M).",
     )
     parser.add_argument(
         "--handle-length-range",
@@ -841,7 +852,12 @@ def build_handle_spec(spec, board_min, board_max):
     # Falls back to the old square 2*radius cross-section when the thickness is left at 0.
     lever_thickness = float(spec.get("handle_lever_thickness_m", 0.0))
     lever_half_h = 0.5 * lever_thickness if lever_thickness > 0.0 else radius
-    stem_length = spec["handle_stem_length_m"]
+    # handle_stem_length_m is the CLEAR underside gap the fingers get to the PANEL: the distance from the
+    # panel face to the panel-facing (near) surface of the lever bar. The stem cylinder runs to the lever
+    # CENTER, which is one bar half-thickness further out -- so extend it by lever_half_h. This makes the
+    # sampled range the actual finger clearance under the lever (accounting for the bar radius/thickness).
+    underside_gap_panel = spec["handle_stem_length_m"]
+    stem_length = underside_gap_panel + lever_half_h
     lever_length = spec["handle_length_m"]
     min_tip_clearance = max(MIN_RETURN_TIP_CLEARANCE_M, spec["handle_return_tip_clearance_m"])
     tip_clearance = min(min_tip_clearance, stem_length)
@@ -857,7 +873,11 @@ def build_handle_spec(spec, board_min, board_max):
     has_bump = bool(spec.get("handle_has_bump", False))
     bump_shape = str(spec.get("handle_bump_shape", "box")) if has_bump else "none"
     bump_protrusion = float(spec.get("handle_bump_length_m", 0.0)) if has_bump else 0.0
-    bump_protrusion = min(bump_protrusion, max(0.0, stem_length - MIN_HANDLE_PLATE_GRASP_GAP_M))
+    # Clamp the mount so at least MIN_HANDLE_PLATE_GRASP_GAP_M of CLEAR finger space remains between the
+    # plate outer face and the lever's near surface. Measured from the panel-referenced underside gap, so
+    # the resulting plate-referenced underside gap = underside_gap_panel - bump_protrusion >= the minimum.
+    bump_protrusion = min(bump_protrusion, max(0.0, underside_gap_panel - MIN_HANDLE_PLATE_GRASP_GAP_M))
+    plate_underside_gap = (underside_gap_panel - bump_protrusion) if has_bump else None
     bump_radius = max(float(spec.get("handle_bump_radius_m", 0.0)), radius * 1.5)
     mount_out = outward_sign * bump_protrusion  # signed z of the mount's outer face
 
@@ -915,6 +935,8 @@ def build_handle_spec(spec, board_min, board_max):
         "lever_thickness_m": lever_thickness,
         "lever_half_height_m": lever_half_h,
         "stem_length_m": stem_length,
+        "panel_underside_gap_m": underside_gap_panel,
+        "plate_underside_gap_m": plate_underside_gap,
         "lever_length_m": lever_length,
         "return_length_m": return_length,
         "return_tip_clearance_m": tip_clearance,
@@ -1220,6 +1242,8 @@ def write_variant_meta(meta_path, variant_name, spec, board_min, board_max, hand
             "radius_m": handle_spec["radius_m"],
             "lever_thickness_m": handle_spec.get("lever_thickness_m", 0.0),
             "stem_length_m": handle_spec["stem_length_m"],
+            "panel_underside_gap_m": handle_spec.get("panel_underside_gap_m"),
+            "plate_underside_gap_m": handle_spec.get("plate_underside_gap_m"),
             "lever_length_m": handle_spec["lever_length_m"],
             "return_length_m": handle_spec["return_length_m"],
             "return_tip_clearance_m": handle_spec["return_tip_clearance_m"],
