@@ -314,7 +314,15 @@ def _install_train_info_bridge():
 
 
 def _install_writer_step_counter(agent):
-    """Expose a stable writer-step counter and mirror RL-Games scalars to W&B when enabled."""
+    """Expose a stable writer-step counter and mirror RL-Games scalars to W&B when enabled.
+
+    wandb.log() normally just enqueues to a background thread, but if the network link to
+    wandb.ai stalls it can start blocking the caller. Since this hook only fires on rank 0
+    (wandb.run is only non-None there), a stall here desyncs rank 0 from the other ranks'
+    collectives (they keep no such dependency) and can wedge the whole distributed job for
+    up to the NCCL watchdog timeout. Route the actual wandb.log() calls through a queue and
+    a dedicated daemon thread so a stalled wandb sync can never block the training loop.
+    """
     writer = agent.writer
     if writer is None or getattr(writer, "_dooropening_wandb_step_counter_installed", False):
         return
@@ -335,11 +343,37 @@ def _install_writer_step_counter(agent):
                 pass
         return value
 
+    wandb_log_queue = None
+    if wandb is not None and wandb.run is not None:
+        import queue
+        import threading
+
+        wandb_log_queue = queue.Queue(maxsize=10000)
+
+        def _wandb_log_worker():
+            while True:
+                item = wandb_log_queue.get()
+                if item is None:
+                    break
+                data, step = item
+                try:
+                    wandb.log(data, step=step)
+                except Exception as e:
+                    print(f"[WARNING] wandb.log() failed in background thread: {e}")
+
+        threading.Thread(target=_wandb_log_worker, daemon=True, name="dooropening-wandb-log").start()
+
     def _counting_add_scalar(tag, scalar_value, global_step=None, *args, **kwargs):
         current_wandb_step = agent.dooropening_wandb_step
         result = original_add_scalar(tag, scalar_value, global_step, *args, **kwargs)
-        if wandb is not None and wandb.run is not None:
-            wandb.log({tag: _to_scalar(scalar_value)}, step=current_wandb_step)
+        if wandb_log_queue is not None:
+            try:
+                wandb_log_queue.put_nowait(({tag: _to_scalar(scalar_value)}, current_wandb_step))
+            except queue.Full:
+                print(
+                    f"[WARNING] wandb log queue full; dropping scalar '{tag}' at step "
+                    f"{current_wandb_step} (wandb sync appears stalled)."
+                )
         agent.dooropening_wandb_step = current_wandb_step + 1
         return result
 
