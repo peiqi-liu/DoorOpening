@@ -186,7 +186,7 @@ def state_machine_offline_right_pull_door(
     # (-x, toward the handle/door). Robot faces -x, so right=+y / left=-y / forward=-x.
     # Moved back (0.035 -> 0.05): larger palm<->door x gap compensates for removing the
     # finger<->panel penalty, so the grasp doesn't drive fingers into the panel.
-    grasp_palm_x_offset = 0.035
+    grasp_palm_x_offset = 0.025
     grasp_palm_y_offset = -0.065
     grasp_palm_z_offset = 0.10
     grasp_open_ratio = 0.70
@@ -264,7 +264,7 @@ def state_machine_offline_right_pull_door(
     pull_base_x_offset = 0.55
     pull_base_y_gain = -0.25 / 1.45
 
-    pull_palm_x_offset_closed = 0.05
+    pull_palm_x_offset_closed = 0.025
     pull_palm_y_offset_closed = -0.08
     pull_palm_z_offset = 0.08
 
@@ -754,7 +754,7 @@ def state_machine_offline_left_pull_door(
     # (-x, toward the handle/door). Robot faces -x, so right=+y / left=-y / forward=-x.
     # Moved back (0.025 -> 0.05): larger palm<->door x gap compensates for removing the
     # finger<->panel penalty.
-    grasp_palm_x_offset = 0.05
+    grasp_palm_x_offset = 0.025
     grasp_palm_y_offset = 0.015
     grasp_palm_z_offset = 0.10
     grasp_open_ratio = 0.7
@@ -832,7 +832,7 @@ def state_machine_offline_left_pull_door(
     pull_base_x_offset = 0.45
     pull_base_y_gain = -0.1 / 1.45
 
-    pull_palm_x_offset_closed = 0.05
+    pull_palm_x_offset_closed = 0.025
     pull_palm_y_offset_closed = 0.03
     pull_palm_z_offset = 0.08
 

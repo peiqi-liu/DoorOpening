@@ -221,7 +221,7 @@ def state_machine_offline_push_right_door(
     palm_target_pos = handle_pos.clone()
     # Grasp EE moved BACK (0.035 -> 0.05) to widen the palm<->door x gap (compensates for removing
     # the finger<->panel penalty). Left/right nudge still not applied on push; y = -0.10.
-    palm_target_pos[:, 0] += 0.05
+    palm_target_pos[:, 0] += 0.025
     palm_target_pos[:, 1] += -0.085
     palm_target_pos[:, 2] += 0.1
     palm_target_pose = _make_pose(palm_target_pos, default_palm_rot)
@@ -567,7 +567,7 @@ def state_machine_offline_push_left_door(
     palm_target_pos = handle_pos.clone()
     # Grasp EE moved BACK (0.025 -> 0.05) to widen the palm<->door x gap (compensates for removing
     # the finger<->panel penalty). Left/right nudge still not applied on push; y = 0.03.
-    palm_target_pos[:, 0] += 0.05
+    palm_target_pos[:, 0] += 0.025
     palm_target_pos[:, 1] += 0.025
     palm_target_pos[:, 2] += 0.10
     palm_target_pose = _make_pose(palm_target_pos, default_palm_rot)

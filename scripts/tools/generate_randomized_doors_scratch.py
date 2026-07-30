@@ -49,11 +49,11 @@ DEFAULT_FRAME_CLEARANCE_RANGE_M = (0.003, 0.015)
 
 DEFAULT_HANDLE_HEIGHT_RANGE_M = (0.75, 1.0)
 DEFAULT_HANDLE_EDGE_DISTANCE_RANGE_M = (0.03, 0.15)
-DEFAULT_HANDLE_RADIUS_RANGE_M = (0.006, 0.015)
-# Vertical thickness (height) of the lever grip bar, DECOUPLED from the stem radius. Real lever grips
-# are thin flat bars, so the point cloud of the lever should be thin in height -- if this is left at
-# 0 the lever falls back to a square 2*radius cross-section (the old, too-tall behaviour).
-DEFAULT_HANDLE_LEVER_THICKNESS_RANGE_M = (0.010, 0.016)
+DEFAULT_HANDLE_RADIUS_RANGE_M = (0.007, 0.013)
+# Lever grip bar RADIUS (half cross-section), decoupled from the stem radius -- same convention as
+# handle_radius_m, so a value of 0.010 = a 1 cm-radius (2 cm across) bar, matching real lever handles.
+# The bar's full cross-section is 2x this. Left at 0 -> falls back to the stem radius.
+DEFAULT_HANDLE_LEVER_THICKNESS_RANGE_M = (0.007, 0.013)
 # CLEAR underside gap the fingers get between the door PANEL face and the panel-facing (near) surface
 # of the lever grip bar. This already ACCOUNTS FOR the lever bar half-thickness -- the stem cylinder is
 # extended by that half-thickness so the lever's near surface sits exactly this far above the panel (see
@@ -142,7 +142,7 @@ MIN_RETURN_TIP_CLEARANCE_M = 0.010
 # surface -- i.e. the finger clearance under the lever when a plate is present. The mount protrusion is
 # clamped so it can never eat into this, so the plate-referenced underside gap never drops below it (the
 # panel-referenced underside gap is the larger DEFAULT_HANDLE_STEM_LENGTH_RANGE_M value).
-MIN_HANDLE_PLATE_GRASP_GAP_M = 0.040
+MIN_HANDLE_PLATE_GRASP_GAP_M = 0.050
 
 REQUIRED_LINK_NAMES = {"base", "link_0", "link_1", "link_2"}
 REQUIRED_JOINT_NAMES = {"joint_0", "joint_1", "joint_2"}
@@ -260,8 +260,9 @@ def parse_args():
         nargs=2,
         metavar=("MIN_M", "MAX_M"),
         default=DEFAULT_HANDLE_LEVER_THICKNESS_RANGE_M,
-        help="Vertical thickness (height) of the lever grip bar, decoupled from the stem radius. "
-        "Set both to 0 to fall back to the old square 2*radius lever cross-section.",
+        help="Lever grip bar RADIUS (half cross-section) in meters, decoupled from the stem radius -- "
+        "same convention as --handle-radius-range, so 0.010 = a 1 cm-radius (2 cm across) bar. The bar's "
+        "full cross-section is 2x this. Set both to 0 to fall back to the stem radius.",
     )
     parser.add_argument(
         "--handle-stem-length-range",
@@ -848,10 +849,11 @@ def build_handle_spec(spec, board_min, board_max):
     ]
 
     radius = spec["handle_radius_m"]
-    # Lever grip bar vertical half-thickness, decoupled from the stem radius so the lever reads thin.
-    # Falls back to the old square 2*radius cross-section when the thickness is left at 0.
-    lever_thickness = float(spec.get("handle_lever_thickness_m", 0.0))
-    lever_half_h = 0.5 * lever_thickness if lever_thickness > 0.0 else radius
+    # Lever grip bar RADIUS (half cross-section), decoupled from the stem radius. The sampled
+    # handle_lever_thickness_m value IS the radius (like handle_radius_m), so the bar's full cross-section
+    # is 2x this -- matching real lever handles (~1 cm radius). Falls back to the stem radius when 0.
+    lever_radius = float(spec.get("handle_lever_thickness_m", 0.0))
+    lever_half_h = lever_radius if lever_radius > 0.0 else radius
     # handle_stem_length_m is the CLEAR underside gap the fingers get to the PANEL: the distance from the
     # panel face to the panel-facing (near) surface of the lever bar. The stem cylinder runs to the lever
     # CENTER, which is one bar half-thickness further out -- so extend it by lever_half_h. This makes the
@@ -871,6 +873,11 @@ def build_handle_spec(spec, board_min, board_max):
     # further out. We clamp the mount protrusion so it always stays behind the lever, keeping at least
     # MIN_HANDLE_PLATE_GRASP_GAP_M of clear grasp space between the plate/boss and the lever.
     has_bump = bool(spec.get("handle_has_bump", False))
+    # Skip the bump entirely when the underside gap can't fit a protruding plate while keeping the full
+    # MIN_HANDLE_PLATE_GRASP_GAP_M of clear finger space -- otherwise a flush (0-protrusion) plate would
+    # leave a plate-referenced gap below the minimum. So every bumped door has >= MIN clearance.
+    if has_bump and underside_gap_panel < MIN_HANDLE_PLATE_GRASP_GAP_M:
+        has_bump = False
     bump_shape = str(spec.get("handle_bump_shape", "box")) if has_bump else "none"
     bump_protrusion = float(spec.get("handle_bump_length_m", 0.0)) if has_bump else 0.0
     # Clamp the mount so at least MIN_HANDLE_PLATE_GRASP_GAP_M of CLEAR finger space remains between the
@@ -932,7 +939,7 @@ def build_handle_spec(spec, board_min, board_max):
         "lever_direction_link2": [lever_direction_x, 0.0, 0.0],
         "return_direction_link2": [0.0, 0.0, -outward_sign],
         "radius_m": radius,
-        "lever_thickness_m": lever_thickness,
+        "lever_thickness_m": 2.0 * lever_half_h,  # full cross-section (= 2 x lever radius)
         "lever_half_height_m": lever_half_h,
         "stem_length_m": stem_length,
         "panel_underside_gap_m": underside_gap_panel,

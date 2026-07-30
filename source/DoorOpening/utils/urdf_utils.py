@@ -11,7 +11,7 @@ from scipy.spatial.transform import Rotation as R
 # "plate_top" = the plate's outer face (the surface a depth camera actually sees), so the door reference
 # lines up with the visible bump instead of the panel behind it. "mesh_center" = the raw link_1 mesh
 # bbox center (the old plate-shifted value; kept only for reference).
-LINK1_KEYPOINT_Z_MODE = "plate_top"
+LINK1_KEYPOINT_Z_MODE = "mesh_center"
 
 
 def _load_link1_panel_and_plate(urdf_path):
