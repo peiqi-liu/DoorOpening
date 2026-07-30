@@ -186,6 +186,17 @@ def compute_exact_door_keypoints(urdf_path):
         )
         keypoints["link_1_bbox_base"] = board_bbox_base.tolist()
         keypoints["link_1_bbox_link1"] = [min_b.tolist(), max_b.tolist()]
+        # link_1 (panel) pose in the door-base frame at the CLOSED config, as [pos(3), quat_wxyz(4)].
+        # Lets callers transform base/world door points into the link_1 LOCAL frame -- the frame the
+        # window-hole aug samples in (X=width, Y=height above floor, Z=thickness). Static per asset.
+        link1_quat_xyzw = R.from_matrix(base_to_board_closed[:3, :3]).as_quat()
+        keypoints["link_1_pose_base"] = [
+            *base_to_board_closed[:3, 3].tolist(),
+            float(link1_quat_xyzw[3]),
+            float(link1_quat_xyzw[0]),
+            float(link1_quat_xyzw[1]),
+            float(link1_quat_xyzw[2]),
+        ]
 
     # --- Link 2: Handle / Hinge ---
     link_2 = root.find(".//link[@name='link_2']")

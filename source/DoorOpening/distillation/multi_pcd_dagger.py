@@ -47,6 +47,7 @@ from DoorOpening.utils.camera_utils import (
 )
 from DoorOpening.utils.door_window_dropout import (
     apply_window_dropout_to_door_points,
+    sample_glass_reflection_points,
     sample_random_window_hole_metadata,
 )
 from DoorOpening.utils.extract_pointcloud_from_articulation import (
@@ -2785,6 +2786,13 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             float(v) for v in self.door_hole_aug_cfg.get("side_margin_range_m", [0.0, 0.18])
         )
         self.door_hole_aug_surface_eps_m = float(self.door_hole_aug_cfg.get("surface_eps_m", 0.03))
+        # Per-rollout (default) vs per-step hole sampling. Per-rollout draws the hole once at each
+        # episode reset and keeps the SAME hole for every step of that rollout; per-step re-draws a
+        # fresh hole on every observation (the old behaviour). Per-rollout is more realistic: a real
+        # window/opening does not teleport around the door frame from frame to frame.
+        self.door_hole_aug_resample_each_step = bool(
+            self.door_hole_aug_cfg.get("resample_each_step", False)
+        )
         if not 0.0 <= self.door_hole_aug_env_prob <= 1.0:
             raise ValueError("door_hole_aug.env_prob must be in [0, 1].")
         if self.door_hole_aug_surface_eps_m < 0.0:
@@ -2799,7 +2807,66 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 raise ValueError(f"door_hole_aug.{range_name} must contain exactly two values.")
             if float(value_range[1]) < float(value_range[0]):
                 raise ValueError(f"door_hole_aug.{range_name} must satisfy min <= max.")
+        # Glass-door reflection: on a fraction of the hole envs, add a sparse veil of noise points over
+        # the window opening (a cheap stand-in for a dark glass door mirroring the robot/room instead of
+        # showing through). Sampled per rollout alongside the hole. See sample_glass_reflection_points.
+        reflection_cfg = dict(self.door_hole_aug_cfg.get("glass_reflection", {}))
+        self.door_hole_reflection_enabled = bool(reflection_cfg.get("enabled", False))
+        # prob = P(reflection | hole). With door_hole_aug.env_prob = P(hole), the three per-rollout door
+        # appearances are: solid = 1-env_prob; pure hole ("bright glass") = env_prob*(1-prob); reflective
+        # glass ("dark") = env_prob*prob. prob < 1 guarantees pure holes still occur.
+        self.door_hole_reflection_prob = float(reflection_cfg.get("prob", 0.5))
+        self.door_hole_reflection_num_points = int(reflection_cfg.get("num_points", 400))
+        # A dark glass door mirrors the robot: a robot-SIZED noise cluster (compact box, not a window
+        # fill) centred behind the window opening. blob_size_m = (width, height, depth) full extents.
+        self.door_hole_reflection_blob_size_m = tuple(
+            float(v) for v in reflection_cfg.get("blob_size_m", [0.5, 1.2, 0.3])
+        )
+        # Each blob dimension is independently scaled by a fraction in this range, so the reflection
+        # ranges from a small/thin sliver (just an arm) up to the full robot size.
+        self.door_hole_reflection_size_fraction_range = tuple(
+            float(v) for v in reflection_cfg.get("size_fraction_range", [0.3, 1.0])
+        )
+        # Number of Gaussian sub-lobes making up the (irregular, non-boxy) reflection cluster.
+        self.door_hole_reflection_num_lobes = int(reflection_cfg.get("num_lobes", 3))
+        # The blob centre is pushed this far (m) behind the panel back face (away from the camera).
+        self.door_hole_reflection_behind_range_m = tuple(
+            float(v) for v in reflection_cfg.get("behind_range_m", [0.1, 1.0])
+        )
+        # Per-env fraction of the reflection budget actually kept: lower = fainter (bright), higher =
+        # denser (dark). [1.0, 1.0] always keeps the full budget.
+        self.door_hole_reflection_density_range = tuple(
+            float(v) for v in reflection_cfg.get("density_range", [1.0, 1.0])
+        )
+        if not 0.0 <= self.door_hole_reflection_prob <= 1.0:
+            raise ValueError("door_hole_aug.glass_reflection.prob must be in [0, 1].")
+        if self.door_hole_reflection_num_points < 0:
+            raise ValueError("door_hole_aug.glass_reflection.num_points must be non-negative.")
+        if len(self.door_hole_reflection_blob_size_m) != 3:
+            raise ValueError("door_hole_aug.glass_reflection.blob_size_m must contain exactly three values.")
+        if any(v < 0.0 for v in self.door_hole_reflection_blob_size_m):
+            raise ValueError("door_hole_aug.glass_reflection.blob_size_m must be non-negative.")
+        if len(self.door_hole_reflection_size_fraction_range) != 2:
+            raise ValueError("door_hole_aug.glass_reflection.size_fraction_range must contain exactly two values.")
+        if not (0.0 <= self.door_hole_reflection_size_fraction_range[0] <= self.door_hole_reflection_size_fraction_range[1]):
+            raise ValueError("door_hole_aug.glass_reflection.size_fraction_range must satisfy 0 <= min <= max.")
+        if self.door_hole_reflection_num_lobes < 1:
+            raise ValueError("door_hole_aug.glass_reflection.num_lobes must be >= 1.")
+        if len(self.door_hole_reflection_behind_range_m) != 2:
+            raise ValueError("door_hole_aug.glass_reflection.behind_range_m must contain exactly two values.")
+        if not (0.0 <= self.door_hole_reflection_behind_range_m[0] <= self.door_hole_reflection_behind_range_m[1]):
+            raise ValueError("door_hole_aug.glass_reflection.behind_range_m must satisfy 0 <= min <= max.")
+        if len(self.door_hole_reflection_density_range) != 2:
+            raise ValueError("door_hole_aug.glass_reflection.density_range must contain exactly two values.")
+        if not (
+            0.0 <= self.door_hole_reflection_density_range[0] <= self.door_hole_reflection_density_range[1] <= 1.0
+        ):
+            raise ValueError("door_hole_aug.glass_reflection.density_range must satisfy 0 <= min <= max <= 1.")
         self.latest_door_hole_aug_stats = {}
+        # Persistent per-env hole metadata. Sampled once per rollout at reset (see
+        # _resample_door_hole_aug) and reused for every step of that rollout unless
+        # door_hole_aug_resample_each_step is set.
+        self._door_hole_aug_metadata = None
         if self.door_hole_aug_enabled:
             print(
                 "[INFO] door_hole_aug enabled: "
@@ -2808,7 +2875,9 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 f"height_range_m={self.door_hole_aug_height_range_m}, "
                 f"center_height_range_m={self.door_hole_aug_center_height_range_m}, "
                 f"side_margin_range_m={self.door_hole_aug_side_margin_range_m}, "
-                f"surface_eps_m={self.door_hole_aug_surface_eps_m}"
+                f"surface_eps_m={self.door_hole_aug_surface_eps_m}, "
+                f"resample_each_step={self.door_hole_aug_resample_each_step}, "
+                f"glass_reflection={'on(prob=' + str(self.door_hole_reflection_prob) + ', num_points=' + str(self.door_hole_reflection_num_points) + ')' if self.door_hole_reflection_enabled else 'off'}"
             )
 
         self.robot_camera_body_idx = None
@@ -3100,7 +3169,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
     def _sample_door_hole_aug_metadata(self, link1_pose_world):
         if not self._door_hole_aug_active():
             return None
-        metadata = sample_random_window_hole_metadata(
+        return sample_random_window_hole_metadata(
             link1_pose_world=link1_pose_world,
             board_bbox_link1=self.env_board_bboxes_link1,
             window_prob=self.door_hole_aug_env_prob,
@@ -3109,14 +3178,104 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             center_height_range=self.door_hole_aug_center_height_range_m,
             side_margin_range=self.door_hole_aug_side_margin_range_m,
         )
-        enabled = metadata["enabled"].to(dtype=torch.float32)
-        self.latest_door_hole_aug_stats = {
-            "door_hole_aug/env_fraction": float(enabled.mean().detach().cpu()),
-            "door_hole_aug/no_hole_fraction": float((1.0 - enabled).mean().detach().cpu()),
-            "door_hole_aug/hole_width_mean_m": float(metadata["hole_width"].mean().detach().cpu()),
-            "door_hole_aug/hole_height_mean_m": float(metadata["hole_height"].mean().detach().cpu()),
-        }
+
+    def _update_door_hole_aug_stats(self):
+        metadata = self._door_hole_aug_metadata
+        if metadata is None:
+            self.latest_door_hole_aug_stats = {}
+            return
+        enabled_bool = metadata["enabled"].to(dtype=torch.bool)
+        enabled = enabled_bool.to(dtype=torch.float32)
+        # Preserve any per-step counters (e.g. dropped_points_mean) already recorded this step.
+        self.latest_door_hole_aug_stats.update(
+            {
+                "door_hole_aug/env_fraction": float(enabled.mean().detach().cpu()),
+                "door_hole_aug/no_hole_fraction": float((1.0 - enabled).mean().detach().cpu()),
+                "door_hole_aug/hole_width_mean_m": float(metadata["hole_width"].mean().detach().cpu()),
+                "door_hole_aug/hole_height_mean_m": float(metadata["hole_height"].mean().detach().cpu()),
+            }
+        )
+        # Mutually-exclusive per-rollout case fractions (sum to 1 with no_hole): so you can read the
+        # bright pure-hole vs dark reflective-glass split directly off the training logs.
+        if "reflection_enabled" in metadata:
+            reflect_bool = metadata["reflection_enabled"].to(dtype=torch.bool)
+            pure_hole = (enabled_bool & ~reflect_bool).to(dtype=torch.float32)
+            self.latest_door_hole_aug_stats["door_hole_aug/reflection_fraction"] = float(
+                reflect_bool.to(dtype=torch.float32).mean().detach().cpu()
+            )
+            self.latest_door_hole_aug_stats["door_hole_aug/pure_hole_fraction"] = float(
+                pure_hole.mean().detach().cpu()
+            )
+
+    def _door_panel_front_sign(self):
+        # Per-env +1/-1: which link_1 thickness (z) direction points toward the camera (robot). The
+        # reflection veil is placed on the opposite (behind-the-glass) side. Robot stays in front of the
+        # door through the rollout, so the reset-time sign is stable.
+        link1_pose_world = self._get_link1_pose_world()
+        link1_pos = link1_pose_world[:, :3]
+        link1_quat = link1_pose_world[:, 3:7]
+        z_axis_local = torch.tensor([0.0, 0.0, 1.0], device=self.device, dtype=link1_quat.dtype)
+        z_axis_world = quat_apply(link1_quat, z_axis_local.expand(self.num_envs, 3))
+        cam_pos = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
+        dot = ((cam_pos - link1_pos) * z_axis_world).sum(dim=-1)
+        return torch.where(dot >= 0, torch.ones_like(dot), -torch.ones_like(dot))
+
+    def _add_glass_reflection_to_metadata(self, metadata):
+        # Attach a sparse per-env "reflection" cloud (link_1 local frame) to the hole metadata. No-op
+        # (leaves the keys absent) when reflection is disabled or has no budget.
+        if not (self.door_hole_reflection_enabled and self.door_hole_reflection_num_points > 0):
+            return metadata
+        metadata.update(
+            sample_glass_reflection_points(
+                hole_metadata=metadata,
+                board_bbox_link1=self.env_board_bboxes_link1,
+                num_points=self.door_hole_reflection_num_points,
+                reflect_prob=self.door_hole_reflection_prob,
+                blob_size=self.door_hole_reflection_blob_size_m,
+                size_fraction_range=self.door_hole_reflection_size_fraction_range,
+                num_lobes=self.door_hole_reflection_num_lobes,
+                behind_range=self.door_hole_reflection_behind_range_m,
+                density_range=self.door_hole_reflection_density_range,
+                front_sign=self._door_panel_front_sign(),
+            )
+        )
         return metadata
+
+    def _resample_door_hole_aug(self, env_ids=None):
+        # Draw fresh hole metadata for the given envs (all envs when env_ids is None) and store it in
+        # the persistent buffer. Called once per rollout at reset so the hole stays fixed across the
+        # episode; the whole batch is re-sampled every step only when resample_each_step is set.
+        if not self._door_hole_aug_active():
+            self._door_hole_aug_metadata = None
+            self.latest_door_hole_aug_stats = {}
+            return
+        link1_pose_world = self._get_link1_pose_world()
+        fresh = self._sample_door_hole_aug_metadata(link1_pose_world)
+        if fresh is None:
+            self._door_hole_aug_metadata = None
+            self.latest_door_hole_aug_stats = {}
+            return
+        fresh = self._add_glass_reflection_to_metadata(fresh)
+        if self._door_hole_aug_metadata is None or env_ids is None:
+            self._door_hole_aug_metadata = fresh
+        else:
+            for key, value in fresh.items():
+                self._door_hole_aug_metadata[key][env_ids] = value[env_ids]
+        self._update_door_hole_aug_stats()
+
+    def _sample_door_reflection_pointcloud_world(self, hole_metadata):
+        # Transform the cached link_1-frame reflection veil into world coords using each door's current
+        # link_1 pose. NaN entries (non-reflecting envs) survive as NaN and are ignored by the renderer.
+        if hole_metadata is None or "reflection_points_link1" not in hole_metadata:
+            return torch.zeros((self.num_envs, 0, 3), dtype=torch.float32, device=self.device)
+        points_link1 = hole_metadata["reflection_points_link1"]
+        if points_link1.shape[1] == 0:
+            return torch.zeros((self.num_envs, 0, 3), dtype=torch.float32, device=self.device)
+        link1_pose_world = self._get_link1_pose_world()
+        link1_pos = link1_pose_world[:, :3]
+        link1_quat = link1_pose_world[:, 3:7]
+        quat = link1_quat.unsqueeze(1).expand(-1, points_link1.shape[1], -1)
+        return quat_apply(quat, points_link1) + link1_pos.unsqueeze(1)
 
     def _apply_door_hole_aug_to_world(self, pointcloud_world, link1_pose_world, board_bbox_link1, hole_metadata):
         if pointcloud_world is None or hole_metadata is None:
@@ -3224,6 +3383,11 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         scene_parts = [door_pcd_world]
         if wall_pcd_world.shape[1] > 0:
             scene_parts.append(wall_pcd_world)
+        # Glass-door reflection veil: a few sparse points on the window opening, added to the static
+        # scene (so it renders + occludes like any door-plane surface). Cheap; NaN where not reflecting.
+        reflection_pcd_world = self._sample_door_reflection_pointcloud_world(hole_metadata)
+        if reflection_pcd_world.shape[1] > 0:
+            scene_parts.append(reflection_pcd_world)
         door_walls_pcd_world = torch.cat(scene_parts, dim=1)
         return door_walls_pcd_world, robot_pcd_world
 
@@ -3316,7 +3480,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
         door_walls_pcd_world, robot_pcd_world = self._sample_scene_pointcloud_world_cached(
-            hole_metadata=getattr(self, "_current_door_hole_aug_metadata", None)
+            hole_metadata=self._door_hole_aug_metadata
         )
         if self.viser_raw_enabled:
             # Keep only the selected family envs on CPU so Viser debug does not retain an
@@ -3333,7 +3497,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
         door_walls_pcd_world, robot_pcd_world = self._sample_scene_pointcloud_world_cached(
-            hole_metadata=getattr(self, "_current_door_hole_aug_metadata", None)
+            hole_metadata=self._door_hole_aug_metadata
         )
         # Lidar renders the full scene (robot included, for self-occlusion); it does not blur, so the
         # crisp-robot split only matters for the depth camera. Occluder set stays door+walls (no robot).
@@ -3349,7 +3513,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
         door_walls_pcd_world, robot_pcd_world = self._sample_scene_pointcloud_world_cached(
-            hole_metadata=getattr(self, "_current_door_hole_aug_metadata", None)
+            hole_metadata=self._door_hole_aug_metadata
         )
         scene_full_pcd_world = torch.cat([door_walls_pcd_world, robot_pcd_world], dim=1)
         if self.viser_raw_enabled:
@@ -3370,32 +3534,32 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
     def _sample_scene_obs_pointcloud_base(self):
         self._viser_cached_ground_truth_pcd_world = None
         self._viser_cached_sensor_obs_pcd_base = OrderedDict()
-        self.latest_door_hole_aug_stats = {}
-        link1_pose_world = self._get_link1_pose_world()
-        self._current_door_hole_aug_metadata = self._sample_door_hole_aug_metadata(link1_pose_world)
-        try:
-            if self.pointcloud_source in {"sampler", "depth"}:
-                depth_pcd_base = self._filter_robot_points_base(self._sample_scene_obs_pointcloud_base_depth())
-                self._viser_cached_sensor_obs_pcd_base["robot_depth_cam_obs"] = depth_pcd_base
-                scene_obs_pcd_sources = [depth_pcd_base]
-            elif self.pointcloud_source == "lidar":
-                lidar_pcd_base = self._filter_robot_points_base(self._sample_scene_obs_pointcloud_base_lidar())
-                self._viser_cached_sensor_obs_pcd_base["robot_lidar_obs"] = lidar_pcd_base
-                scene_obs_pcd_sources = [lidar_pcd_base]
-            else:
-                depth_pcd_base, lidar_pcd_base = self._sample_scene_obs_pointcloud_base_both()
-                depth_pcd_base = self._filter_robot_points_base(depth_pcd_base)
-                lidar_pcd_base = self._filter_robot_points_base(lidar_pcd_base)
-                self._viser_cached_sensor_obs_pcd_base["robot_lidar_obs"] = lidar_pcd_base
-                self._viser_cached_sensor_obs_pcd_base["robot_depth_cam_obs"] = depth_pcd_base
-                # Keep the realsense (dense, narrow FoV) and lidar (sparse, wide FoV) clouds
-                # SEPARATE. Concatenating then sampling a fixed budget biases toward the denser
-                # realsense and can drop the sparse-but-critical lidar handle points. Each local
-                # crop instead draws an equal share from each source (see _build_local_pcd).
-                scene_obs_pcd_sources = [depth_pcd_base, lidar_pcd_base]
-            return scene_obs_pcd_sources
-        finally:
-            self._current_door_hole_aug_metadata = None
+        # Per-rollout hole: reuse the metadata drawn at the last reset (see _resample_door_hole_aug).
+        # Only when resample_each_step is set do we redraw a fresh hole for the whole batch every step.
+        if self.door_hole_aug_resample_each_step:
+            self._resample_door_hole_aug()
+        else:
+            self._update_door_hole_aug_stats()
+        if self.pointcloud_source in {"sampler", "depth"}:
+            depth_pcd_base = self._filter_robot_points_base(self._sample_scene_obs_pointcloud_base_depth())
+            self._viser_cached_sensor_obs_pcd_base["robot_depth_cam_obs"] = depth_pcd_base
+            scene_obs_pcd_sources = [depth_pcd_base]
+        elif self.pointcloud_source == "lidar":
+            lidar_pcd_base = self._filter_robot_points_base(self._sample_scene_obs_pointcloud_base_lidar())
+            self._viser_cached_sensor_obs_pcd_base["robot_lidar_obs"] = lidar_pcd_base
+            scene_obs_pcd_sources = [lidar_pcd_base]
+        else:
+            depth_pcd_base, lidar_pcd_base = self._sample_scene_obs_pointcloud_base_both()
+            depth_pcd_base = self._filter_robot_points_base(depth_pcd_base)
+            lidar_pcd_base = self._filter_robot_points_base(lidar_pcd_base)
+            self._viser_cached_sensor_obs_pcd_base["robot_lidar_obs"] = lidar_pcd_base
+            self._viser_cached_sensor_obs_pcd_base["robot_depth_cam_obs"] = depth_pcd_base
+            # Keep the realsense (dense, narrow FoV) and lidar (sparse, wide FoV) clouds
+            # SEPARATE. Concatenating then sampling a fixed budget biases toward the denser
+            # realsense and can drop the sparse-but-critical lidar handle points. Each local
+            # crop instead draws an equal share from each source (see _build_local_pcd).
+            scene_obs_pcd_sources = [depth_pcd_base, lidar_pcd_base]
+        return scene_obs_pcd_sources
 
     @staticmethod
     def _split_point_budget(total, num_parts):
@@ -3670,7 +3834,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             # scene cloud in Viser, but compose it from cached link clouds ONLY on capture
             # iterations -- no per-step depth/lidar rendering.
             door_walls_pcd_world, robot_pcd_world = self._sample_scene_pointcloud_world_cached(
-                hole_metadata=getattr(self, "_current_door_hole_aug_metadata", None)
+                hole_metadata=self._door_hole_aug_metadata
             )
             gt_scene_pcd_world = torch.cat([door_walls_pcd_world, robot_pcd_world], dim=1)
             self._viser_pending_debug_frame = {
@@ -3843,6 +4007,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             self.latest_aux_target_vector = None
             self._resample_wall_distractors()
             self._resample_door_frame_visibility()
+            self._resample_door_hole_aug()
             self.temporal_current_time_s = self._iteration_to_time_s(start_iteration)
             self._resample_aux_handle_gt_bias()
             self._seed_temporal_histories()
@@ -3964,6 +4129,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                     self.current_lengths[done_mask] = 0.0
                     self._resample_wall_distractors(done_mask)
                     self._resample_door_frame_visibility(done_mask)
+                    self._resample_door_hole_aug(done_mask)
                     # Redraw the systematic GT bias BEFORE seeding, since the seed reads the biased GT.
                     self._resample_aux_handle_gt_bias(done_mask)
                     self._seed_temporal_histories(done_mask)

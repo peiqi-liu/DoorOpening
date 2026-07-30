@@ -50,6 +50,11 @@ from DoorOpening.utils.camera_utils import (
     drop_depth_edges,
     rasterize_depth_zbuffer_from_pose,
 )
+from DoorOpening.utils.door_window_dropout import (
+    apply_window_dropout_to_door_points,
+    sample_glass_reflection_points,
+    sample_random_window_hole_metadata,
+)
 from DoorOpening.utils.extract_pointcloud_from_articulation import FrankaLeapSampler
 from DoorOpening.utils.urdf_utils import compute_exact_door_keypoints
 from DoorOpening.utils.wall_distractors import (
@@ -131,8 +136,17 @@ def load_door_asset(urdf_path, num_points, device):
     full_bbox = kp.get("door_full_bbox_base", kp["link_1_bbox_base"])
     bbox = torch.as_tensor(full_bbox, dtype=torch.float32, device=device).unsqueeze(0)  # (1, 2, 3)
     panel_bbox = torch.as_tensor(kp["link_1_bbox_base"], dtype=torch.float32, device=device).unsqueeze(0)  # (1, 2, 3)
+    # Panel bbox + link_1 pose in the link_1 LOCAL frame -- what the window-hole aug samples in
+    # (multi_pcd_dagger.env_board_bboxes_link1 / _get_link1_pose_world). Falls back to the base bbox
+    # for doors with no meta (link_1 frame ~ base frame for those).
+    panel_bbox_link1 = torch.as_tensor(
+        kp.get("link_1_bbox_link1", kp["link_1_bbox_base"]), dtype=torch.float32, device=device
+    ).unsqueeze(0)  # (1, 2, 3)
+    link1_pose_base = torch.as_tensor(
+        kp.get("link_1_pose_base", [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]), dtype=torch.float32, device=device
+    )  # (7,) [pos, quat_wxyz]
     handle_center = np.asarray(kp.get("link_2_center_base", [0.0, 0.0, 0.0]), dtype=np.float64)  # base frame
-    return bbox, panel_bbox, panel_handle_pts, frame_pts, handle_center
+    return bbox, panel_bbox, panel_bbox_link1, link1_pose_base, panel_handle_pts, frame_pts, handle_center
 
 
 def load_robot_asset(num_points, device):
@@ -317,6 +331,9 @@ def parse_args():
                    help="Yaw (deg about world z) applied to the door. Default AUTO: pick -90 or +90 so the "
                    "HANDLE faces the robot/camera (world -Y), exactly like render_wall_configs_viser. Pass a "
                    "value to override.")
+    p.add_argument("--glass-reflection", action="store_true",
+                   help="Force the glass-door reflection veil ON regardless of the cfg (needs the window "
+                   "hole; adds a sparse noise cloud over the opening). Uses door_hole_aug.glass_reflection knobs.")
     p.add_argument("--board-num-points", type=int, default=None, help="GT door surface points (default: scene_door_num_points).")
     p.add_argument("--gt-scale", type=float, default=1.0,
                    help="Scale the GT input density: multiplies the door, wall AND robot point counts. "
@@ -368,6 +385,7 @@ def main():
     cfg = yaml.safe_load(args.student_cfg.read_text()) or {}
     wall_cfg = dict(cfg.get("dagger", {}).get("wall_distractors", {}))
     frame_cfg = dict(cfg.get("dagger", {}).get("door_frame_aug", {}))
+    hole_cfg = dict(cfg.get("dagger", {}).get("door_hole_aug", {}))
     depth_cfg = dict(cfg.get("dagger", {}).get("depth_cam_render", {}))
     # Policy-input crop knobs, read from the SAME student cfg multi_pcd_dagger uses (_build_local_pcd ->
     # crop_local_pcd base cylindrical crop). Height bounds [0.55, 1.5] are crop_local_pcd's own defaults.
@@ -393,7 +411,9 @@ def main():
     edge_drop_m = args.edge_drop_m if args.edge_drop_m is not None else float(depth_cfg.get("edge_drop_m", 0.0))
 
     # --- GT door geometry (door-base frame at world origin) ---
-    board_bbox, panel_bbox, board_gt, frame_gt, handle_center = load_door_asset(args.door, board_num_points, device)
+    board_bbox, panel_bbox, panel_bbox_link1, link1_pose_base, board_gt, frame_gt, handle_center = load_door_asset(
+        args.door, board_num_points, device
+    )
 
     # Orient the door so the HANDLE faces the robot/camera (world -Y). Default AUTO-picks -90 or +90
     # exactly like render_wall_configs_viser (mine used to hardcode -90, which faced the handle AWAY and
@@ -416,10 +436,105 @@ def main():
     board_gt_world = door_to_world(board_gt)
     frame_gt_world = door_to_world(frame_gt)
 
+    # link_1 (panel) pose in WORLD = door-yaw rotation (origin, no translation) composed with the
+    # static link_1-in-base pose. The window-hole aug transforms world door points into this frame.
+    from scipy.spatial.transform import Rotation as _R
+
+    link1_pos_base_np = link1_pose_base[:3].cpu().numpy()
+    link1_quat_base_wxyz = link1_pose_base[3:].cpu().numpy()
+    R_base_link1 = _R.from_quat(
+        [link1_quat_base_wxyz[1], link1_quat_base_wxyz[2], link1_quat_base_wxyz[3], link1_quat_base_wxyz[0]]
+    )
+    R_door_np = R_door.cpu().numpy()
+    R_world_link1_np = R_door_np @ R_base_link1.as_matrix()
+    link1_pos_world_np = R_door_np @ link1_pos_base_np
+    link1_quat_world_xyzw = _R.from_matrix(R_world_link1_np).as_quat()
+    link1_pose_world = torch.tensor(
+        [
+            *link1_pos_world_np.tolist(),
+            float(link1_quat_world_xyzw[3]),
+            float(link1_quat_world_xyzw[0]),
+            float(link1_quat_world_xyzw[1]),
+            float(link1_quat_world_xyzw[2]),
+        ],
+        dtype=torch.float32,
+        device=device,
+    )
+    # link_1 LOCAL -> world transform for the reflection veil (points_link1 @ R.T + pos).
+    R_world_link1_t = torch.tensor(R_world_link1_np, dtype=torch.float32, device=device)
+    link1_pos_world_t = torch.tensor(link1_pos_world_np, dtype=torch.float32, device=device)
+
     # --- Door-frame (link_0) aug: same knobs multi_pcd_dagger reads. When on, the frame is included
     # in a per-config fraction (env_prob) of frames, exactly like the per-env episode coin flip. ---
     frame_aug_enabled = bool(frame_cfg.get("enabled", False)) and frame_gt_world.shape[1] > 0
     frame_env_prob = float(frame_cfg.get("env_prob", 0.5))
+
+    # --- Window-hole aug: same knobs multi_pcd_dagger reads. One hole is drawn PER CONFIG (= per
+    # rollout) and applied to that config's panel+handle cloud, matching the per-rollout training
+    # behaviour (the hole no longer jitters step-to-step). ---
+    hole_aug_enabled = bool(hole_cfg.get("enabled", False))
+    hole_env_prob = float(hole_cfg.get("env_prob", 0.35))
+    hole_width_range = tuple(float(v) for v in hole_cfg.get("width_range_m", [0.12, 1.60]))
+    hole_height_range = tuple(float(v) for v in hole_cfg.get("height_range_m", [0.18, 2.20]))
+    hole_center_height_range = tuple(float(v) for v in hole_cfg.get("center_height_range_m", [0.10, 1.90]))
+    hole_side_margin_range = tuple(float(v) for v in hole_cfg.get("side_margin_range_m", [0.0, 0.18]))
+    hole_surface_eps = float(hole_cfg.get("surface_eps_m", 0.03))
+
+    # --- Glass-door reflection: on a fraction of the hole configs, add a sparse veil of noise points
+    # over the window opening (cheap stand-in for a dark glass door mirroring the robot/room). ---
+    reflection_cfg = dict(hole_cfg.get("glass_reflection", {}))
+    reflection_enabled = hole_aug_enabled and (args.glass_reflection or bool(reflection_cfg.get("enabled", False)))
+    reflection_prob = float(reflection_cfg.get("prob", 0.5))
+    reflection_num_points = int(reflection_cfg.get("num_points", 400))
+    reflection_blob_size = tuple(float(v) for v in reflection_cfg.get("blob_size_m", [0.5, 1.2, 0.3]))
+    reflection_size_fraction = tuple(float(v) for v in reflection_cfg.get("size_fraction_range", [0.3, 1.0]))
+    reflection_num_lobes = int(reflection_cfg.get("num_lobes", 3))
+    reflection_behind_range = tuple(float(v) for v in reflection_cfg.get("behind_range_m", [0.1, 1.0]))
+    reflection_density_range = tuple(float(v) for v in reflection_cfg.get("density_range", [1.0, 1.0]))
+    # Which link_1 thickness (z) direction faces the camera, so the veil goes BEHIND the glass. Filled in
+    # once camera_pose is known (below); read late by make_holed_door at render time.
+    reflection_front_sign = None
+
+    def make_holed_door(panel_handle_world):
+        """One window hole per config: drop panel+handle points inside it (NaN, fixed N) and, when glass
+        reflection is on, also return a sparse world veil of reflection points over the SAME window.
+        Returns (holed (1, N, 3), reflection_world (1, P, 3) or None)."""
+        if not hole_aug_enabled:
+            return panel_handle_world, None
+        metadata = sample_random_window_hole_metadata(
+            link1_pose_world=link1_pose_world,
+            board_bbox_link1=panel_bbox_link1[0],
+            window_prob=hole_env_prob,
+            width_range=hole_width_range,
+            height_range=hole_height_range,
+            center_height_range=hole_center_height_range,
+            side_margin_range=hole_side_margin_range,
+        )
+        dropped, _ = apply_window_dropout_to_door_points(
+            points_world=panel_handle_world[0],
+            link1_pose_world=link1_pose_world,
+            board_bbox_link1=panel_bbox_link1[0],
+            hole_metadata=metadata,
+            surface_eps=hole_surface_eps,
+        )
+        holed = dropped.unsqueeze(0)
+        reflection_world = None
+        if reflection_enabled and reflection_num_points > 0:
+            refl = sample_glass_reflection_points(
+                hole_metadata=metadata,
+                board_bbox_link1=panel_bbox_link1[0],
+                num_points=reflection_num_points,
+                reflect_prob=reflection_prob,
+                blob_size=reflection_blob_size,
+                size_fraction_range=reflection_size_fraction,
+                num_lobes=reflection_num_lobes,
+                behind_range=reflection_behind_range,
+                density_range=reflection_density_range,
+                front_sign=reflection_front_sign,
+            )
+            pts_link1 = refl["reflection_points_link1"]  # (P, 3) link_1 frame, NaN when not reflecting
+            reflection_world = (pts_link1 @ R_world_link1_t.T + link1_pos_world_t).unsqueeze(0)  # (1, P, 3)
+        return holed, reflection_world
 
     # --- Wall distractor sampler (same code the training pipeline uses) ---
     wall_params = WallDistractorParams.from_cfg(wall_cfg, scene_door_num_points)
@@ -475,11 +590,20 @@ def main():
 
     cam_spec = build_camera_spec(args.cam_width_px, args.cam_height_px, args.near_m, args.far_m, device)
 
+    # Now that the camera pose is known, resolve which panel face points at it, so the reflection veil is
+    # placed BEHIND the glass (link_1 z column of R_world_link1 is the panel normal in world).
+    if reflection_enabled:
+        panel_normal_world = R_world_link1_np[:, 2]
+        cam_to_panel = camera_pose[0, :3].cpu().numpy() - link1_pos_world_np
+        reflection_front_sign = float(np.sign(float(np.dot(cam_to_panel, panel_normal_world))) or 1.0)
+
     walls_on = (not args.no_walls) and wall_params.enabled and wall_params.num_points > 0
     print(f"[INFO] device        : {device}")
     print(f"[INFO] door           : {args.door.parent.name}  ({board_gt_world.shape[1]} pts, yaw {round(math.degrees(door_yaw))}deg -> handle faces robot)")
     print(f"[INFO] walls          : {'on (' + str(wall_params.num_points) + ' pts)' if walls_on else 'off'}")
     print(f"[INFO] door frame     : {'on (link_0, env_prob=' + str(frame_env_prob) + ', ' + str(frame_gt_world.shape[1]) + ' pts)' if frame_aug_enabled else 'off (panel+handle only, matches training default)'}")
+    print(f"[INFO] window hole    : {'on (env_prob=' + str(hole_env_prob) + ', per-config w' + str(hole_width_range) + ' h' + str(hole_height_range) + ')' if hole_aug_enabled else 'off'}")
+    print(f"[INFO] glass reflect  : {'on (prob=' + str(reflection_prob) + ', ' + str(reflection_num_points) + ' pts, blob' + str(reflection_blob_size) + ' m x frac' + str(reflection_size_fraction) + ', ' + str(reflection_num_lobes) + ' lobes, behind' + str(reflection_behind_range) + ' m, front_sign=' + str(reflection_front_sign) + ')' if reflection_enabled else 'off'}")
     print(f"[INFO] robot          : {'on (' + str(robot_world.shape[1]) + ' pts, in ray cast)' if robot_world is not None else 'off'}")
     print(f"[INFO] camera         : {args.cam_width_px}x{args.cam_height_px}px RealSense, "
           f"range [{args.near_m}, {args.far_m}] m, {cam_desc}")
@@ -520,14 +644,21 @@ def main():
         # its thin links aren't dilated away (matches training).
         scene_clouds, occluders, gt_clouds = [], [], []
         for _ in idxs:
-            occ_parts = [board_gt_world]
+            # One window hole per config (per rollout), drawn once and baked into the panel cloud (NaN);
+            # its glass reflection veil (if on) is a sparse world cloud over the same window. The veil
+            # joins the scene AND the occluder set (matching multi_pcd_dagger: a dark glass door reflects
+            # instead of showing through, so the reflection surface occludes the room behind it).
+            holed_board, reflection_world = make_holed_door(board_gt_world)
+            occ_parts = [holed_board]
+            if reflection_world is not None:
+                occ_parts.append(reflection_world)
             if frame_aug_enabled and torch.rand((), device=device).item() < frame_env_prob:
                 occ_parts.append(frame_gt_world)
             if walls_on:
                 occ_parts.append(door_to_world(sample_walls()))
             occ = torch.cat(occ_parts, dim=1) if len(occ_parts) > 1 else occ_parts[0]
             occluders.append(occ)
-            scene_clouds.append(occ)  # rendered (blurred) cloud = door + walls, NO robot
+            scene_clouds.append(occ)  # rendered (blurred) cloud = door + reflection + walls, NO robot
             gt_clouds.append(torch.cat([occ, robot_world], dim=1) if robot_world is not None else occ)
         scene_clouds = torch.cat(scene_clouds, dim=0)  # (Bc, No, 3)
         occluders = torch.cat(occluders, dim=0)  # (Bc, No, 3)

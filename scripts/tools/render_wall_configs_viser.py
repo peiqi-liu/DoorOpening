@@ -42,6 +42,10 @@ import yaml
 
 from isaaclab.utils.math import quat_apply
 from DoorOpening.utils.camera_utils import crop_local_pcd, simulate_depth_cam_render_from_pose
+from DoorOpening.utils.door_window_dropout import (
+    apply_window_dropout_to_door_points,
+    sample_random_window_hole_metadata,
+)
 from DoorOpening.utils.pose_utils import world_to_local
 from DoorOpening.utils.urdf_utils import compute_exact_door_keypoints
 from DoorOpening.utils.wall_distractors import (
@@ -145,8 +149,16 @@ def load_door_asset(urdf_path, num_points, device):
     kp = compute_exact_door_keypoints(str(urdf_path))
     full_bbox = kp.get("door_full_bbox_base", kp["link_1_bbox_base"])
     bbox = torch.as_tensor(full_bbox, dtype=torch.float32, device=device).unsqueeze(0)  # (1, 2, 3)
+    # Panel (link_1) bbox + pose in the link_1 LOCAL frame -- what the window-hole aug samples in
+    # (multi_pcd_dagger.env_board_bboxes_link1 / _get_link1_pose_world).
+    panel_bbox_link1 = torch.as_tensor(
+        kp.get("link_1_bbox_link1", kp["link_1_bbox_base"]), dtype=torch.float32, device=device
+    ).unsqueeze(0)  # (1, 2, 3)
+    link1_pose_base = torch.as_tensor(
+        kp.get("link_1_pose_base", [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]), dtype=torch.float32, device=device
+    )  # (7,) [pos, quat_wxyz]
     handle_center = np.asarray(kp.get("link_2_center_base", [0.0, 0.0, 0.0]), dtype=np.float64)  # base frame
-    return bbox, door_pts, handle_center
+    return bbox, panel_bbox_link1, link1_pose_base, door_pts, handle_center
 
 
 def load_robot_asset(num_points, device):
@@ -431,13 +443,17 @@ def main():
     # frame at the world origin; the panel (link_1) bbox drives wall placement. ---
     door_desc = "cube"
     handle_center = None
+    panel_bbox_link1 = None
+    link1_pose_base = None
     if args.cube:
         board_bbox, board_gt = build_board(args.panel_width, args.panel_height, args.panel_thickness)
         door_desc = f"cube {args.panel_width}x{args.panel_height}x{args.panel_thickness} m"
     else:
         # board_bbox is the FULL door outer bbox (frame + panel + handle) -- the same door_full_bboxes
         # training now uses for wall placement, so walls sit outside the whole door with a real gap.
-        board_bbox, board_gt, handle_center = load_door_asset(args.door, board_num_points, device)
+        board_bbox, panel_bbox_link1, link1_pose_base, board_gt, handle_center = load_door_asset(
+            args.door, board_num_points, device
+        )
         door_desc = f"door urdf {args.door.parent.name}"
     wall_bbox = board_bbox
 
@@ -464,6 +480,64 @@ def main():
         return pts @ R_door.T
 
     board_gt = door_to_world(board_gt)
+
+    # --- Window-hole aug: same knobs multi_pcd_dagger reads. One hole is drawn PER CONFIG (= per
+    # rollout) and baked into that config's door cloud as NaN, matching the per-rollout training
+    # behaviour (the hole no longer jitters step-to-step). Real door only (needs the link_1 frame). ---
+    hole_cfg = dict(dagger_cfg.get("door_hole_aug", {}))
+    hole_aug_enabled = bool(hole_cfg.get("enabled", False)) and (link1_pose_base is not None)
+    hole_env_prob = float(hole_cfg.get("env_prob", 0.35))
+    hole_width_range = tuple(float(v) for v in hole_cfg.get("width_range_m", [0.12, 1.60]))
+    hole_height_range = tuple(float(v) for v in hole_cfg.get("height_range_m", [0.18, 2.20]))
+    hole_center_height_range = tuple(float(v) for v in hole_cfg.get("center_height_range_m", [0.10, 1.90]))
+    hole_side_margin_range = tuple(float(v) for v in hole_cfg.get("side_margin_range_m", [0.0, 0.18]))
+    hole_surface_eps = float(hole_cfg.get("surface_eps_m", 0.03))
+    link1_pose_world = None
+    if hole_aug_enabled:
+        from scipy.spatial.transform import Rotation as _R
+
+        link1_pos_base_np = link1_pose_base[:3].cpu().numpy()
+        link1_quat_base_wxyz = link1_pose_base[3:].cpu().numpy()
+        R_base_link1 = _R.from_quat(
+            [link1_quat_base_wxyz[1], link1_quat_base_wxyz[2], link1_quat_base_wxyz[3], link1_quat_base_wxyz[0]]
+        )
+        R_door_np = R_door.cpu().numpy()
+        link1_pos_world_np = R_door_np @ link1_pos_base_np
+        link1_quat_world_xyzw = _R.from_matrix(R_door_np @ R_base_link1.as_matrix()).as_quat()
+        link1_pose_world = torch.tensor(
+            [
+                *link1_pos_world_np.tolist(),
+                float(link1_quat_world_xyzw[3]),
+                float(link1_quat_world_xyzw[0]),
+                float(link1_quat_world_xyzw[1]),
+                float(link1_quat_world_xyzw[2]),
+            ],
+            dtype=torch.float32,
+            device=device,
+        )
+
+    def apply_hole(door_world):
+        """Drop door-surface points inside a freshly-sampled window hole (NaN, fixed N). Same helpers
+        multi_pcd_dagger uses. door_world: (1, N, 3) world; returns (1, N, 3) with holes as NaN."""
+        if not hole_aug_enabled:
+            return door_world
+        metadata = sample_random_window_hole_metadata(
+            link1_pose_world=link1_pose_world,
+            board_bbox_link1=panel_bbox_link1[0],
+            window_prob=hole_env_prob,
+            width_range=hole_width_range,
+            height_range=hole_height_range,
+            center_height_range=hole_center_height_range,
+            side_margin_range=hole_side_margin_range,
+        )
+        dropped, _ = apply_window_dropout_to_door_points(
+            points_world=door_world[0],
+            link1_pose_world=link1_pose_world,
+            board_bbox_link1=panel_bbox_link1[0],
+            hole_metadata=metadata,
+            surface_eps=hole_surface_eps,
+        )
+        return dropped.unsqueeze(0)
 
     # --- Robot base: on the -Y side, +x_base points toward the door (+Y). +90deg yaw => robot faces
     # +Y, so its RIGHT-hand side is world +X (where the real RealSense sits). ---
@@ -532,6 +606,7 @@ def main():
     print(f"[INFO] student cfg     : {args.student_cfg}")
     print(f"[INFO] wall num_points : {wall_params.num_points}  (enabled={wall_params.enabled}, density={wall_params.point_density_per_m2})")
     print(f"[INFO] door            : {door_desc}  ({board_gt.shape[1]} pts)")
+    print(f"[INFO] window hole     : {'on (env_prob=' + str(hole_env_prob) + ', per-config w' + str(hole_width_range) + ' h' + str(hole_height_range) + ')' if hole_aug_enabled else 'off'}")
     print(f"[INFO] robot           : {'on (%d pts, +%d to policy; arm+base RE-SAMPLED per config)' % (scene_robot_num_points, robot_model_policy_points) if args.robot else 'off'}")
     print(f"[INFO] base crop       : {base_crop_points} pts, range {local_pcd_range[0]} m, x_cutoff {x_direction_cutoff}")
     print(f"[INFO] camera          : {args.cam_width_px}x{args.cam_height_px}px, {cam_desc}")
@@ -574,13 +649,16 @@ def main():
             robot_filter_joint_angles = torch.as_tensor(cfg, dtype=torch.float32, device=device).unsqueeze(0)
 
         wall_world = door_to_world(sample_walls(wall_bbox))  # (1, Nw, 3) sampled in door frame, rotated to world
+        # One window hole per config (per rollout), baked into the door cloud as NaN before it feeds
+        # BOTH the rendered scene and the occluder pass (so the hole shows up as missing depth).
+        board_gt_holed = apply_hole(board_gt)
         # Scene = door + walls (+ robot). Occluder = door + walls only (robot excluded, matching
         # Dagger._sample_scene_pointcloud_world_cached: the robot's thin links must not be dilated).
-        scene_parts = [board_gt, wall_world]
+        scene_parts = [board_gt_holed, wall_world]
         if robot_world is not None:
             scene_parts.append(robot_world)
         gt_world = torch.cat(scene_parts, dim=1)
-        occluder_world = torch.cat([board_gt, wall_world], dim=1)
+        occluder_world = torch.cat([board_gt_holed, wall_world], dim=1)
 
         rendered_world, _ = simulate_depth_cam_render_from_pose(
             pcd=gt_world, camera_pose=camera_pose, occluder_pcd=occluder_world, **depth_render_kwargs
