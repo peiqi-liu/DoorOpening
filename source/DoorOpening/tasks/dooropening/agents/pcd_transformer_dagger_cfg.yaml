@@ -305,7 +305,7 @@ dagger:
     #   reflective glass (dark): env_prob * reflection.prob        = 0.315  <- hole + reflection blob
     # Keep reflection.prob < 1 so the pure-hole (bright) case always occurs.
     enabled: true # When enabled, drop points from link_1 to simulate a window/open hole in the door panel.
-    env_prob: 0.45 # P(this rollout's door has a window hole).
+    env_prob: 1.0 # P(this rollout's door has a window hole).
     width_range_m: [0.12, 1.60]
     height_range_m: [0.18, 2.20]
     center_height_range_m: [0.10, 1.90]
@@ -313,13 +313,13 @@ dagger:
     surface_eps_m: 0.03
     resample_each_step: false # false: draw ONE hole per rollout at reset, fixed for the whole episode. true: redraw every step (old behaviour).
     glass_reflection:
-      enabled: false # When on, a fraction of hole envs show a robot-SIZED noise blob behind the window (dark-glass reflection stand-in; a rough robot copy, not a true mirror image).
-      prob: 0.7 # P(reflection | hole). < 1 leaves the rest as bright pure holes.
+      enabled: true # When on, a fraction of hole envs show a robot-SIZED noise blob behind the window (dark-glass reflection stand-in; a rough robot copy, not a true mirror image).
+      prob: 1.0 # P(reflection | hole). < 1 leaves the rest as bright pure holes.
       num_points: 400 # Points in the reflection blob.
       blob_size_m: [0.5, 1.2, 0.3] # FULL robot-sized noise cluster (width, height, depth) -- compact, NOT a fill of the whole opening.
       size_fraction_range: [0.3, 1.0] # Each blob dim is independently scaled by a fraction in this range, so the reflection ranges from a small/thin sliver (just an arm) up to the full robot. Placed at a random spot inside the window.
       num_lobes: 3 # Number of overlapping Gaussian sub-clumps making up the cluster; more = lumpier / less box-like (1 = a single soft blob).
-      behind_range_m: [0.1, 1.0] # The blob centre sits this far (m) behind the panel back face (away from the camera), where a virtual mirror image would be.
+      behind_range_m: [0.1, 0.6] # The blob centre sits this far (m) behind the panel back face (away from the camera), where a virtual mirror image would be. Kept moderate so the reflection sits clearly behind the glass (not embedded in the door plane) while staying inside the local_pcd_range crop instead of being pushed too far back and cropped off.
       density_range: [0.3, 1.0] # Per-env fraction of num_points actually kept: low = faint (brighter), high = dense (darker). [1.0, 1.0] = always full.
   viser:
     raw:

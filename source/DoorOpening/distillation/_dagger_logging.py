@@ -268,6 +268,16 @@ class LoggingMixin:
             if self.left_right_condition_enabled:
                 print("Fraction Left:", self.latest_fraction_left)
                 print("Fraction Right:", self.latest_fraction_right)
+            if self.door_hole_aug_enabled and self.latest_door_hole_aug_stats:
+                _hole_stats = self.latest_door_hole_aug_stats
+                _n_envs = _hole_stats.get("door_hole_aug/num_envs")
+                _n_hole = _hole_stats.get("door_hole_aug/hole_env_count")
+                _n_reflect = _hole_stats.get("door_hole_aug/reflection_env_count")
+                _n_pure = _hole_stats.get("door_hole_aug/pure_hole_env_count")
+                print(f"Door Hole Envs (hole / total): {_n_hole} / {_n_envs}")
+                if _n_reflect is not None:
+                    print(f"Door Mirror Envs (reflective-glass): {_n_reflect}")
+                    print(f"Door Bright-Hole Envs (pure hole, no mirror): {_n_pure}")
             print("Temporal Aux Handle Enabled:", bool(self.temporal_aux_handle_enabled))
             print("Temporal Push/Pull Belief Enabled:", bool(self.temporal_push_pull_belief_enabled))
             if self.temporal_push_pull_belief_enabled:

@@ -766,6 +766,20 @@ def _reset_dagger_rollout_state(dagger):
     dagger.latest_aux_input_vector = None
     dagger.latest_aux_target_vector = None
     dagger._resample_wall_distractors()
+    # Per-rollout door augmentations are drawn once at reset (the training loop does this in run(); the
+    # eval loop must too). Without this, _door_hole_aug_metadata stays None for the whole eval and the
+    # window hole / glass reflection are never applied even with door_hole_aug.env_prob = 1.0.
+    dagger._resample_door_frame_visibility()
+    dagger._resample_door_hole_aug()
+    # Diagnostic: prove the window-hole aug is actually active this eval. env_fraction should be ~1.0
+    # with door_hole_aug.env_prob=1.0, and hole_width/height_mean_m should be > 0. If stats is empty or
+    # env_fraction is 0, the hole metadata is not being applied (chase that); if it's populated but you
+    # still see no hole in the .pt, the hole is being re-filled at render (blur/occluder) or cropped.
+    print(
+        f"[HOLE-DIAG] hole_enabled={dagger.door_hole_aug_enabled} "
+        f"reflection_enabled={dagger.door_hole_reflection_enabled} "
+        f"stats={dagger.latest_door_hole_aug_stats}"
+    )
     dagger.temporal_current_time_s = 0.0
     dagger._seed_temporal_histories()
     dagger._seed_aux_buffer()

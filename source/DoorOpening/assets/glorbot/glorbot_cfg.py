@@ -130,19 +130,38 @@ GLORBOT_CONFIG = ArticulationCfg(
             stiffness=10000,
             damping=3000,
         ),
+        # Per-joint Franka PD gains matched to the REAL-WORLD deploy controller (kp/kd used on hardware),
+        # set per joint because the real values vary within each group (kd differs across joint1-4; both
+        # kp and kd differ across joint5-7). stiffness/damping accept a {joint_name: value} dict so each
+        # joint gets its exact gain. NOTE: these are the ADR-increment-0 nominal gains -- at eval the
+        # `robot_joint_stiffness_and_damping` EventTerm still scales them by the ADR band (kp x[0.8,1.2],
+        # kd x[0.7,1.3]); pin the ADR increment / bypass _force_max_adr_for_eval to hold these exactly.
         "panda_shoulder": ImplicitActuatorCfg(
             joint_names_expr=["panda_joint[1-4]"],
             effort_limit_sim=50.0,
             velocity_limit_sim=2.175,
-            stiffness=600.0,
-            damping=100.0,
+            stiffness=1600.0,
+            damping={
+                "panda_joint1": 24.0,
+                "panda_joint2": 20.0,
+                "panda_joint3": 24.0,
+                "panda_joint4": 24.0,
+            },
         ),
         "panda_forearm": ImplicitActuatorCfg(
             joint_names_expr=["panda_joint[5-7]"],
             effort_limit_sim=190.0,
             velocity_limit_sim=2.61,
-            stiffness=600.0,
-            damping=100.0,
+            stiffness={
+                "panda_joint5": 410.0,
+                "panda_joint6": 410.0,
+                "panda_joint7": 130.0,
+            },
+            damping={
+                "panda_joint5": 6.0,
+                "panda_joint6": 6.0,
+                "panda_joint7": 4.0,
+            },
         ),
         "x5_arm": ImplicitActuatorCfg(
             joint_names_expr=["x5_joint[1-6]"],

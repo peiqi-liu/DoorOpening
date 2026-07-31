@@ -3186,25 +3186,37 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             return
         enabled_bool = metadata["enabled"].to(dtype=torch.bool)
         enabled = enabled_bool.to(dtype=torch.float32)
-        # Preserve any per-step counters (e.g. dropped_points_mean) already recorded this step.
+        total_envs = int(enabled_bool.numel())
+        hole_env_count = int(enabled_bool.sum().detach().cpu())
+        # Preserve any per-step counters (e.g. dropped_points_mean) already recorded this step. Both the
+        # fractions AND the absolute env counts (out of total_envs) are logged so the console/wandb shows
+        # exactly HOW MANY of the current envs have a window hole vs a mirrored-robot reflection.
         self.latest_door_hole_aug_stats.update(
             {
+                "door_hole_aug/num_envs": total_envs,
+                "door_hole_aug/hole_env_count": hole_env_count,
                 "door_hole_aug/env_fraction": float(enabled.mean().detach().cpu()),
                 "door_hole_aug/no_hole_fraction": float((1.0 - enabled).mean().detach().cpu()),
                 "door_hole_aug/hole_width_mean_m": float(metadata["hole_width"].mean().detach().cpu()),
                 "door_hole_aug/hole_height_mean_m": float(metadata["hole_height"].mean().detach().cpu()),
             }
         )
-        # Mutually-exclusive per-rollout case fractions (sum to 1 with no_hole): so you can read the
-        # bright pure-hole vs dark reflective-glass split directly off the training logs.
+        # Mutually-exclusive per-rollout case fractions/counts (sum to 1 / total_envs with no_hole): so
+        # you can read the bright pure-hole vs dark reflective-glass split directly off the training logs.
         if "reflection_enabled" in metadata:
             reflect_bool = metadata["reflection_enabled"].to(dtype=torch.bool)
-            pure_hole = (enabled_bool & ~reflect_bool).to(dtype=torch.float32)
+            pure_hole_bool = enabled_bool & ~reflect_bool
+            self.latest_door_hole_aug_stats["door_hole_aug/reflection_env_count"] = int(
+                reflect_bool.sum().detach().cpu()
+            )
+            self.latest_door_hole_aug_stats["door_hole_aug/pure_hole_env_count"] = int(
+                pure_hole_bool.sum().detach().cpu()
+            )
             self.latest_door_hole_aug_stats["door_hole_aug/reflection_fraction"] = float(
                 reflect_bool.to(dtype=torch.float32).mean().detach().cpu()
             )
             self.latest_door_hole_aug_stats["door_hole_aug/pure_hole_fraction"] = float(
-                pure_hole.mean().detach().cpu()
+                pure_hole_bool.to(dtype=torch.float32).mean().detach().cpu()
             )
 
     def _door_panel_front_sign(self):

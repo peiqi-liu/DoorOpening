@@ -53,7 +53,15 @@ from isaaclab.utils.math import quat_from_euler_xyz
 
 import isaaclab.sim as sim_utils
 
-euler_angles = torch.tensor([-np.pi / 4, 0.0, 0])  # (roll, pitch, yaw) in radians
+# Camera mount orientation on x5_camera_link as (roll, pitch, yaw).
+#   roll  = -45deg  -> compensates for the 45deg-tilted RealSense bracket on the ARX x5 wrist
+#                      (rotation in the yz plane, about the link x-axis).
+#   pitch = small   -> tilts the optical axis DOWN so the camera looks down a bit (rotation in the xz
+#                      plane, about the link y-axis), keeping the handle inside the vertical FoV during
+#                      approach. If a visual check shows it tilting UP instead of down, flip this sign.
+CAMERA_MOUNT_ROLL_RAD = -np.pi / 4
+CAMERA_MOUNT_PITCH_RAD = float(np.deg2rad(10.0))
+euler_angles = torch.tensor([CAMERA_MOUNT_ROLL_RAD, CAMERA_MOUNT_PITCH_RAD, 0.0])  # (roll, pitch, yaw) in radians
 POINTCLOUD_CAMERA_QUAT = quat_from_euler_xyz(euler_angles[0], euler_angles[1], euler_angles[2])
 POINTCLOUD_CAMERA_QUAT = tuple(POINTCLOUD_CAMERA_QUAT.tolist())
 
