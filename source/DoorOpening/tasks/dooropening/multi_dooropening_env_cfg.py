@@ -60,7 +60,8 @@ import isaaclab.sim as sim_utils
 #                      plane, about the link y-axis), keeping the handle inside the vertical FoV during
 #                      approach. If a visual check shows it tilting UP instead of down, flip this sign.
 CAMERA_MOUNT_ROLL_RAD = -np.pi / 4
-CAMERA_MOUNT_PITCH_RAD = float(np.deg2rad(10.0))
+# CAMERA_MOUNT_PITCH_RAD = float(np.deg2rad(10.0))  # look-down pitch, disabled for now
+CAMERA_MOUNT_PITCH_RAD = float(np.deg2rad(0.0))
 euler_angles = torch.tensor([CAMERA_MOUNT_ROLL_RAD, CAMERA_MOUNT_PITCH_RAD, 0.0])  # (roll, pitch, yaw) in radians
 POINTCLOUD_CAMERA_QUAT = quat_from_euler_xyz(euler_angles[0], euler_angles[1], euler_angles[2])
 POINTCLOUD_CAMERA_QUAT = tuple(POINTCLOUD_CAMERA_QUAT.tolist())
