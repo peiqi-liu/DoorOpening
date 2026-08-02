@@ -136,9 +136,14 @@ GLORBOT_CONFIG = ArticulationCfg(
         # joint gets its exact gain. NOTE: these are the ADR-increment-0 nominal gains -- at eval the
         # `robot_joint_stiffness_and_damping` EventTerm still scales them by the ADR band (kp x[0.8,1.2],
         # kd x[0.7,1.3]); pin the ADR increment / bypass _force_max_adr_for_eval to hold these exactly.
+        # effort_limit_sim is deliberately NOT set on either panda group: when it is None on an
+        # IMPLICIT actuator, IsaacLab keeps the USD/URDF-authored limit (actuator_base "case 3: if
+        # actuator_cfg_value is None: we use usd_value"; the 1e9 fallback applies to explicit models
+        # only). That gives the real Panda torques straight from glorbot.urdf -- 87 N-m on joint1-4
+        # and 12 N-m on joint5-7 -- instead of the hand-picked 50 / 190 used before, where the wrist
+        # cap was ~16x the hardware value.
         "panda_shoulder": ImplicitActuatorCfg(
             joint_names_expr=["panda_joint[1-4]"],
-            effort_limit_sim=50.0,
             velocity_limit_sim=2.175,
             stiffness=1600.0,
             damping={
@@ -150,7 +155,6 @@ GLORBOT_CONFIG = ArticulationCfg(
         ),
         "panda_forearm": ImplicitActuatorCfg(
             joint_names_expr=["panda_joint[5-7]"],
-            effort_limit_sim=190.0,
             velocity_limit_sim=2.61,
             stiffness={
                 "panda_joint5": 410.0,

@@ -44,11 +44,23 @@ DEFAULT_PANEL_THICKNESS_RANGE_M = (0.028, 0.055)
 # each side of the door. The upper bound is deliberately WIDE rather than "a normal door frame": the
 # jamb is the nearest thing to a wall that is rigidly attached to the door, so spanning frameless ->
 # broad casing is a primary randomization axis, not a cosmetic one.
-DEFAULT_FRAME_POST_WIDTH_RANGE_M = (0.0, 0.20)
+DEFAULT_FRAME_POST_WIDTH_RANGE_M = (0.0, 0.25)
 DEFAULT_FRAME_HEAD_HEIGHT_RANGE_M = (0.0, 0.20)
-# Frame DEPTH (front-to-back thickness) as a multiple of the panel thickness. From a thin normal jamb
-# (~1x) up to a moderately thick wall reveal. Upper bound reduced so the deepest frame is not too large.
-DEFAULT_FRAME_DEPTH_SCALE_RANGE = (1.0, 4.0)
+# Frame DEPTH (front-to-back thickness) in ABSOLUTE METERS. Previously this was a multiple of the panel
+# thickness, which made the reachable depth depend on the panel draw: the same scale gave 0.028 m on a
+# thin panel and 0.055 m on a thick one, so no single scale range could guarantee BOTH a near-flush frame
+# AND a 0.30 m one. Sampling meters directly decouples the two, so every door -- thin panel or thick --
+# spans the same depth spectrum.
+# The frame box is CENTERED on the panel mid-plane, so the casing stands (depth - panel_thickness)/2
+# proud of EACH panel face: 0.30 m depth on a ~0.045 m panel = ~0.13 m standing out per side. A draw at
+# or below the panel thickness is floored to panel_thickness + 0.01 downstream (see build_frame_boxes),
+# i.e. "effectively no reveal, frame flush with the panel".
+# CAUTION: nothing couples this to the handle. The lever only stands
+# handle_stem_length + 2*handle_lever_thickness (~0.06-0.11 m) off the panel face, so past roughly
+# 0.22 m of depth the casing out-protrudes the handle and the lever sits recessed inside the reveal.
+# That is physically real for a door set deep in a thick wall, but combined with a small
+# handle_edge_distance it puts the jamb right beside the grasp -- see DEFAULT_HANDLE_EDGE_DISTANCE_RANGE_M.
+DEFAULT_FRAME_DEPTH_RANGE_M = (0.0, 0.30)
 DEFAULT_FRAME_CLEARANCE_RANGE_M = (0.003, 0.015)
 
 DEFAULT_HANDLE_HEIGHT_RANGE_M = (0.75, 1.0)
@@ -224,11 +236,13 @@ def parse_args():
         default=DEFAULT_FRAME_HEAD_HEIGHT_RANGE_M,
     )
     parser.add_argument(
-        "--frame-depth-scale-range",
+        "--frame-depth-range",
         type=float,
         nargs=2,
-        metavar=("MIN_SCALE", "MAX_SCALE"),
-        default=DEFAULT_FRAME_DEPTH_SCALE_RANGE,
+        metavar=("MIN_M", "MAX_M"),
+        default=DEFAULT_FRAME_DEPTH_RANGE_M,
+        help="Frame front-to-back depth in meters. Draws at or below the panel thickness are floored to "
+        "a flush frame.",
     )
     parser.add_argument(
         "--frame-clearance-range",
@@ -696,7 +710,7 @@ def sample_variant_spec(rng, args):
     panel_thickness = sample_uniform(rng, args.panel_thickness_range)
     frame_post_width = sample_uniform(rng, args.frame_post_width_range)
     frame_head_height = sample_uniform(rng, args.frame_head_height_range)
-    frame_depth_scale = sample_uniform(rng, args.frame_depth_scale_range)
+    frame_depth = sample_uniform(rng, args.frame_depth_range)
     frame_clearance = sample_uniform(rng, args.frame_clearance_range)
     hinge_side, handle_side = sample_hinge_and_handle_sides(rng, args)
     opening_direction = choose_mode(rng, args.opening_direction, options=("pull", "push"))
@@ -723,7 +737,7 @@ def sample_variant_spec(rng, args):
         "panel_thickness_m": panel_thickness,
         "frame_post_width_m": frame_post_width,
         "frame_head_height_m": frame_head_height,
-        "frame_depth_m": panel_thickness * frame_depth_scale,
+        "frame_depth_m": frame_depth,
         "frame_clearance_m": frame_clearance,
         "hinge_side": hinge_side,
         "handle_side": handle_side,
@@ -1362,7 +1376,7 @@ def main():
     args.panel_thickness_range = resolve_range(args.panel_thickness_range, "panel_thickness_range")
     args.frame_post_width_range = resolve_range(args.frame_post_width_range, "frame_post_width_range")
     args.frame_head_height_range = resolve_range(args.frame_head_height_range, "frame_head_height_range")
-    args.frame_depth_scale_range = resolve_range(args.frame_depth_scale_range, "frame_depth_scale_range")
+    args.frame_depth_range = resolve_range(args.frame_depth_range, "frame_depth_range")
     args.frame_clearance_range = resolve_range(args.frame_clearance_range, "frame_clearance_range")
     args.handle_height_range = resolve_range(args.handle_height_range, "handle_height_range")
     args.handle_edge_distance_range = resolve_range(args.handle_edge_distance_range, "handle_edge_distance_range")
