@@ -4,7 +4,7 @@ from typing import Literal
 import torch
 from isaaclab.utils.math import euler_xyz_from_quat, quat_from_euler_xyz
 
-from DoorOpening.constants.robot_constants import FRANKA_DEFAULT_JOINT_POS, FRANKA_JOINT_NAMES, CAMERA_JOINT_DEFAULT_VALUES, CAMERA_JOINT_VALUES_WHEN_SEARCHING_HINGE, CAMERA_JOINT_VALUES_WHEN_OBSERVING_LEFT
+from DoorOpening.constants.robot_constants import FRANKA_DEFAULT_JOINT_POS, FRANKA_JOINT_NAMES
 from DoorOpening.utils.state_machine.api import get_board_pos, get_hinge_pos, open_hand, solve_ik
 
 HandleSide = Literal["right", "left"]
@@ -110,23 +110,6 @@ def state_machine_offline_right_pull_door(
         [FRANKA_DEFAULT_JOINT_POS[name] for name in FRANKA_JOINT_NAMES],
         device=device,
     )
-    # -------------------------
-    # Step 0: Observe
-    # -------------------------
-
-    # q_robot[3: 10] = franka_default_q
-    # q_robot[:3] = torch.tensor([0.15, 0.2, 0])
-
-    # q_robot[-6:] = torch.tensor(list(CAMERA_JOINT_VALUES_WHEN_SEARCHING_HINGE.values()))
-
-    # _append_state(
-    #     robot_traj,
-    #     door_traj,
-    #     key_idx_in_key_indices,
-    #     q_robot,
-    #     q_door,
-    #     mark_keyframe=True,
-    # )
 
     # -------------------------
     # Step 1: Pregrasp
@@ -184,9 +167,9 @@ def state_machine_offline_right_pull_door(
     # Unified with the push-right planner so grasp palm<->handle offsets match.
     # Right-handle door: nudge grasp EE ~2.5 cm LEFT (-y, toward door center) and ~1.5 cm FORWARD
     # (-x, toward the handle/door). Robot faces -x, so right=+y / left=-y / forward=-x.
-    # Moved back (0.035 -> 0.05): larger palm<->door x gap compensates for removing the
-    # finger<->panel penalty, so the grasp doesn't drive fingers into the panel.
-    grasp_palm_x_offset = 0.025
+    # Palm<->door x gap kept at 0.035: enough clearance that the grasp doesn't drive fingers into
+    # the panel, without reaching as deep as the 0.025 tuned for the thicker HEAD lever bars.
+    grasp_palm_x_offset = 0.035
     grasp_palm_y_offset = -0.065
     grasp_palm_z_offset = 0.10
     grasp_open_ratio = 0.70
@@ -264,7 +247,7 @@ def state_machine_offline_right_pull_door(
     pull_base_x_offset = 0.55
     pull_base_y_gain = -0.25 / 1.45
 
-    pull_palm_x_offset_closed = 0.025
+    pull_palm_x_offset_closed = 0.05
     pull_palm_y_offset_closed = -0.08
     pull_palm_z_offset = 0.08
 
@@ -669,24 +652,6 @@ def state_machine_offline_left_pull_door(
         q_door,
         mark_keyframe=True,
     )
-    
-    # -------------------------
-    # Step 0: Observe
-    # -------------------------
-
-    # q_robot[3: 10] = franka_default_q
-    # q_robot[:3] = torch.tensor([0.15, 0.2, 0])
-
-    # q_robot[-6:] = torch.tensor(list(CAMERA_JOINT_VALUES_WHEN_SEARCHING_HINGE.values()))
-
-    # _append_state(
-    #     robot_traj,
-    #     door_traj,
-    #     key_idx_in_key_indices,
-    #     q_robot,
-    #     q_door,
-    #     mark_keyframe=True,
-    # )
 
     # -------------------------
     # Step 1: Pregrasp
@@ -718,7 +683,7 @@ def state_machine_offline_left_pull_door(
     # handle here; flip the sign if the camera looks the wrong way. base_target_rot (untilted) is
     # restored from Step 4 onward, so only pregrasp/grasp/unlatch (which reuse this base_target_pose)
     # are tilted.
-    pregrasp_base_tilt_yaw = 0.35
+    pregrasp_base_tilt_yaw = 0.3
     _, _, _base_yaw = euler_xyz_from_quat(base_target_rot)
     pregrasp_tilt_base_rot = get_rotation_quat(0.0, 0.0, _base_yaw.item() + pregrasp_base_tilt_yaw, device)
     base_target_pose = _make_pose(base_target_pos, pregrasp_tilt_base_rot)
@@ -752,9 +717,9 @@ def state_machine_offline_left_pull_door(
     # -------------------------
     # Left-handle door: nudge grasp EE ~2.5 cm RIGHT (+y, toward door center) and ~1.5 cm FORWARD
     # (-x, toward the handle/door). Robot faces -x, so right=+y / left=-y / forward=-x.
-    # Moved back (0.025 -> 0.05): larger palm<->door x gap compensates for removing the
-    # finger<->panel penalty.
-    grasp_palm_x_offset = 0.025
+    # Palm<->door x gap kept at 0.035, matching the right-door planner so left/right grasp the
+    # same distance out from the panel.
+    grasp_palm_x_offset = 0.035
     grasp_palm_y_offset = 0.015
     grasp_palm_z_offset = 0.10
     grasp_open_ratio = 0.7
@@ -832,7 +797,7 @@ def state_machine_offline_left_pull_door(
     pull_base_x_offset = 0.45
     pull_base_y_gain = -0.1 / 1.45
 
-    pull_palm_x_offset_closed = 0.025
+    pull_palm_x_offset_closed = 0.05
     pull_palm_y_offset_closed = 0.03
     pull_palm_z_offset = 0.08
 

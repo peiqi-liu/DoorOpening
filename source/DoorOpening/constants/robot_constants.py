@@ -3,38 +3,20 @@ import numpy as np
 
 CAMERA_JOINT_DEFAULT_VALUES = {
     "x5_joint1": 0.0, 
-    "x5_joint2": 0, 
-    "x5_joint3": 0, 
+    "x5_joint2": 0.15, 
+    "x5_joint3": 0.2, 
     "x5_joint4": 0, 
-    "x5_joint5": 0.0, 
-    "x5_joint6": 0.0,
-}
-
-CAMERA_JOINT_VALUES_WHEN_SEARCHING_HINGE = {
-    "x5_joint1": 0.0, 
-    "x5_joint2": 0.6, 
-    "x5_joint3": 0.6, 
-    "x5_joint4": 0, 
-    "x5_joint5": 0.0, 
-    "x5_joint6": 0.0,
-}
-
-CAMERA_JOINT_VALUES_WHEN_OBSERVING_LEFT = {
-    "x5_joint1": 0.25, 
-    "x5_joint2": 0.85, 
-    "x5_joint3": 0.7, 
-    "x5_joint4": 0.1, 
     "x5_joint5": 0.0, 
     "x5_joint6": 0.0,
 }
 
 # CAMERA_JOINT_DEFAULT_VALUES = {
-#     "x5_joint1": 1.57, 
-#     "x5_joint2": 2.355, 
-#     "x5_joint3": 0.0, 
-#     "x5_joint4": 1.57, 
-#     "x5_joint5": 0.0, 
-#     "x5_joint6": 0.0,
+#     "x5_joint1": 0.0,
+#     "x5_joint2": 0,
+#     "x5_joint3": 0,
+#     "x5_joint4": 0.2,
+#     "x5_joint5": 0.0,
+#     "x5_joint6": 1.57,
 # }
 
 FRANKA_DEFAULT_JOINT_POS = {

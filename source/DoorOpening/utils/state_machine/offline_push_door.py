@@ -4,7 +4,7 @@ from typing import Literal
 import torch
 from isaaclab.utils.math import euler_xyz_from_quat, quat_from_euler_xyz
 
-from DoorOpening.constants.robot_constants import FRANKA_DEFAULT_JOINT_POS, FRANKA_END_JOINT_POS, FRANKA_JOINT_NAMES, CAMERA_JOINT_DEFAULT_VALUES, CAMERA_JOINT_VALUES_WHEN_SEARCHING_HINGE, CAMERA_JOINT_VALUES_WHEN_OBSERVING_LEFT
+from DoorOpening.constants.robot_constants import FRANKA_DEFAULT_JOINT_POS, FRANKA_END_JOINT_POS, FRANKA_JOINT_NAMES
 from DoorOpening.utils.state_machine.api import get_board_edge, get_hinge_pos, open_hand, solve_ik
 
 HandleSide = Literal["right", "left"]
@@ -155,24 +155,6 @@ def state_machine_offline_push_right_door(
     )
 
     # -------------------------
-    # Step 0: Observe
-    # -------------------------
-
-    # q_robot[3: 10] = franka_default_q
-    # q_robot[:3] = torch.tensor([0.15, 0.2, 0])
-
-    # q_robot[-6:] = torch.tensor(list(CAMERA_JOINT_VALUES_WHEN_SEARCHING_HINGE.values()))
-
-    # _append_state(
-    #     robot_traj,
-    #     door_traj,
-    #     key_idx_in_key_indices,
-    #     q_robot,
-    #     q_door,
-    #     mark_keyframe=True,
-    # )
-
-    # -------------------------
     # Step 1: Pregrasp
     # -------------------------
     handle_pos = get_hinge_pos(
@@ -219,9 +201,9 @@ def state_machine_offline_push_right_door(
     # Step 2: Move to grasp
     # -------------------------
     palm_target_pos = handle_pos.clone()
-    # Grasp EE moved BACK (0.035 -> 0.05) to widen the palm<->door x gap (compensates for removing
-    # the finger<->panel penalty). Left/right nudge still not applied on push; y = -0.10.
-    palm_target_pos[:, 0] += 0.025
+    # Palm<->door x gap kept at 0.035, matching the pull planners so every grasp reaches the same
+    # distance out from the panel. Left/right nudge still not applied on push; y = -0.10.
+    palm_target_pos[:, 0] += 0.035
     palm_target_pos[:, 1] += -0.085
     palm_target_pos[:, 2] += 0.1
     palm_target_pose = _make_pose(palm_target_pos, default_palm_rot)
@@ -493,24 +475,6 @@ def state_machine_offline_push_left_door(
     )
 
     # -------------------------
-    # Step 0: Observe
-    # -------------------------
-
-    # q_robot[3: 10] = franka_default_q
-    # q_robot[:3] = torch.tensor([0.15, 0.2, 0])
-
-    # q_robot[-6:] = torch.tensor(list(CAMERA_JOINT_VALUES_WHEN_SEARCHING_HINGE.values()))
-
-    # _append_state(
-    #     robot_traj,
-    #     door_traj,
-    #     key_idx_in_key_indices,
-    #     q_robot,
-    #     q_door,
-    #     mark_keyframe=True,
-    # )
-
-    # -------------------------
     # Step 1: Pregrasp
     # -------------------------
     handle_pos = get_hinge_pos(
@@ -530,7 +494,7 @@ def state_machine_offline_push_left_door(
     # handle here; flip the sign if the camera looks the wrong way. base_target_rot (untilted) is
     # restored from Step 4 onward, so only pregrasp/grasp/unlatch (which reuse this base_target_pose)
     # are tilted.
-    pregrasp_base_tilt_yaw = 0.35
+    pregrasp_base_tilt_yaw = 0.3
     _, _, _base_yaw = euler_xyz_from_quat(base_target_rot)
     pregrasp_tilt_base_rot = get_rotation_quat(0.0, 0.0, _base_yaw.item() + pregrasp_base_tilt_yaw, device)
     base_target_pose = _make_pose(base_target_pos, pregrasp_tilt_base_rot)
@@ -565,9 +529,9 @@ def state_machine_offline_push_left_door(
     # Step 2: Move to grasp
     # -------------------------
     palm_target_pos = handle_pos.clone()
-    # Grasp EE moved BACK (0.025 -> 0.05) to widen the palm<->door x gap (compensates for removing
-    # the finger<->panel penalty). Left/right nudge still not applied on push; y = 0.03.
-    palm_target_pos[:, 0] += 0.025
+    # Palm<->door x gap kept at 0.035, matching the pull planners so every grasp reaches the same
+    # distance out from the panel. Left/right nudge still not applied on push; y = 0.03.
+    palm_target_pos[:, 0] += 0.035
     palm_target_pos[:, 1] += 0.025
     palm_target_pos[:, 2] += 0.10
     palm_target_pose = _make_pose(palm_target_pos, default_palm_rot)
