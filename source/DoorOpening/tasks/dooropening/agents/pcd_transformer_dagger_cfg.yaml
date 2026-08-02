@@ -260,7 +260,7 @@ dagger:
     # - height axis: bottom/top of the panel
     # - thickness axis: through the panel, normal to the door slab
     # Each sampled point comes from either the left or right column.
-    side_margin_m: [0.2, 0.8]  # Column width along the door width axis, i.e. how far each column extends outward from the left/right panel edge.
+    side_margin_m: [0.2, 1.2]  # Column width along the door width axis, i.e. how far each column extends outward from the left/right panel edge. Upper bound raised from 0.8 -> 1.2 because the reworked x5 camera pose (mount pitch 0 deg, tilt now carried by x5_joint2/3) sees a wider band beside the door: at 0.8 m the column often ended inside the frame, leaving an unrealistic floating wall edge.
     edge_gap_m: [0.0, 0.04]  # Empty gap (m) between the door side edge and the inner face of the wall column. Non-zero so the wall never sits flush against / overlapping the door (a zero gap is unrealistic). Clamped to >= 0 in code.
     depth_m: [0.1, 1.5]  # Extra thickness added beyond the door slab thickness along the door-thickness axis, independently per front/back segment.
     # Position of the seam where the front and back segments on one side butt together (see
@@ -294,8 +294,8 @@ dagger:
   # includes or drops the frame per env (domain randomization for the often-thick PartNetv5_plusplus
   # casings). Disabled by default -- set enabled: true to activate.
   door_frame_aug:
-    enabled: false
-    env_prob: 0.5  # Per-env probability the frame IS rendered this episode.
+    enabled: true  # Real doors mostly DO have a visible casing/jamb, so the frame must appear in the input.
+    env_prob: 0.5  # Per-env probability the frame IS rendered this episode. The other half covers frameless / flush-mounted doors.
   door_hole_aug:
     # Per-rollout door appearance is drawn once at reset from these two probabilities. With
     # env_prob = P(hole) and glass_reflection.prob = P(reflection | hole), the three MUTUALLY

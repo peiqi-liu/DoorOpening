@@ -37,11 +37,15 @@ DEFAULT_PANEL_WIDTH_RANGE_M = (0.7, 1.0)
 DEFAULT_PANEL_HEIGHT_RANGE_M = (1.75, 2.15)
 DEFAULT_PANEL_THICKNESS_RANGE_M = (0.028, 0.055)
 # Frame BORDER (post width / head height) around the opening. Range STARTS AT 0 so it spans the full
-# spectrum: near-0 = effectively NO frame (panel flush in the wall), up to a modest surround. When both
+# spectrum: near-0 = effectively NO frame (panel flush in the wall), up to a wide surround. When both
 # post width and head height sample near 0 the frame boxes vanish entirely (degenerate -> skipped).
-# Upper bound kept modest -- even the "large" end should look like a normal door frame, not a slab.
-DEFAULT_FRAME_POST_WIDTH_RANGE_M = (0.0, 0.10)
-DEFAULT_FRAME_HEAD_HEIGHT_RANGE_M = (0.0, 0.10)
+# The panel is centered in the frame (verified: left/right jamb margins are identical on every asset),
+# so this value IS the per-side jamb the camera sees -- a 0.20 post reads like a 0.20 m wall flanking
+# each side of the door. The upper bound is deliberately WIDE rather than "a normal door frame": the
+# jamb is the nearest thing to a wall that is rigidly attached to the door, so spanning frameless ->
+# broad casing is a primary randomization axis, not a cosmetic one.
+DEFAULT_FRAME_POST_WIDTH_RANGE_M = (0.0, 0.20)
+DEFAULT_FRAME_HEAD_HEIGHT_RANGE_M = (0.0, 0.20)
 # Frame DEPTH (front-to-back thickness) as a multiple of the panel thickness. From a thin normal jamb
 # (~1x) up to a moderately thick wall reveal. Upper bound reduced so the deepest frame is not too large.
 DEFAULT_FRAME_DEPTH_SCALE_RANGE = (1.0, 4.0)
