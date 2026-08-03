@@ -111,8 +111,15 @@ class PinocchioIKSolver():
         self.data = self.model.createData()
         self.q_neutral = pinocchio.neutral(self.model)
 
-        # print([f.name for f in self.model.frames])
-        self.ee_frame_idx = [f.name for f in self.model.frames].index(ee_link_name)
+        # Cache the frame-name list once. get_frame_pose/compute_fk used to rebuild this list
+        # (and linear-scan it with .index()) on every call, which is O(nframes) per lookup and
+        # dominated the per-frame FK cost when replaying a full trajectory. _frame_index() below
+        # preserves the exact first-occurrence semantics of the old [...].index(name) while
+        # memoizing the result.
+        self._frame_names = [f.name for f in self.model.frames]
+        self._frame_idx_cache = {}
+        # print(self._frame_names)
+        self.ee_frame_idx = self._frame_index(ee_link_name)
 
         self.controlled_joints_by_name = {}
         self.controlled_joints = []
@@ -207,6 +214,49 @@ class PinocchioIKSolver():
 
         return q_out
 
+    def _frame_index(self, name: str) -> int:
+        """First-occurrence frame index for `name`, memoized. Equivalent to
+        [f.name for f in self.model.frames].index(name) but without rebuilding/scanning the
+        list on every call."""
+        idx = self._frame_idx_cache.get(name)
+        if idx is None:
+            idx = self._frame_names.index(name)
+            self._frame_idx_cache[name] = idx
+        return idx
+
+    def get_frames_pose_batch(
+        self,
+        config: Union[np.ndarray, dict],
+        node_a_list: List[str],
+        node_b: str,
+        ignore_missing_joints: bool = False,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Pose of each frame in `node_a_list` expressed in the `node_b` frame, for a single
+        configuration.
+
+        This is the batched analogue of calling get_frame_pose() once per node_a: it runs a
+        single forwardKinematics + updateFramePlacements (instead of one per body) and reuses
+        cached frame indices, so replaying a whole trajectory over K key bodies costs one FK per
+        frame instead of K.
+
+        Returns:
+            translations: (K, 3) float64 array
+            rotations:    (K, 3, 3) float64 array
+        """
+        q_model = self._qmap_control2model(config, ignore_missing_joints=ignore_missing_joints)
+        pinocchio.forwardKinematics(self.model, self.data, q_model)
+        pinocchio.updateFramePlacements(self.model, self.data)
+
+        oMb_inv = self.data.oMf[self._frame_index(node_b)].inverse()
+
+        translations = np.empty((len(node_a_list), 3))
+        rotations = np.empty((len(node_a_list), 3, 3))
+        for k, node_a in enumerate(node_a_list):
+            bMa = oMb_inv * self.data.oMf[self._frame_index(node_a)]
+            translations[k] = bMa.translation
+            rotations[k] = bMa.rotation
+        return translations, rotations
+
     def get_frame_pose(
         self,
         config: Union[np.ndarray, dict],
@@ -229,8 +279,8 @@ class PinocchioIKSolver():
         q_model = self._qmap_control2model(config, ignore_missing_joints=ignore_missing_joints)
         # print('q_model', q_model)
         pinocchio.forwardKinematics(self.model, self.data, q_model)
-        frame_idx1 = [f.name for f in self.model.frames].index(node_a)
-        frame_idx2 = [f.name for f in self.model.frames].index(node_b)
+        frame_idx1 = self._frame_index(node_a)
+        frame_idx2 = self._frame_index(node_b)
         # print(frame_idx1)
         # print(frame_idx2)
         # print(self.model.getFrameId(node_a))
@@ -262,7 +312,7 @@ class PinocchioIKSolver():
             frame_idx = self.ee_frame_idx
         else:
             try:
-                frame_idx = [f.name for f in self.model.frames].index(link_name)
+                frame_idx = self._frame_index(link_name)
             except ValueError:
                 logger.error(f"Unknown link_name {link_name}. Defaulting to end-effector")
                 frame_idx = self.ee_frame_idx
@@ -295,7 +345,7 @@ class PinocchioIKSolver():
             max_iterations: time budget in number of steps
         """
         if custom_ee_frame is not None:
-            _ee_frame_idx = [f.name for f in self.model.frames].index(custom_ee_frame)
+            _ee_frame_idx = self._frame_index(custom_ee_frame)
         else:
             _ee_frame_idx = self.ee_frame_idx
 

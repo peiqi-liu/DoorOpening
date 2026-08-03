@@ -965,24 +965,38 @@ def play_and_save_traj(
     ) 
 
     robot_key_bodies = ROBOT_KEY_BODY_NAMES
-    robot_body_pos_traj = []
-    robot_body_quat_traj = []
+    T = len(robot_traj)
+    K = len(robot_key_bodies)
 
-    for robot_point in robot_traj:
-        body_poses = []
-        body_quats = []
-        for node_a in robot_key_bodies:
-            transform = robot_ik_solver.get_frame_pose(config = robot_point[:10], node_b = "base_link", node_a = node_a)
-            translation, rotation = torch.tensor(transform.translation).unsqueeze(0).float(), torch.tensor(transform.rotation).unsqueeze(0).float()
-            quat = quat_from_matrix(rotation)
-            body_world_pos, body_world_quat = combine_frame_transforms(t01 = torch.tensor(robot_world_pos).unsqueeze(0).float(), q01 = torch.tensor(robot_world_quat).unsqueeze(0).float(), t12 = translation, q12 = quat)
-            body_poses.append(body_world_pos.squeeze())
-            body_quats.append(body_world_quat.squeeze())
-        robot_body_pos_traj.append(torch.stack(body_poses, dim=0))
-        robot_body_quat_traj.append(torch.stack(body_quats, dim=0))
+    # Gather key-body poses (in base_link frame) with ONE forwardKinematics per frame instead of
+    # one per (frame, body): the base<-body transforms come back as raw numpy, and the base->world
+    # composition (quat_from_matrix + combine_frame_transforms) is done once as a single batched
+    # torch op over all T*K poses rather than per element.
+    body_trans = np.empty((T, K, 3), dtype=np.float32)   # base_link-frame translation
+    body_rot = np.empty((T, K, 3, 3), dtype=np.float32)  # base_link-frame rotation matrix
+    for t, robot_point in enumerate(robot_traj):
+        trans, rot = robot_ik_solver.get_frames_pose_batch(
+            config=robot_point[:10].detach().cpu().numpy(),
+            node_a_list=robot_key_bodies,
+            node_b="base_link",
+        )
+        body_trans[t] = trans
+        body_rot[t] = rot
 
-    robot_body_pos_traj = torch.stack(robot_body_pos_traj, dim=0)
-    robot_body_quat_traj = torch.stack(robot_body_quat_traj, dim=0)
+    body_trans = torch.from_numpy(body_trans).reshape(-1, 3)          # (T*K, 3)
+    body_quat = quat_from_matrix(torch.from_numpy(body_rot).reshape(-1, 3, 3))  # (T*K, 4)
+
+    robot_world_pos_t = torch.tensor(robot_world_pos, dtype=torch.float32).expand(T * K, 3)
+    robot_world_quat_t = torch.tensor(robot_world_quat, dtype=torch.float32).expand(T * K, 4)
+
+    body_world_pos, body_world_quat = combine_frame_transforms(
+        t01=robot_world_pos_t,
+        q01=robot_world_quat_t,
+        t12=body_trans,
+        q12=body_quat,
+    )
+    robot_body_pos_traj = body_world_pos.reshape(T, K, 3)
+    robot_body_quat_traj = body_world_quat.reshape(T, K, 4)
 
     # translation = get_hinge_pos(door_urdf_path, door_initial_pose, door_traj)
     # body_world_pos, _ = combine_frame_transforms(t01 = torch.tensor(door_world_pos).unsqueeze(0).float(), q01 = torch.tensor(door_world_quat).unsqueeze(0).float(), t12 = translation, q12 = None)

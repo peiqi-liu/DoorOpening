@@ -63,7 +63,19 @@ DEFAULT_FRAME_HEAD_HEIGHT_RANGE_M = (0.0, 0.20)
 DEFAULT_FRAME_DEPTH_RANGE_M = (0.0, 0.30)
 DEFAULT_FRAME_CLEARANCE_RANGE_M = (0.003, 0.015)
 
-DEFAULT_HANDLE_HEIGHT_RANGE_M = (0.75, 1.0)
+# Lever centre height above the floor, set to US practice. ADA 2010 §308 puts operable parts in a
+# 34-48 in reach range (0.86-1.22 m); real US door hardware clusters at 34-40 in (0.86-1.02 m), with
+# ~36 in (0.91 m) the common spec. The lower bound is therefore the ADA floor, and the upper bound is
+# deliberately pushed ABOVE typical practice so the heights real doors actually use stay INTERIOR to
+# the distribution. The previous (0.75, 1.0) put 0.95-1.00 m at the boundary, and an audit of 512
+# doors showed success collapsing there (79% at 0.75-0.80 m -> 38% at 0.95-1.00 m) while every band
+# below held ~72-79% -- a cliff at the edge of the training data, exactly where real handles sit.
+# 0.75 m is dropped: it is below the ADA minimum and no US door uses it.
+# NOTE: this value is in the DOOR's local frame, and env_constants.DOOR_INITIAL_POS lifts the door
+# 0.03 m off the floor, so world handle height = this + 0.03. The bounds below are pre-compensated:
+# (0.83, 1.12) local -> (0.86, 1.15) in world, which is the ADA-referenced range we actually want.
+# Keep them in sync if DOOR_INITIAL_POS[2] changes.
+DEFAULT_HANDLE_HEIGHT_RANGE_M = (0.83, 1.12)
 DEFAULT_HANDLE_EDGE_DISTANCE_RANGE_M = (0.03, 0.15)
 DEFAULT_HANDLE_RADIUS_RANGE_M = (0.007, 0.013)
 # Lever grip bar RADIUS (half cross-section), decoupled from the stem radius -- same convention as
@@ -89,10 +101,14 @@ DEFAULT_RETURN_HANDLE_PROB = 0.7
 #   - "cylinder" : a round mounting boss co-axial with the stem, on link_2. Rotationally symmetric so
 #                  it stays put under the joint_2 sweep. Sized by radius and protrusion (length).
 # In both cases the handle stem starts at the OUTER face of the mount, so handle_stem_length is the
-# clear gap the fingers get above the mount. On for ~70% of doors by default; when on, the SIZE varies
-# down to nearly-flush (smallest plate ≈ no plate), so the no-plate..plate spectrum is covered by both
-# the 30% hard-off share AND the size variation of the 70% that are on.
-DEFAULT_HANDLE_BUMP_PROB = 0.7
+# clear gap the fingers get above the mount.
+# DEFAULT OFF (was 0.7). A 512-door audit put the plate at a ~17-point success penalty at every handle
+# height (85.8% -> 69.6% below 0.95 m world, 61.3% -> 43.5% above), while the finger clearance the
+# plate eats into showed no independent effect of its own (-0.082 on grasp failures, -0.001 on the
+# rest). So whatever the plate costs is not explained by the gap it consumes, and the same gap can be
+# dialled directly with DEFAULT_HANDLE_STEM_LENGTH_RANGE_M instead. Pass --handle-bump-prob to put the
+# plates back (the size ranges below still apply when it is non-zero).
+DEFAULT_HANDLE_BUMP_PROB = 0.0
 DEFAULT_HANDLE_BUMP_SHAPE = "box"
 # Outward protrusion (z) of the mount out of the door face. Range starts near ZERO so a small draw is
 # effectively "no bump" (nearly flush), up to a chunky escutcheon (30 mm). This lets a single always-on

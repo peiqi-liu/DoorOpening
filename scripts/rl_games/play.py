@@ -96,6 +96,27 @@ parser.add_argument(
     help="Number of tracked-env rollouts to record before stopping + saving --save-viser-pt.",
 )
 parser.add_argument(
+    "--door-audit-out",
+    "--door_audit_out",
+    dest="door_audit_out",
+    type=str,
+    default=None,
+    help=(
+        "Record a per-episode success/failure row for every door asset and write it as JSON. "
+        "Join it with the door variant_meta.json files via scripts/tools/analyze_door_audit.py to "
+        "see which door parameters separate the failures from the successes. Run with "
+        "--num_envs equal to the asset count (512 per family set) so every door is covered."
+    ),
+)
+parser.add_argument(
+    "--door-audit-episodes",
+    "--door_audit_episodes",
+    dest="door_audit_episodes",
+    type=int,
+    default=1,
+    help="Stop playback once EVERY env has completed at least this many episodes (with --door-audit-out).",
+)
+parser.add_argument(
     "--track-pointcloud-camera",
     action="store_true",
     default=False,
@@ -664,6 +685,165 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             f"save_dir={save_dir})."
         )
 
+    door_audit_state = None
+    if args_cli.door_audit_out is not None:
+        from DoorOpening.assets.door.multi_door_cfg import asset_paths as _audit_asset_paths
+
+        _n_assets = len(_audit_asset_paths)
+        if play_env.num_envs < _n_assets:
+            print(
+                f"[AUDIT][WARN] num_envs={play_env.num_envs} < {_n_assets} door assets; only the first "
+                f"{play_env.num_envs} doors of the cycle will be evaluated."
+            )
+        # NOTE ON SUCCESS: play_env.last_success is `episode_reached_last_frame`, and the reference
+        # motion advances frame_idx on a CLOCK (multi_motion_lib: `frame_idx += frame_step`), not on
+        # achievement. So it reports 1.0 for any episode that merely runs long enough -- with early
+        # stopping off, that is every episode. We therefore record it only as `ref_frame_reached` and
+        # derive the real outcome from physical task state accumulated over the episode:
+        #   hinge_max   : how far the door actually swung open (rad)
+        #   latch_max   : how far the handle actually turned (rad)
+        #   dist_past_max: how far the base traversed past the door plane (m)
+        # The env cfg declares success_far_push_dist / success_far_pull_dist for exactly this
+        # traversal test, but nothing in the codebase reads them -- we apply them here.
+        _base_x_local = list(play_env.cfg.base_joints).index("base_x_joint")
+        door_audit_state = {
+            "asset_paths": [str(p) for p in _audit_asset_paths],
+            # env -> asset index is fixed for the whole run (rank-offset cycle), so a door's identity
+            # never changes across resets and every episode row can be attributed to one door.
+            "env_asset_idx": play_env.env_asset_indices.detach().cpu().tolist(),
+            "rows": [],
+            "episodes_per_env": [0] * int(play_env.num_envs),
+            "target_episodes": max(1, int(args_cli.door_audit_episodes)),
+            "board_idx": int(play_env._door_board_joint_idx),
+            "hinge_idx": int(play_env._door_hinge_joint_idx),
+            "base_x_dof": int(play_env._robot_base_dof_idx[_base_x_local].item()),
+            "is_push": play_env._get_is_push_env().detach().cpu().clone(),
+            "push_thresh": float(play_env.cfg.success_far_push_dist),
+            "pull_thresh": float(play_env.cfg.success_far_pull_dist),
+            # Running per-episode maxima, reset when an env is done.
+            "hinge_max": torch.zeros(play_env.num_envs),
+            "latch_max": torch.zeros(play_env.num_envs),
+            "dist_max": torch.full((play_env.num_envs,), -1e9),
+            "prev": None,
+            "done": False,
+        }
+
+    def _accumulate_door_progress():
+        """Track per-episode maxima of the physical task signals (call every step, pre-reset)."""
+        st = door_audit_state
+        d = play_env.door.data
+        hinge = d.joint_pos[:, st["hinge_idx"]].abs().detach().cpu()
+        latch = d.joint_pos[:, st["board_idx"]].abs().detach().cpu()
+        base_x = play_env.robot.data.joint_pos[:, st["base_x_dof"]]
+        dist = play_env._base_dist_past_door(base_x).detach().cpu()
+        torch.maximum(st["hinge_max"], hinge, out=st["hinge_max"])
+        torch.maximum(st["latch_max"], latch, out=st["latch_max"])
+        torch.maximum(st["dist_max"], dist, out=st["dist_max"])
+        print(
+            f"[AUDIT] Per-door audit enabled: {play_env.num_envs} envs over {_n_assets} assets, "
+            f"{door_audit_state['target_episodes']} episode(s) per env -> {os.path.abspath(args_cli.door_audit_out)}"
+        )
+
+    def _snapshot_door_dynamics():
+        """Per-env door joint gains for the CURRENTLY running episode.
+
+        Must be read BEFORE env.step(), because the reset inside step() redraws the ADR
+        stiffness/damping/effort-limit event terms -- reading after would report the next
+        episode's values against this episode's outcome.
+        """
+        d = play_env.door.data
+        b, hh = door_audit_state["board_idx"], door_audit_state["hinge_idx"]
+        eff = getattr(d, "joint_effort_limits", None)
+        return {
+            "board_stiffness": d.joint_stiffness[:, b].detach().cpu().clone(),
+            "board_damping": d.joint_damping[:, b].detach().cpu().clone(),
+            "hinge_stiffness": d.joint_stiffness[:, hh].detach().cpu().clone(),
+            "hinge_damping": d.joint_damping[:, hh].detach().cpu().clone(),
+            "hinge_effort_limit": (eff[:, hh].detach().cpu().clone() if eff is not None else None),
+            "episode_len": play_env.episode_length_buf.detach().cpu().clone(),
+        }
+
+    def _record_door_audit(dones_tensor):
+        prev = door_audit_state["prev"]
+        if prev is None:
+            return
+        done_ids = torch.nonzero(dones_tensor.reshape(-1), as_tuple=False).squeeze(-1).detach().cpu().tolist()
+        if not done_ids:
+            return
+        st = door_audit_state
+        ref_reached = play_env.last_success.detach().cpu()
+        x5_hit = getattr(play_env, "episode_x5_collided", None)
+        box_hit = getattr(play_env, "episode_franka_box_collided", None)
+        for env_id in done_ids:
+            if st["episodes_per_env"][env_id] >= st["target_episodes"]:
+                continue
+            is_push = bool(st["is_push"][env_id] > 0.5)
+            thresh = st["push_thresh"] if is_push else st["pull_thresh"]
+            traversed = float(st["dist_max"][env_id].item()) > thresh
+            row = {
+                "env_id": int(env_id),
+                "asset_idx": int(st["env_asset_idx"][env_id]),
+                "asset_path": st["asset_paths"][st["env_asset_idx"][env_id]],
+                # Real outcome: the base actually got through the doorway.
+                "success": float(traversed),
+                # The old clock-driven metric, kept so the two can be compared.
+                "ref_frame_reached": float(ref_reached[env_id].item()),
+                "hinge_max_rad": float(st["hinge_max"][env_id].item()),
+                "latch_max_rad": float(st["latch_max"][env_id].item()),
+                "dist_past_door_max_m": float(st["dist_max"][env_id].item()),
+                "is_push": float(is_push),
+                "episode_steps": int(prev["episode_len"][env_id].item()),
+                "board_stiffness": float(prev["board_stiffness"][env_id].item()),
+                "board_damping": float(prev["board_damping"][env_id].item()),
+                "hinge_stiffness": float(prev["hinge_stiffness"][env_id].item()),
+                "hinge_damping": float(prev["hinge_damping"][env_id].item()),
+            }
+            if prev["hinge_effort_limit"] is not None:
+                row["hinge_effort_limit"] = float(prev["hinge_effort_limit"][env_id].item())
+            if x5_hit is not None:
+                row["x5_door_collision"] = float(x5_hit[env_id].to(torch.float32).item())
+            if box_hit is not None:
+                row["franka_box_collision"] = float(box_hit[env_id].to(torch.float32).item())
+            # Why the episode ended. Populated only with --enable-early-stopping: without it
+            # _get_dones short-circuits before computing the drift masks and everything is a timeout.
+            _rd = play_env.extras.get("fail/robot_drift")
+            _dd = play_env.extras.get("fail/door_drift")
+            if _rd is not None and _dd is not None:
+                robot_drift = bool(_rd.reshape(-1)[env_id].item())
+                door_drift = bool(_dd.reshape(-1)[env_id].item())
+                row["killed_robot_drift"] = float(robot_drift)
+                row["killed_door_drift"] = float(door_drift)
+                row["term_reason"] = (
+                    "robot_drift" if robot_drift else "door_drift" if door_drift else "timeout"
+                )
+            st["rows"].append(row)
+            st["episodes_per_env"][env_id] += 1
+        # Clear the running maxima for every env that just reset, so the next episode starts clean.
+        for env_id in done_ids:
+            st["hinge_max"][env_id] = 0.0
+            st["latch_max"][env_id] = 0.0
+            st["dist_max"][env_id] = -1e9
+        if all(c >= st["target_episodes"] for c in st["episodes_per_env"]):
+            st["done"] = True
+
+    def _write_door_audit():
+        import json as _json
+
+        path = os.path.abspath(args_cli.door_audit_out)
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        rows = door_audit_state["rows"]
+        with open(path, "w", encoding="utf-8") as fh:
+            _json.dump({"checkpoint": resume_path, "rows": rows}, fh, indent=1)
+        n_ok = sum(1 for r in rows if r["success"] > 0.5)
+        n_ref = sum(1 for r in rows if r.get("ref_frame_reached", 0.0) > 0.5)
+        opened = sum(1 for r in rows if r.get("hinge_max_rad", 0.0) > 0.35)  # ~20 deg of swing
+        print(
+            f"[AUDIT] Wrote {len(rows)} episode rows to {path}\n"
+            f"[AUDIT]   traversed past door : {n_ok}/{len(rows)}  <- real success\n"
+            f"[AUDIT]   door swung > 20 deg : {opened}/{len(rows)}\n"
+            f"[AUDIT]   reached last ref frame: {n_ref}/{len(rows)}  (clock-driven, not achievement)"
+        )
+
     probe_state = None
 
     def _save_probe_payload():
@@ -781,8 +961,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 obs = agent.obs_to_torch(obs)
                 # agent stepping
                 actions = agent.get_action(obs, is_deterministic=agent.is_deterministic)
+                # Snapshot this episode's door gains and task progress before step() resets them.
+                if door_audit_state is not None:
+                    door_audit_state["prev"] = _snapshot_door_dynamics()
+                    _accumulate_door_progress()
                 # env stepping
                 obs, _, dones, _ = env.step(actions)
+                if door_audit_state is not None:
+                    _record_door_audit(dones)
 
                 # Contact-force readout: franka<->arx (arm self-collision vs the arx/x5 camera arm)
                 # and leap-fingers<->panel. Printed every 30 env steps to avoid flooding the console.
@@ -937,6 +1123,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         for s in agent.states:
                             s[:, dones, :] = 0.0
 
+            if door_audit_state is not None and door_audit_state["done"]:
+                print(
+                    f"[AUDIT] Every env completed {door_audit_state['target_episodes']} episode(s); "
+                    "stopping playback."
+                )
+                break
+
             # Enough rollouts captured -> stop the play loop so the .pt is written by the finally block.
             if viser_pt_state is not None and viser_pt_state.get("done"):
                 print(
@@ -960,6 +1153,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             if args_cli.real_time and sleep_time > 0:
                 time.sleep(sleep_time)
     finally:
+        # Write whatever rows exist, even on Ctrl-C / early exit.
+        if door_audit_state is not None and door_audit_state["rows"]:
+            _write_door_audit()
+
         if viser_pt_state is not None and viser_pt_state["frames"]:
             _viser_path = os.path.abspath(args_cli.save_viser_pt)
             os.makedirs(os.path.dirname(_viser_path) or ".", exist_ok=True)
