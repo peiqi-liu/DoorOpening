@@ -124,25 +124,11 @@ GLORBOT_CONFIG = ArticulationCfg(
         #     stiffness=4000.0,
         #     damping=2000.0,
         # ),
-        # Base drive gains ported from a reference mobile-base config (matched to the real chassis).
-        # Split linear (base_x/base_y, prismatic m·s⁻¹) vs yaw (base_rotation, revolute rad·s⁻¹) because
-        # their gains AND velocity caps differ. The velocity_limit_sim caps (1.0 m/s, 3.14 rad/s) are the
-        # key change vs before (the base had NO velocity limit and could slew/stop instantly). Gains are
-        # physical so they transfer despite the rate difference (reference runs 60 Hz; ours is 30 Hz:
-        # sim_dt=1/120, decimation=4). Action scale/convention unchanged (integrated-target delta).
-        "base_linear": ImplicitActuatorCfg(
-            joint_names_expr=["base_[xy]_joint"],
+        "base": ImplicitActuatorCfg(
+            joint_names_expr=["base_.*"],
             effort_limit_sim=1000.0,
-            velocity_limit_sim=1.0,
-            stiffness=80000.0,
-            damping=4000.0,
-        ),
-        "base_rotation": ImplicitActuatorCfg(
-            joint_names_expr=["base_rotation_joint"],
-            effort_limit_sim=1000.0,
-            velocity_limit_sim=3.14,
-            stiffness=8000.0,
-            damping=400.0,
+            stiffness=10000,
+            damping=3000,
         ),
         # Per-joint Franka PD gains matched to the REAL-WORLD deploy controller (kp/kd used on hardware),
         # set per joint because the real values vary within each group (kd differs across joint1-4; both
