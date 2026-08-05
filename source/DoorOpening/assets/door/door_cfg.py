@@ -167,7 +167,17 @@ def create_door_cfg(
 
 
 root_path = os.path.dirname(os.path.dirname(__file__))
-asset_base_folder = os.path.join(root_path, "door/v5_test")
+# Which single-door test set the debug/reference-motion scripts (scripts/state_machine.py,
+# scripts/hard_code_traj.py) operate on, selected by --door_number into DOOR_CONFIGS below.
+# Override without editing this file:
+#     DOOROPENING_DOOR_SET=v6_test python scripts/state_machine.py --door_number 0 ...
+DOOR_SET_NAME = os.environ.get("DOOROPENING_DOOR_SET", "v5_test").strip() or "v5_test"
+asset_base_folder = os.path.join(root_path, "door", DOOR_SET_NAME)
+if not os.path.isdir(asset_base_folder):
+    raise FileNotFoundError(
+        f"Door set {DOOR_SET_NAME!r} not found at {asset_base_folder}. "
+        "Set DOOROPENING_DOOR_SET to a folder under source/DoorOpening/assets/door."
+    )
 asset_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/mobility.urdf"), recursive=True))
 board_offsets = []
 board_bboxes = []

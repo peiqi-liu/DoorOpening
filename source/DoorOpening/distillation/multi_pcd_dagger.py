@@ -216,6 +216,26 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.depth_cam_render_blur_sigma_px = float(self.depth_cam_render_cfg.get("blur_sigma_px", 0.0))
         # Edge dropout on the SCENE depth (after blur) to remove flying-pixel smears on wall/door edges.
         self.depth_cam_render_edge_drop_m = float(self.depth_cam_render_cfg.get("edge_drop_m", 0.0))
+        # Axial (along-ray) depth jitter, in meters, added per-pixel BEFORE back-projection. Unlike the
+        # image-space blur, axial jitter keeps every point on its own camera ray, so it fuzzes surfaces
+        # (a realistic RealSense range-noise look on the handle) WITHOUT the lateral "point -> ray"
+        # overshoot the blur casts across silhouettes. Applied separately to the scene (door+walls) and
+        # to the crisp robot pass so the robot body can carry sensor-like fuzz without smearing fingers.
+        # 0 disables. Prefer this over blur_kernel_px to keep the handle blurry while cutting overshoot.
+        self.depth_cam_render_axial_jitter_std_m = float(
+            self.depth_cam_render_cfg.get("axial_jitter_std_m", 0.0)
+        )
+        self.depth_cam_render_robot_axial_jitter_std_m = float(
+            self.depth_cam_render_cfg.get("robot_axial_jitter_std_m", 0.0)
+        )
+        # Optional override of the depth camera's HORIZONTAL / VERTICAL field of view (degrees). None =>
+        # the physical D435 defaults in camera_utils (85 x 58). Lowering fov_y_deg raises fy, so the
+        # rendered image spans a NARROWER vertical angle at the same resolution: points near the top/
+        # bottom fall outside the frame and drop -- a vertical-FOV crop. Use to match a real camera that
+        # effectively sees less vertically than the 58-degree nominal (mounting/tilt/crop). NOTE: keep
+        # scripts/rl_games/play.py's real camera crop in sync at deploy, or sim/real intrinsics drift.
+        self.depth_cam_render_fov_x_deg = self.depth_cam_render_cfg.get("fov_x_deg", None)
+        self.depth_cam_render_fov_y_deg = self.depth_cam_render_cfg.get("fov_y_deg", None)
         self.lidar_render_cfg = self.runtime_cfg.get("lidar_render", {})
         self.lidar_num_points = self.lidar_render_cfg.get("num_points")
         self.lidar_num_azimuth = int(self.lidar_render_cfg.get("num_azimuth", 512))
@@ -3022,11 +3042,19 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
     def _build_sampler_camera_spec(self):
         camera_cfg = self.ov_env.cfg.pointcloud_camera_cfg
         # Half-res D435 model. The intrinsics/range live in DoorOpening.utils.camera_utils so that
-        # scripts/rl_games/play.py can drive the real IsaacLab camera to the identical spec.
+        # scripts/rl_games/play.py can drive the real IsaacLab camera to the identical spec. fov_*_deg
+        # default to None -> the D435 physical FOV; depth_cam_render.fov_y_deg can narrow the vertical
+        # field (see the config note in __init__).
+        fov_kwargs = {}
+        if self.depth_cam_render_fov_x_deg is not None:
+            fov_kwargs["fov_x_deg"] = float(self.depth_cam_render_fov_x_deg)
+        if self.depth_cam_render_fov_y_deg is not None:
+            fov_kwargs["fov_y_deg"] = float(self.depth_cam_render_fov_y_deg)
         return build_realsense_sampler_spec(
             int(camera_cfg.height) // 2,
             int(camera_cfg.width) // 2,
             device=self.device,
+            **fov_kwargs,
         )
 
     def _get_sampler_camera_pose(self):
@@ -3424,15 +3452,30 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         )
         return world_to_local(rendered_pcd_world, robot_base_pos_w, robot_base_quat_w)
 
+    @staticmethod
+    def _apply_axial_depth_jitter(depth, std_m):
+        """Add zero-mean Gaussian noise to a depth image ALONG the ray (range direction) only.
+
+        This is the same axial model as camera_utils.render_depth_roundtrip_from_pose's
+        jitter_mode="axial": perturbing depth before back-projection keeps every point on its own
+        pixel ray, so the lateral silhouette (thin handle) stays put while the surface fuzzes in depth.
+        Invalid (+inf / NaN) pixels are left untouched so they still pack out as NaN padding.
+        """
+        if std_m is None or float(std_m) <= 0.0:
+            return depth
+        finite = torch.isfinite(depth)
+        return torch.where(finite, depth + torch.randn_like(depth) * float(std_m), depth)
+
     def _render_depth_scene_with_crisp_robot(self, door_walls_pcd_world, robot_pcd_world, camera_pose):
         """Depth-cam obs render (world frame) with the robot kept CRISP -- the same logic as the viser
         tool's render_batch, so training and that preview stay identical.
 
         The SCENE (door + walls) goes through the z-buffer + occluder anti-penetration pass + RealSense
-        edge-bleed blur; edge-drop then removes the blur's flying-pixel smears on wall/door silhouettes.
-        The ROBOT is rasterized in a SEPARATE crisp pass (NO blur / edge-drop / jitter) and composited by
-        nearest-surface ``minimum``, so it self-occludes / occludes the door but carries no unfaithful
-        sensor noise on its own body. door+walls is BOTH the main and the occluder cloud here.
+        edge-bleed blur; edge-drop then removes the blur's flying-pixel smears on wall/door silhouettes;
+        optional axial (on-ray) jitter adds range fuzz without lateral overshoot. The ROBOT is rasterized
+        in a SEPARATE crisp pass (NO lateral blur / edge-drop, only optional axial jitter) and composited
+        by nearest-surface ``minimum``, so it self-occludes / occludes the door while its thin fingers
+        stay sharp. door+walls is BOTH the main and the occluder cloud here.
 
         Returns (B, num_points, 3) world points, NaN-padded to a fixed count.
         """
@@ -3469,11 +3512,14 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         # --- Edge dropout on the scene: remove the blur's flying-pixel smears at wall/door edges. ---
         if self.depth_cam_render_edge_drop_m > 0.0:
             scene_depth = drop_depth_edges(scene_depth, self.depth_cam_render_edge_drop_m)
-        # --- Robot: crisp z-buffer, composited by nearest-surface min (no blur / edge-drop / jitter). ---
+        # --- Scene axial jitter: fuzz surfaces (blurry handle) along the ray, no lateral overshoot. ---
+        scene_depth = self._apply_axial_depth_jitter(scene_depth, self.depth_cam_render_axial_jitter_std_m)
+        # --- Robot: crisp z-buffer (no blur / edge-drop), then optional axial-only sensor fuzz. ---
         robot_depth, intr = rasterize_depth_zbuffer_from_pose(
             robot_pcd_world, camera_pose, cam_spec,
             inflate_px=self.depth_cam_render_inflate_px, clip_mode=self.depth_cam_render_clip_mode,
         )
+        robot_depth = self._apply_axial_depth_jitter(robot_depth, self.depth_cam_render_robot_axial_jitter_std_m)
         depth = torch.minimum(scene_depth, robot_depth)
         pcd_world, _ = backproject_depth_to_world_from_pose(depth, camera_pose, intr)
         # --- Fixed-N packing (same as render_depth_roundtrip_from_pose): shuffle, push NaN to the end. ---
@@ -3546,6 +3592,11 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
     def _sample_scene_obs_pointcloud_base(self):
         self._viser_cached_ground_truth_pcd_world = None
         self._viser_cached_sensor_obs_pcd_base = OrderedDict()
+        # The depth camera is a real sensor: it SEES the robot's own hand, so the depth cloud is NOT
+        # robot-filtered -- the self-points stay in and the policy learns to tell its fingers from the
+        # handle via proprioception, matching the real RealSense. Only the LIDAR cloud is robot-filtered
+        # (_filter_robot_points_base). This kept-for-viser handle now equals the policy-facing depth cloud.
+        self._last_rendered_depth_pcd_base = None
         # Per-rollout hole: reuse the metadata drawn at the last reset (see _resample_door_hole_aug).
         # Only when resample_each_step is set do we redraw a fresh hole for the whole batch every step.
         if self.door_hole_aug_resample_each_step:
@@ -3553,7 +3604,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         else:
             self._update_door_hole_aug_stats()
         if self.pointcloud_source in {"sampler", "depth"}:
-            depth_pcd_base = self._filter_robot_points_base(self._sample_scene_obs_pointcloud_base_depth())
+            depth_pcd_base = self._sample_scene_obs_pointcloud_base_depth()  # robot NOT filtered from depth
+            self._last_rendered_depth_pcd_base = depth_pcd_base
             self._viser_cached_sensor_obs_pcd_base["robot_depth_cam_obs"] = depth_pcd_base
             scene_obs_pcd_sources = [depth_pcd_base]
         elif self.pointcloud_source == "lidar":
@@ -3562,8 +3614,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             scene_obs_pcd_sources = [lidar_pcd_base]
         else:
             depth_pcd_base, lidar_pcd_base = self._sample_scene_obs_pointcloud_base_both()
-            depth_pcd_base = self._filter_robot_points_base(depth_pcd_base)
-            lidar_pcd_base = self._filter_robot_points_base(lidar_pcd_base)
+            self._last_rendered_depth_pcd_base = depth_pcd_base  # depth keeps the robot
+            lidar_pcd_base = self._filter_robot_points_base(lidar_pcd_base)  # lidar only
             self._viser_cached_sensor_obs_pcd_base["robot_lidar_obs"] = lidar_pcd_base
             self._viser_cached_sensor_obs_pcd_base["robot_depth_cam_obs"] = depth_pcd_base
             # Keep the realsense (dense, narrow FoV) and lidar (sparse, wide FoV) clouds

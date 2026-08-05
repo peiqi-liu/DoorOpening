@@ -73,9 +73,16 @@ DEFAULT_FRAME_CLEARANCE_RANGE_M = (0.003, 0.015)
 # 0.75 m is dropped: it is below the ADA minimum and no US door uses it.
 # NOTE: this value is in the DOOR's local frame, and env_constants.DOOR_INITIAL_POS lifts the door
 # 0.03 m off the floor, so world handle height = this + 0.03. The bounds below are pre-compensated:
-# (0.83, 1.12) local -> (0.86, 1.15) in world, which is the ADA-referenced range we actually want.
-# Keep them in sync if DOOR_INITIAL_POS[2] changes.
-DEFAULT_HANDLE_HEIGHT_RANGE_M = (0.83, 1.12)
+# (0.82, 1.07) local -> (0.85, 1.10) in world. Keep them in sync if DOOR_INITIAL_POS[2] changes.
+# The 0.85 m floor dips ~1.4 cm below the ADA 34 in (0.864 m) minimum on purpose: plenty of older and
+# residential doors are not code-compliant, so a little margin below the legal floor is free robustness.
+# The ceiling is a deliberate middle: 1.15 m world put a THIRD of doors above 1.04 m, where a 200-door
+# audit measured 1/44 then 0/25 success, so most of that tail was unusable; 1.05 m world would have
+# hugged the top of US practice with no headroom left at all. 1.10 m keeps the 0.86-1.02 m band real US
+# hardware occupies well inside the distribution (36 in / 0.91 m sits at the 21st percentile, not the
+# edge), matches European DIN lever height (~1.05 m) with margin, and leaves ~25% of doors above the
+# current failure wall as reachable stretch -- the reference trajectories solve every one of them.
+DEFAULT_HANDLE_HEIGHT_RANGE_M = (0.82, 1.07)
 DEFAULT_HANDLE_EDGE_DISTANCE_RANGE_M = (0.03, 0.15)
 DEFAULT_HANDLE_RADIUS_RANGE_M = (0.007, 0.013)
 # Lever grip bar RADIUS (half cross-section), decoupled from the stem radius -- same convention as

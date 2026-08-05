@@ -1032,6 +1032,13 @@ def _append_viser_frame(recorder, viser_meta, base_env, dagger, student_output):
     pcd_base = getattr(dagger, "_last_policy_input_pcd_base", None)
     if pcd_base is not None and pcd_base.shape[0] > env_id:
         frame["policy_input_points_world"] = _base_to_world(pcd_base[env_id, ..., :3]).cpu().clone()
+    # RealSense-rendered depth-cam cloud (the raw render, robot hand included and self-occluding the
+    # door -- this is BEFORE _filter_robot_points_base strips the robot's own points for the policy).
+    # Both clouds live in the same base-body frame, so _base_to_world applies identically. NaN padding
+    # is carried through and dropped by replay_viser_pt.py's finite filter.
+    depth_cam_base = getattr(dagger, "_last_rendered_depth_pcd_base", None)
+    if depth_cam_base is not None and depth_cam_base.shape[0] > env_id:
+        frame["robot_depth_cam_obs_points_world"] = _base_to_world(depth_cam_base[env_id, ..., :3]).cpu().clone()
     # Aux handle position: the network's PREDICTED handle pos and the aux INPUT it received are both in
     # the base-body frame. Pre-transform to env-relative world here (the replay renders *_world directly)
     # so they track the point cloud instead of the root.

@@ -170,7 +170,7 @@ def state_machine_offline_right_pull_door(
     # Palm<->door x gap kept at 0.035: enough clearance that the grasp doesn't drive fingers into
     # the panel, without reaching as deep as the 0.025 tuned for the thicker HEAD lever bars.
     grasp_palm_x_offset = 0.035
-    grasp_palm_y_offset = -0.065
+    grasp_palm_y_offset = -0.085
     grasp_palm_z_offset = 0.10
     grasp_open_ratio = 0.70
 
@@ -403,19 +403,20 @@ def state_machine_offline_right_pull_door(
     # Retract offset applied DIRECTLY in world frame -- no base-yaw rotation (that rotation was
     # mixing the axes: "dx too small, dy too large"). Now these map straight to world directions:
     # +x pulls the hand BACKWARD off the door; +y nudges it to the RIGHT to clear the panel.
-    retreat_local_x = 0.22
-    retreat_local_y = 0.35
+    retreat_local_x = 0.15
+    retreat_local_y = 0.3
     # LIFT the retract target up: the arm swings a wide arc from here around to the panel-hold
     # pose, and doing that low sweeps it through the arx camera arm on the base. Keeping the hand
     # high makes the swing pass OVER the arx instead of colliding with it.
-    retreat_z_lift = 0.28
+    # retreat_z_lift = 0.05
     # No base move at the retract stage: the base stays at the door-blocking pose set in step 5.
     # Append the retract offset to the LAST palm location (step 5's palm pose), NOT the base pose,
     # so dx/dy/dz are all deltas from where the hand currently is.
     retreat_palm_pos = palm_target_pose[:, :3].clone()
     retreat_palm_pos[:, 0] += retreat_local_x
     retreat_palm_pos[:, 1] += retreat_local_y
-    retreat_palm_pos[:, 2] += retreat_z_lift
+    # retreat_palm_pos[:, 2] += retreat_z_lift
+    retreat_palm_pos[:, 2] = 1.2
     retreat_palm_pose = _make_pose(retreat_palm_pos, default_palm_rot)
 
     q_robot[:10] = solve_ik(
@@ -450,10 +451,6 @@ def state_machine_offline_right_pull_door(
     # Contact height on the panel: raised back up so the hand holds/pushes the panel HIGHER (the
     # low contact made the arm swing down toward the arx on the way in).
     push_contact_z_offset = 0.22
-    # Extra outward +y for a NON-KEY approach waypoint: the arm first swings OUT to the side of the
-    # panel, then moves in to contact -- so it does not penetrate straight through. Reduced from
-    # 0.20 -> 0.10 because the approach was landing too far to the right.
-    push_approach_out_y = 0.10
     contact_board_pos = get_board_pos(
         door_urdf_path,
         door_initial_pose,
@@ -464,7 +461,7 @@ def state_machine_offline_right_pull_door(
     # --- Non-key approach: move outward (extra +y) before pushing in ---
     palm_target_pos = contact_board_pos.clone()
     palm_target_pos[:, 0] += push_contact_x_offset
-    palm_target_pos[:, 1] += push_contact_y_offset + push_approach_out_y
+    palm_target_pos[:, 1] += push_contact_y_offset
     palm_target_pos[:, 2] += push_contact_z_offset
     palm_target_pose = _make_pose(palm_target_pos, push_palm_rot)
 

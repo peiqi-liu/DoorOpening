@@ -204,6 +204,8 @@ dagger:
   append_robot_model_to_policy_cloud: true
   robot_model_policy_points: 2000  # Robot model points appended to the policy input after the depth/lidar crops.
   robot_pointcloud_filter:
+    # Robot self-points are stripped from the LIDAR cloud only. The depth camera is a real sensor that
+    # sees the robot's own hand, so the depth cloud keeps its self-points (see _sample_scene_obs_pointcloud_base).
     enabled: true
     sdf_cutoff: 0.02
     max_points_per_process: 5000
@@ -213,6 +215,11 @@ dagger:
     # plus an OPTIONAL RealSense-style spatial blur (blur_kernel_px/blur_sigma_px below) so thin features
     # like the handle bleed into a blurry "bump" instead of rendering as a crisp lever.
     num_points: 12000
+    # Depth-camera field of view (degrees). Omit / null -> D435 physical defaults (85 x 58). Lowering
+    # fov_y_deg narrows the VERTICAL angle at the same resolution, cropping top/bottom points to match a
+    # real camera that effectively sees less vertically than 58 deg. Set to reduce the vertical FOV;
+    # keep the deploy-time real camera crop (scripts/rl_games/play.py) in sync if this helps sim2real.
+    fov_y_deg: 50  # null -> D435 58 deg nominal. Set e.g. 45 to crop the vertical FOV (did not reproduce the real bug, so left off).
     inflate_px: 0  # Main-pass z-buffer dilation (px). 0 = plain round-trip (each point -> one pixel -> back), which is what we want; the door/robot clouds are dense enough that the raw per-pixel z-buffer has no meaningful holes. Raise to 1-2 only if the surface looks holey/sparse.
     clip_mode: "post"
     use_compile: true
@@ -222,8 +229,22 @@ dagger:
     # kernel 5 already erases the handle's crisp plane. blur_kernel_px <= 1 disables it (0 = current
     # behaviour). Recommended starting point to make the handle a bump: blur_kernel_px 5-7, blur_sigma_px
     # 2-3 (larger sigma = softer). Set per-run; left off here so existing runs are unchanged.
-    blur_kernel_px: 11
+    # Kept at the MINIMUM that still turns the crisp lever into a blurry bump (kernel 5 already erases
+    # the handle's crisp plane, per the note above). Was 11: that extra kernel width is what smeared the
+    # handle laterally across the handle->panel gap and cast the "flying pixel" overshoot. The surface
+    # fuzz the wide blur used to add is now supplied by axial_jitter_std_m below, which stays on-ray and
+    # does NOT overshoot. Net: same blurry handle, far less overshoot.
+    blur_kernel_px: 5
     blur_sigma_px: 3.0
+    # Axial (along-ray) depth noise added per-pixel before back-projection -- the physically-faithful
+    # RealSense range-noise model. Unlike the lateral blur it keeps every point on its own camera ray,
+    # so it fuzzes the handle/door surface in DEPTH (still looks blurry) without smearing across the
+    # silhouette into overshoot. axial_jitter_std_m -> scene (door+walls); robot_axial_jitter_std_m ->
+    # the crisp robot pass, so the robot body carries sensor-like fuzz without smearing its thin fingers.
+    # ~0.005 m ~ D435 range noise at this standoff. 0 on either disables that pass. Tune against the
+    # viser depth-cam replay (robot_depth_cam_obs stream) alongside a real capture.
+    axial_jitter_std_m: 0.005
+    robot_axial_jitter_std_m: 0.003
     # After the blur, drop SCENE (door+wall) pixels sitting on a depth discontinuity larger than this
     # (m). The blur bleeds wall/door silhouettes into floating "flying pixel" smears; this removes them
     # (a real depth camera drops edge returns rather than bleeding them), so the walls stay clean. The
