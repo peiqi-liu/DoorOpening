@@ -145,6 +145,14 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.play_policy = bool(self.config.get("play_policy", False))
         self.runtime_cfg = self.config.get("dagger", {})
         self.wall_distractor_cfg = dict(self.runtime_cfg.get("wall_distractors", {}))
+        # Per-FRAME handle-visibility dropout: each step, with this per-env probability, the protruding
+        # handle (link_2) points are removed from the rendered door cloud so the panel reads flat -- the
+        # handle "flickers out" like a thin lever on a real depth camera. Forces the aux head to learn to
+        # track the handle anchored to the visible PANEL (+seed) instead of relying on seeing the handle,
+        # so it stays faithful when the real handle is invisible. Even ~0.05 covers many frames/rollout.
+        self.door_handle_dropout_prob = float(self.runtime_cfg.get("door_handle_dropout_prob", 0.0))
+        if not 0.0 <= self.door_handle_dropout_prob <= 1.0:
+            raise ValueError("door_handle_dropout_prob must be in [0, 1].")
         self.door_hole_aug_cfg = dict(self.runtime_cfg.get("door_hole_aug", {}))
         self.door_frame_aug_cfg = dict(self.runtime_cfg.get("door_frame_aug", {}))
 
@@ -216,6 +224,12 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.depth_cam_render_blur_sigma_px = float(self.depth_cam_render_cfg.get("blur_sigma_px", 0.0))
         # Edge dropout on the SCENE depth (after blur) to remove flying-pixel smears on wall/door edges.
         self.depth_cam_render_edge_drop_m = float(self.depth_cam_render_cfg.get("edge_drop_m", 0.0))
+        # Median filter (odd kernel px) on the SCENE depth. Unlike the gaussian blur it does NOT average
+        # across the handle->panel step, so it makes a THIN lever vanish into the flat panel (a minority
+        # of near pixels in the window -> the median picks the panel depth) WITHOUT creating flying-pixel
+        # overshoot -- every output pixel stays a real surface depth. Use to reproduce "the handle is
+        # invisible in the point cloud, the robot sees a flat surface". 0/1 disables it.
+        self.depth_cam_render_median_kernel_px = int(self.depth_cam_render_cfg.get("median_kernel_px", 0))
         # Axial (along-ray) depth jitter, in meters, added per-pixel BEFORE back-projection. Unlike the
         # image-space blur, axial jitter keeps every point on its own camera ray, so it fuzzes surfaces
         # (a realistic RealSense range-noise look on the handle) WITHOUT the lateral "point -> ray"
@@ -2699,6 +2713,15 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             idx: build_first_visual_link_pointcloud_cache(sampler, link_names=("link_1", "link_2"), device=self.device)
             for idx, sampler in self.door_samplers.items()
         }
+        # Per-asset x/y bounding box of the handle (link_2) in its own local frame, for the per-frame
+        # handle-visibility dropout (see door_handle_dropout_prob). z is the protrusion axis; we only drop
+        # the PROTRUDING handle (|z| above a small threshold), sparing the panel plane at z~0 so the region
+        # reads flat rather than as a hole.
+        self.door_handle_bbox_link2 = {}
+        for idx, links in self.door_link_pointclouds.items():
+            h = links.get("link_2")
+            if h is not None and h.numel() > 0:
+                self.door_handle_bbox_link2[idx] = (h.min(dim=0).values, h.max(dim=0).values)
         # --- Optional door-frame (link_0 = casing/jamb) augmentation -------------------------------
         # The frame is fused into the door base (merge_fixed_joints=True), so it is NOT a separate sim
         # body and is normally absent from the door point cloud (only link_1/link_2 are composed). When
@@ -3402,6 +3425,22 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                     asset_pcd_world = torch.where(
                         frame_visible.view(-1, 1, 1), asset_pcd_world_with_frame, asset_pcd_world
                     )
+            # Per-frame handle-visibility dropout: for the drawn envs, NaN the protruding handle points so
+            # the panel reads flat this step (the handle "flickers out"). Per-env draw each frame.
+            if self.door_handle_dropout_prob > 0.0 and asset_idx in self.door_handle_bbox_link2 and "link_2" in link_pos_w_by_name:
+                drop = torch.rand(env_ids.shape[0], device=self.device) < self.door_handle_dropout_prob
+                if bool(drop.any()):
+                    bmin, bmax = self.door_handle_bbox_link2[asset_idx]
+                    pts_l2 = world_to_local(asset_pcd_world, link_pos_w_by_name["link_2"], link_quat_w_by_name["link_2"])
+                    margin = 0.01
+                    in_xy = (
+                        (pts_l2[..., 0] >= bmin[0] - margin) & (pts_l2[..., 0] <= bmax[0] + margin)
+                        & (pts_l2[..., 1] >= bmin[1] - margin) & (pts_l2[..., 1] <= bmax[1] + margin)
+                    )
+                    protruding = pts_l2[..., 2].abs() > 0.01  # spare the panel plane (z~0), drop the standoff handle
+                    drop_mask = drop.view(-1, 1) & in_xy & protruding
+                    asset_pcd_world = asset_pcd_world.clone()
+                    asset_pcd_world[drop_mask] = float("nan")
             if hole_metadata is not None:
                 asset_pcd_world = self._apply_door_hole_aug_to_world(
                     asset_pcd_world,
@@ -3466,6 +3505,27 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         finite = torch.isfinite(depth)
         return torch.where(finite, depth + torch.randn_like(depth) * float(std_m), depth)
 
+    @staticmethod
+    def _apply_depth_median_filter(depth, kernel_px):
+        """Median-filter a depth image to ERASE thin near-features (a small handle) without the overshoot
+        a mean/gaussian blur creates. A thin lever is a minority of pixels in a KxK window, so the median
+        picks the surrounding panel depth -> the handle flattens into the panel (invisible), and every
+        output pixel is a REAL neighboring depth (no averaged/flying in-between points). Odd kernel only;
+        <=1 disables. depth: (B, H, W); +inf (invalid) rides through the sort.
+        """
+        k = int(kernel_px)
+        if k <= 1:
+            return depth
+        if k % 2 == 0:
+            k += 1  # keep it odd so the window has a true median
+        pad = k // 2
+        x = depth.unsqueeze(1)  # (B, 1, H, W)
+        # Replicate-pad so borders don't pull in spurious depths (avoids the 0-fill F.unfold would do).
+        x = torch.nn.functional.pad(x, (pad, pad, pad, pad), mode="replicate")
+        patches = x.unfold(2, k, 1).unfold(3, k, 1)  # (B, 1, H, W, k, k)
+        b, _, h, w, _, _ = patches.shape
+        return patches.contiguous().view(b, h, w, k * k).median(dim=-1).values
+
     def _render_depth_scene_with_crisp_robot(self, door_walls_pcd_world, robot_pcd_world, camera_pose):
         """Depth-cam obs render (world frame) with the robot kept CRISP -- the same logic as the viser
         tool's render_batch, so training and that preview stay identical.
@@ -3512,6 +3572,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         # --- Edge dropout on the scene: remove the blur's flying-pixel smears at wall/door edges. ---
         if self.depth_cam_render_edge_drop_m > 0.0:
             scene_depth = drop_depth_edges(scene_depth, self.depth_cam_render_edge_drop_m)
+        # --- Median filter: dissolve the thin handle into the flat panel (no overshoot). ---
+        scene_depth = self._apply_depth_median_filter(scene_depth, self.depth_cam_render_median_kernel_px)
         # --- Scene axial jitter: fuzz surfaces (blurry handle) along the ray, no lateral overshoot. ---
         scene_depth = self._apply_axial_depth_jitter(scene_depth, self.depth_cam_render_axial_jitter_std_m)
         # --- Robot: crisp z-buffer (no blur / edge-drop), then optional axial-only sensor fuzz. ---

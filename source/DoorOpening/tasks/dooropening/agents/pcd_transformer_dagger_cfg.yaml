@@ -250,6 +250,12 @@ dagger:
     # (a real depth camera drops edge returns rather than bleeding them), so the walls stay clean. The
     # ROBOT is rendered in a separate crisp pass and is NOT blurred/edge-dropped. 0 disables it.
     edge_drop_m: 0.05
+    # Median filter (odd px) on the SCENE depth. Erases a THIN handle by replacing it with the
+    # surrounding panel depth -- the lever dissolves into a flat surface, reproducing "the handle is
+    # invisible in the point cloud" -- WITHOUT the flying-pixel overshoot a wider gaussian blur would add
+    # (median picks a real neighbor depth, never an in-between value). 0 disables; try 5-9 to hide the
+    # handle (bigger swallows fatter handles). A ~5 mm lever at ~1 m is only 1-2 px, so 5 already hides it.
+    median_kernel_px: 0
     # GT robot/model points rendered as a SEPARATE crisp z-buffer pass and composited by nearest-surface
     # min, so the robot self-occludes / occludes the door but never gets blur/edge-drop noise on its own
     # body (unfaithful near-robot depth noise). See multi_pcd_dagger._render_depth_scene_with_crisp_robot.
@@ -273,6 +279,11 @@ dagger:
     use_compile: true
     # Lidar analog of depth_cam_render.occluder_inflate_px (bin radius, not pixels). 0 disables it.
     occluder_fill_bins: 3
+  # Per-FRAME handle-visibility dropout: each step, per env with this probability, the protruding handle
+  # points are removed from the rendered door cloud (panel reads flat -- the handle "flickers out", like a
+  # thin lever on a real depth sensor). Trains the aux head to keep tracking the handle from the visible
+  # panel + seed instead of relying on seeing it. 0 disables; even ~0.05 hits many frames per rollout.
+  door_handle_dropout_prob: 0.05
   wall_distractors:
     enabled: true
     wall_num_points: 50000
