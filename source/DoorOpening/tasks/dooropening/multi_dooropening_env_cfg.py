@@ -257,6 +257,7 @@ class EventCfg:
             # raised to 1.2 so grippy handles are still covered. Real handle grip should be a subset.
             # Widened (was (0.2, 1.0)) after real-world observation that a metal lever can be very
             # slippery: floor 0.05 (fingers barely grip), ceiling 1.2 (grippy handles covered).
+            # Widened (was (0.2, 1.0)): floor 0.05 (fingers barely grip), ceiling 1.2 (grippy handles).
             "static_friction_range": (0.05, 1.2),
             "dynamic_friction_range": (0.05, 1.2),
             "restitution_range": (0.0, 0.0),
@@ -316,7 +317,7 @@ class EventCfg:
             # curriculum. Restoring torque k*theta is kept from blowing up at large angles by the panel
             # effort-limit cap in edit_door_articulation (per-env, 60..200 Nm), so high stiffness gives a
             # hard breakaway rather than an ever-heavier swing. Endpoint 350 over-covers the real doors.
-            # ADR-ramped panel spring: median start (63 / 8.8); endpoint widens to (1..500) / (1..47).
+            # ADR-ramped panel spring: median start (63 / 8.8); endpoint widens to (1..360) / (1..47).
             "stiffness_distribution_params": (63.0, 63.0),
             "damping_distribution_params": (8.8, 8.8),
             # Use absolute values so the curriculum is expressed in physical gains, not multipliers of the
@@ -394,12 +395,15 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # door; the outer range 60..200 over-covers real on both ends.
     # Panel-swing effort cap (per-env, ADR-ramped): median start (80) out to the outer range (60, 100);
     # 100 Nm validated as the heavy ceiling. edit_door_articulation switches it to 1e6 while latched.
+    # Panel-swing effort cap (per-env, ADR-ramped): median start (80) out to the outer range (60, 100).
     door_panel_effort_limit_start_range_nm = (80.0, 80.0)
     door_panel_effort_limit_range_nm = (60.0, 100.0)
 
     # Handle (joint_2) unlatch angle threshold (radians): the door stays latched until the handle is
     # rotated past this. Per-env, ADR-ramped from the fixed 0.8 start out to (0.65, 0.95) so the policy
     # must learn to fully turn handles that unlatch late. Read every step by edit_door_articulation.
+    # Handle (joint_2) unlatch angle threshold (radians): per-env, ADR-ramped from the fixed 0.8 start
+    # out to (0.65, 0.95). Read every step by edit_door_articulation.
     door_latch_threshold_start_range_rad = (0.8, 0.8)
     door_latch_threshold_range_rad = (0.65, 0.95)
 
@@ -852,8 +856,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             # Widened endpoint (was (1, 125) / (1, 16.7)) so the curriculum can reach the heavy real
             # doors. 350 over-covers the 300 that reproduced real; damping ceiling scaled to keep the
             # ~7.5 stiffness/damping ratio the panel was tuned around (350/7.5 ~= 47).
-            # Endpoint widened to 500 (validated heavy ceiling); damping ceiling 47.
-            "stiffness_distribution_params": (1.0, 500.0),
+            # Endpoint 360 (500 was overkill); damping ceiling 47.
+            "stiffness_distribution_params": (1.0, 360.0),
             "damping_distribution_params": (1.0, 47.0),
         },
         "door_board_joint_friction": {
