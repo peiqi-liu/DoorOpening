@@ -404,6 +404,14 @@ class DooropeningEnv(DirectRLEnv):
             float(self.cfg.door_panel_effort_limit_start_range_nm[1]),
             device=self.device,
         )
+        # Per-env handle (joint_2) unlatch angle threshold (radians), sampled at reset and read every
+        # step by edit_door_articulation. 1-D (num_envs,) so it broadcasts against door.data.joint_pos
+        # [:, joint_2]; a (num_envs, 1) shape would broadcast the wrong way in the lock comparison.
+        self._door_latch_thresholds = torch.full(
+            (self.num_envs,),
+            float(self.cfg.door_latch_threshold_start_range_rad[1]),
+            device=self.device,
+        )
         self._dr_metrics_interval = max(int(self.cfg.dr_metrics_interval), 1)
         self._log_verbose_dr_metrics = bool(self.cfg.log_verbose_dr_metrics)
         self._init_viser_pointcloud_recording()
@@ -963,6 +971,29 @@ class DooropeningEnv(DirectRLEnv):
             len(env_ids), device=self.device
         )
 
+    def _current_door_latch_threshold_range(self) -> tuple[float, float]:
+        start_range = self.cfg.door_latch_threshold_start_range_rad
+        if not self._adr_enabled:
+            return float(start_range[0]), float(start_range[1])
+        interpolated = self.dooropening_adr.get_interpolated_range(
+            start_range, self.cfg.door_latch_threshold_range_rad
+        )
+        return float(interpolated[0]), float(interpolated[1])
+
+    def _sample_door_latch_thresholds(self, env_ids: torch.Tensor):
+        # No separate _apply: the sampled buffer is read every step by edit_door_articulation.
+        low, high = self._current_door_latch_threshold_range()
+        if high < low:
+            raise ValueError(
+                f"Door latch threshold ADR range must satisfy min <= max, got min={low}, max={high}."
+            )
+        if high == low:
+            self._door_latch_thresholds[env_ids] = low
+            return
+        self._door_latch_thresholds[env_ids] = low + (high - low) * torch.rand(
+            len(env_ids), device=self.device
+        )
+
     def _compute_curriculum_progress(self, progress_total: float) -> float:
         progress_total = max(float(progress_total), 1.0)
         return min(float(self._get_curriculum_step_count()) / progress_total, 1.0)
@@ -1093,6 +1124,7 @@ class DooropeningEnv(DirectRLEnv):
         )
         handle_effort_min, handle_effort_max = self._current_door_handle_effort_limit_range()
         panel_effort_min, panel_effort_max = self._current_door_panel_effort_limit_range()
+        latch_min, latch_max = self._current_door_latch_threshold_range()
 
         self.extras["dr/increment"] = float(self.dooropening_adr.increment_counter)
         self.extras["dr/robot_stiffness_min"] = float(robot_stiffness[0])
@@ -1115,6 +1147,8 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["dr/door_board_friction_max"] = float(board_friction[1])
         self.extras["dr/door_panel_effort_limit_min"] = float(panel_effort_min)
         self.extras["dr/door_panel_effort_limit_max"] = float(panel_effort_max)
+        self.extras["dr/door_latch_threshold_min"] = float(latch_min)
+        self.extras["dr/door_latch_threshold_max"] = float(latch_max)
 
         self.extras["dr_limit/spawn_arm_joint_pos_noise"] = self._current_custom_param("robot_spawn", "arm_joint_pos_noise")
         self.extras["dr_limit/spawn_finger_joint_pos_noise"] = self._current_custom_param(
@@ -1188,6 +1222,9 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["dr_sample/door_panel_effort_limit_mean"] = self._door_panel_effort_limits.mean().item()
         self.extras["dr_sample/door_panel_effort_limit_min"] = self._door_panel_effort_limits.min().item()
         self.extras["dr_sample/door_panel_effort_limit_max"] = self._door_panel_effort_limits.max().item()
+        self.extras["dr_sample/door_latch_threshold_mean"] = self._door_latch_thresholds.mean().item()
+        self.extras["dr_sample/door_latch_threshold_min"] = self._door_latch_thresholds.min().item()
+        self.extras["dr_sample/door_latch_threshold_max"] = self._door_latch_thresholds.max().item()
 
     def _update_adr_ranges(self):
         if not self._adr_enabled:
@@ -1525,6 +1562,8 @@ class DooropeningEnv(DirectRLEnv):
             # Per-env panel-swing restoring-torque cap (sampled at reset, ADR-ramped) so the high
             # stiffness doesn't make the door impossibly heavy at large angles; latch lock stays 1e6.
             unlocked_panel_effort_limit=self._door_panel_effort_limits,
+            # Per-env handle unlatch angle threshold (radians), sampled at reset, ADR-ramped.
+            hinge_range=self._door_latch_thresholds,
         )
         # applied_robot_dof_targets already carries the lag-filtered target from _pre_physics_step.
         # Add per-substep controller noise on top without polluting the lag history.
@@ -2641,6 +2680,7 @@ class DooropeningEnv(DirectRLEnv):
             self._sample_door_handle_effort_limits(env_ids)
             self._apply_door_handle_effort_limits(env_ids)
             self._sample_door_panel_effort_limits(env_ids)
+            self._sample_door_latch_thresholds(env_ids)
             self._refresh_nominal_door_joint_gains(env_ids)
             return
 
@@ -2701,6 +2741,7 @@ class DooropeningEnv(DirectRLEnv):
         self._sample_door_handle_effort_limits(env_ids)
         self._apply_door_handle_effort_limits(env_ids)
         self._sample_door_panel_effort_limits(env_ids)
+        self._sample_door_latch_thresholds(env_ids)
         self._refresh_nominal_door_joint_gains(env_ids)
 
     def close(self):

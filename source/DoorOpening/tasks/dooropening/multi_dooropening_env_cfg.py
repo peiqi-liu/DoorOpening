@@ -397,6 +397,12 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     door_panel_effort_limit_start_range_nm = (80.0, 80.0)
     door_panel_effort_limit_range_nm = (60.0, 100.0)
 
+    # Handle (joint_2) unlatch angle threshold (radians): the door stays latched until the handle is
+    # rotated past this. Per-env, ADR-ramped from the fixed 0.8 start out to (0.65, 0.95) so the policy
+    # must learn to fully turn handles that unlatch late. Read every step by edit_door_articulation.
+    door_latch_threshold_start_range_rad = (0.8, 0.8)
+    door_latch_threshold_range_rad = (0.65, 0.95)
+
     # simulation
     sim: SimulationCfg = SimulationCfg(
         dt=sim_dt,

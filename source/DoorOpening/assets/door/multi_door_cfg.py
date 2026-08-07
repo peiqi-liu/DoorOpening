@@ -376,6 +376,8 @@ def edit_door_articulation(
     nominal_joint_stiffness: torch.Tensor | None = None,
     nominal_joint_damping: torch.Tensor | None = None,
     door_closed_range = 0.05,     # radians
+    # Handle (joint_2) unlatch angle threshold (radians): the door stays latched until |joint_2| exceeds
+    # this. Scalar or per-env tensor (num_envs,) for domain randomization; broadcasts against joint_pos.
     hinge_range = 0.8,
     locked_stiffness = 1e6,
     locked_damping = 1e5,
