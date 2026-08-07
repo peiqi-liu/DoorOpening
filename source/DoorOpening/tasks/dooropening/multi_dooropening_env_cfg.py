@@ -255,6 +255,8 @@ class EventCfg:
             # Widened (was (0.2, 1.0)) after real-world observation that a metal lever can be very
             # slippery: floor dropped to 0.05 so the policy trains on fingers that barely grip, ceiling
             # raised to 1.2 so grippy handles are still covered. Real handle grip should be a subset.
+            # Widened (was (0.2, 1.0)) after real-world observation that a metal lever can be very
+            # slippery: floor 0.05 (fingers barely grip), ceiling 1.2 (grippy handles covered).
             "static_friction_range": (0.05, 1.2),
             "dynamic_friction_range": (0.05, 1.2),
             "restitution_range": (0.0, 0.0),
@@ -314,6 +316,7 @@ class EventCfg:
             # curriculum. Restoring torque k*theta is kept from blowing up at large angles by the panel
             # effort-limit cap in edit_door_articulation (per-env, 60..200 Nm), so high stiffness gives a
             # hard breakaway rather than an ever-heavier swing. Endpoint 350 over-covers the real doors.
+            # ADR-ramped panel spring: median start (63 / 8.8); endpoint widens to (1..500) / (1..47).
             "stiffness_distribution_params": (63.0, 63.0),
             "damping_distribution_params": (8.8, 8.8),
             # Use absolute values so the curriculum is expressed in physical gains, not multipliers of the
@@ -334,6 +337,7 @@ class EventCfg:
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("door", joint_names="joint_1"),
+            # Coulomb breakaway friction: starts at 0, ADR endpoint widens to (0..0.7). Coefficient, not Nm.
             "friction_distribution_params": (0.0, 0.0),
             "operation": "abs",
         },
@@ -378,7 +382,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # unlatch. ADR endpoint widened 6 -> 20 Nm after real doors needed much more torque to fully
     # unlatch; 15 Nm reproduced the real behavior, so 20 over-covers it. Ramps from the (1,1) EventTerm
     # base up to (1, 20).
-    door_handle_effort_limit_range_nm = (1.0, 20.0)
+    # Handle latch return-spring effort limit. ADR ramps from the (1,1) base up to (1, 12); 12 validated.
+    door_handle_effort_limit_range_nm = (1.0, 12.0)
     door_handle_effort_limit_sim = door_handle_effort_limit_range_nm[0]
 
     # Panel-swing (joint_1) effort-limit CAP applied while unlatched (edit_door_articulation switches it
@@ -387,8 +392,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # cap is sampled per-env at reset, ADR-ramped from a narrow median start to the full outer range so
     # heavy/light doors spread out only as the curriculum advances. 150 Nm reproduced the real heavy
     # door; the outer range 60..200 over-covers real on both ends.
-    door_panel_effort_limit_start_range_nm = (130.0, 130.0)
-    door_panel_effort_limit_range_nm = (60.0, 200.0)
+    # Panel-swing effort cap (per-env, ADR-ramped): median start (80) out to the outer range (60, 100);
+    # 100 Nm validated as the heavy ceiling. edit_door_articulation switches it to 1e6 while latched.
+    door_panel_effort_limit_start_range_nm = (80.0, 80.0)
+    door_panel_effort_limit_range_nm = (60.0, 100.0)
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
@@ -839,12 +846,14 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             # Widened endpoint (was (1, 125) / (1, 16.7)) so the curriculum can reach the heavy real
             # doors. 350 over-covers the 300 that reproduced real; damping ceiling scaled to keep the
             # ~7.5 stiffness/damping ratio the panel was tuned around (350/7.5 ~= 47).
-            "stiffness_distribution_params": (1.0, 350.0),
+            # Endpoint widened to 500 (validated heavy ceiling); damping ceiling 47.
+            "stiffness_distribution_params": (1.0, 500.0),
             "damping_distribution_params": (1.0, 47.0),
         },
         "door_board_joint_friction": {
             # Coulomb breakaway friction on the panel swing. Ramps from the (0, 0) EventTerm base out to
             # (0, 0.7); 0.5 reproduced real, so 0.7 over-covers it. Coefficient (load-dependent), not Nm.
+            # Coulomb breakaway friction endpoint; 0.5 reproduced real, 0.7 over-covers.
             "friction_distribution_params": (0.0, 0.7),
         },
         "door_hinge_joint_stiffness_and_damping": {
