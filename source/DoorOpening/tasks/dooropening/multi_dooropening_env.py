@@ -1088,7 +1088,11 @@ class DooropeningEnv(DirectRLEnv):
         hinge_damping = self._current_event_param(
             "door_hinge_joint_stiffness_and_damping", "damping_distribution_params"
         )
+        board_friction = self._current_event_param(
+            "door_board_joint_friction", "friction_distribution_params"
+        )
         handle_effort_min, handle_effort_max = self._current_door_handle_effort_limit_range()
+        panel_effort_min, panel_effort_max = self._current_door_panel_effort_limit_range()
 
         self.extras["dr/increment"] = float(self.dooropening_adr.increment_counter)
         self.extras["dr/robot_stiffness_min"] = float(robot_stiffness[0])
@@ -1107,6 +1111,10 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["dr/door_hinge_damping_max"] = float(hinge_damping[1])
         self.extras["dr/door_handle_effort_limit_min"] = float(handle_effort_min)
         self.extras["dr/door_handle_effort_limit_max"] = float(handle_effort_max)
+        self.extras["dr/door_board_friction_min"] = float(board_friction[0])
+        self.extras["dr/door_board_friction_max"] = float(board_friction[1])
+        self.extras["dr/door_panel_effort_limit_min"] = float(panel_effort_min)
+        self.extras["dr/door_panel_effort_limit_max"] = float(panel_effort_max)
 
         self.extras["dr_limit/spawn_arm_joint_pos_noise"] = self._current_custom_param("robot_spawn", "arm_joint_pos_noise")
         self.extras["dr_limit/spawn_finger_joint_pos_noise"] = self._current_custom_param(
@@ -1170,6 +1178,16 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["dr_sample/door_handle_effort_limit_mean"] = self._door_handle_effort_limits.mean().item()
         self.extras["dr_sample/door_handle_effort_limit_min"] = self._door_handle_effort_limits.min().item()
         self.extras["dr_sample/door_handle_effort_limit_max"] = self._door_handle_effort_limits.max().item()
+        # Actually-applied panel (joint_1) Coulomb friction coefficient in the sim -- proves the
+        # door_board_joint_friction EventTerm is taking effect (nonzero once ADR ramps in).
+        board_applied_friction = self.door.data.joint_friction_coeff[:, self._door_board_joint_idx]
+        self.extras["dr_sample/door_board_friction_mean"] = board_applied_friction.mean().item()
+        self.extras["dr_sample/door_board_friction_min"] = board_applied_friction.min().item()
+        self.extras["dr_sample/door_board_friction_max"] = board_applied_friction.max().item()
+        # Per-env panel effort-limit cap actually handed to edit_door_articulation each step.
+        self.extras["dr_sample/door_panel_effort_limit_mean"] = self._door_panel_effort_limits.mean().item()
+        self.extras["dr_sample/door_panel_effort_limit_min"] = self._door_panel_effort_limits.min().item()
+        self.extras["dr_sample/door_panel_effort_limit_max"] = self._door_panel_effort_limits.max().item()
 
     def _update_adr_ranges(self):
         if not self._adr_enabled:
