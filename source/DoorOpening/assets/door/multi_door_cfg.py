@@ -372,13 +372,23 @@ ALL_DOOR_CONFIGS = setup_doors()
 
 
 def edit_door_articulation(
-    door: Articulation, 
+    door: Articulation,
     nominal_joint_stiffness: torch.Tensor | None = None,
     nominal_joint_damping: torch.Tensor | None = None,
     door_closed_range = 0.05,     # radians
     hinge_range = 0.8,
     locked_stiffness = 1e6,
     locked_damping = 1e5,
+    # Panel-swing (joint_1) effort-limit CAP applied while UNLATCHED. With a high panel stiffness,
+    # restoring torque k*theta would grow unbounded as the door opens ("board too heavy at large angle");
+    # this caps it so the resistance plateaus at a constant value (in Nm). Accepts either a scalar or a
+    # per-env tensor (shape (num_envs,) or (num_envs, 1)) for domain randomization. None => leave the
+    # actuator's own effort limit untouched (original behavior). It is switched with the lock state
+    # (locked_panel_effort_limit while latched) because the SAME effort limit throttles the 1e6 latch
+    # lock -- without the switch, a modest cap would let the robot shove the door open past the unlatch
+    # threshold WITHOUT turning the handle, bypassing the latch.
+    unlocked_panel_effort_limit: "float | torch.Tensor | None" = None,
+    locked_panel_effort_limit: float = 1e6,
     # Optional: disable the latching behavior by setting the hinge range to a negative value
     # hinge_range = -0.1,
 ):
@@ -408,3 +418,19 @@ def edit_door_articulation(
     joint_damping[locked, j1] = locked_damping
     door.write_joint_stiffness_to_sim(joint_stiffness)
     door.write_joint_damping_to_sim(joint_damping)
+
+    # Switch joint_1's effort-limit cap with the lock state (see arg docs above): the per-env unlocked
+    # cap while free to swing, the huge locked value while latched so the latch still holds firmly.
+    if unlocked_panel_effort_limit is not None:
+        if torch.is_tensor(unlocked_panel_effort_limit):
+            panel_effort = (
+                unlocked_panel_effort_limit.to(device=q.device, dtype=torch.float32)
+                .reshape(q.shape[0], 1)
+                .clone()
+            )
+        else:
+            panel_effort = torch.full(
+                (q.shape[0], 1), float(unlocked_panel_effort_limit), device=q.device, dtype=torch.float32
+            )
+        panel_effort[locked, 0] = float(locked_panel_effort_limit)
+        door.write_joint_effort_limit_to_sim(panel_effort, joint_ids=[j1], env_ids=None)
