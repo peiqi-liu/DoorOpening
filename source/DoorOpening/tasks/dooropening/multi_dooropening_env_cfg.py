@@ -307,21 +307,32 @@ class EventCfg:
         },
     )
 
+    # ADR-ramped panel-swing spring. Design intent: the panel is deliberately allowed to be very stiff,
+    # and the door's perceived HEAVINESS is governed by the effort-limit cap
+    # (door_panel_effort_limit_range_nm), not by stiffness. Restoring torque k*theta saturates at that
+    # cap, so a stiff panel means a sharp breakaway that then holds a constant resistance in Nm, while
+    # the low-stiffness end still gives a soft, freer-swinging door.
+    #
+    # Both gains are sampled LOG-uniformly in absolute physical units: the stiffness range spans 40x
+    # (20..800 Nm/rad at full ADR), and uniform sampling would put ~95% of doors above 60 Nm/rad and
+    # almost never visit the soft regime.
     door_board_joint_stiffness_and_damping = EventTerm(
         func=randomize_actuator_gains,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("door", joint_names="joint_1"),
-            # ADR-ramped panel-swing spring. Base is a narrow start band (stiffness 40..80, damping 8.8);
-            # the ADR endpoint widens to (1..250) / (1..47) so heavy doors appear only late in the
-            # curriculum. Restoring torque k*theta is kept from blowing up at large angles by the panel
-            # effort-limit cap in edit_door_articulation (per-env, 20..80 Nm), so high stiffness gives a
-            # hard breakaway rather than an ever-heavier swing.
-            "stiffness_distribution_params": (40.0, 80.0),
-            "damping_distribution_params": (8.8, 8.8),
-            # Use absolute values so the curriculum is expressed in physical gains, not multipliers of the
-            # board actuator defaults (whose damping is 0.2).
+            # Start band 40..150 Nm/rad; ADR endpoint widens to 20..800.
+            "stiffness_distribution_params": (40.0, 150.0),
+            # Damping is sampled independently of stiffness, so its range is CHOSEN via the damping
+            # ratio zeta = c / (2*sqrt(k*I)), with I ~= 24 kg*m^2 (panel about its hinge: m*w^2/3 for
+            # the nominal 80 kg board at the ~0.95 m mid panel width the generator emits). The old
+            # validated tuning (k=63, c=8.8) is zeta ~= 0.11, and this start band spans zeta ~0.08..0.36
+            # against the 40..150 stiffness band. The ADR endpoint (4, 60) keeps the median near
+            # zeta ~0.14 across 20..800 stiffness, with only ~1% of draws landing overdamped.
+            "damping_distribution_params": (7.0, 30.0),
+            # Absolute physical gains, not multipliers of the board actuator defaults.
             "operation": "abs",
+            "distribution": "log_uniform",
         },
     )
 
@@ -379,28 +390,32 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     viewer: ViewerCfg = ViewerCfg(eye=(1.5, -2.0, 1.0), lookat=(0.4, 0.0, 0.7), origin_type="env")
     # Handle (joint_2) latch return-spring effort limit -- how hard the lever resists being rotated to
-    # unlatch. ADR ramps from the (1,1) EventTerm base up to (1, 9); 12 Nm was
-    # more torque than a real lever needs to unlatch, so the ceiling was lowered to 9.
-    door_handle_effort_limit_range_nm = (1.0, 9.0)
+    # unlatch. ADR ramps from the (1,1) EventTerm base up to (1, 5). 9-12 Nm was far more torque than a
+    # real lever return spring needs, so the ceiling is now 5.
+    door_handle_effort_limit_range_nm = (1.0, 5.0)
     door_handle_effort_limit_sim = door_handle_effort_limit_range_nm[0]
 
     # Panel-swing (joint_1) effort-limit CAP applied while unlatched (edit_door_articulation switches it
     # to 1e6 while latched so the latch still holds). It caps the high-stiffness restoring torque so the
     # door plateaus at a constant "heaviness" in Nm instead of growing unbounded with opening angle. The
-    # cap is sampled per-env at reset, ADR-ramped from a narrow median start to the full outer range so
-    # heavy/light doors spread out only as the curriculum advances.
-    # Start at 40 Nm, widen out to a broad outer range
-    # (20, 80) -- light doors (20 Nm) up to heavy (80 Nm) as the curriculum advances.
-    door_panel_effort_limit_start_range_nm = (40.0, 40.0)
-    door_panel_effort_limit_range_nm = (20.0, 80.0)
+    # cap is sampled per-env at reset (uniformly, see _sample_door_panel_effort_limits) and ADR-ramped
+    # from a narrow start band out to the full outer range, so heavy/light doors spread out only as the
+    # curriculum advances.
+    #
+    # This is now the PRIMARY door-difficulty knob: panel stiffness is sampled very wide and high
+    # (see door_board_joint_stiffness_and_damping) precisely so that the restoring torque saturates
+    # here, making the door feel like a constant-torque load of this many Nm. Start band 40..60 Nm;
+    # ADR endpoint widens to 5..80 -- nearly free-swinging (5 Nm) up to heavy (80 Nm).
+    door_panel_effort_limit_start_range_nm = (40.0, 60.0)
+    door_panel_effort_limit_range_nm = (5.0, 80.0)
 
     # Handle (joint_2) unlatch angle threshold (radians): the door stays latched until the handle is
     # rotated past this. Per-env, ADR-ramped from the fixed 0.8 start out to (0.65, 0.95) so the policy
     # must learn to fully turn handles that unlatch late. Read every step by edit_door_articulation.
     # Handle (joint_2) unlatch angle threshold (radians): per-env, ADR-ramped from the fixed 0.8 start
-    # out to (0.65, 0.95). Read every step by edit_door_articulation.
+    # out to (0.75, 0.9) -- tightened from (0.65, 0.95). Read every step by edit_door_articulation.
     door_latch_threshold_start_range_rad = (0.8, 0.8)
-    door_latch_threshold_range_rad = (0.65, 0.95)
+    door_latch_threshold_range_rad = (0.75, 0.9)
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
@@ -848,11 +863,12 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "armature_distribution_params": (0.001, 0.005),
         },
         "door_board_joint_stiffness_and_damping": {
-            # Stiffness ceiling lowered 360 -> 250: 360 made the late curriculum heavier than any real
-            # door. Damping ceiling left at 47 (now a slightly over-damped ceiling relative to the old
-            # ~7.5 stiffness/damping ratio, i.e. 250/47 ~= 5.3); drop it to ~33 if the ratio matters.
-            "stiffness_distribution_params": (1.0, 250.0),
-            "damping_distribution_params": (1.0, 47.0),
+            # Log-uniform over 20..800 Nm/rad: heaviness is set by the effort cap, so stiffness is free to
+            # go very high (sharp breakaway, then constant resistance) and fairly low (soft swing).
+            "stiffness_distribution_params": (20.0, 800.0),
+            # Nm*s/rad. Chosen so the implied zeta = c/(2*sqrt(k*I)) stays sane across the whole
+            # stiffness span: median ~0.14, p95 ~0.68, ~1% overdamped. See the EventTerm comment.
+            "damping_distribution_params": (4.0, 60.0),
         },
         "door_board_joint_friction": {
             # Coulomb breakaway friction on the panel swing. Ramps from the (0, 0) EventTerm base out to
