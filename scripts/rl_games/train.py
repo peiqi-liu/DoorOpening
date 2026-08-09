@@ -466,6 +466,64 @@ def _inherit_central_value_config(agent_cfg: dict):
             central_cfg.setdefault(key, config[key])
 
 
+def _resolve_isaaclab_env(vec_env):
+    """Return the unwrapped IsaacLab env behind RL-Games' vec-env wrappers."""
+
+    candidate = getattr(vec_env, "env", vec_env)
+    return getattr(candidate, "unwrapped", candidate)
+
+
+def _restore_env_curriculum_progress(agent):
+    """Re-seed the env-side curriculum counter after RL-Games restores a checkpoint.
+
+    RL-Games' `restore()` brings back `epoch_num`/`frame`, but the IsaacLab env is constructed
+    fresh, so its `common_step_counter` starts at 0. That counter is what DooropeningEnv's
+    `_get_curriculum_step_count()` returns, and it drives BOTH the ADR increment schedule
+    (`_update_adr_ranges`, via `adr_reset_progress_total`) and the reference-motion reset /
+    drift-threshold curriculum (via `reset_progress_total`). Without this, a resumed run replays
+    the whole domain-randomization and reset curriculum from scratch against an already-trained
+    policy. Write the counter back here — i.e. after `_restore()` but before `agent.train()`,
+    whose first `env_reset()` already samples curriculum-dependent reset states in `_reset_idx`.
+    """
+
+    epoch_num = int(getattr(agent, "epoch_num", 0) or 0)
+    frame = int(getattr(agent, "frame", 0) or 0)
+    if epoch_num <= 0 and frame <= 0:
+        # Fresh run (or a checkpoint restored with set_epoch=False) — nothing to resume.
+        return
+
+    horizon_length = int(getattr(agent, "horizon_length", 0) or 0)
+    num_actors = int(getattr(agent, "num_actors", 0) or 0)
+    world_size = int(getattr(agent, "world_size", 1) or 1)
+
+    # Each epoch performs exactly `horizon_length` env.step() calls per rank, so this is exact and
+    # independent of how many envs the checkpoint was trained with. `frame` counts
+    # num_actors * horizon_length * world_size per epoch, so dividing it by the CURRENT num_actors
+    # would misread the progress whenever the run resumes with a different --num_envs; it is only
+    # used as a fallback.
+    if epoch_num > 0 and horizon_length > 0:
+        env_steps = epoch_num * horizon_length
+    else:
+        env_steps = frame // max(num_actors * world_size, 1)
+
+    unwrapped_env = _resolve_isaaclab_env(agent.vec_env)
+    if not hasattr(unwrapped_env, "common_step_counter"):
+        print(
+            "[WARNING] Could not resume curriculum progress: "
+            f"{type(unwrapped_env).__name__} has no `common_step_counter`. "
+            "ADR / reset curricula will restart from zero."
+        )
+        return
+
+    unwrapped_env.common_step_counter = int(env_steps)
+    if hasattr(unwrapped_env, "set_train_info"):
+        unwrapped_env.set_train_info(frame)
+    print(
+        f"[INFO] Resumed curriculum progress from checkpoint: epoch={epoch_num}, frame={frame} -> "
+        f"common_step_counter={int(env_steps)} (ADR increments and reset curriculum continue from here)."
+    )
+
+
 class DoorOpeningRunner(Runner):
     """Runner that installs local instrumentation before training starts."""
 
@@ -476,6 +534,7 @@ class DoorOpeningRunner(Runner):
         _install_writer_step_counter(agent)
         rl_games_torch_runner._restore(agent, args)
         rl_games_torch_runner._override_sigma(agent, args)
+        _restore_env_curriculum_progress(agent)
         agent.train()
 
 

@@ -312,13 +312,12 @@ class EventCfg:
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("door", joint_names="joint_1"),
-            # ADR-ramped panel-swing spring. Base is the median start (stiffness 63, damping 8.8); the
-            # ADR endpoint widens to (1..350) / (1..16.7->47) so heavy doors appear only late in the
+            # ADR-ramped panel-swing spring. Base is a narrow start band (stiffness 40..80, damping 8.8);
+            # the ADR endpoint widens to (1..250) / (1..47) so heavy doors appear only late in the
             # curriculum. Restoring torque k*theta is kept from blowing up at large angles by the panel
-            # effort-limit cap in edit_door_articulation (per-env, 60..200 Nm), so high stiffness gives a
-            # hard breakaway rather than an ever-heavier swing. Endpoint 350 over-covers the real doors.
-            # ADR-ramped panel spring: median start (63 / 8.8); endpoint widens to (1..360) / (1..47).
-            "stiffness_distribution_params": (63.0, 63.0),
+            # effort-limit cap in edit_door_articulation (per-env, 20..80 Nm), so high stiffness gives a
+            # hard breakaway rather than an ever-heavier swing.
+            "stiffness_distribution_params": (40.0, 80.0),
             "damping_distribution_params": (8.8, 8.8),
             # Use absolute values so the curriculum is expressed in physical gains, not multipliers of the
             # board actuator defaults (whose damping is 0.2).
@@ -380,24 +379,20 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     viewer: ViewerCfg = ViewerCfg(eye=(1.5, -2.0, 1.0), lookat=(0.4, 0.0, 0.7), origin_type="env")
     # Handle (joint_2) latch return-spring effort limit -- how hard the lever resists being rotated to
-    # unlatch. ADR endpoint widened 6 -> 20 Nm after real doors needed much more torque to fully
-    # unlatch; 15 Nm reproduced the real behavior, so 20 over-covers it. Ramps from the (1,1) EventTerm
-    # base up to (1, 20).
-    # Handle latch return-spring effort limit. ADR ramps from the (1,1) base up to (1, 12); 12 validated.
-    door_handle_effort_limit_range_nm = (1.0, 12.0)
+    # unlatch. ADR ramps from the (1,1) EventTerm base up to (1, 9); 12 Nm was
+    # more torque than a real lever needs to unlatch, so the ceiling was lowered to 9.
+    door_handle_effort_limit_range_nm = (1.0, 9.0)
     door_handle_effort_limit_sim = door_handle_effort_limit_range_nm[0]
 
     # Panel-swing (joint_1) effort-limit CAP applied while unlatched (edit_door_articulation switches it
     # to 1e6 while latched so the latch still holds). It caps the high-stiffness restoring torque so the
     # door plateaus at a constant "heaviness" in Nm instead of growing unbounded with opening angle. The
     # cap is sampled per-env at reset, ADR-ramped from a narrow median start to the full outer range so
-    # heavy/light doors spread out only as the curriculum advances. 150 Nm reproduced the real heavy
-    # door; the outer range 60..200 over-covers real on both ends.
-    # Panel-swing effort cap (per-env, ADR-ramped): median start (80) out to the outer range (60, 100);
-    # 100 Nm validated as the heavy ceiling. edit_door_articulation switches it to 1e6 while latched.
-    # Panel-swing effort cap (per-env, ADR-ramped): median start (80) out to the outer range (60, 100).
-    door_panel_effort_limit_start_range_nm = (80.0, 80.0)
-    door_panel_effort_limit_range_nm = (60.0, 100.0)
+    # heavy/light doors spread out only as the curriculum advances.
+    # Start at 40 Nm, widen out to a broad outer range
+    # (20, 80) -- light doors (20 Nm) up to heavy (80 Nm) as the curriculum advances.
+    door_panel_effort_limit_start_range_nm = (40.0, 40.0)
+    door_panel_effort_limit_range_nm = (20.0, 80.0)
 
     # Handle (joint_2) unlatch angle threshold (radians): the door stays latched until the handle is
     # rotated past this. Per-env, ADR-ramped from the fixed 0.8 start out to (0.65, 0.95) so the policy
@@ -853,11 +848,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "armature_distribution_params": (0.001, 0.005),
         },
         "door_board_joint_stiffness_and_damping": {
-            # Widened endpoint (was (1, 125) / (1, 16.7)) so the curriculum can reach the heavy real
-            # doors. 350 over-covers the 300 that reproduced real; damping ceiling scaled to keep the
-            # ~7.5 stiffness/damping ratio the panel was tuned around (350/7.5 ~= 47).
-            # Endpoint 360 (500 was overkill); damping ceiling 47.
-            "stiffness_distribution_params": (1.0, 360.0),
+            # Stiffness ceiling lowered 360 -> 250: 360 made the late curriculum heavier than any real
+            # door. Damping ceiling left at 47 (now a slightly over-damped ceiling relative to the old
+            # ~7.5 stiffness/damping ratio, i.e. 250/47 ~= 5.3); drop it to ~33 if the ratio matters.
+            "stiffness_distribution_params": (1.0, 250.0),
             "damping_distribution_params": (1.0, 47.0),
         },
         "door_board_joint_friction": {
