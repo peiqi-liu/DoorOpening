@@ -67,6 +67,16 @@ POINTCLOUD_CAMERA_QUAT = quat_from_euler_xyz(euler_angles[0], euler_angles[1], e
 POINTCLOUD_CAMERA_QUAT = tuple(POINTCLOUD_CAMERA_QUAT.tolist())
 
 
+# NOTE on `history_length=0` (used by EVERY contact sensor in this file): it is a throughput knob,
+# not a semantics change. SensorBase.update() takes an UNCONDITIONAL `_update_outdated_buffers()`
+# branch whenever `history_length > 0`, which defeats IsaacLab's lazy sensor evaluation -- and that
+# refresh opens with `_is_outdated.nonzero()`, a data-dependent shape, i.e. a blocking CUDA sync.
+# DirectRLEnv.step() calls scene.update() INSIDE the decimation loop, so at history_length=1 every
+# sensor did a full PhysX contact-matrix readback + a sync on all `decimation` substeps while only
+# the last one is ever read. At 0, `force_matrix_w` / `net_forces_w` are still populated exactly the
+# same way (ContactSensor just aliases the `*_history` buffers as an unsqueezed view) and the fetch
+# happens lazily, once, when the reward code first touches `.data`. Raise this back above 0 only if
+# something starts reading `net_forces_w_history` / `force_matrix_w_history` -- nothing does today.
 def _robot_body_contact_sensor(body_name: str, filter_prim_paths) -> ContactSensorCfg:
     """A single-body filtered contact sensor on a robot body.
 
@@ -80,7 +90,7 @@ def _robot_body_contact_sensor(body_name: str, filter_prim_paths) -> ContactSens
     return ContactSensorCfg(
         prim_path=f"/World/envs/env_.*/Robot/{body_name}",
         update_period=0.0,
-        history_length=1,
+        history_length=0,
         debug_vis=False,
         filter_prim_paths_expr=list(filter_prim_paths),
     )
@@ -493,7 +503,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     contact_forces_door2 = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Door/link_2",
         update_period=0.0,
-        history_length=1,
+        history_length=0,
         debug_vis=False,
         filter_prim_paths_expr=list(HANDLE_CONTACT_FILTER_PRIM_PATHS),
     )
@@ -502,7 +512,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     contact_forces_door2_palm = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Door/link_2",
         update_period=0.0,
-        history_length=1,
+        history_length=0,
         debug_vis=False,
         filter_prim_paths_expr=list(PALM_ONLY_HANDLE_CONTACT_FILTER_PRIM_PATHS),
     )
@@ -512,7 +522,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     contact_forces_door_panel = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Door/link_1",
         update_period=0.0,
-        history_length=1,
+        history_length=0,
         debug_vis=False,
         filter_prim_paths_expr=list(PANEL_CONTACT_FILTER_PRIM_PATHS),
     )
@@ -527,42 +537,42 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     contact_forces_door_franka_box = ContactSensorCfg(
         prim_path=FRANKA_BOX_DOOR_CONTACT_PRIM_PATH,
         update_period=0.0,
-        history_length=1,
+        history_length=0,
         debug_vis=False,
         filter_prim_paths_expr=list(DOOR_BODY_CONTACT_FILTER_PRIM_PATHS),
     )
     contact_forces_door_x5_link2 = ContactSensorCfg(
         prim_path=f"/World/envs/env_.*/Robot/{X5_BODY_NAMES[2]}",
         update_period=0.0,
-        history_length=1,
+        history_length=0,
         debug_vis=False,
         filter_prim_paths_expr=list(DOOR_BODY_CONTACT_FILTER_PRIM_PATHS),
     )
     contact_forces_door_x5_link3 = ContactSensorCfg(
         prim_path=f"/World/envs/env_.*/Robot/{X5_BODY_NAMES[3]}",
         update_period=0.0,
-        history_length=1,
+        history_length=0,
         debug_vis=False,
         filter_prim_paths_expr=list(DOOR_BODY_CONTACT_FILTER_PRIM_PATHS),
     )
     contact_forces_door_x5_link4 = ContactSensorCfg(
         prim_path=f"/World/envs/env_.*/Robot/{X5_BODY_NAMES[4]}",
         update_period=0.0,
-        history_length=1,
+        history_length=0,
         debug_vis=False,
         filter_prim_paths_expr=list(DOOR_BODY_CONTACT_FILTER_PRIM_PATHS),
     )
     contact_forces_door_x5_link5 = ContactSensorCfg(
         prim_path=f"/World/envs/env_.*/Robot/{X5_BODY_NAMES[5]}",
         update_period=0.0,
-        history_length=1,
+        history_length=0,
         debug_vis=False,
         filter_prim_paths_expr=list(DOOR_BODY_CONTACT_FILTER_PRIM_PATHS),
     )
     contact_forces_door_x5_camera = ContactSensorCfg(
         prim_path=f"/World/envs/env_.*/Robot/{X5_BODY_NAMES[6]}",
         update_period=0.0,
-        history_length=1,
+        history_length=0,
         debug_vis=False,
         filter_prim_paths_expr=list(DOOR_BODY_CONTACT_FILTER_PRIM_PATHS),
     )
@@ -578,7 +588,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     contact_forces_self_collision_franka = ContactSensorCfg(
         prim_path=SELF_COLLISION_FRANKA_PRIM_PATH,
         update_period=0.0,
-        history_length=1,
+        history_length=0,
         debug_vis=False,
         filter_prim_paths_expr=list(SELF_COLLISION_FRANKA_FILTER_PRIM_PATHS),
     )
@@ -588,7 +598,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     contact_forces_self_collision_hand = ContactSensorCfg(
         prim_path=SELF_COLLISION_HAND_PRIM_PATH,
         update_period=0.0,
-        history_length=1,
+        history_length=0,
         debug_vis=False,
         filter_prim_paths_expr=list(SELF_COLLISION_HAND_FILTER_PRIM_PATHS),
     )

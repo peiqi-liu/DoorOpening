@@ -1515,20 +1515,11 @@ class DooropeningEnv(DirectRLEnv):
         self.scaled_actions = self._scale_actions(actions)
         targets = self.robot_dof_targets + self.dt * self.scaled_actions
         targets = self._pin_arx_targets_to_fixed_pose(targets)
-        self.scene.sensors["contact_forces_door2"].update(self.cfg.sim_dt)
-        self.scene.sensors["contact_forces_door2_palm"].update(self.cfg.sim_dt)
-        self.scene.sensors["contact_forces_door_x5_link2"].update(self.cfg.sim_dt)
-        self.scene.sensors["contact_forces_door_x5_link3"].update(self.cfg.sim_dt)
-        self.scene.sensors["contact_forces_door_x5_link4"].update(self.cfg.sim_dt)
-        self.scene.sensors["contact_forces_door_x5_link5"].update(self.cfg.sim_dt)
-        self.scene.sensors["contact_forces_door_x5_camera"].update(self.cfg.sim_dt)
-        self.scene.sensors["contact_forces_door_panel"].update(self.cfg.sim_dt)
-        for _name in BASE_DOOR_SENSOR_NAMES:
-            self.scene.sensors[_name].update(self.cfg.sim_dt)
-        self.scene.sensors["contact_forces_door_franka_box"].update(self.cfg.sim_dt)
-        for _name in SELF_COLLISION_SENSOR_NAMES:
-            self.scene.sensors[_name].update(self.cfg.sim_dt)
-
+        # NOTE: no explicit contact-sensor update() here. This runs BEFORE the physics step, so it
+        # could only ever refresh last step's contacts, and scene.update() (called by
+        # DirectRLEnv.step on every decimation substep) re-marks them outdated immediately after.
+        # The reward/termination code reads `sensor.data.*` post-step, which pulls fresh buffers on
+        # demand. Updating here just bought an extra PhysX readback + CUDA sync per sensor per step.
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
         self.robot_dof_targets[:] = self._pin_arx_targets_to_fixed_pose(self.robot_dof_targets)
         # Action latency: apply the target the policy produced `_action_latency_buf` env steps ago

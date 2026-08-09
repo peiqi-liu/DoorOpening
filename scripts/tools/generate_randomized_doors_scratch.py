@@ -33,7 +33,7 @@ training. They preserve the expected IsaacLab naming:
 """
 
 
-DEFAULT_PANEL_WIDTH_RANGE_M = (0.7, 1.0)
+DEFAULT_PANEL_WIDTH_RANGE_M = (0.8, 1.05)
 DEFAULT_PANEL_HEIGHT_RANGE_M = (1.75, 2.15)
 DEFAULT_PANEL_THICKNESS_RANGE_M = (0.028, 0.055)
 # Frame BORDER (post width / head height) around the opening. Range STARTS AT 0 so it spans the full

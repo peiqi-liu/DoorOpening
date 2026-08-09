@@ -403,7 +403,7 @@ def state_machine_offline_right_pull_door(
     # Retract offset applied DIRECTLY in world frame -- no base-yaw rotation (that rotation was
     # mixing the axes: "dx too small, dy too large"). Now these map straight to world directions:
     # +x pulls the hand BACKWARD off the door; +y nudges it to the RIGHT to clear the panel.
-    retreat_local_x = 0.15
+    retreat_local_x = 0.3
     retreat_local_y = 0.3
     # LIFT the retract target up: the arm swings a wide arc from here around to the panel-hold
     # pose, and doing that low sweeps it through the arx camera arm on the base. Keeping the hand
