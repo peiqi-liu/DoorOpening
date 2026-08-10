@@ -416,8 +416,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # (see door_board_joint_stiffness_and_damping) precisely so that the restoring torque saturates
     # here, making the door feel like a constant-torque load of this many Nm. Start band 40..60 Nm;
     # ADR endpoint widens to 5..80 -- nearly free-swinging (5 Nm) up to heavy (80 Nm).
-    door_panel_effort_limit_start_range_nm = (40.0, 60.0)
-    door_panel_effort_limit_range_nm = (5.0, 80.0)
+    door_panel_effort_limit_start_range_nm = (10.0, 25.0)
+    door_panel_effort_limit_range_nm = (5.0, 60.0)
 
     # Handle (joint_2) unlatch angle threshold (radians): the door stays latched until the handle is
     # rotated past this. Per-env, ADR-ramped from the fixed 0.8 start out to (0.65, 0.95) so the policy
@@ -425,7 +425,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # Handle (joint_2) unlatch angle threshold (radians): per-env, ADR-ramped from the fixed 0.8 start
     # out to (0.75, 0.9) -- tightened from (0.65, 0.95). Read every step by edit_door_articulation.
     door_latch_threshold_start_range_rad = (0.8, 0.8)
-    door_latch_threshold_range_rad = (0.75, 0.9)
+    door_latch_threshold_range_rad = (0.75, 0.85)
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
