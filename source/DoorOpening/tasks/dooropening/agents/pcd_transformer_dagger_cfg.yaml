@@ -279,11 +279,37 @@ dagger:
     use_compile: true
     # Lidar analog of depth_cam_render.occluder_inflate_px (bin radius, not pixels). 0 disables it.
     occluder_fill_bins: 3
-  # Per-FRAME handle-visibility dropout: each step, per env with this probability, the protruding handle
-  # points are removed from the rendered door cloud (panel reads flat -- the handle "flickers out", like a
-  # thin lever on a real depth sensor). Trains the aux head to keep tracking the handle from the visible
-  # panel + seed instead of relying on seeing it. 0 disables; even ~0.05 hits many frames per rollout.
-  door_handle_dropout_prob: 0.05
+  # Handle-visibility dropout: the protruding handle points are removed from the rendered door cloud, so
+  # the panel reads flat and the aux head must keep tracking the handle from the visible panel + seed.
+  # This is a BACKUP skill only -- reading the handle straight out of the point cloud stays the primary
+  # objective -- so the hidden fraction is kept moderate (~19% of episodes at these settings).
+  door_handle_dropout:
+    # PER-EPISODE, conditioned on the door's CLEAR UNDERSIDE GAP (standoff between the mounting surface
+    # and the lever's near face, read from variant_meta.json -> handle.{plate,panel}_underside_gap_m).
+    # Drawn once per env at reset and held for the WHOLE rollout: invisibility is a property of the DOOR,
+    # so a handle that is unresolvable on frame 0 stays unresolvable through the entire approach and the
+    # policy can never bank on it reappearing.
+    # A SMALL gap = lever nearly flush with the surface = the depth blur/median merges the two = likely
+    # invisible. A LARGE gap = lever standing well proud of the panel = essentially always resolvable.
+    # P ramps linearly from episode_prob_at_min_gap at gap <= gap_range_m[0] to episode_prob_at_max_gap
+    # at gap >= gap_range_m[1], clamped outside.
+    # The four trained *_plusplus families span gaps 0.040-0.085 m (median 0.064). Both ends of the ramp
+    # come from observed real-sensor behaviour: 40 mm is the "handle vanishes" regime (0.9 -- still a
+    # DRAW, never forced), and the lever is only reliably resolvable once the gap reaches 65 mm, so the
+    # floor is not reached before then. That leaves the whole lower half of the asset distribution (52%
+    # of doors are under 65 mm) on the ramp and the overall hidden rate at ~25% of episodes. That is the
+    # upper end of what this augmentation should cost: the handle stays visible in 3 of 4 episodes, so
+    # reading it from the cloud remains the dominant signal and tracking stays the backup.
+    # Remove gap_range_m to fall back to a flat `episode_prob`.
+    gap_range_m: [0.04, 0.065]
+    episode_prob_at_min_gap: 0.9
+    episode_prob_at_max_gap: 0.02  # "almost impossible" rather than exactly 0, so wide-gap doors still see a rare dropout.
+    missing_gap_prob: 0.02  # Legacy asset families whose variant_meta.json has no gap; defaults to episode_prob_at_max_gap.
+    # PER-FRAME flicker: redrawn every step, so the handle blinks in and out. OFF -- IID flicker lets the
+    # policy just average the handle back over a couple of frames, the exact crutch the episode component
+    # removes. Raise only to model genuinely transient dropouts (glare, one bad frame).
+    # Legacy key `door_handle_dropout_prob` (per-frame only) is still read as the default for this.
+    frame_prob: 0.0
   wall_distractors:
     enabled: true
     wall_num_points: 50000
