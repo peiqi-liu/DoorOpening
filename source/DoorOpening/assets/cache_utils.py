@@ -23,12 +23,40 @@ DISTRIBUTED_RUN_TAG_ENV_VAR = "DOOROPENING_DISTRIBUTED_RUN_TAG"
 ASSETS_PRECONVERTED_ENV_VAR = "DOOROPENING_ASSETS_PRECONVERTED_TAG"
 
 
-def get_converter_cache_root() -> Path:
-    """Return the absolute cache root used for generated Isaac Lab USD assets."""
+def _cache_root_base() -> Path:
+    """Return the configured cache root WITHOUT the per-run-tag namespace."""
     configured_root = os.environ.get(CACHE_ROOT_ENV_VAR)
     cache_root = Path(configured_root).expanduser() if configured_root else DEFAULT_CACHE_ROOT
     if not cache_root.is_absolute():
         cache_root = (REPO_ROOT / cache_root).resolve()
+    return cache_root
+
+
+def get_converter_cache_root() -> Path:
+    """Return the absolute cache root used for generated Isaac Lab USD assets.
+
+    Namespaced under a per-launch run tag (``configure_distributed_run_tag``), so two
+    concurrent launches (distinct SLURM jobs, distinct interactive runs) never read or write
+    each other's converted assets. This isn't about caching across launches -- every launch
+    always reconverts every asset from source regardless (``should_force_usd_conversion`` is
+    hardcoded True; see ``dooropening_forced_usd_reconversion_intentional``), so there is no
+    reuse to lose. It exists to make the two races below structurally impossible instead of
+    coordinating around them:
+      1. writer vs writer: two launches' rank-0s reconverting the same shared door concurrently
+         (fixed earlier by a per-asset lock + private staging + atomic publish).
+      2. writer vs reader: one launch republishing a door while a DIFFERENT, already-finished
+         launch is mid-way through referencing that same cached USD from native USD stage
+         composition during env spawn -- which never goes through the lock at all, since it
+         doesn't call ``UrdfConverter``. This is what actually produced a rigid-body-less
+         ``glorbot.usd`` on 2026-08-11: job A finished prewarm and was spawning ~2048 envs
+         (referencing glorbot's cached USD directly) while job B, on a different node sharing
+         the same NFS-mounted cache, reconverted and replaced the same files mid-read.
+    Each launch now gets its own subtree, so neither race can occur across launches; the
+    intra-launch coordination (rank 0 converts, ranks >0 wait) is unaffected.
+    """
+    configure_distributed_run_tag()
+    run_tag = os.environ[DISTRIBUTED_RUN_TAG_ENV_VAR]
+    cache_root = _cache_root_base() / run_tag
     cache_root.mkdir(parents=True, exist_ok=True)
     return cache_root
 
@@ -221,6 +249,7 @@ def preconvert_shared_urdf_assets(
         lock_fd = _acquire_lock(lock_path, timeout_s=timeout_s, poll_interval_s=poll_interval_s)
         try:
             _gc_stale_prewarm_markers(sync_root)
+            _gc_stale_cache_roots(run_tag)
             with contextlib.suppress(FileNotFoundError):
                 error_path.unlink()
             # Only trust an existing .done marker if the USDs it claims actually exist on disk.
@@ -606,6 +635,33 @@ def _gc_stale_prewarm_markers(sync_root: Path, max_age_s: float = 3 * 24 * 3600.
                     marker.unlink()
             except (FileNotFoundError, OSError):
                 continue
+
+
+def _gc_stale_cache_roots(current_run_tag: str, max_age_s: float = 3 * 24 * 3600.0) -> None:
+    """Prune other launches' per-run-tag cache subtrees once they're old enough to be done.
+
+    Each launch gets its own ``<cache_root_base>/<run_tag>/`` subtree (see
+    ``get_converter_cache_root``), so nothing but disk space is at stake in leaving old ones
+    around -- but left unchecked they accumulate a full ~2000-asset conversion (tens of GB) per
+    past launch forever. Only directories other than the current run tag, whose newest file is
+    older than max_age_s (i.e. that launch is long finished), are removed.
+    """
+    base = _cache_root_base()
+    now = time.time()
+    for child in base.iterdir():
+        if not child.is_dir() or child.name == current_run_tag:
+            continue
+        try:
+            # Cheap staleness proxy: the newest .done/.failed marker that launch's own prewarm
+            # wrote (or, if it never got that far, the run-tag directory's own creation time).
+            markers = list((child / ".asset_prewarm").glob("*.done")) + list(
+                (child / ".asset_prewarm").glob("*.failed")
+            )
+            newest_mtime = max((m.stat().st_mtime for m in markers), default=child.stat().st_mtime)
+            if now - newest_mtime > max_age_s:
+                _rmtree(child)
+        except (FileNotFoundError, OSError):
+            continue
 
 
 def _safe_open_usd_stage(path: str | Path, *, context: str) -> object:
