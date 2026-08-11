@@ -460,16 +460,28 @@ _ORIG_URDF_CONVERTER_INIT = None
 def install_rank_safe_urdf_converter() -> None:
     """Serialize + isolate URDF->USD conversions so ranks never write a shared cache dir at once.
 
-    Wraps ``UrdfConverter.__init__`` so that whenever a conversion would actually WRITE into a
-    shared ``usd_dir`` (the serialized preconvert OR an on-demand spawn), it:
-      1. takes a per-asset file lock on ``<usd_dir>.convert.lock``,
+    Wraps ``UrdfConverter.__init__`` so that EVERY access to a shared ``usd_dir`` -- reads
+    included, not just writes -- takes a per-asset file lock on ``<usd_dir>.convert.lock`` before
+    touching it. A write (the serialized preconvert OR an on-demand spawn):
+      1. holds that lock,
       2. converts into a private ``<usd_dir>.staging.<pid>`` directory, then
       3. atomically publishes the finished files into the shared dir (``os.replace`` per file).
     Two processes converting the same door can therefore never collide on the intermediate
     ``configuration/*.tmp.usd`` files (which on NFS silly-renames the open file, fails the write,
     returns a NULL ``UsdStage`` and aborts the process). Generated USDs use relative references,
-    so moving the tree into place is safe. Idempotent; a pure cache-hit load takes no lock and
-    keeps the stock (fast) behavior.
+    so moving the tree into place is safe.
+
+    Reads also take the lock (previously a cache-hit load was lock-free). Without it, a job that
+    already finished its own prewarm and moved on to ``gym.make()`` could open a door's
+    ``mobility.usd`` at the exact moment a SIBLING job (different SLURM job, same door-config
+    hash, sharing this NFS cache) was mid-way through publishing a fresh conversion of that same
+    door -- ``_publish_converted_dir`` replaces a door's several USD files one at a time, not as
+    one atomic unit, so the reader could see a torn mix of old+new references: a USD with a valid
+    ``defaultPrim`` (so prewarm's own validation passes) but a collapsed/missing rigid-body
+    hierarchy. That surfaced as a random env's "No contact sensors added ... no rigid bodies" at
+    env creation, on a different door each time depending purely on which sibling job happened to
+    be rewriting what at that moment. Serializing reads behind the same per-asset lock as writes
+    closes that window; an uncontended read still pays only a cheap lock acquire/release.
     """
     global _ORIG_URDF_CONVERTER_INIT
     from isaaclab.sim.converters import UrdfConverter
@@ -485,12 +497,13 @@ def install_rank_safe_urdf_converter() -> None:
             _ORIG_URDF_CONVERTER_INIT(self, cfg)
             return
         shared_dir = str(shared_dir)
-        force = bool(getattr(cfg, "force_usd_conversion", False))
-        if not force and _cached_conversion_is_current(UrdfConverter, cfg, shared_dir):
-            # Cache hit: the stock init just loads, no write -> no lock needed.
-            _ORIG_URDF_CONVERTER_INIT(self, cfg)
-            return
         with _asset_convert_lock(shared_dir):
+            force = bool(getattr(cfg, "force_usd_conversion", False))
+            if not force and _cached_conversion_is_current(UrdfConverter, cfg, shared_dir):
+                # Cache hit: the stock init just loads. No write, but still under the lock so a
+                # concurrent sibling-job publish can never be read mid-flight.
+                _ORIG_URDF_CONVERTER_INIT(self, cfg)
+                return
             # Another process may have published a valid USD while we waited for the lock.
             if _cached_conversion_is_current(UrdfConverter, cfg, shared_dir):
                 saved_force = getattr(cfg, "force_usd_conversion", False)

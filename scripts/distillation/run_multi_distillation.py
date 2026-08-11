@@ -6,7 +6,7 @@ import pathlib
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from distutils.util import strtobool
 
 # --- Hang diagnostics -------------------------------------------------------------------
@@ -326,7 +326,16 @@ def main(env_cfg, agent_cfg: dict):
         torch.cuda.set_device(local_rank)
     if use_distributed and not dist.is_initialized():
         backend = "nccl" if torch.cuda.is_available() else "gloo"
-        dist.init_process_group(backend, rank=rank, world_size=world_size)
+        # Rank 0 alone serializes the full shared-asset URDF->USD reconversion (preconvert_shared_urdf_assets,
+        # tens of minutes for ~2000 doors), then every rank independently builds its own MultiAssetSpawner
+        # scene (observed: ~17.5 min for 256 envs). The FIRST collective any rank issues after
+        # init_process_group is Dagger.__init__'s dist.all_reduce -- with the default ~600s store/NCCL
+        # timeout, a straggler rank (usually rank 0, carrying the extra prewarm burden) blows past it and
+        # torch.distributed.elastic tears down the whole job. Startup here is legitimately slow, not hung;
+        # give ranks a much longer runway to reach that first barrier together.
+        dist.init_process_group(
+            backend, rank=rank, world_size=world_size, timeout=timedelta(seconds=7200)
+        )
 
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
 

@@ -204,7 +204,7 @@ simulation_app = app_launcher.app
 
 import gymnasium as gym
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 import torch
 import torch.distributed as dist
 
@@ -237,7 +237,13 @@ def main(env_cfg, agent_cfg: dict):
 
     if use_distributed and not dist.is_initialized():
         backend = "nccl" if torch.cuda.is_available() else "gloo"
-        dist.init_process_group(backend, rank=rank, world_size=world_size)
+        # See run_multi_distillation.py: rank 0's serialized preconvert_shared_urdf_assets plus each
+        # rank's own MultiAssetSpawner scene creation (observed ~17.5 min for 256 envs) can push the
+        # first post-init collective barrier well past the default ~600s store/NCCL timeout. Startup
+        # here is legitimately slow, not hung.
+        dist.init_process_group(
+            backend, rank=rank, world_size=world_size, timeout=timedelta(seconds=7200)
+        )
 
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
 
