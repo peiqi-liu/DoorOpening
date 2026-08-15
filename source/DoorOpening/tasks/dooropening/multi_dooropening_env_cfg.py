@@ -400,9 +400,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     viewer: ViewerCfg = ViewerCfg(eye=(1.5, -2.0, 1.0), lookat=(0.4, 0.0, 0.7), origin_type="env")
     # Handle (joint_2) latch return-spring effort limit -- how hard the lever resists being rotated to
-    # unlatch. ADR ramps from the (1,1) EventTerm base up to (1, 5). 9-12 Nm was far more torque than a
-    # real lever return spring needs, so the ceiling is now 5.
-    door_handle_effort_limit_range_nm = (1.0, 5.0)
+    # unlatch.
+    door_handle_effort_limit_range_nm = (1.0, 3.0)
     door_handle_effort_limit_sim = door_handle_effort_limit_range_nm[0]
 
     # Panel-swing (joint_1) effort-limit CAP applied while unlatched (edit_door_articulation switches it
@@ -425,7 +424,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # Handle (joint_2) unlatch angle threshold (radians): per-env, ADR-ramped from the fixed 0.8 start
     # out to (0.75, 0.9) -- tightened from (0.65, 0.95). Read every step by edit_door_articulation.
     door_latch_threshold_start_range_rad = (0.8, 0.8)
-    door_latch_threshold_range_rad = (0.75, 0.85)
+    door_latch_threshold_range_rad = (0.65, 1.05)
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
@@ -754,7 +753,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=False)
 
-    base_action_scale = 0.6
+    base_action_scale = 1.0
     arm_action_scale = 0.6
     finger_action_scale = 1.5
     arx_action_scale = 0.6

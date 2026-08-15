@@ -145,7 +145,8 @@ GLORBOT_CONFIG = ArticulationCfg(
         "panda_shoulder": ImplicitActuatorCfg(
             joint_names_expr=["panda_joint[1-4]"],
             velocity_limit_sim=2.175,
-            stiffness=1600.0,
+            effort_limit_sim = 50,
+            stiffness=600.0,
             damping={
                 "panda_joint1": 24.0,
                 "panda_joint2": 20.0,
@@ -156,10 +157,11 @@ GLORBOT_CONFIG = ArticulationCfg(
         "panda_forearm": ImplicitActuatorCfg(
             joint_names_expr=["panda_joint[5-7]"],
             velocity_limit_sim=2.61,
+            effort_limit_sim = 10,
             stiffness={
-                "panda_joint5": 410.0,
-                "panda_joint6": 410.0,
-                "panda_joint7": 130.0,
+                "panda_joint5": 100.0,
+                "panda_joint6": 100.0,
+                "panda_joint7": 100.0,
             },
             damping={
                 "panda_joint5": 6.0,
@@ -179,7 +181,7 @@ GLORBOT_CONFIG = ArticulationCfg(
         # Thumb (finger_joint_12..15) is a separate group so it can carry a higher effort limit.
         "finger": ImplicitActuatorCfg(
             joint_names_expr=["finger_joint_(1|2|3|5|6|7|9|1[01])"],
-            effort_limit_sim=1.0,
+            effort_limit_sim=0.55,
             stiffness=FINGER_STIFFNESS,
             damping=FINGER_DAMPING,
             # Joint friction for the LEAP fingers (was unset -> 0). Matches the real geared-Dynamixel
