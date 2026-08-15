@@ -23,12 +23,40 @@ DISTRIBUTED_RUN_TAG_ENV_VAR = "DOOROPENING_DISTRIBUTED_RUN_TAG"
 ASSETS_PRECONVERTED_ENV_VAR = "DOOROPENING_ASSETS_PRECONVERTED_TAG"
 
 
-def get_converter_cache_root() -> Path:
-    """Return the absolute cache root used for generated Isaac Lab USD assets."""
+def _cache_root_base() -> Path:
+    """Return the configured cache root WITHOUT the per-run-tag namespace."""
     configured_root = os.environ.get(CACHE_ROOT_ENV_VAR)
     cache_root = Path(configured_root).expanduser() if configured_root else DEFAULT_CACHE_ROOT
     if not cache_root.is_absolute():
         cache_root = (REPO_ROOT / cache_root).resolve()
+    return cache_root
+
+
+def get_converter_cache_root() -> Path:
+    """Return the absolute cache root used for generated Isaac Lab USD assets.
+
+    Namespaced under a per-launch run tag (``configure_distributed_run_tag``), so two
+    concurrent launches (distinct SLURM jobs, distinct interactive runs) never read or write
+    each other's converted assets. This isn't about caching across launches -- every launch
+    always reconverts every asset from source regardless (``should_force_usd_conversion`` is
+    hardcoded True; see ``dooropening_forced_usd_reconversion_intentional``), so there is no
+    reuse to lose. It exists to make the two races below structurally impossible instead of
+    coordinating around them:
+      1. writer vs writer: two launches' rank-0s reconverting the same shared door concurrently
+         (fixed earlier by a per-asset lock + private staging + atomic publish).
+      2. writer vs reader: one launch republishing a door while a DIFFERENT, already-finished
+         launch is mid-way through referencing that same cached USD from native USD stage
+         composition during env spawn -- which never goes through the lock at all, since it
+         doesn't call ``UrdfConverter``. This is what actually produced a rigid-body-less
+         ``glorbot.usd`` on 2026-08-11: job A finished prewarm and was spawning ~2048 envs
+         (referencing glorbot's cached USD directly) while job B, on a different node sharing
+         the same NFS-mounted cache, reconverted and replaced the same files mid-read.
+    Each launch now gets its own subtree, so neither race can occur across launches; the
+    intra-launch coordination (rank 0 converts, ranks >0 wait) is unaffected.
+    """
+    configure_distributed_run_tag()
+    run_tag = os.environ[DISTRIBUTED_RUN_TAG_ENV_VAR]
+    cache_root = _cache_root_base() / run_tag
     cache_root.mkdir(parents=True, exist_ok=True)
     return cache_root
 
@@ -221,6 +249,7 @@ def preconvert_shared_urdf_assets(
         lock_fd = _acquire_lock(lock_path, timeout_s=timeout_s, poll_interval_s=poll_interval_s)
         try:
             _gc_stale_prewarm_markers(sync_root)
+            _gc_stale_cache_roots(run_tag)
             with contextlib.suppress(FileNotFoundError):
                 error_path.unlink()
             # Only trust an existing .done marker if the USDs it claims actually exist on disk.
@@ -460,16 +489,28 @@ _ORIG_URDF_CONVERTER_INIT = None
 def install_rank_safe_urdf_converter() -> None:
     """Serialize + isolate URDF->USD conversions so ranks never write a shared cache dir at once.
 
-    Wraps ``UrdfConverter.__init__`` so that whenever a conversion would actually WRITE into a
-    shared ``usd_dir`` (the serialized preconvert OR an on-demand spawn), it:
-      1. takes a per-asset file lock on ``<usd_dir>.convert.lock``,
+    Wraps ``UrdfConverter.__init__`` so that EVERY access to a shared ``usd_dir`` -- reads
+    included, not just writes -- takes a per-asset file lock on ``<usd_dir>.convert.lock`` before
+    touching it. A write (the serialized preconvert OR an on-demand spawn):
+      1. holds that lock,
       2. converts into a private ``<usd_dir>.staging.<pid>`` directory, then
       3. atomically publishes the finished files into the shared dir (``os.replace`` per file).
     Two processes converting the same door can therefore never collide on the intermediate
     ``configuration/*.tmp.usd`` files (which on NFS silly-renames the open file, fails the write,
     returns a NULL ``UsdStage`` and aborts the process). Generated USDs use relative references,
-    so moving the tree into place is safe. Idempotent; a pure cache-hit load takes no lock and
-    keeps the stock (fast) behavior.
+    so moving the tree into place is safe.
+
+    Reads also take the lock (previously a cache-hit load was lock-free). Without it, a job that
+    already finished its own prewarm and moved on to ``gym.make()`` could open a door's
+    ``mobility.usd`` at the exact moment a SIBLING job (different SLURM job, same door-config
+    hash, sharing this NFS cache) was mid-way through publishing a fresh conversion of that same
+    door -- ``_publish_converted_dir`` replaces a door's several USD files one at a time, not as
+    one atomic unit, so the reader could see a torn mix of old+new references: a USD with a valid
+    ``defaultPrim`` (so prewarm's own validation passes) but a collapsed/missing rigid-body
+    hierarchy. That surfaced as a random env's "No contact sensors added ... no rigid bodies" at
+    env creation, on a different door each time depending purely on which sibling job happened to
+    be rewriting what at that moment. Serializing reads behind the same per-asset lock as writes
+    closes that window; an uncontended read still pays only a cheap lock acquire/release.
     """
     global _ORIG_URDF_CONVERTER_INIT
     from isaaclab.sim.converters import UrdfConverter
@@ -485,12 +526,13 @@ def install_rank_safe_urdf_converter() -> None:
             _ORIG_URDF_CONVERTER_INIT(self, cfg)
             return
         shared_dir = str(shared_dir)
-        force = bool(getattr(cfg, "force_usd_conversion", False))
-        if not force and _cached_conversion_is_current(UrdfConverter, cfg, shared_dir):
-            # Cache hit: the stock init just loads, no write -> no lock needed.
-            _ORIG_URDF_CONVERTER_INIT(self, cfg)
-            return
         with _asset_convert_lock(shared_dir):
+            force = bool(getattr(cfg, "force_usd_conversion", False))
+            if not force and _cached_conversion_is_current(UrdfConverter, cfg, shared_dir):
+                # Cache hit: the stock init just loads. No write, but still under the lock so a
+                # concurrent sibling-job publish can never be read mid-flight.
+                _ORIG_URDF_CONVERTER_INIT(self, cfg)
+                return
             # Another process may have published a valid USD while we waited for the lock.
             if _cached_conversion_is_current(UrdfConverter, cfg, shared_dir):
                 saved_force = getattr(cfg, "force_usd_conversion", False)
@@ -593,6 +635,33 @@ def _gc_stale_prewarm_markers(sync_root: Path, max_age_s: float = 3 * 24 * 3600.
                     marker.unlink()
             except (FileNotFoundError, OSError):
                 continue
+
+
+def _gc_stale_cache_roots(current_run_tag: str, max_age_s: float = 3 * 24 * 3600.0) -> None:
+    """Prune other launches' per-run-tag cache subtrees once they're old enough to be done.
+
+    Each launch gets its own ``<cache_root_base>/<run_tag>/`` subtree (see
+    ``get_converter_cache_root``), so nothing but disk space is at stake in leaving old ones
+    around -- but left unchecked they accumulate a full ~2000-asset conversion (tens of GB) per
+    past launch forever. Only directories other than the current run tag, whose newest file is
+    older than max_age_s (i.e. that launch is long finished), are removed.
+    """
+    base = _cache_root_base()
+    now = time.time()
+    for child in base.iterdir():
+        if not child.is_dir() or child.name == current_run_tag:
+            continue
+        try:
+            # Cheap staleness proxy: the newest .done/.failed marker that launch's own prewarm
+            # wrote (or, if it never got that far, the run-tag directory's own creation time).
+            markers = list((child / ".asset_prewarm").glob("*.done")) + list(
+                (child / ".asset_prewarm").glob("*.failed")
+            )
+            newest_mtime = max((m.stat().st_mtime for m in markers), default=child.stat().st_mtime)
+            if now - newest_mtime > max_age_s:
+                _rmtree(child)
+        except (FileNotFoundError, OSError):
+            continue
 
 
 def _safe_open_usd_stage(path: str | Path, *, context: str) -> object:
