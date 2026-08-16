@@ -416,7 +416,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # here, making the door feel like a constant-torque load of this many Nm. Start band 40..60 Nm;
     # ADR endpoint widens to 5..80 -- nearly free-swinging (5 Nm) up to heavy (80 Nm).
     door_panel_effort_limit_start_range_nm = (10.0, 25.0)
-    door_panel_effort_limit_range_nm = (5.0, 60.0)
+    door_panel_effort_limit_range_nm = (2.0, 30.0)
 
     # Handle (joint_2) unlatch angle threshold (radians): the door stays latched until the handle is
     # rotated past this. Per-env, ADR-ramped from the fixed 0.8 start out to (0.65, 0.95) so the policy

@@ -181,7 +181,7 @@ GLORBOT_CONFIG = ArticulationCfg(
         # Thumb (finger_joint_12..15) is a separate group so it can carry a higher effort limit.
         "finger": ImplicitActuatorCfg(
             joint_names_expr=["finger_joint_(1|2|3|5|6|7|9|1[01])"],
-            effort_limit_sim=0.55,
+            effort_limit_sim=0.3,
             stiffness=FINGER_STIFFNESS,
             damping=FINGER_DAMPING,
             # Joint friction for the LEAP fingers (was unset -> 0). Matches the real geared-Dynamixel
@@ -200,7 +200,7 @@ GLORBOT_CONFIG = ArticulationCfg(
         # real hand's softer side-to-side PD (kp/kd 0.75x), reproducing its grasp-load droop in sim.
         "finger_abduction": ImplicitActuatorCfg(
             joint_names_expr=["finger_joint_(0|4|8)"],
-            effort_limit_sim=1.0,
+            effort_limit_sim=0.3,
             stiffness=FINGER_STIFFNESS * ABDUCTION_GAIN_SCALE,
             damping=FINGER_DAMPING * ABDUCTION_GAIN_SCALE,
             friction=0.01,
