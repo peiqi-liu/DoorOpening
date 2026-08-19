@@ -124,11 +124,34 @@ GLORBOT_CONFIG = ArticulationCfg(
         #     stiffness=4000.0,
         #     damping=2000.0,
         # ),
-        "base": ImplicitActuatorCfg(
-            joint_names_expr=["base_.*"],
+        # Base translation and rotation are split into SEPARATE actuator groups because their gains
+        # are not the same physical quantity: base_x/base_y are prismatic (stiffness N/m, damping
+        # N-s/m) while base_rotation is revolute (N-m/rad, N-m-s/rad). The old single ["base_.*"]
+        # group applied kp=10000/kd=3000 to all three as if they were interchangeable.
+        #
+        # That mattered because both DOFs land heavily overdamped, and for an overdamped system the
+        # dominant pole is -k/d -- so tau = d/k = 0.3 s for BOTH, independent of inertia. Sharing k
+        # and d therefore handed translation (56.5 kg) and rotation (~3 kg-m^2 about the base z
+        # axis) IDENTICAL first-order lag despite a ~20:1 effective-inertia ratio. The real base has
+        # no such symmetry -- its yaw responds much faster than its translation -- so the offline
+        # state machine's blocking phase (yaw completes at ~41% of the segment, translation at ~93%,
+        # release at ~96%) held in sim but not on hardware, where the yaw arrived early and the
+        # step-in fell short.
+        "base_translation": ImplicitActuatorCfg(
+            joint_names_expr=["base_x_joint", "base_y_joint"],
             effort_limit_sim=1000.0,
             stiffness=10000,
             damping=3000,
+        ),
+        # Rotation damping cut 10x (3000 -> 300) so yaw responds ~10x faster than translation
+        # (tau = d/k: 0.03 s vs 0.3 s), reproducing the real base's asymmetry. NOTE this pushes yaw
+        # from heavily overdamped to slightly UNDERdamped -- at I ~ 3 kg-m^2, zeta goes 8.7 -> ~0.87
+        # (wn ~ 58 rad/s) -- so expect some yaw overshoot that the old gains could not produce.
+        "base_rotation": ImplicitActuatorCfg(
+            joint_names_expr=["base_rotation_joint"],
+            effort_limit_sim=1000.0,
+            stiffness=10000,
+            damping=300,
         ),
         # Per-joint Franka PD gains matched to the REAL-WORLD deploy controller (kp/kd used on hardware),
         # set per joint because the real values vary within each group (kd differs across joint1-4; both
