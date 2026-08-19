@@ -9,6 +9,10 @@
 
 """
 Defines the Glorbot robot configuration for simulation with Isaac Sim.
+
+Glorbot is the tidybot2 chassis carrying a Franka Panda arm with Franka's stock 2-finger gripper,
+plus an ARX X5 camera arm. 18 actuated DOFs, of which 17 are commanded (the gripper's second
+finger follows the first through a mimic coupling).
 """
 
 from pathlib import Path
@@ -29,7 +33,16 @@ glorbot_usd_path = str(Path(glorbot_usd_dir) / glorbot_usd_file_name)
 import numpy as np
 
 # default camera pose for the camera to look front
-from DoorOpening.constants.robot_constants import DEFAULT_JOINT_POS, OPEN_FINGER_JOINT_VALUES, CLOSE_FINGER_JOINT_VALUES, FULL_JOINT_NAMES, BASE_JOINT_NAMES, FRANKA_JOINT_NAMES
+from DoorOpening.constants.robot_constants import (
+    DEFAULT_JOINT_POS,
+    DRIVEN_FINGER_JOINT_NAME,
+    MIMIC_FINGER_JOINT_NAME,
+    OPEN_FINGER_JOINT_VALUES,
+    CLOSE_FINGER_JOINT_VALUES,
+    FULL_JOINT_NAMES,
+    BASE_JOINT_NAMES,
+    FRANKA_JOINT_NAMES,
+)
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
 
 ROBOT_SOLVER_POSITION_ITERS = 8
@@ -37,17 +50,6 @@ ROBOT_SOLVER_VELOCITY_ITERS = 2
 ROBOT_CONTACT_OFFSET = 0.005
 ROBOT_REST_OFFSET = 0.001
 ROBOT_MAX_DEPENETRATION_VELOCITY = 500.0
-
-# LEAP hand finger PD gains. The three abduction ("MCP Side") DOFs -- finger_joint_0/4/8 -- are run at
-# ABDUCTION_GAIN_SCALE of the flexion gains to mirror the real hand, whose leap_hand_node.py drives
-# motor IDs 0/4/8 at 0.75x the P/D gain of every other joint. That softer PD is what makes those
-# joints droop ~0.3 rad under grasp load on hardware; matching the asymmetry here reproduces the
-# steady-state tracking error in sim instead of tracking the target cleanly. Set to 1.0 for the old
-# uniform-stiffness behavior.
-FINGER_STIFFNESS = 600
-FINGER_DAMPING = 40
-ABDUCTION_GAIN_SCALE = 0.75
-
 
 def disable_collision_scope_instancing(robot_prim_path_expr: str = "/World/envs/env_.*/Robot") -> int:
     """De-instance each link's ``collisions`` scope so the collider debug viz renders.
@@ -73,6 +75,59 @@ def disable_collision_scope_instancing(robot_prim_path_expr: str = "/World/envs/
     return len(scopes)
 
 
+# How the two fingers are held together as ONE DOF.
+#   True  -> the URDF <mimic> tag is honored and PhysX enforces joint2 = joint1 with a
+#            PhysxMimicJointAPI constraint (the follower's PD is then switched off below).
+#   False -> the mimic tag is ignored, joint2 is an ordinary joint, and the coupling is done in
+#            software by every controller writing the same target to both DOFs.
+# Both give a single commanded DOF. Flip to False if the fingers behave asymmetrically (which
+# means the constraint was not created) or to rule the constraint out while debugging.
+HONOR_URDF_MIMIC = True
+
+# ---------------------------------------------------------------------------------------------
+# Gripper drive parameters, taken from the Franka Hand Product Manual (R50010, rev 1.2, section
+# 5.1 "Mechanical Data") rather than from Isaac Lab's stock Franka asset. The manual's numbers:
+#     Grasping (continuous) force adjustable  30-70   N
+#     Travel Range                            80      mm  (i.e. 0.04 per finger -- matches URDF)
+#     Travel Speed (per finger)               50      mm/s
+#     Weight                                  730     g
+#
+# effort_limit = the top of the hardware's continuous band. Isaac Lab's stock 200 N is ~3x what
+# the real hand can produce; on a 15 g finger it is also ~13,000 m/s^2, enough to cross the whole
+# 40 mm travel in 2.5 ms (a 60 Hz step is 16.7 ms), so the drive slams rather than moves.
+GRIPPER_EFFORT_LIMIT = 70.0
+
+# Max finger speed, straight from the manual. NOTE this is 4x SLOWER than the 0.2 m/s that Isaac
+# Lab's Franka and this URDF's <limit> author: the real hand needs 0.8 s to close from fully open,
+# not 0.2 s. Worth keeping honest -- a policy trained against a 4x-fast gripper learns grasp
+# timing that does not exist on hardware.
+GRIPPER_VELOCITY_LIMIT = 0.05
+
+# The manual specifies force, not stiffness, because the real hand is force-controlled
+# (libfranka's grasp() takes a target force). Under Isaac Lab's implicit POSITION drive the grasp
+# force is instead an emergent quantity: F = stiffness * (commanded - actual), clipped at
+# effort_limit. So stiffness is chosen to land the resulting force inside the hardware's 30-70 N
+# band for a realistic command. Commanding "fully closed" (0.0) on a ~20 mm door handle leaves
+# 10 mm of unreachable travel per finger, which gives:
+#     k = 2e3 (Isaac Lab stock) ->  20 N   below the hardware's 30 N minimum
+#     k = 5e3                   ->  50 N   mid-band  <-- chosen
+#     k = 1e4                   -> 100 N   clipped to 70 N, i.e. always saturated
+GRIPPER_STIFFNESS = 5e3
+
+# Damping is picked for zeta >= 1 in BOTH coupling modes, since the effective mass seen by the
+# driven DOF doubles when the mimic constraint drags the second finger along:
+#     m_eff = 0.065 kg (one finger + armature) -> d_crit = 36 -> zeta 1.66
+#     m_eff = 0.130 kg (both, via the mimic)   -> d_crit = 51 -> zeta 1.18
+# No ringing either way. Isaac Lab's stock 1e2 also satisfies this but is ~2x more sluggish.
+GRIPPER_DAMPING = 60.0
+
+# Added mass (kg) on each finger DOF. Without it the 15 g fingers plus a high effort limit
+# overshoot within a single step and jitter. The real fingers are driven through a screw drive
+# whose reflected inertia dwarfs the 15 g finger, so this is physical, not a fudge -- but it is
+# the first knob to turn if the fingers feel sluggish.
+GRIPPER_ARMATURE = 0.05
+
+
 GLORBOT_CONFIG = ArticulationCfg(
     spawn=sim_utils.UrdfFileCfg(
         fix_base=True,
@@ -88,8 +143,17 @@ GLORBOT_CONFIG = ArticulationCfg(
             solver_velocity_iteration_count=ROBOT_SOLVER_VELOCITY_ITERS,
         ),
         force_usd_conversion=should_force_usd_conversion(),
+        # Honor the <mimic> tag on panda_finger_joint2 so the gripper is ONE commanded DOF, like
+        # the real single-actuator Franka hand.
+        # WARNING: this field's name is the opposite of what it does. UrdfConverter passes it
+        # verbatim to the importer's `set_parse_mimic()` (urdf_converter.py: "import_config.
+        # set_parse_mimic(self.cfg.convert_mimic_joints_to_normal_joints)"), and in the importer
+        # parse_mimic=True means "emit a PhysxMimicJointAPI constraint" while False means "treat
+        # the mimic joint as an ordinary independent joint" -- its GUI checkbox for this is
+        # literally labelled "Ignore Mimic" with `default_val=not config.parse_mimic`. So True
+        # here KEEPS the coupling; the default (False) would silently give two free fingers.
+        convert_mimic_joints_to_normal_joints=HONOR_URDF_MIMIC,
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-            # enabled_self_collisions=False,
             enabled_self_collisions=True,
             solver_position_iteration_count=ROBOT_SOLVER_POSITION_ITERS,
             solver_velocity_iteration_count=ROBOT_SOLVER_VELOCITY_ITERS,
@@ -101,70 +165,38 @@ GLORBOT_CONFIG = ArticulationCfg(
             contact_offset=ROBOT_CONTACT_OFFSET,
             rest_offset=ROBOT_REST_OFFSET,
         ),
-        # Decompose collision meshes into convex pieces (default is a single convex_hull, which
-        # would turn the chassis + tall lidar-mast mesh into one solid wedge). Needed so the
-        # tidybot2_base_link mast collision approximates the real thin stick, not a big blob.
+        # A single convex hull would swallow the lidar mast into a
+        # solid wedge. It also matters for the gripper itself -- hand.obj is a concave C shape, and
+        # a single hull would fill the slot the fingers slide in.
         collider_type="convex_decomposition",
-        # collider_type="convex_hull",
-        # scale = (0.8, 0.8, 0.8),
         activate_contact_sensors=True,
     ),
-    # spawn=sim_utils.UsdFileCfg(
-    #     usd_path=glorbot_usd_path,
-    #     scale = (0.8, 0.8, 0.8),
-    # ),
     init_state=ArticulationCfg.InitialStateCfg(
         joint_pos=DEFAULT_JOINT_POS,
         pos=ROBOT_INITIAL_POS,
-        rot=ROBOT_INITIAL_ROT
+        rot=ROBOT_INITIAL_ROT,
     ),
     actuators={
-        # "body": ImplicitActuatorCfg(
-        #     joint_names_expr=[".*"],
-        #     stiffness=4000.0,
-        #     damping=2000.0,
-        # ),
-        # Base translation and rotation are split into SEPARATE actuator groups because their gains
-        # are not the same physical quantity: base_x/base_y are prismatic (stiffness N/m, damping
-        # N-s/m) while base_rotation is revolute (N-m/rad, N-m-s/rad). The old single ["base_.*"]
-        # group applied kp=10000/kd=3000 to all three as if they were interchangeable.
-        #
-        # That mattered because both DOFs land heavily overdamped, and for an overdamped system the
-        # dominant pole is -k/d -- so tau = d/k = 0.3 s for BOTH, independent of inertia. Sharing k
-        # and d therefore handed translation (56.5 kg) and rotation (~3 kg-m^2 about the base z
-        # axis) IDENTICAL first-order lag despite a ~20:1 effective-inertia ratio. The real base has
-        # no such symmetry -- its yaw responds much faster than its translation -- so the offline
-        # state machine's blocking phase (yaw completes at ~41% of the segment, translation at ~93%,
-        # release at ~96%) held in sim but not on hardware, where the yaw arrived early and the
-        # step-in fell short.
+        # Split translation/rotation into separate groups -- their gains are not the same physical
+        # quantity (prismatic N/m vs revolute N-m/rad), and both land overdamped where the dominant
+        # pole is -k/d, so a shared group gave translation (56.5 kg) and yaw (~3 kg-m^2) an identical
+        # 0.3 s lag. Rotation damping is 10x lower so yaw responds ~10x faster, as on the real base.
         "base_translation": ImplicitActuatorCfg(
             joint_names_expr=["base_x_joint", "base_y_joint"],
             effort_limit_sim=1000.0,
             stiffness=10000,
             damping=3000,
         ),
-        # Rotation damping cut 10x (3000 -> 300) so yaw responds ~10x faster than translation
-        # (tau = d/k: 0.03 s vs 0.3 s), reproducing the real base's asymmetry. NOTE this pushes yaw
-        # from heavily overdamped to slightly UNDERdamped -- at I ~ 3 kg-m^2, zeta goes 8.7 -> ~0.87
-        # (wn ~ 58 rad/s) -- so expect some yaw overshoot that the old gains could not produce.
         "base_rotation": ImplicitActuatorCfg(
             joint_names_expr=["base_rotation_joint"],
             effort_limit_sim=1000.0,
             stiffness=10000,
             damping=300,
         ),
-        # Per-joint Franka PD gains matched to the REAL-WORLD deploy controller (kp/kd used on hardware),
-        # set per joint because the real values vary within each group (kd differs across joint1-4; both
-        # kp and kd differ across joint5-7). stiffness/damping accept a {joint_name: value} dict so each
-        # joint gets its exact gain. NOTE: these are the ADR-increment-0 nominal gains -- at eval the
-        # `robot_joint_stiffness_and_damping` EventTerm still scales them by the ADR band (kp x[0.8,1.2],
-        # kd x[0.7,1.3]); pin the ADR increment / bypass _force_max_adr_for_eval to hold these exactly.
-        # effort_limit_sim is deliberately NOT set on either panda group: when it is None on an
-        # IMPLICIT actuator, IsaacLab keeps the USD/URDF-authored limit (actuator_base "case 3: if
-        # actuator_cfg_value is None: we use usd_value"; the 1e9 fallback applies to explicit models
-        # only). That gives the real Panda torques straight from glorbot.urdf -- 87 N-m on joint1-4
-        # and 12 N-m on joint5-7 -- instead of the hand-picked 50 / 190 used before, where the wrist
-        # cap was ~16x the hardware value.
+        # Per-joint Franka PD gains matched to the REAL-WORLD deploy controller (kp/kd used on
+        # hardware), set per joint because the real values vary within each group. effort_limit_sim
+        # is deliberately unset: when None on an IMPLICIT actuator, IsaacLab keeps the URDF-authored
+        # limit (87 N-m on joint1-4, 12 N-m on joint5-7) instead of a hand-picked cap.
         "panda_shoulder": ImplicitActuatorCfg(
             joint_names_expr=["panda_joint[1-4]"],
             velocity_limit_sim=2.175,
@@ -197,49 +229,31 @@ GLORBOT_CONFIG = ArticulationCfg(
             stiffness=1000.0,
             damping=80.0,
         ),
-        # Index + middle + ring FLEXION joints. The abduction ("MCP Side") DOFs finger_joint_0/4/8 are
-        # split into the "finger_abduction" group below so they can run at the softer real-hand gains.
-        # Thumb (finger_joint_12..15) is a separate group so it can carry a higher effort limit.
-        "finger": ImplicitActuatorCfg(
-            joint_names_expr=["finger_joint_(1|2|3|5|6|7|9|1[01])"],
-            effort_limit_sim=1.0,
-            stiffness=FINGER_STIFFNESS,
-            damping=FINGER_DAMPING,
-            # Joint friction for the LEAP fingers (was unset -> 0). Matches the real geared-Dynamixel
-            # finger friction and damps overshoot alongside the armature below.
-            friction=0.01,
-            # The LEAP finger links are ultralight (izz ~1e-5 kg m^2). With a 1.0 Nm effort limit that
-            # is ~1e5 rad/s^2 of angular acceleration when the PD saturates, so the fingers overshoot
-            # in a single step and jitter. Armature adds effective rotor inertia the implicit PD sees,
-            # capping the per-step acceleration. NOTE: this is only the nominal / ADR-increment-0 value;
-            # at training time the `robot_finger_armature` EventTerm (see multi_dooropening_env_cfg.py)
-            # randomizes it per-episode -- lower that ADR range too if you want 0.002 to hold in training.
-            armature=0.002,
+        # The commanded finger DOF.
+        "panda_hand": ImplicitActuatorCfg(
+            joint_names_expr=[DRIVEN_FINGER_JOINT_NAME],
+            effort_limit_sim=GRIPPER_EFFORT_LIMIT,
+            velocity_limit_sim=GRIPPER_VELOCITY_LIMIT,
+            stiffness=GRIPPER_STIFFNESS,
+            damping=GRIPPER_DAMPING,
+            armature=GRIPPER_ARMATURE,
         ),
-        # Abduction ("MCP Side") DOFs finger_joint_0/4/8 (real motor IDs 0/4/8). Same params as the
-        # flexion "finger" group EXCEPT the P/D gains are scaled by ABDUCTION_GAIN_SCALE to mirror the
-        # real hand's softer side-to-side PD (kp/kd 0.75x), reproducing its grasp-load droop in sim.
-        "finger_abduction": ImplicitActuatorCfg(
-            joint_names_expr=["finger_joint_(0|4|8)"],
-            effort_limit_sim=1.0,
-            stiffness=FINGER_STIFFNESS * ABDUCTION_GAIN_SCALE,
-            damping=FINGER_DAMPING * ABDUCTION_GAIN_SCALE,
-            friction=0.01,
-            armature=0.002,
+        # The follower. Its gains depend on HOW the coupling is enforced, which is why they are
+        # derived from HONOR_URDF_MIMIC rather than hardcoded:
+        #   mimic constraint  -> zero gains. A PhysX mimic joint already forces joint2 = joint1;
+        #       leaving a 2000 N/m PD on joint2 as well is redundant actuation, and the drive and
+        #       the constraint then fight each other every step, which chatters.
+        #   software coupling -> same gains as the master, since then joint2 is an ordinary free
+        #       joint and the controller's duplicated target is the only thing holding it.
+        # If the fingers ever go limp/asymmetric, the constraint was not created: flip
+        # HONOR_URDF_MIMIC to False and the software path takes over.
+        "panda_hand_follower": ImplicitActuatorCfg(
+            joint_names_expr=[MIMIC_FINGER_JOINT_NAME],
+            effort_limit_sim=GRIPPER_EFFORT_LIMIT,
+            velocity_limit_sim=GRIPPER_VELOCITY_LIMIT,
+            stiffness=0.0 if HONOR_URDF_MIMIC else GRIPPER_STIFFNESS,
+            damping=0.0 if HONOR_URDF_MIMIC else GRIPPER_DAMPING,
+            armature=GRIPPER_ARMATURE,
         ),
-        # Thumb (finger_joint_12..15). Split out from the other fingers with a HIGHER effort limit:
-        # the thumb is NOT policy-controlled (commented out of finger_joints), so it is only held by
-        # this PD at a fixed reset target. At 1.0 Nm it got shoved off that target by self-collision
-        # from the closing fingers + inertial loads during arm motion and never recovered ("fell"). A
-        # larger effort limit lets it hold. Same gains/friction/armature as the fingers otherwise; the
-        # armature still caps per-step acceleration so the higher cap stays stable. Tune if needed.
-        "thumb": ImplicitActuatorCfg(
-            joint_names_expr=["finger_joint_1[2-5]"],
-            effort_limit_sim=5.0,
-            stiffness=600,
-            damping=40,
-            friction=0.01,
-            armature=0.002,
-        ),
-    }
+    },
 )

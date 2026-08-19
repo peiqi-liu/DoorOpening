@@ -83,12 +83,12 @@ class GlorbotRMPController:
     def get_action(
         self, base_pose, base_velocity, 
         franka_joint_positions, franka_joint_velocities,
-        leap_joint_positions, leap_joint_velocities,
+        finger_joint_positions, finger_joint_velocities,
         arx_joint_positions, arx_joint_velocities,
         ee_target_pose, global_point_cloud=None, robot_point_cloud_world_frame=None,
     ):
-        q = np.concatenate((base_pose, franka_joint_positions, leap_joint_positions, arx_joint_positions))
-        qd = np.concatenate((base_velocity, franka_joint_velocities, leap_joint_velocities, arx_joint_velocities))
+        q = np.concatenate((base_pose, franka_joint_positions, finger_joint_positions, arx_joint_positions))
+        qd = np.concatenate((base_velocity, franka_joint_velocities, finger_joint_velocities, arx_joint_velocities))
 
         # update global point cloud if provided
         if global_point_cloud is not None:

@@ -94,7 +94,7 @@ DEFAULT_HANDLE_LEVER_THICKNESS_RANGE_M = (0.007, 0.013)
 # extended by that half-thickness so the lever's near surface sits exactly this far above the panel (see
 # build_handle_spec). So this range IS the finger clearance under the lever, not the lever-center offset.
 # Floor lowered 0.043 -> 0.040 to tighten the worst-case finger clearance under the lever. Still ~2x the
-# 21 mm LEAP fingertip cross-section. Doors sampled into the 40-50 mm band never get a raised mount --
+# 21 mm finger cross-section (the Franka fingertip is 21 mm wide too). Doors sampled into the 40-50 mm band never get a raised mount --
 # build_handle_spec drops the bump below MIN_HANDLE_PLATE_GRASP_GAP_M rather than shrink the grasp gap.
 DEFAULT_HANDLE_STEM_LENGTH_RANGE_M = (0.040, 0.085)
 DEFAULT_HANDLE_LENGTH_RANGE_M = (0.09, 0.14)

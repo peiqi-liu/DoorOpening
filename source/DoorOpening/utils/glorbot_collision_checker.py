@@ -19,22 +19,8 @@ class GlorbotCollisionChecker:
         "panda_joint5",
         "panda_joint6",
         "panda_joint7",
-        "finger_joint_1",
-        "finger_joint_0",
-        "finger_joint_2",
-        "finger_joint_3",
-        "finger_joint_12",
-        "finger_joint_13",
-        "finger_joint_14",
-        "finger_joint_15",
-        "finger_joint_5",
-        "finger_joint_4",
-        "finger_joint_6",
-        "finger_joint_7",
-        "finger_joint_9",
-        "finger_joint_8",
-        "finger_joint_10",
-        "finger_joint_11",
+        "panda_finger_joint1",
+        "panda_finger_joint2",
         "x5_joint1",
         "x5_joint2",
         "x5_joint3",
@@ -246,26 +232,20 @@ class GlorbotCollisionChecker:
             ([0.016, -0.025, 0.025], 0.03),
             ([0.016, 0.025, -0.025], 0.03),
         ]
-        model["palm_lower"] = [
-            ([-0.04, -0.035, 0.01], 0.035),
-            ([-0.04, -0.070, 0.01], 0.035),
-            ([-0.04, 0.0, 0.01], 0.035),
-            ([-0.070, -0.060, 0.01], 0.032),
-            ([-0.070, -0.010, 0.01], 0.032),
+        # Franka hand: one box-ish cluster for the hand body, one sphere per finger. The finger
+        # spheres sit on the pad, which is where a collision that matters actually happens.
+        model["panda_hand"] = [
+            ([0.0, 0.0, 0.02], 0.045),
+            ([0.0, 0.045, 0.045], 0.03),
+            ([0.0, -0.045, 0.045], 0.03),
         ]
-
-        for i in [1, 2, 3]:
-            model[f"mcp_joint_{i}"] = [([-0.025, 0.04, 0.015], 0.025)]
-            model[f"pip_{i}"] = [([0.01, 0.0, -0.01], 0.02)]
-            model[f"dip_{i}"] = [([0.01, -0.035, 0.015], 0.02)]
-            model[f"fingertip_{i}"] = [([0.0, -0.035, 0.015], 0.02)]
-
-        model["pip_4"] = [([0.0, 0.0, 0.0], 0.02)]
-        model["dip_4"] = [([0.001, 0.01, -0.02], 0.02)]
-        model["fingertip_4"] = [
-            ([0.0, -0.045, -0.01], 0.02),
-            ([0.0, -0.02, -0.01], 0.02),
-            ([0.0, 0.0, -0.01], 0.02),
+        model["panda_leftfinger"] = [
+            ([0.0, 0.008, 0.045], 0.014),
+            ([0.0, 0.010, 0.020], 0.014),
+        ]
+        model["panda_rightfinger"] = [
+            ([0.0, -0.008, 0.045], 0.014),
+            ([0.0, -0.010, 0.020], 0.014),
         ]
         return model
 

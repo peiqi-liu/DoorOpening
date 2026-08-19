@@ -51,7 +51,7 @@ from DoorOpening.utils.door_window_dropout import (
     sample_random_window_hole_metadata,
 )
 from DoorOpening.utils.extract_pointcloud_from_articulation import (
-    FrankaLeapSampler,
+    FrankaGripperSampler,
     build_first_visual_link_pointcloud_cache,
     compose_cached_link_pointcloud_world,
 )
@@ -2782,7 +2782,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         )
         unique_asset_idx = sorted(set(self.env_asset_idx.detach().cpu().tolist()))
         self.door_samplers = {
-            idx: FrankaLeapSampler(
+            idx: FrankaGripperSampler(
                 door_asset_paths[idx],
                 device=self.device,
                 num_points=self.scene_door_pcd_num_points,
@@ -2843,7 +2843,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             self.scene_robot_pcd_num_points = self.scene_door_pcd_num_points
 
         self.scene_robot_pcd_num_points = int(self.scene_robot_pcd_num_points)
-        self.robot_sampler = FrankaLeapSampler(
+        self.robot_sampler = FrankaGripperSampler(
             glorbot_urdf_path,
             device=self.device,
             num_points=self.scene_robot_pcd_num_points,

@@ -329,16 +329,13 @@ def get_base_lin_speed(base_env):
 
 def _build_compact_joint_layout(joint_names):
     """Return (names, indices) for the compact viser-pt joint order
-    [base_x_joint, base_y_joint, base_rotation_joint, panda_joint1..7, finger_joint_0..N].
+    [base_x_joint, base_y_joint, base_rotation_joint, panda_joint1..7, panda_finger_joint1].
 
     Uses the REAL joint names so scripts/replay_viser_pt.py matches them straight onto the URDF
     (base_x/y/rotation are actuated URDF joints -> the base is driven through them).
     """
     desired = ["base_x_joint", "base_y_joint", "base_rotation_joint"] + [f"panda_joint{i}" for i in range(1, 8)]
-    fingers = sorted(
-        (n for n in joint_names if str(n).startswith("finger_joint_")),
-        key=lambda n: int(str(n).rsplit("_", 1)[1]),
-    )
+    fingers = sorted(n for n in joint_names if str(n).startswith("panda_finger_joint"))
     desired += list(fingers)
     name_to_idx = {str(n): i for i, n in enumerate(joint_names)}
     names, indices = [], []
@@ -1164,7 +1161,7 @@ def main(env_cfg, agent_cfg: dict):
     env_cfg.pointcloud_render_mode = "none"
     env_cfg.enable_pointcloud_camera = False
 
-    # TEMP (eval only): run WITHOUT the LEAP finger armature + finger JOINT friction (both -> 0).
+    # TEMP (eval only): run WITHOUT the finger armature + finger JOINT friction (both -> 0).
     # Zero the spawn actuator values AND the reset-time armature event / ADR target range, so nothing
     # re-applies a nonzero armature at reset. Uncomment this block to disable them again.
     # _finger_act = env_cfg.robot_cfg.actuators.get("finger")
@@ -1516,7 +1513,7 @@ def main(env_cfg, agent_cfg: dict):
                 _print_progress(run_index, step, active, timed_out, drifted, last_metrics, action_loss=last_action_loss)
                 _print_mode_progress(run_index, step, mode_tracker, mode_step_summary)
                 # Contact-force readout over the ACTIVE envs: franka<->arx (franka arm self-collision
-                # vs the arx/x5 camera arm), leap-fingers<->panel, and leap-fingers<->handle.
+                # vs the arx/x5 camera arm), fingers<->panel, and fingers<->handle.
                 _fa = getattr(base_env, "franka_arx_contact_force_norm", None)
                 _fp = getattr(base_env, "finger_panel_contact_force_norm", None)
                 _fh = getattr(base_env, "finger_handle_contact_force_norm", None)
@@ -1526,8 +1523,8 @@ def main(env_cfg, agent_cfg: dict):
                     print(
                         f"[CONTACT] run={run_index} step={step} "
                         f"franka<->arx force: mean={_fa_a.mean().item():.3f} max={_fa_a.max().item():.3f} N | "
-                        f"leap-fingers<->panel force: mean={_fp_a.mean().item():.3f} max={_fp_a.max().item():.3f} N | "
-                        f"leap-fingers<->handle force: mean={_fh_a.mean().item():.3f} max={_fh_a.max().item():.3f} N"
+                        f"fingers<->panel force: mean={_fp_a.mean().item():.3f} max={_fp_a.max().item():.3f} N | "
+                        f"fingers<->handle force: mean={_fh_a.mean().item():.3f} max={_fh_a.max().item():.3f} N"
                     )
                 # Raw base velocity (physical joint velocities; ignores base_action_scale) for
                 # sim<->real comparison. lin speed = ||(base_x_vel, base_y_vel)|| in m/s.

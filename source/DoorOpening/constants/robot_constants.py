@@ -59,10 +59,8 @@ DEFAULT_JOINT_POS = {
     "panda_joint5": 0.0,
     "panda_joint6": 0.5 * np.pi,
     "panda_joint7": 0.0,
-    "finger_joint_12": 0.0,
-    "finger_joint_13": 0.0,
-    "finger_joint_14": 1.0,
-    "finger_joint_15": 1.0
+    "panda_finger_joint1": 0.04,
+    "panda_finger_joint2": 0.04,
 }
 
 FRANKA_JOINT_NAMES = [
@@ -93,80 +91,53 @@ BASE_JOINT_NAMES = [
 DM_JOINT_NAMES = BASE_JOINT_NAMES + FRANKA_JOINT_NAMES
 DEBUG_JOINT_NAMES = BASE_JOINT_NAMES + FRANKA_JOINT_NAMES + list(CAMERA_JOINT_DEFAULT_VALUES.keys())
 
+# The Franka hand's two prismatic DOFs. They are ONE actuator on the real gripper, so
+# panda_finger_joint2 mimics panda_finger_joint1 1:1 (see the <mimic> tag in glorbot.urdf) and only
+# the driven joint is ever commanded -- use DRIVEN_FINGER_JOINT_NAME / FULL_JOINT_NAMES for that.
+# This list is both DOFs, for state reads and actuator/gain lookups.
+DRIVEN_FINGER_JOINT_NAME = 'panda_finger_joint1'
+MIMIC_FINGER_JOINT_NAME = 'panda_finger_joint2'
+
 FINGER_JOINT_NAMES = [
-    'finger_joint_0',
-    'finger_joint_1',
-    'finger_joint_2',
-    'finger_joint_3',
-    'finger_joint_4',
-    'finger_joint_5',
-    'finger_joint_6',
-    'finger_joint_7',
-    'finger_joint_8',
-    'finger_joint_9',
-    'finger_joint_10',
-    'finger_joint_11',
-    'finger_joint_12',
-    'finger_joint_13',
-    'finger_joint_14',
-    'finger_joint_15',
+    DRIVEN_FINGER_JOINT_NAME,
+    MIMIC_FINGER_JOINT_NAME,
 ]
 
-FULL_JOINT_NAMES = BASE_JOINT_NAMES + FRANKA_JOINT_NAMES + FINGER_JOINT_NAMES + CAMERA_JOINT_NAMES
+# The COMMANDED joints. The gripper contributes one entry, not two: the follower tracks through
+# the mimic coupling and must never be given a target of its own. Use ALL_DOF_NAMES when you need
+# every articulation DOF (e.g. sizing a full joint-state tensor).
+FULL_JOINT_NAMES = (
+    BASE_JOINT_NAMES + FRANKA_JOINT_NAMES + [DRIVEN_FINGER_JOINT_NAME] + CAMERA_JOINT_NAMES
+)
+
+ALL_DOF_NAMES = BASE_JOINT_NAMES + FRANKA_JOINT_NAMES + FINGER_JOINT_NAMES + CAMERA_JOINT_NAMES
 
 ROBOT_KEY_BODY_NAMES = [
     "tidybot2_base_link",
     "panda_link2",
     "panda_link4",
     "panda_link6",
-    "palm_lower",
+    "panda_hand",
     # "x5_camera_link",
 ]
 
 ROBOT_RESET_KEY_BODY_NAMES = [
     "tidybot2_base_link",
     "panda_link4",
-    "palm_lower",
+    "panda_hand",
     # "x5_camera_link",
 ]
 
-ROBOT_PALM_LINK_NAME = "palm_lower"
+ROBOT_PALM_LINK_NAME = "panda_hand"
 ROBOT_BASE_BODY_LINK_NAME = "tidybot2_base_link"
+# Pad frames on the two fingers, i.e. the grasp keypoints.
+ROBOT_FINGERTIP_BODY_NAMES = ["left_fingertip", "right_fingertip"]
 
-CLOSE_FINGER_JOINT_VALUES = {
-    "finger_joint_0": 0.0,
-    "finger_joint_1": torch.pi / 2,
-    "finger_joint_2": 1.8,
-    "finger_joint_3": 1.0,
-    "finger_joint_4": 0.0,
-    "finger_joint_5": torch.pi / 2,
-    "finger_joint_6": 1.8,
-    "finger_joint_7": 1.0,
-    "finger_joint_8": 0.0,
-    "finger_joint_9": torch.pi / 2,
-    "finger_joint_10": 1.8,
-    "finger_joint_11": 1.0,
-    "finger_joint_12": torch.pi / 2,
-    "finger_joint_13": 0.0,
-    "finger_joint_14": 0.5,
-    "finger_joint_15": 1.0,
-}
+# Gripper half-opening in metres: 0.04 is fully open (8 cm between the pads), 0.0 is closed.
+# Both DOFs are written so the fingers stay symmetric whether or not the mimic constraint exists.
+GRIPPER_OPEN_WIDTH = 0.04
+GRIPPER_CLOSED_WIDTH = 0.0
 
-OPEN_FINGER_JOINT_VALUES = {
-    "finger_joint_0": 0.0,
-    "finger_joint_1": 0.0,
-    "finger_joint_2": 0.0,
-    "finger_joint_3": 0.0,
-    "finger_joint_4": 0.0,
-    "finger_joint_5": 0.0,
-    "finger_joint_6": 0.0,
-    "finger_joint_7": 0.0,
-    "finger_joint_8": 0.0,
-    "finger_joint_9": 0.0,
-    "finger_joint_10": 0.0,
-    "finger_joint_11": 0.0,
-    "finger_joint_12": torch.pi / 2,
-    "finger_joint_13": 0.0,
-    "finger_joint_14": 0.0,
-    "finger_joint_15": 0.0,
-}
+CLOSE_FINGER_JOINT_VALUES = {name: GRIPPER_CLOSED_WIDTH for name in FINGER_JOINT_NAMES}
+
+OPEN_FINGER_JOINT_VALUES = {name: GRIPPER_OPEN_WIDTH for name in FINGER_JOINT_NAMES}

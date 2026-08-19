@@ -631,7 +631,7 @@ def main():
             base_pos = torch.tensor([[lateral, -standoff, 0.0]], dtype=torch.float32, device=device)
             base_quat = yaw_quat_wxyz(yaw).to(device).unsqueeze(0)
             base_R = _quat_wxyz_to_matrix(base_quat[0].detach().cpu().tolist())
-            cfg = np.zeros(len(robot_joint_names), dtype=np.float64)  # base + leap + x5 stay at 0
+            cfg = np.zeros(len(robot_joint_names), dtype=np.float64)  # base + gripper + x5 stay at 0
             # Franka = forward "reaching" pose + per-joint jitter, clamped to limits. This keeps the
             # arm reaching toward the door (in front of the camera) while varying the exact occlusion.
             for j, k in enumerate(panda_joint_idx):

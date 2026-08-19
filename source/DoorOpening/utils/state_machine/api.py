@@ -72,7 +72,7 @@ def solve_ik(robot_urdf_path, q, palm_pose, base_pose, robot_initial_pose, num_a
 
     ik_solver = PinocchioIKSolver(
         urdf_path=robot_urdf_path, 
-        ee_link_name="palm_lower", 
+        ee_link_name="panda_hand", 
         controlled_joints=BASE_JOINT_NAMES + FRANKA_JOINT_NAMES,
         reference_joint_pos=FRANKA_DEFAULT_JOINT_POS,
     )

@@ -456,16 +456,13 @@ def _configure_policy_arx_mode(env_cfg) -> None:
 def _build_compact_joint_layout(joint_names):
     """Return (names, indices) for the compact viser-pt joint order.
 
-    Order: [base_x_joint, base_y_joint, base_rotation_joint, panda_joint1..7, finger_joint_0..N]
+    Order: [base_x_joint, base_y_joint, base_rotation_joint, panda_joint1..7, panda_finger_joint1]
     -- the human-readable order requested for the replay printout. Uses the REAL joint names so
     scripts/replay_viser_pt.py matches them straight onto the URDF (base_x/y/rotation are actuated
     URDF joints, so the base is driven through them -- no separate base pose needed).
     """
     desired = ["base_x_joint", "base_y_joint", "base_rotation_joint"] + [f"panda_joint{i}" for i in range(1, 8)]
-    fingers = sorted(
-        (n for n in joint_names if str(n).startswith("finger_joint_")),
-        key=lambda n: int(str(n).rsplit("_", 1)[1]),
-    )
+    fingers = sorted(n for n in joint_names if str(n).startswith("panda_finger_joint"))
     desired += list(fingers)
     name_to_idx = {str(n): i for i, n in enumerate(joint_names)}
     names, indices = [], []
@@ -594,9 +591,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # per frame (FK + resample from precomputed link meshes).
         _door_sampler = None
         try:
-            from DoorOpening.utils.extract_pointcloud_from_articulation import FrankaLeapSampler
+            from DoorOpening.utils.extract_pointcloud_from_articulation import FrankaGripperSampler
 
-            _door_sampler = FrankaLeapSampler(_door_urdf, device=str(play_env.device), num_points=2048)
+            _door_sampler = FrankaGripperSampler(_door_urdf, device=str(play_env.device), num_points=2048)
         except Exception as _exc:  # noqa: BLE001
             print(f"[WARN] --save-viser-pt: could not build door pointcloud sampler ({_exc}); robot-only frames.")
         viser_pt_state = {
@@ -971,7 +968,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     _record_door_audit(dones)
 
                 # Contact-force readout: franka<->arx (arm self-collision vs the arx/x5 camera arm)
-                # and leap-fingers<->panel. Printed every 30 env steps to avoid flooding the console.
+                # and fingers<->panel. Printed every 30 env steps to avoid flooding the console.
                 contact_log_step += 1
                 if contact_log_step % 30 == 0:
                     _fa = getattr(play_env, "franka_arx_contact_force_norm", None)
@@ -981,8 +978,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         print(
                             f"[CONTACT] step={contact_log_step} "
                             f"franka<->arx force: mean={_fa.mean().item():.3f} max={_fa.max().item():.3f} N | "
-                            f"leap-fingers<->panel force: mean={_fp.mean().item():.3f} max={_fp.max().item():.3f} N | "
-                            f"leap-fingers<->handle force: mean={_fh.mean().item():.3f} max={_fh.max().item():.3f} N"
+                            f"fingers<->panel force: mean={_fp.mean().item():.3f} max={_fp.max().item():.3f} N | "
+                            f"fingers<->handle force: mean={_fh.mean().item():.3f} max={_fh.max().item():.3f} N"
                         )
 
                 if probe_state is not None and not probe_state["done"]:

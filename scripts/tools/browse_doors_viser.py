@@ -5,7 +5,7 @@ Loads a single ``mobility.urdf`` at a time and swaps it in place, so you can pag
 asset directory (e.g. the 512 doors in PartNetv5_plusplus) one by one without drowning the browser.
 
 The glorbot robot is loaded once at the origin next to the door, with one slider per actuated
-joint so you can pose it joint-by-joint (base x/y/yaw, panda arm, LEAP hand, x5).
+joint so you can pose it joint-by-joint (base x/y/yaw, panda arm, gripper, x5).
 
 Each door is shown at the CLOSED pose (all joints = 0) with:
     - the door mesh (frame + panel + handle),
@@ -61,7 +61,7 @@ SLIDER_CLAMP = {
 JOINT_GROUPS = [
     ("Base", ("base_",)),
     ("Panda arm", ("panda_",)),
-    ("LEAP hand", ("finger_joint_",)),
+    ("Gripper", ("panda_finger_joint",)),
     ("X5", ("x5_",)),
 ]
 

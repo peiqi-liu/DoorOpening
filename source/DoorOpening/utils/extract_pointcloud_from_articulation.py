@@ -1014,7 +1014,7 @@ def resolve_mesh_path(urdf_path: str, mesh_filename: str):
         # Plain relative/absolute path → resolve normally
         return urdf_dir / mesh_filename
 
-class FrankaLeapSampler:
+class FrankaGripperSampler:
     def __init__(self, urdf_path, device = "cuda", num_points=4096):
         self.device = device
         self.urdf_path = urdf_path
@@ -1381,7 +1381,7 @@ def sample_pointcloud(urdf_path, joint_angles, device = "cuda", verbose = False)
     if not isinstance(joint_angles, torch.Tensor):
         joint_angles = torch.tensor(joint_angles, dtype=torch.float32)
     joint_angles = joint_angles.to(device)
-    sampler = FrankaLeapSampler(urdf_path, device)
+    sampler = FrankaGripperSampler(urdf_path, device)
     pcd = sampler.sample(joint_angles)
 
     if verbose:
@@ -1393,7 +1393,7 @@ def sample_pointcloud_from_link_name(urdf_path, joint_angles, link_name, device 
     if not isinstance(joint_angles, torch.Tensor):
         joint_angles = torch.tensor(joint_angles, dtype=torch.float32)
     joint_angles = joint_angles.to(device)
-    sampler = FrankaLeapSampler(urdf_path, device)
+    sampler = FrankaGripperSampler(urdf_path, device)
     pcd = sampler.sample_link_set(joint_angles, link_name)
     if verbose:
         tensor_to_ply(pcd[0], "pointcloud.ply")
@@ -1404,7 +1404,7 @@ if __name__ == "__main__":
     # urdf_path = "/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/door/PartNet/8893/mobility.urdf"
     urdf_path = "/home/glorbo4/peiqi/DoorOpening/source/DoorOpening/assets/glorbot/glorbot.urdf"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    sampler = FrankaLeapSampler(urdf_path, device)
+    sampler = FrankaGripperSampler(urdf_path, device)
     joint_angles = torch.randn(1, 32, device=device)
     pcd = sampler.sample(joint_angles)
     verbose = True

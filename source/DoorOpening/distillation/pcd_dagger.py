@@ -31,7 +31,7 @@ from DoorOpening.utils.camera_utils import (
     simulate_depth_cam_render_from_pose,
     simulate_lidar_render_from_pose,
 )
-from DoorOpening.utils.extract_pointcloud_from_articulation import FrankaLeapSampler
+from DoorOpening.utils.extract_pointcloud_from_articulation import FrankaGripperSampler
 from DoorOpening.utils.glorbot_collision_checker import GlorbotCollisionChecker
 from DoorOpening.utils.pose_utils import world_to_local
 from DoorOpening.utils.viser_pt import (
@@ -689,7 +689,7 @@ class Dagger:
         self.wall_distractor_bbox_max_ordered = torch.gather(bbox_max, 1, self.wall_distractor_axis_order)
         unique_asset_idx = sorted(set(self.env_asset_idx.detach().cpu().tolist()))
         self.door_samplers = {
-            idx: FrankaLeapSampler(door_asset_paths[idx], device=self.device, num_points=self.door_pcd_num_points)
+            idx: FrankaGripperSampler(door_asset_paths[idx], device=self.device, num_points=self.door_pcd_num_points)
             for idx in unique_asset_idx
         }
         door_geometry_aug_cfg = self.runtime_cfg.get("door_geometry_aug", {})
@@ -699,7 +699,7 @@ class Dagger:
         if self.robot_pcd_num_points is None:
             self.robot_pcd_num_points = self.door_pcd_num_points
         self.robot_pcd_num_points = int(self.robot_pcd_num_points)
-        self.robot_sampler = FrankaLeapSampler(glorbot_urdf_path, device=self.device, num_points=self.robot_pcd_num_points)
+        self.robot_sampler = FrankaGripperSampler(glorbot_urdf_path, device=self.device, num_points=self.robot_pcd_num_points)
         robot_sampler_joint_names = list(self.robot_sampler.robot.actuated_joint_names)
         robot_joint_ids, robot_joint_names = self.ov_env.robot.find_joints(robot_sampler_joint_names)
         self.robot_sampler_joint_ids = torch.tensor(robot_joint_ids, device=self.device, dtype=torch.long)

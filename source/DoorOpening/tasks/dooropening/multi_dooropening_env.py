@@ -40,7 +40,7 @@ from DoorOpening.tasks.dooropening.contact_force_utils import (
 from DoorOpening.utils.pose_utils import world_to_local
 from isaaclab.utils.math import quat_conjugate, quat_apply, quat_mul
 from DoorOpening.utils.quat_utils import quat_to_6d
-from DoorOpening.utils.extract_pointcloud_from_articulation import FrankaLeapSampler
+from DoorOpening.utils.extract_pointcloud_from_articulation import FrankaGripperSampler
 from DoorOpening.utils.viser_pt import format_iterated_record_path, prepare_pointcloud
 from typing import Tuple
 
@@ -55,7 +55,7 @@ from typing import Tuple
 BASE_DOOR_SENSOR_NAMES = tuple(f"contact_forces_base_door_{b}" for b in BASE_DOOR_CONTACT_BODY_NAMES)
 SELF_COLLISION_SENSOR_NAMES = (
     "contact_forces_self_collision_franka",
-    # Finger<->flange: LEAP digit links vs panda_link7 (counted at self_collision_penalty_w).
+    # Finger<->flange: the gripper fingers vs panda_link7 (counted at self_collision_penalty_w).
     "contact_forces_self_collision_hand",
 )
 
@@ -170,16 +170,6 @@ class DooropeningEnv(DirectRLEnv):
         # create auxiliary variables for computing applied action, observations and rewards
         self.robot_dof_lower_limits = self.robot.data.soft_joint_pos_limits[0, self._robot_dof_idx, 0].to(device=self.device)
         self.robot_dof_upper_limits = self.robot.data.soft_joint_pos_limits[0, self._robot_dof_idx, 1].to(device=self.device)
-
-        # TEMP DIAGNOSTIC (revert before commit): mirror deploy's HAND_ABDUCTION_JOINT_LIMITS extra clamp
-        # (finger_joint_0 upper->0.0, finger_joint_8 lower->0.0) to test the sim-to-real splayed-hand hypothesis.
-        joint_name_to_dof_pos = {name: i for i, name in enumerate(joint_names)}
-        i0 = joint_name_to_dof_pos["finger_joint_0"]
-        i8 = joint_name_to_dof_pos["finger_joint_8"]
-        self.robot_dof_upper_limits[i0] = min(self.robot_dof_upper_limits[i0], 0.0)
-        self.robot_dof_lower_limits[i8] = max(self.robot_dof_lower_limits[i8], 0.0)
-        print(f"[TEMP-CLAMP] finger_joint_0 upper -> {float(self.robot_dof_upper_limits[i0]):.3f}, "
-              f"finger_joint_8 lower -> {float(self.robot_dof_lower_limits[i8]):.3f}")
 
         # We are going to update this variables to control the robot
         self.robot_dof_targets = torch.zeros((self.num_envs, len(self._robot_dof_idx)), device=self.device)
@@ -491,7 +481,7 @@ class DooropeningEnv(DirectRLEnv):
         This is the r_contact term in r = r_target - lambda_l*r_limit - lambda_c*r_contact.
         We count the franka arm, x5/arx camera arm, and mobile-base chassis links whose net
         self-contact force with any other non-adjacent link exceeds the threshold. Finger<->finger
-        self-collision is still excluded (it drove finger poses conservative), but the LEAP fingers
+        self-collision is still excluded (it drove finger poses conservative), but the fingers
         ARE checked against the panda_link7 flange (contact_forces_self_collision_hand): the fingers
         curling back into the flange is a real collision we penalize.
         """
@@ -595,14 +585,14 @@ class DooropeningEnv(DirectRLEnv):
 
         selected_asset_idx = int(self._viser_env_asset_idx[self._viser_pointcloud_env_id].detach().cpu().item())
         self._viser_door_samplers = {
-            selected_asset_idx: FrankaLeapSampler(
+            selected_asset_idx: FrankaGripperSampler(
                 door_asset_paths[selected_asset_idx],
                 device=self.device,
                 num_points=self._viser_door_num_points,
             )
         }
 
-        self._viser_robot_sampler = FrankaLeapSampler(
+        self._viser_robot_sampler = FrankaGripperSampler(
             glorbot_urdf_path,
             device=self.device,
             num_points=self._viser_robot_num_points,
@@ -661,7 +651,7 @@ class DooropeningEnv(DirectRLEnv):
         asset_idx = int(self._viser_env_asset_idx[env_id].detach().cpu().item())
         sampler = self._viser_door_samplers.get(asset_idx)
         if sampler is None:
-            sampler = FrankaLeapSampler(
+            sampler = FrankaGripperSampler(
                 door_asset_paths[asset_idx],
                 device=self.device,
                 num_points=self._viser_door_num_points,
@@ -2228,7 +2218,7 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["error/x5_door_contact_penalty"] = weighted_x5_door_contact_penalty.mean().item()
 
         # Self-collision penalty over non-finger links (franka arm + x5/arx arm + base chassis).
-        # The LEAP hand is excluded so finger poses are not driven conservative.
+        # The hand is excluded so finger poses are not driven conservative.
         self_collision_body_count = self._get_self_collision_body_count()
         weighted_self_collision_penalty = self.self_collision_penalty_w * self_collision_body_count
         self.extras["error/self_collision_penalty"] = weighted_self_collision_penalty.mean().item()
@@ -2351,7 +2341,7 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["stats/filtered_handle_force_norm_max"] = float(handle_force_norm.max().detach().cpu().item())
 
         # --- PUSH-only palm-handle contact reward ---------------------------------------------------
-        # Reward palm_center/palm_lower pressing the handle (link_2) during the grasp->push-open window
+        # Reward panda_hand pressing the handle (link_2) during the grasp->push-open window
         # (ref_hinge_contact_mask == keyframes 2..5). Binary bonus, push envs only. On PUSH the old
         # finger-inclusive hinge_contact reward is gated off (see the compute_reward call below), so
         # fingers touching the handle are no longer rewarded for pushing. Pull is untouched.
@@ -2378,7 +2368,7 @@ class DooropeningEnv(DirectRLEnv):
         # term). Binary bonus for the hand contacting the handle (link_2) during the grasp/pull window
         # (ref_hinge_contact_mask), gated to PULL envs (1 - is_push); PUSH uses the palm-only reward
         # above instead. Reuses handle_force_norm computed above (||contact_forces_door2||), whose filter
-        # is the palm + inner finger surfaces (palm_center/palm_lower + pip/dip/realtip/fingertip of
+        # is the hand body + the two fingers (
         # fingers 1/2/3, mcp excluded); behavior is identical to the old contact_force_w * contact_reward
         # term inside deep-mimic.
         hinge_contact = (handle_force_norm > self.cfg.handle_contact_force_threshold).to(
@@ -2392,7 +2382,7 @@ class DooropeningEnv(DirectRLEnv):
         )
         self.extras["reward/hinge_contact_pull_reward"] = weighted_hinge_contact_reward.mean().item()
 
-        # finger<->panel force (LEAP hand vs door panel Door/link_1).
+        # finger<->panel force (gripper fingers vs door panel Door/link_1).
         contact_forces_door_panel = self._get_filtered_contact_force_w(
             self.scene.sensors["contact_forces_door_panel"],
             expected_num_envs=self.num_envs,
@@ -2401,7 +2391,7 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["stats/panel_contact_force_norm_max"] = float(panel_force_norm.max().detach().cpu().item())
 
         # Finger<->door contact PROTECTION penalty: finger<->panel and finger<->handle are processed
-        # TOGETHER to protect the delicate LEAP fingers. Whenever the fingers press EITHER door body
+        # TOGETHER to protect the fingers. Whenever the fingers press EITHER door body
         # (panel link_1 OR handle link_2) harder than finger_door_contact_force_threshold, a strong
         # penalty is applied -- but ONLY while ref_panel_contact_mask is on (push: open-door +
         # base-forward, keyframes 3..5; pull: retract-arm + push-panel + hold-traverse, keyframes
@@ -2420,7 +2410,7 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["stats/finger_door_contact_frac"] = float(finger_door_over_threshold.float().mean().detach().cpu().item())
 
         # Diagnostic contact forces surfaced for the eval/play scripts to print: (1) franka<->arx
-        # (self-collision of the franka arm against the arx/x5 camera arm) and (2) leap fingers
+        # (self-collision of the franka arm against the arx/x5 camera arm) and (2) the fingers
         # <->panel. Store per-env tensors as attributes + max/mean in extras.
         franka_arx_force_norm = self._get_franka_arx_contact_force_norm()
         self.franka_arx_contact_force_norm = franka_arx_force_norm

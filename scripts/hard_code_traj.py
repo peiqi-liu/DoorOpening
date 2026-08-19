@@ -3,40 +3,44 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""
-This script demonstrates how to add and simulate on-board sensors for a robot.
+"""Keyframe/teleop harness for glorbot.
 
-We add the following sensors on the quadruped robot, ANYmal-C (ANYbotics):
-
-* USD-Camera: This is a camera sensor that is attached to the robot's base.
-* Height Scanner: This is a height scanner sensor that is attached to the robot's base.
-* Contact Sensor: This is a contact sensor that is attached to the robot's feet.
+Slider panel, IK-to-pose button, record key poses, spline them into a trajectory, play it back
+and save it. The panel's hand section is a single gripper-width slider + Open/Close buttons,
+because the Franka hand is one actuator.
 
 .. code-block:: bash
 
-    # Usage
-    ./isaaclab.sh -p scripts/tutorials/04_sensors/add_sensors_on_robot.py --enable_cameras
+    # interactive (slider panel)
+    ./isaaclab.sh -p scripts/hard_code_traj.py --enable_cameras
 
+    # headless-ish smoke test: no panel interaction needed, the gripper opens/closes on a loop
+    ./isaaclab.sh -p scripts/hard_code_traj.py --enable_cameras --gripper_cycle
 """
 
 """Launch Isaac Sim Simulator first."""
 
-import pickle as pkl
 import argparse
 
 from isaaclab.app import AppLauncher
 
 # add argparse arguments
-parser = argparse.ArgumentParser(description="Tutorial on adding sensors on a robot.")
+parser = argparse.ArgumentParser(description="Keyframe/teleop harness for glorbot.")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to spawn.")
-parser.add_argument(
-    "--save",
-    action="store_true",
-    default=False,
-    help="Save the data from camera at index specified by ``--camera_id``.",
-)
 parser.add_argument("--debug", action="store_true", default=False, help="Debug output.")
 parser.add_argument("--force", action="store_true", default=False, help="Force reset the scene.")
+parser.add_argument(
+    "--gripper_cycle",
+    action="store_true",
+    default=False,
+    help="Continuously open/close the gripper to verify the finger DOFs actuate.",
+)
+parser.add_argument(
+    "--gripper_cycle_steps",
+    type=int,
+    default=120,
+    help="Sim steps spent per open/close half-cycle when --gripper_cycle is set.",
+)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -56,10 +60,16 @@ from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
 from isaaclab.utils import configclass
 
-from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, DEFAULT_JOINT_POS, disable_collision_scope_instancing
+from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, disable_collision_scope_instancing
 from DoorOpening.assets.door.door_cfg import DOOR_CONFIG, edit_door_articulation
 
-from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES
+from DoorOpening.constants.robot_constants import (
+    DEFAULT_JOINT_POS,
+    FINGER_JOINT_NAMES,
+    FULL_JOINT_NAMES,
+    GRIPPER_CLOSED_WIDTH,
+    GRIPPER_OPEN_WIDTH,
+)
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
 
 from DoorOpening.motion.slider_controller import OmniJointController
@@ -75,10 +85,20 @@ torch.set_printoptions(precision=3, sci_mode=False)
 CAMERA_EULER_ANGLES = torch.tensor([-np.pi / 4, 0.0, 0.0])
 CAMERA_QUAT = quat_from_euler_xyz(*CAMERA_EULER_ANGLES)
 
+# Bodies printed at startup so the gripper's placement can be eyeballed.
+REPORTED_BODY_NAMES = [
+    "tidybot2_base_link",
+    "panda_link6",
+    "panda_hand",
+    "palm_center",
+    "left_fingertip",
+    "right_fingertip",
+]
+
 
 @configclass
-class SensorsSceneCfg(InteractiveSceneCfg):
-    """Design the scene with sensors on the robot."""
+class GripperSceneCfg(InteractiveSceneCfg):
+    """Scene with the gripper robot, a door, an onboard camera and door contact sensors."""
 
     # ground plane
     ground = AssetBaseCfg(prim_path="/World/defaultGroundPlane", spawn=sim_utils.GroundPlaneCfg())
@@ -94,7 +114,7 @@ class SensorsSceneCfg(InteractiveSceneCfg):
         init_state=ArticulationCfg.InitialStateCfg(
             joint_pos=DEFAULT_JOINT_POS,
             pos=ROBOT_INITIAL_POS,
-            rot=ROBOT_INITIAL_ROT
+            rot=ROBOT_INITIAL_ROT,
         ),
     )
 
@@ -127,6 +147,24 @@ class SensorsSceneCfg(InteractiveSceneCfg):
         history_length=6,
         debug_vis=True,
         filter_prim_paths_expr=["{ENV_REGEX_NS}/Robot"],
+    )
+
+    # Finger-side contact: tells you whether the pads are actually loaded when a grasp closes on
+    # the handle, rather than only what the door feels in total.
+    contact_forces_left_finger = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/panda_leftfinger",
+        update_period=0.0,
+        history_length=6,
+        debug_vis=True,
+        filter_prim_paths_expr=["{ENV_REGEX_NS}/Door/link_1", "{ENV_REGEX_NS}/Door/link_2"],
+    )
+
+    contact_forces_right_finger = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/panda_rightfinger",
+        update_period=0.0,
+        history_length=6,
+        debug_vis=True,
+        filter_prim_paths_expr=["{ENV_REGEX_NS}/Door/link_1", "{ENV_REGEX_NS}/Door/link_2"],
     )
 
 
@@ -199,16 +237,12 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     # Define simulation stepping
     sim_dt = sim.get_physics_dt()
     sim_time = 0.0
-    count = 0
     camera = scene["camera"]
-    camera_viewer = IsaacCameraViewer("Glorbot RGB Camera")
-    # Simulate physics
-
+    camera_viewer = IsaacCameraViewer("Glorbot Gripper RGB Camera")
 
     # reset the scene entities
     # root state
     # we offset the root state by the origin since the states are written in simulation world frame
-    # if this is not done, then the robots will be spawned at the (0, 0, 0) of the simulation world
     root_state = scene["robot"].data.default_root_state.clone()
     root_state[:, :3] += scene.env_origins
     scene["robot"].write_root_pose_to_sim(root_state[:, :7])
@@ -224,7 +258,6 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     print("root state door: ", root_state_door)
     scene["door"].write_root_pose_to_sim(root_state_door[:, :7])
     scene["door"].write_root_velocity_to_sim(root_state_door[:, 7:])
-    # door_pos = scene["door"].data.soft_joint_pos_limits[..., 0]
     door_pos = torch.zeros_like(scene["door"].data.soft_joint_pos_limits[..., 0])
     scene["door"].write_joint_position_to_sim(door_pos)
 
@@ -249,21 +282,33 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     # give controller access to marker
     controller.goal_marker = goal_marker
 
-    body_idx, body_name = scene["robot"].find_bodies(["tidybot2_base_link", "panda_link2", "panda_link4", "panda_link6", "palm_center"])
+    body_idx, body_name = scene["robot"].find_bodies(REPORTED_BODY_NAMES)
     print("body idx: ", body_idx)
     print("body name: ", body_name)
-
     print("robot body pos: ", scene["robot"].data.body_pos_w[:, body_idx])
     print("robot body quat: ", scene["robot"].data.body_quat_w[:, body_idx])
-    
+
+    # Both DOFs, only for reading state back: the gripper is commanded through the single driven
+    # joint (panda_finger_joint1); panda_finger_joint2 follows it via the URDF mimic coupling.
+    gripper_joint_ids, gripper_joint_names = scene["robot"].find_joints(
+        FINGER_JOINT_NAMES, preserve_order=True
+    )
+    print("gripper joints (driven, follower): ", gripper_joint_names, gripper_joint_ids)
+
     count = 0
-    # handle_cfg = FRAME_MARKER_CFG.replace(prim_path="/World/HandleFrame")
-    # handle_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)
-    # board_cfg = FRAME_MARKER_CFG.replace(prim_path="/World/BoardFrame")
-    # board_cfg.markers["frame"].scale = (0.3, 0.3, 0.3)
     try:
         while simulation_app.is_running():
-            count += 1
+            # --gripper_cycle overrides the panel's gripper width with a square wave so the fingers
+            # can be verified without touching the UI.
+            if args_cli.gripper_cycle:
+                half_cycle = max(1, args_cli.gripper_cycle_steps)
+                closing = (count // half_cycle) % 2 == 1
+                target_width = GRIPPER_CLOSED_WIDTH if closing else GRIPPER_OPEN_WIDTH
+                # Only on transitions: set_gripper_width also clears any recorded trajectory.
+                if abs(controller.gripper_width - target_width) > 1e-6:
+                    controller.set_gripper_width(target_width)
+                    print(f"[GRIPPER] step {count}: commanding width {target_width:.3f}")
+
             slider_pos = controller.q_slider.clone()
             joint_pos = scene["robot"].data.default_joint_pos.clone()
             joint_pos[..., :] = slider_pos
@@ -271,9 +316,8 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             door_pos = controller.door_q_slider.clone()
             door_joint_pos = scene["door"].data.default_joint_pos.clone()
             door_joint_pos[..., :] = door_pos
-            
+
             edit_door_articulation(scene["door"], door_closed_range=0.02, hinge_range=0.4)
-            # scene["door"].write_joint_position_to_sim(door_joint_pos)
             if not args_cli.force:
                 scene["robot"].set_joint_position_target(joint_pos)
                 scene["door"].set_joint_position_target(door_joint_pos)
@@ -281,19 +325,20 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
                 scene["robot"].write_joint_position_to_sim(joint_pos)
                 scene["door"].write_joint_position_to_sim(door_joint_pos)
 
-            # print("-------------------------------")
             if count % 10 == 0 and args_cli.debug:
-                # Keep net_forces_w in this debug script because it is intended to show
-                # total contact load on each door link, not filtered handle-hand contact.
-                # print(scene["contact_forces_door1"])
-                # print("Received force matrix of: ", scene["contact_forces_door1"].data.force_matrix_w)
+                # Follower should track the driven joint; a growing gap between the two columns
+                # means the mimic coupling is not in effect (see glorbot_gripper_cfg.py).
+                measured = scene["robot"].data.joint_pos[:, gripper_joint_ids]
+                print("gripper [driven, follower] target / measured: ", joint_pos[:, gripper_joint_ids], measured)
+                # net_forces_w is total contact load on each door link; the finger sensors below are
+                # filtered, so they report handle/board contact only.
                 print("Received contact force of link 1: ", scene["contact_forces_door1"].data.net_forces_w)
-                print("-------------------------------")
-                # print(scene["contact_forces_door2"])
-                # print("Received force matrix of: ", scene["contact_forces_door2"].data.force_matrix_w)
                 print("Received contact force of link 2: ", scene["contact_forces_door2"].data.net_forces_w)
+                print("left finger vs door: ", scene["contact_forces_left_finger"].data.force_matrix_w)
+                print("right finger vs door: ", scene["contact_forces_right_finger"].data.force_matrix_w)
                 print("-------------------------------")
-            # -- write data to sim
+
+            # -- playback of a recorded trajectory
             if controller.playback:
                 q = controller.traj[controller.play_idx]
                 joint_pos = scene["robot"].data.default_joint_pos.clone()
@@ -302,18 +347,11 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
                 qd = controller.qd[controller.play_idx]
                 joint_vel = scene["robot"].data.default_joint_vel.clone()
                 joint_vel[..., :] = qd
-                # if controller.play_idx == 0:
-                #     scene["robot"].write_joint_state_to_sim(joint_pos, joint_vel)
-                # else:
-                #     scene["robot"].set_joint_velocity_target(joint_vel)
-                #     scene["robot"].set_joint_position_target(joint_pos)
                 scene["robot"].write_joint_state_to_sim(joint_pos, joint_vel)
 
                 door_q = controller.door_traj[controller.play_idx]
                 door_joint_pos = scene["door"].data.default_joint_pos.clone()
                 door_joint_pos[..., :] = door_q
-                # scene["door"].write_joint_position_to_sim(door_joint_pos)
-                # scene["door"].set_joint_position_target(door_joint_pos)
                 scene["door"].write_joint_position_to_sim(door_joint_pos)
 
                 # Write these poses data to the controller so it can be saved to pickle later
@@ -325,7 +363,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
                 if controller.play_idx >= len(controller.traj):
                     controller.playback = False
                     print("[PLAYBACK] Finished")
-            
+
             scene.write_data_to_sim()
             # perform step
             sim.step()
@@ -351,16 +389,14 @@ def main():
     # Set main camera
     sim.set_camera_view(eye=[2.0, -2.5, 3.2], target=[0.0, 0.0, 0.7])
     # Design scene
-    scene_cfg = SensorsSceneCfg(num_envs=args_cli.num_envs, env_spacing=2.0)
+    scene_cfg = GripperSceneCfg(num_envs=args_cli.num_envs, env_spacing=2.0)
     scene = InteractiveScene(scene_cfg)
     # De-instance the robot's `collisions` scopes so the collider debug viz (green overlay)
-    # renders them; the URDF->USD converter marks them instanceable and the GUI skips
-    # instanced colliders (make_instanceable=False in the converter cfg does not change this).
+    # renders them; see disable_collision_scope_instancing's docstring.
     disable_collision_scope_instancing()  # default expr "/World/envs/env_.*/Robot"
     disable_collision_scope_instancing("/World/envs/env_.*/Door")
     # Play the simulator
     sim.reset()
-    print("material properties: ", scene["robot"].root_physx_view.get_material_properties())
     material_properties = scene["robot"].root_physx_view.get_material_properties()
     print("material properties: ", material_properties.shape)
     material_properties[..., 0] = 2.0

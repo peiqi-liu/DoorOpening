@@ -55,7 +55,7 @@ from DoorOpening.utils.door_window_dropout import (
     sample_glass_reflection_points,
     sample_random_window_hole_metadata,
 )
-from DoorOpening.utils.extract_pointcloud_from_articulation import FrankaLeapSampler
+from DoorOpening.utils.extract_pointcloud_from_articulation import FrankaGripperSampler
 from DoorOpening.utils.urdf_utils import compute_exact_door_keypoints
 from DoorOpening.utils.wall_distractors import (
     WallDistractorParams,
@@ -115,12 +115,12 @@ def load_door_asset(urdf_path, num_points, device):
       * ``frame_pts`` -- link_0 (casing/jamb), which training renders only when ``door_frame_aug`` is on
         and the per-env coin flip includes it. Kept separate so this preview can toggle it the same way.
 
-    Sourced from the SAME FrankaLeapSampler cache the training/probe pipelines use (points sampled in
+    Sourced from the SAME FrankaGripperSampler cache the training/probe pipelines use (points sampled in
     each link's frame, then FK'd into the door base frame at the closed-door config), so the preview
     cloud is faithful to what the renderer actually ingests -- not a whole-mesh dump that always bakes
     the frame in.
     """
-    sampler = FrankaLeapSampler(str(urdf_path), device=device, num_points=int(num_points))
+    sampler = FrankaGripperSampler(str(urdf_path), device=device, num_points=int(num_points))
     zero_joints = torch.zeros((1, len(sampler.robot.actuated_joint_names)), device=device, dtype=torch.float32)
     panel_handle_pts = sampler.sample_link_set(zero_joints, ["link_1", "link_2"])  # (1, N, 3) base frame
     frame_local = sampler.points.get("link_0")

@@ -7,8 +7,13 @@ from isaaclab.controllers import DifferentialIKController, DifferentialIKControl
 from isaaclab.utils.math import euler_xyz_from_quat, quat_from_euler_xyz
 from scipy.interpolate import CubicSpline
 import numpy as np  
-from DoorOpening.constants.robot_constants import BASE_JOINT_NAMES, FRANKA_JOINT_NAMES
-from DoorOpening.utils.finger_utils import tendon_to_joint_angle_utils, joint_angle_to_tendon_utils
+from DoorOpening.constants.robot_constants import (
+    BASE_JOINT_NAMES,
+    FRANKA_JOINT_NAMES,
+    FINGER_JOINT_NAMES,
+    GRIPPER_CLOSED_WIDTH,
+    GRIPPER_OPEN_WIDTH,
+)
 
 class OmniJointController:
     def __init__(self, scene: InteractiveScene, joint_names):
@@ -32,9 +37,7 @@ class OmniJointController:
 
         self.q_slider = scene["robot"].data.joint_pos.clone()
         self.door_q_slider = scene["door"].data.joint_pos.clone()
-        finger_joint_names = [f"finger_joint_{i}" for i in range(16)]
-        self.finger_joint_ids, finger_joint_names = scene["robot"].find_joints(finger_joint_names)
-        self.finger_q_slider = joint_angle_to_tendon_utils(self.scene["robot"])[0].detach().cpu()
+        self._setup_hand_state()
         self.ik_joint_ids, self.ik_joint_names = scene["robot"].find_joints(BASE_JOINT_NAMES + FRANKA_JOINT_NAMES)
         self.ik_joint_pos_upper_limit = scene["robot"].data.joint_pos_limits[..., self.ik_joint_ids, 1]
         self.ik_joint_pos_lower_limit = scene["robot"].data.joint_pos_limits[..., self.ik_joint_ids, 0]
@@ -61,6 +64,51 @@ class OmniJointController:
         self._build_ik_controller()
 
         self._build_ui()
+
+    def _setup_hand_state(self):
+        """Resolve the gripper DOFs. preserve_order so index 0 is the DRIVEN joint."""
+        self.gripper_joint_ids, self.gripper_joint_names = self.scene["robot"].find_joints(
+            FINGER_JOINT_NAMES, preserve_order=True
+        )
+        # The driven joint alone defines the panel state; the other follows it.
+        self.gripper_width = float(self.q_slider[0, self.gripper_joint_ids[0]])
+        self.gripper_slider = None
+
+    def _build_hand_ui(self):
+        """One gripper-width slider, because the hand is one actuator (see glorbot.urdf)."""
+        ui.Separator(height=8)
+        ui.Label("Gripper Control (half-opening, m)")
+        self.gripper_slider = ui.FloatSlider(
+            min=GRIPPER_CLOSED_WIDTH,
+            max=GRIPPER_OPEN_WIDTH,
+            step=0.001,
+            height=18,
+        )
+        self.gripper_slider.model.set_value(self.gripper_width)
+        self.gripper_slider.model.add_value_changed_fn(self._on_gripper_slider_changed)
+
+        with ui.HStack(height=24, spacing=4):
+            ui.Button("Open Gripper", clicked_fn=partial(self.set_gripper_width, GRIPPER_OPEN_WIDTH))
+            ui.Button("Close Gripper", clicked_fn=partial(self.set_gripper_width, GRIPPER_CLOSED_WIDTH))
+
+    def _on_gripper_slider_changed(self, model):
+        self._apply_gripper_width(model.get_value_as_float())
+
+    def set_gripper_width(self, width: float):
+        """Command the gripper to ``width`` and reflect it in the panel."""
+        self._apply_gripper_width(width)
+        if self.gripper_slider is not None:
+            # Re-entrant into _on_gripper_slider_changed, but _apply_gripper_width is idempotent.
+            self.gripper_slider.model.set_value(self.gripper_width)
+
+    def _apply_gripper_width(self, width: float):
+        # Clear any built trajectory, same as every other slider edit.
+        self._initialize_trajectory()
+        self.gripper_width = max(GRIPPER_CLOSED_WIDTH, min(GRIPPER_OPEN_WIDTH, float(width)))
+        # Both DOFs get the target so the fingers stay symmetric even without the mimic constraint.
+        for joint_id in self.gripper_joint_ids:
+            self.q_slider[0, joint_id] = self.gripper_width
+        self._sync_joint_sliders()
 
     def _build_ik_controller(self):
         ik_cfg = DifferentialIKControllerCfg(
@@ -127,18 +175,7 @@ class OmniJointController:
                     )
                     self.joint_sliders.append(slider)
 
-                ui.Separator(height=8)
-                ui.Label("Finger Tendon Control")
-                for i in range(4):
-                    ui.Label(f"finger_tendon_{i}")
-                    slider = ui.FloatSlider(
-                        min=0.0,
-                        max=3.14,
-                        step=0.01,
-                        height=18,
-                    )
-                    slider.model.set_value(float(self.finger_q_slider[i]))
-                    slider.model.add_value_changed_fn(partial(self._on_finger_slider_changed, i))
+                self._build_hand_ui()
 
                 # door joint position sliders
                 for i, name in enumerate(self.door_joint_names):
@@ -261,14 +298,6 @@ class OmniJointController:
             pkl.dump(data, f)
 
         print(f"[SAVE] Trajectory saved to {path}")
-
-    def _on_finger_slider_changed(self, idx, model):
-        self._initialize_trajectory()
-        value = model.get_value_as_float()
-        self.finger_q_slider[idx] = value
-        new_q_value = tendon_to_joint_angle_utils(self.scene["robot"], self.finger_q_slider)
-        self.q_slider[..., self.finger_joint_ids] = new_q_value[..., self.finger_joint_ids]
-        self._sync_joint_sliders()
 
     def _on_slider_changed(self, idx, model):
         self._initialize_trajectory()

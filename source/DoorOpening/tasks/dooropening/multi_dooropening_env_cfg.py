@@ -4,12 +4,13 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from DoorOpening.assets.door.multi_door_cfg import ALL_DOOR_CONFIGS
-from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG
+from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, GRIPPER_ARMATURE
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
 from DoorOpening.constants.door_constants import DOOR_BODY_NAMES, DOOR_JOINT_NAMES
 from DoorOpening.constants.robot_constants import (
     CAMERA_JOINT_NAMES,
     DEFAULT_JOINT_POS,
+    DRIVEN_FINGER_JOINT_NAME,
     ROBOT_KEY_BODY_NAMES,
     ROBOT_RESET_KEY_BODY_NAMES,
     ROBOT_PALM_LINK_NAME,
@@ -299,19 +300,17 @@ class EventCfg:
         },
     )
 
-    # Per-episode randomization of the LEAP finger joint armature (reflected rotor inertia the
-    # implicit PD sees). Lowered to a small armature (nominal 0.001) now that the finger actuator
-    # also carries joint friction (0.01, see glorbot_cfg): friction damps the overshoot/jitter that
-    # previously required a larger armature. Absolute values (not a scale). The ADR curriculum in
-    # `adr_cfg_dict` widens (0.001, 0.001) -> (0.001, 0.005). To also randomize the arm armature
-    # (currently fixed at 0), add an analogous term scoped to joint_names=["panda_joint.*",
-    # "x5_joint.*"] with an endpoint like (0.0, 0.08).
+    # Per-episode randomization of the gripper finger armature. On a PRISMATIC DOF armature is
+    # added MASS (kg), not rotor inertia, so the nominal here is glorbot_cfg's GRIPPER_ARMATURE
+    # (0.05 kg) rather than the LEAP hand's 0.002 kg-m^2 -- a rotational value left here would be
+    # ~25x too small and reintroduce the single-step overshoot it exists to prevent. Absolute
+    # values (not a scale).
     robot_finger_armature = EventTerm(
         func=randomize_joint_parameters,
         mode="reset",
         params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=["finger_joint_.*"]),
-            "armature_distribution_params": (0.002, 0.002),
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_finger_joint.*"]),
+            "armature_distribution_params": (GRIPPER_ARMATURE, GRIPPER_ARMATURE),
             "operation": "abs",
             "distribution": "uniform",
         },
@@ -467,36 +466,14 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         'panda_joint7',
     ]
 
+    # The gripper is ONE commanded DOF, so the action space carries a single finger entry. The
+    # follower (panda_finger_joint2) tracks it through the mimic coupling and must never get a
+    # target of its own. NOTE this makes the action space 1-wide here where the LEAP hand was 12,
+    # so policies/checkpoints trained on that hand are not loadable against this robot.
     finger_joints = [
-        'finger_joint_0',
-        'finger_joint_1',
-        'finger_joint_2',
-        'finger_joint_3',
-        'finger_joint_4',
-        'finger_joint_5',
-        'finger_joint_6',
-        'finger_joint_7',
-        'finger_joint_8',
-        'finger_joint_9',
-        'finger_joint_10',
-        'finger_joint_11',
-        # 'finger_joint_12',
-        # 'finger_joint_13',
-        # 'finger_joint_14',
-        # 'finger_joint_15',
+        DRIVEN_FINGER_JOINT_NAME,
     ]
 
-    # finger_joints = [
-    #     'finger_joint_1',
-    #     'finger_joint_2',
-    #     'finger_joint_3',
-    #     'finger_joint_5',
-    #     'finger_joint_6',
-    #     'finger_joint_7',
-    #     'finger_joint_9',
-    #     'finger_joint_10',
-    #     'finger_joint_11',
-    # ]
 
     arx_joints = CAMERA_JOINT_NAMES[:4]
 
@@ -507,7 +484,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         debug_vis=False,
         filter_prim_paths_expr=list(HANDLE_CONTACT_FILTER_PRIM_PATHS),
     )
-    # PUSH-door palm-only handle contact sensor: only palm_center/palm_lower vs the handle (link_2).
+    # PUSH-door hand-only handle contact sensor: only panda_hand vs the handle (link_2).
     # Drives the push palm-handle reward (fingers excluded).
     contact_forces_door2_palm = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Door/link_2",
@@ -516,7 +493,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         debug_vis=False,
         filter_prim_paths_expr=list(PALM_ONLY_HANDLE_CONTACT_FILTER_PRIM_PATHS),
     )
-    # Finger<->panel contact sensor: LEAP hand bodies against the door panel (Door/link_1).
+    # Finger<->panel contact sensor: the gripper fingers against the door panel (Door/link_1).
     # Gated by panel_contact_mask, a force above threshold here is penalized (fingers should
     # grip the handle, not the panel) except where pushing the panel is the task.
     contact_forces_door_panel = ContactSensorCfg(
@@ -592,9 +569,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         debug_vis=False,
         filter_prim_paths_expr=list(SELF_COLLISION_FRANKA_FILTER_PRIM_PATHS),
     )
-    # Finger<->flange self-collision: LEAP digit links (fingers + thumb) filtered ONLY against the
+    # Finger<->flange self-collision: the two gripper fingers filtered ONLY against the
     # franka panda_link7 flange. Counted with the same self_collision_penalty_w. Intra-hand
-    # contacts are not in the filter set, so finger<->finger / finger<->thumb are NOT penalized.
+    # contacts are not in the filter set, so finger<->finger contact is NOT penalized.
     contact_forces_self_collision_hand = ContactSensorCfg(
         prim_path=SELF_COLLISION_HAND_PRIM_PATH,
         update_period=0.0,
@@ -773,7 +750,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     door_joint_pos_w = 4.0
     hinge_contact_reward_w = 1.5
     # PUSH-only palm-handle contact reward: +palm_handle_reward_w per step whenever palm_center/
-    # palm_lower press the handle (> handle_contact_force_threshold) during the grasp->push-open window
+    # panda_hand presses the handle (> handle_contact_force_threshold) during the grasp->push-open window
     # (hinge_contact_mask, keyframes 2..5). Binary. For PULL this is inactive (is_push gate = 0), and
     # for PUSH the old finger-inclusive hinge_contact reward is disabled -- fingers on the handle are
     # no longer rewarded on push.
@@ -867,7 +844,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "damping_distribution_params": (0.7, 1.3),
         },
         "robot_finger_armature": {
-            # Widen from the nominal 0.001 toward a small physical band for the geared LEAP fingers.
+            # Widen from the nominal toward a small physical band around the screw drive's reflected mass.
             # Kept low -- joint friction (0.01) now handles jitter damping, so armature can stay near
             # the real reflected inertia; ceiling well under the ~0.03 stability limit.
             "armature_distribution_params": (0.001, 0.005),

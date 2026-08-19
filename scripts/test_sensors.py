@@ -41,7 +41,7 @@ parser.add_argument(
     "--benchmark_pointcloud",
     action="store_true",
     default=False,
-    help="Benchmark depth-to-pointcloud against FrankaLeapSampler on matching simulation frames.",
+    help="Benchmark depth-to-pointcloud against FrankaGripperSampler on matching simulation frames.",
 )
 parser.add_argument(
     "--benchmark_warmup_frames",
@@ -119,7 +119,8 @@ from isaaclab.utils.math import quat_apply, quat_from_euler_xyz
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
 
 from DoorOpening.utils.camera_utils import depth_to_pointcloud, simulate_lidar_render_from_pose
-from DoorOpening.utils.extract_pointcloud_from_articulation import FrankaLeapSampler
+from DoorOpening.constants.robot_constants import FINGER_JOINT_NAMES
+from DoorOpening.utils.extract_pointcloud_from_articulation import FrankaGripperSampler
 
 
 euler_angles = torch.tensor([-np.pi / 4, 0.0, 0])  # (roll, pitch, yaw) in radians
@@ -157,16 +158,16 @@ def _print_benchmark_summary(benchmark_state: dict, num_envs: int):
     sampler_total_mean = float(np.mean(benchmark_state["sampler_total_ms"]))
 
     raw_faster_name, raw_slower_name = (
-        ("depth_to_pointcloud", "FrankaLeapSampler.sample")
+        ("depth_to_pointcloud", "FrankaGripperSampler.sample")
         if depth_mean <= sampler_mean
-        else ("FrankaLeapSampler.sample", "depth_to_pointcloud")
+        else ("FrankaGripperSampler.sample", "depth_to_pointcloud")
     )
     raw_speedup = max(depth_mean, sampler_mean) / max(min(depth_mean, sampler_mean), 1e-9)
 
     total_faster_name, total_slower_name = (
-        ("depth_to_pointcloud", "FrankaLeapSampler.sample + world transform")
+        ("depth_to_pointcloud", "FrankaGripperSampler.sample + world transform")
         if depth_mean <= sampler_total_mean
-        else ("FrankaLeapSampler.sample + world transform", "depth_to_pointcloud")
+        else ("FrankaGripperSampler.sample + world transform", "depth_to_pointcloud")
     )
     total_speedup = max(depth_mean, sampler_total_mean) / max(min(depth_mean, sampler_total_mean), 1e-9)
 
@@ -175,15 +176,15 @@ def _print_benchmark_summary(benchmark_state: dict, num_envs: int):
         f"{num_envs} envs, {args_cli.benchmark_num_points} points)"
     )
     print(f"[INFO]: depth_to_pointcloud output shape: {benchmark_state['depth_shape']}")
-    print(f"[INFO]: FrankaLeapSampler output shape: {benchmark_state['sampler_shape']}")
+    print(f"[INFO]: FrankaGripperSampler output shape: {benchmark_state['sampler_shape']}")
     print(
         "[INFO]: depth_to_pointcloud timing is projection + crop only; "
         "camera rendering cost is not included in this number."
     )
     print(f"[INFO]: depth_to_pointcloud: {_format_timing_stats(benchmark_state['depth_ms'])}")
-    print(f"[INFO]: FrankaLeapSampler.sample: {_format_timing_stats(benchmark_state['sampler_ms'])}")
+    print(f"[INFO]: FrankaGripperSampler.sample: {_format_timing_stats(benchmark_state['sampler_ms'])}")
     print(
-        "[INFO]: FrankaLeapSampler.sample + world transform: "
+        "[INFO]: FrankaGripperSampler.sample + world transform: "
         f"{_format_timing_stats(benchmark_state['sampler_total_ms'])}"
     )
     print(
@@ -274,7 +275,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         door_base_body_idx = int(scene["door"].find_bodies("base")[0][0])
         benchmark_state = {
             "device": timing_device,
-            "sampler": FrankaLeapSampler(
+            "sampler": FrankaGripperSampler(
                 door_asset_path,
                 device=args_cli.device,
                 num_points=args_cli.benchmark_num_points,
@@ -321,12 +322,12 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             print("[INFO]: Viser logging enabled for rendered_lidar_points.")
 
         lidar_state = {
-            "sampler": FrankaLeapSampler(
+            "sampler": FrankaGripperSampler(
                 door_asset_path,
                 device=args_cli.device,
                 num_points=LIDAR_DOOR_SCENE_NUM_POINTS,
             ),
-            "robot_sampler": FrankaLeapSampler(
+            "robot_sampler": FrankaGripperSampler(
                 glorbot_urdf_path,
                 device=args_cli.device,
                 num_points=LIDAR_ROBOT_SCENE_NUM_POINTS,
@@ -590,7 +591,7 @@ def main():
     sim.reset()
     # Now we are ready!
     print("[INFO]: Setup complete...")
-    print("[FINGER ORDER]", list(scene["robot"].find_joints([f"finger_joint_{i}" for i in range(12)])[1]))
+    print("[FINGER ORDER]", list(scene["robot"].find_joints(FINGER_JOINT_NAMES, preserve_order=True)[1]))
     # Run the simulator
     run_simulator(sim, scene)
 

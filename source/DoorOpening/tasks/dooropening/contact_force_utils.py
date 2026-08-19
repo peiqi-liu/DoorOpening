@@ -1,58 +1,26 @@
 import torch
 
-# The HANDLE contact-bonus sensor rewards contact from the PALM and the INNER finger segments
-# only. The mcp_joint (the outward knuckle at the finger base) is excluded, so the bonus is
-# collected by gripping with the palm + inner finger surfaces (pip / dip / fingertip /
-# realtip), not by knocking the handle with the outward knuckle.
+# HANDLE contact-bonus sensor: the surfaces that should be doing the gripping. For the Franka
+# hand that is the two fingers plus the hand body between them. Every finger surface on this hand
+# is an inward-facing grasping surface, so there is no knuckle to exclude.
 HANDLE_CONTACT_FILTER_PRIM_PATHS = (
-    "/World/envs/env_.*/Robot/palm_center",
-    "/World/envs/env_.*/Robot/palm_lower",
-    "/World/envs/env_.*/Robot/pip_1",
-    "/World/envs/env_.*/Robot/dip_1",
-    "/World/envs/env_.*/Robot/realtip_1",
-    "/World/envs/env_.*/Robot/fingertip_1",
-    "/World/envs/env_.*/Robot/pip_2",
-    "/World/envs/env_.*/Robot/dip_2",
-    "/World/envs/env_.*/Robot/realtip_2",
-    "/World/envs/env_.*/Robot/fingertip_2",
-    "/World/envs/env_.*/Robot/pip_3",
-    "/World/envs/env_.*/Robot/dip_3",
-    "/World/envs/env_.*/Robot/realtip_3",
-    "/World/envs/env_.*/Robot/fingertip_3",
+    "/World/envs/env_.*/Robot/panda_hand",
+    "/World/envs/env_.*/Robot/panda_leftfinger",
+    "/World/envs/env_.*/Robot/panda_rightfinger",
 )
 
-# PUSH-door palm-only handle-contact reward sensor: ONLY the two palm links (palm_center, palm_lower)
-# count. Fingers are excluded entirely -- the push reward is collected by pressing the handle with the
-# PALM, not by finger contact (which is no longer rewarded on push).
+# PUSH-door hand-only handle-contact reward sensor: ONLY the hand body counts. Fingers are
+# excluded entirely -- the push reward is collected by pressing the handle with the hand, not by
+# finger contact (which is not rewarded on push).
 PALM_ONLY_HANDLE_CONTACT_FILTER_PRIM_PATHS = (
-    "/World/envs/env_.*/Robot/palm_center",
-    "/World/envs/env_.*/Robot/palm_lower",
+    "/World/envs/env_.*/Robot/panda_hand",
 )
 
-# Penalize finger<->panel contact. Every LEAP finger link incl. tips, including the thumb
-# (_4 digit). The palm (palm_center/palm_lower) is intentionally EXCLUDED: pressing the panel
-# (Door/link_1) with the palm is NOT penalized.
+# Penalize finger<->panel contact. The hand body (panda_hand) is intentionally EXCLUDED:
+# pressing the panel (Door/link_1) with it is NOT penalized.
 PANEL_CONTACT_FILTER_PRIM_PATHS = (
-    "/World/envs/env_.*/Robot/mcp_joint_1",
-    "/World/envs/env_.*/Robot/pip_1",
-    "/World/envs/env_.*/Robot/dip_1",
-    "/World/envs/env_.*/Robot/realtip_1",
-    "/World/envs/env_.*/Robot/fingertip_1",
-    "/World/envs/env_.*/Robot/mcp_joint_2",
-    "/World/envs/env_.*/Robot/pip_2",
-    "/World/envs/env_.*/Robot/dip_2",
-    "/World/envs/env_.*/Robot/realtip_2",
-    "/World/envs/env_.*/Robot/fingertip_2",
-    "/World/envs/env_.*/Robot/mcp_joint_3",
-    "/World/envs/env_.*/Robot/pip_3",
-    "/World/envs/env_.*/Robot/dip_3",
-    "/World/envs/env_.*/Robot/realtip_3",
-    "/World/envs/env_.*/Robot/fingertip_3",
-    "/World/envs/env_.*/Robot/mcp_joint_4",
-    "/World/envs/env_.*/Robot/pip_4",
-    "/World/envs/env_.*/Robot/dip_4",
-    "/World/envs/env_.*/Robot/realtip_4",
-    "/World/envs/env_.*/Robot/fingertip_4",
+    "/World/envs/env_.*/Robot/panda_leftfinger",
+    "/World/envs/env_.*/Robot/panda_rightfinger",
 )
 
 X5_BODY_NAMES = (
@@ -106,7 +74,7 @@ FRANKA_BOX_DOOR_CONTACT_PRIM_PATH = "/World/envs/env_.*/Robot/franka_control_box
 # threshold. PhysX already drops directly-jointed (adjacent) pairs.
 #
 # Excluded on purpose from THIS group: panda_link0/panda_link1 (base-adjacent arm mount), the
-# panda_link7 flange, and the whole LEAP hand (finger<->finger self-collision drove poses too
+# panda_link7 flange, and the whole hand (finger<->finger self-collision drove poses too
 # conservative). The fingers ARE separately checked against the panda_link7 flange -- see
 # SELF_COLLISION_HAND_* below.
 SELF_COLLISION_FRANKA_BODIES = ("panda_link2", "panda_link3", "panda_link4", "panda_link5", "panda_link6")
@@ -136,20 +104,14 @@ def _self_collision_filter_prims(*body_name_groups) -> tuple[str, ...]:
 SELF_COLLISION_FRANKA_PRIM_PATH = _self_collision_group_prim_path(SELF_COLLISION_FRANKA_BODIES)
 SELF_COLLISION_FRANKA_FILTER_PRIM_PATHS = _self_collision_filter_prims(SELF_COLLISION_X5_BODIES, SELF_COLLISION_BASE_BODIES)
 
-# Finger<->flange self-collision. The LEAP hand as a whole is still excluded from the franka
-# self-collision group above (penalizing finger<->finger drove poses too conservative), but the
-# fingers curling BACK can strike the franka panda_link7 flange behind the palm -- a real collision
-# we DO want to avoid. So a dedicated multi-body sensor over the LEAP digit links (3 fingers + the
-# thumb), filtered ONLY against panda_link7. Because the filter is JUST the flange, intra-hand
-# contacts (finger<->finger, finger<->thumb) never appear in the force matrix and are NOT penalized.
-# palm_lower/palm_center are omitted (fixed-jointed to the flange -> always/adjacent contact).
+# Finger<->flange self-collision: the fingers filtered ONLY against panda_link7. The hand is
+# excluded from the franka self-collision group above, but a wrist pose that folds the gripper back
+# can still strike the flange behind it, which is a real collision we DO want to avoid. Because the
+# filter is JUST the flange, finger<->finger contact never appears in the force matrix and is not
+# penalized. panda_hand/palm_center are omitted (fixed-jointed to the flange -> adjacent contact).
 FRANKA_FLANGE_BODY = "panda_link7"
-LEAP_HAND_DIGIT_BODIES = tuple(
-    f"{seg}_{i}"
-    for i in (1, 2, 3, 4)
-    for seg in ("mcp_joint", "pip", "dip", "fingertip", "realtip")
-)
-SELF_COLLISION_HAND_PRIM_PATH = _self_collision_group_prim_path(LEAP_HAND_DIGIT_BODIES)
+HAND_DIGIT_BODIES = ("panda_leftfinger", "panda_rightfinger")
+SELF_COLLISION_HAND_PRIM_PATH = _self_collision_group_prim_path(HAND_DIGIT_BODIES)
 SELF_COLLISION_HAND_FILTER_PRIM_PATHS = (f"/World/envs/env_.*/Robot/{FRANKA_FLANGE_BODY}",)
 
 

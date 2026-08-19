@@ -29,7 +29,7 @@ from DoorOpening.assets.door.multi_door_cfg import asset_paths as door_asset_pat
 from DoorOpening.assets.glorbot.glorbot_cfg import glorbot_urdf_path
 from DoorOpening.utils.camera_utils import build_realsense_sampler_spec, render_depth_roundtrip_from_pose
 from DoorOpening.utils.extract_pointcloud_from_articulation import (
-    FrankaLeapSampler,
+    FrankaGripperSampler,
     build_first_visual_link_pointcloud_cache,
     compose_cached_link_pointcloud_world,
 )
@@ -53,7 +53,7 @@ class PointcloudCameraProbe:
         self.env = play_env
         self.device = play_env.device
         self.door_num_points = int(door_num_points)
-        # The robot mesh (Franka arm + base + LEAP hand + x5 arm) covers far more surface than the
+        # The robot mesh (Franka arm + base + gripper + x5 arm) covers far more surface than the
         # door panel+handle, so it needs more points than the door to reach a comparable per-area
         # density -- otherwise background points leak through the sparse robot in the depth z-buffer.
         self.robot_num_points = int(robot_num_points)
@@ -75,7 +75,7 @@ class PointcloudCameraProbe:
         unique_asset_idx = sorted(set(self.env_asset_idx.detach().cpu().tolist()))
         self.door_link_pointclouds = {}
         for idx in unique_asset_idx:
-            sampler = FrankaLeapSampler(door_asset_paths[idx], device=self.device, num_points=self.door_num_points)
+            sampler = FrankaGripperSampler(door_asset_paths[idx], device=self.device, num_points=self.door_num_points)
             self.door_link_pointclouds[idx] = build_first_visual_link_pointcloud_cache(
                 sampler, link_names=self.DOOR_LINK_NAMES, device=self.device
             )
@@ -85,7 +85,7 @@ class PointcloudCameraProbe:
         }
 
         # --- Robot mesh cache (all links, placed by live body poses -- no joint remap needed) ---
-        robot_sampler = FrankaLeapSampler(glorbot_urdf_path, device=self.device, num_points=self.robot_num_points)
+        robot_sampler = FrankaGripperSampler(glorbot_urdf_path, device=self.device, num_points=self.robot_num_points)
         self.robot_link_pointclouds = build_first_visual_link_pointcloud_cache(robot_sampler, device=self.device)
         self.robot_sampler_body_indices = {}
         for link_name in self.robot_link_pointclouds.keys():
