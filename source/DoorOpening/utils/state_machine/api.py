@@ -266,6 +266,62 @@ def get_hinge_pos(door_urdf_path, door_initial_pose, joint_angles):
 
     return hinge_pos.cpu()
 
+def get_handle_bar_pos(door_urdf_path, door_initial_pose, joint_angles, protrusion_pct=75.0):
+    """World position of the LEVER BAR itself -- the part a gripper can actually close around.
+
+    Use this, not get_hinge_pos, for anything that has to touch the handle.
+
+    get_hinge_pos returns a point derived from the whole of link_2, which is escutcheon PLATE +
+    lever bar + return hook. It does try to isolate the lever, by taking the points furthest from
+    a PCA axis -- but for a plate-dominated mesh the smallest-eigenvalue direction is the PLATE'S
+    NORMAL, so "radial distance" ends up measuring spread across the plate face and the outermost
+    points are the plate's own corners. Averaging those lands back on the plate. Rendered meshes
+    show the consequence plainly: the jaws close on the escutcheon while the lever bar hangs free
+    beside them, and the door is never actually grasped. Distance-to-link_2-centroid checks cannot
+    see this, because that centroid is exactly the wrong point.
+
+    The split that IS physically meaningful is PROTRUSION from the door face: the plate lies flush
+    against the panel, the lever stands off it. So fit the panel plane, orient its normal toward
+    the handle, and keep the handle points standing furthest off it.
+    """
+    door_initial_pos, door_initial_quat = door_initial_pose[..., :3], door_initial_pose[..., 3:]
+
+    panel = sample_pointcloud_from_link_name(door_urdf_path, joint_angles, "link_1", device="cpu")
+    handle = sample_pointcloud_from_link_name(door_urdf_path, joint_angles, "link_2", device="cpu")
+    panel = quat_apply(door_initial_quat, panel) + door_initial_pos
+    handle = quat_apply(door_initial_quat, handle) + door_initial_pos
+
+    out = []
+    for b in range(handle.shape[0]):
+        pan_b, han_b = panel[b], handle[b]
+        centre = pan_b.mean(dim=0)
+        # Panel plane normal = smallest singular direction of the panel cloud.
+        normal = torch.linalg.svd(pan_b - centre)[2][-1]
+        # Orient it toward the handle, so "protruding" is unambiguous at any door angle.
+        if torch.dot(han_b.mean(dim=0) - centre, normal) < 0:
+            normal = -normal
+        protrusion = (han_b - centre) @ normal
+        cut = torch.quantile(protrusion, protrusion_pct / 100.0)
+        standing = han_b[protrusion >= cut]
+        if standing.shape[0] < 10:
+            out.append(han_b.mean(dim=0))
+            continue
+        # The standing-off points are stem-top + lever + return hook. Their centroid is still
+        # dragged back toward the stem, so walk out along the lever instead: its long axis is the
+        # principal direction of this subset, and the graspable span is the OUTER half of it
+        # (the stem sits at the pivot end). Taking the mid-point of that outer half puts the
+        # target on the bar itself rather than at its root.
+        sub_centre = standing.mean(dim=0)
+        axis = torch.linalg.svd(standing - sub_centre)[2][0]
+        along = (standing - sub_centre) @ axis
+        # Orient the axis to point AWAY from the pivot (the handle-assembly centroid).
+        if torch.dot(sub_centre - han_b.mean(dim=0), axis) < 0:
+            axis, along = -axis, -along
+        outer = standing[along >= torch.quantile(along, 0.35)]
+        out.append(outer.mean(dim=0) if outer.shape[0] >= 5 else standing.mean(dim=0))
+    return torch.stack(out, dim=0).cpu()
+
+
 def sample_pointcloud(urdf_path, joint_angles, initial_pose):
     pointcloud = sample_pointcloud(urdf_path, joint_angles.cpu(), device="cpu")
     pointcloud = quat_apply(initial_pose[..., 3:], pointcloud) + initial_pose[..., :3]
