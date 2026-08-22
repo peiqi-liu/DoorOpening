@@ -895,9 +895,17 @@
       </geometry>
       <material name="panda_white" />
     </visual>
+    <!-- Collision uses the VISUAL mesh, not meshes/franka/collision/finger.obj. That file is a
+         32-face CONVEX HULL of the finger (21.98 cm^3 vs the real finger's 11.22 cm^3), and the
+         finger is an L: its pad is only the last ~18 mm, while the shank is set back ~11.5 mm from
+         the grasp centerline. Hulling it bridges base to tip in a straight wedge, so the collider
+         came up to 10 mm closer to the centerline than any real material over z = 6..36 mm. The
+         jaw was ~20 mm narrower than it looks, and a lever bar entering the jaw struck phantom
+         geometry before ever reaching the pads. The spawn cfg sets collider_type of
+         "convex_decomposition", which recovers the recess from this mesh to within ~2 mm. -->
     <collision>
       <geometry>
-        <mesh filename="package://glorbot/meshes/franka/collision/finger.obj" />
+        <mesh filename="package://glorbot/meshes/franka/visual/finger.obj" />
       </geometry>
     </collision>
   </link>
@@ -916,10 +924,11 @@
       </geometry>
       <material name="panda_white" />
     </visual>
+    <!-- Visual mesh as the collider, same reason as panda_leftfinger above. -->
     <collision>
       <origin rpy="0 0 3.141592653589793" xyz="0 0 0" />
       <geometry>
-        <mesh filename="package://glorbot/meshes/franka/collision/finger.obj" />
+        <mesh filename="package://glorbot/meshes/franka/visual/finger.obj" />
       </geometry>
     </collision>
   </link>

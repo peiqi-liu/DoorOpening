@@ -5,7 +5,7 @@ dropout: 0.0
 normalize_state: True
 normalize_action: True
 action_space: "absolute"
-action_dim: 22
+action_dim: 11  # base(3) + franka arm(7) + gripper(1); must equal the env action_space
 aux_weight: 0.1
 mode_prediction:
   enabled: false

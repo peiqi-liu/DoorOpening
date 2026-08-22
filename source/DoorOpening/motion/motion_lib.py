@@ -2,6 +2,10 @@ import torch
 import pickle as pkl
 from typing import Optional, Sequence
 from DoorOpening.utils.pose_utils import normalize_to_center_frame
+from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES
+
+# base(3) + franka(7) + gripper(1) + x5 camera(6) = 17. See multi_motion_lib for why this is derived.
+NUM_REF_ROBOT_JOINTS = len(FULL_JOINT_NAMES)
 
 class ReferenceMotionManager:
     def __init__(
@@ -402,7 +406,14 @@ class ReferenceMotionManager:
 
 
     def get_robot_joint_pos_twist(self, env_ids: Optional[Sequence[int]] = None):
-        assert self.ref_robot_joint_pos_twist.shape[-1] == 32 and self.ref_robot_joint_pos_twist.ndim == 3
+        assert (
+            self.ref_robot_joint_pos_twist.ndim == 3
+            and self.ref_robot_joint_pos_twist.shape[-1] == NUM_REF_ROBOT_JOINTS
+        ), (
+            f"Reference robot joint vector has {self.ref_robot_joint_pos_twist.shape[-1]} entries, "
+            f"expected {NUM_REF_ROBOT_JOINTS}. A width of 32 means the motion file was generated "
+            "for the 16-DOF LEAP hand and must be regenerated for the Franka gripper."
+        )
         if env_ids is None:
             return self.ref_robot_joint_pos_twist
         else:

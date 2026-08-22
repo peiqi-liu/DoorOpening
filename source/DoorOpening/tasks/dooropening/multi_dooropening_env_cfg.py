@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from DoorOpening.assets.door.multi_door_cfg import ALL_DOOR_CONFIGS
-from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, GRIPPER_ARMATURE
+from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, GRIPPER_VELOCITY_LIMIT
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
 from DoorOpening.constants.door_constants import DOOR_BODY_NAMES, DOOR_JOINT_NAMES
 from DoorOpening.constants.robot_constants import (
@@ -300,21 +300,11 @@ class EventCfg:
         },
     )
 
-    # Per-episode randomization of the gripper finger armature. On a PRISMATIC DOF armature is
-    # added MASS (kg), not rotor inertia, so the nominal here is glorbot_cfg's GRIPPER_ARMATURE
-    # (0.05 kg) rather than the LEAP hand's 0.002 kg-m^2 -- a rotational value left here would be
-    # ~25x too small and reintroduce the single-step overshoot it exists to prevent. Absolute
-    # values (not a scale).
-    robot_finger_armature = EventTerm(
-        func=randomize_joint_parameters,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_finger_joint.*"]),
-            "armature_distribution_params": (GRIPPER_ARMATURE, GRIPPER_ARMATURE),
-            "operation": "abs",
-            "distribution": "uniform",
-        },
-    )
+    # NOTE: there is deliberately NO gripper-armature randomization term. The Franka hand is a
+    # single-actuator screw drive whose reflected inertia is a fixed property of the mechanism, and
+    # the LEAP-era term that used to live here randomized it in ROTATIONAL units (kg-m^2) on what is
+    # now a PRISMATIC DOF (where armature is added MASS in kg). The nominal 0.05 kg is set once, in
+    # glorbot_cfg's GRIPPER_ARMATURE.
 
     # ADR-ramped panel-swing spring. Design intent: the panel is deliberately allowed to be very stiff,
     # and the door's perceived HEAVINESS is governed by the effort-limit cap
@@ -494,8 +484,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         filter_prim_paths_expr=list(PALM_ONLY_HANDLE_CONTACT_FILTER_PRIM_PATHS),
     )
     # Finger<->panel contact sensor: the gripper fingers against the door panel (Door/link_1).
-    # Gated by panel_contact_mask, a force above threshold here is penalized (fingers should
-    # grip the handle, not the panel) except where pushing the panel is the task.
+    # DIAGNOSTIC ONLY -- it feeds stats/finger_panel_contact_force_norm_* and the per-env
+    # `finger_panel_contact_force_norm` the play/eval scripts print. It drives no reward term
+    # (the old finger<->door contact penalty was removed along with the LEAP hand).
     contact_forces_door_panel = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Door/link_1",
         update_period=0.0,
@@ -580,12 +571,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         filter_prim_paths_expr=list(SELF_COLLISION_HAND_FILTER_PRIM_PATHS),
     )
     handle_contact_force_threshold = 1.0
-    # Finger<->door contact PROTECTION: finger<->panel (link_1) and finger<->handle (link_2) are
-    # processed TOGETHER. When the fingers press EITHER door body harder than this (N), a strong
-    # penalty (finger_door_contact_penalty_w) is applied -- but ONLY while the panel-contact mask is
-    # on (push: open-door + base-forward; pull: retract-arm + push-panel + hold-traverse). Below the
-    # threshold, or with the mask off, is free. Tune against stats/finger_door_contact_force_norm_max.
-    finger_door_contact_force_threshold = 10.0
     # Contact between a non-front base face and any door body above this (N) is penalized.
     base_door_contact_force_threshold = 5.0
     x5_body_contact_force_threshold = 1.5
@@ -619,20 +604,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         ),
         offset=CameraCfg.OffsetCfg(pos=(0.0, 0.0, 0.0), rot=POINTCLOUD_CAMERA_QUAT, convention="world"),
     )
-
-    # Raw `.pt` point-cloud replay dumps for teacher RL training on headless/HPC nodes.
-    # This uses geometry samplers, not cameras or renderer video: one robot cloud and one door cloud per saved frame.
-    viser_pointcloud = {
-        "enabled": False,
-        "path": "teacher_viser_replay.pt",
-        "env_id": 80,
-        "capture_interval": 3,
-        "save_interval": 10_000,
-        "max_points": 18_000,
-        "robot_num_points": 15_000,
-        "door_num_points": 3_000,
-        "max_frames": 1000,
-    }
 
     door_body_names = DOOR_BODY_NAMES
 
@@ -731,9 +702,34 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=False)
 
-    base_action_scale = 0.6
+    base_action_scale = 1.0
     arm_action_scale = 0.6
-    finger_action_scale = 1.5
+    # Actions are integrated into the PD target (target += dt * scale * action, dt = 1/30 s), so a
+    # scale is a commanded RATE. The gripper DOF is PRISMATIC, so unlike every other scale here this
+    # one is a linear speed in METRES PER SECOND, not rad/s. Same convention as IsaacLab's own
+    # franka_cabinet direct env, whose finger target rate is dof_speed_scale * action_scale =
+    # 0.1 * 7.5 = 0.75 m/s (franka_cabinet_env.py:199/285).
+    #
+    # It is expressed as a multiple of GRIPPER_VELOCITY_LIMIT (0.05 m/s = the Franka Hand manual's
+    # "Travel Speed (per finger) 50 mm/s", also the URDF <limit velocity>) because THAT is the real
+    # ceiling: IsaacLab writes an implicit actuator's velocity_limit_sim into PhysX as the DOF max
+    # velocity (articulation.py: _process_actuators_cfg -> write_joint_velocity_limit_to_sim ->
+    # set_dof_max_velocities), so the joint physically cannot travel faster no matter what is
+    # commanded. Raising the multiplier does not speed the finger up; it only lets the target lead
+    # the state.
+    #
+    # 2x is deliberate headroom rather than an exact match:
+    #  - the drive lags the target, so a 1.0x command settles slightly BELOW the velocity cap;
+    #  - once the fingers are blocked by the handle, grasp force is stiffness * (target - actual),
+    #    so the target has to keep travelling past the contact point -- at 2x that force builds in
+    #    half the time (full stroke of target travel: 0.4 s instead of 0.8 s);
+    #  - it leaves room if GRIPPER_VELOCITY_LIMIT is ever raised toward the 0.2 m/s the official
+    #    franka_description URDF and IsaacLab's stock Franka asset use.
+    # The cost is that |action| > 0.5 all produces the same (velocity-capped) motion, so push this
+    # much higher only if you want a bang-bang gripper. For a faster gripper, raise
+    # GRIPPER_VELOCITY_LIMIT in glorbot_cfg -- this scale follows it automatically.
+    gripper_action_speed_headroom = 2.0
+    finger_action_scale = gripper_action_speed_headroom * GRIPPER_VELOCITY_LIMIT
     arx_action_scale = 0.6
 
     # Deep Mimic Reward Parameters
@@ -741,30 +737,39 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_key_body_pos_w = 2.0
     robot_base_joint_pos_w = 3.0
     robot_arm_joint_pos_w = 3.0
-    robot_finger_joint_pos_w = 1.5
+    # Gripper-opening tracking (the single driven finger DOF). There is deliberately no matching
+    # VELOCITY term: the gripper is a 1-DOF open/close command whose speed is already capped at the
+    # hardware limit, so tracking the reference's finger velocity added a term that was numerically
+    # constant and shaped nothing.
+    robot_gripper_joint_pos_w = 1.5
     robot_arx_joint_pos_w = 5.0
     robot_arx_tuck_joint_pos_w = 2.0
     robot_base_joint_vel_w = 1.0
     robot_arm_joint_vel_w = 2.0
-    robot_finger_joint_vel_w = 0.5
     door_joint_pos_w = 4.0
-    hinge_contact_reward_w = 1.5
+    # PULL-only binary bonus for the GRIPPER (panda_hand + the two fingers, see
+    # HANDLE_CONTACT_FILTER_PRIM_PATHS) touching the handle during the grasp/pull window.
+    hinge_gripper_contact_reward_w = 1.5
     # PUSH-only palm-handle contact reward: +palm_handle_reward_w per step whenever palm_center/
     # panda_hand presses the handle (> handle_contact_force_threshold) during the grasp->push-open window
     # (hinge_contact_mask, keyframes 2..5). Binary. For PULL this is inactive (is_push gate = 0), and
-    # for PUSH the old finger-inclusive hinge_contact reward is disabled -- fingers on the handle are
-    # no longer rewarded on push.
+    # for PUSH the finger-inclusive hinge_gripper_contact reward is disabled -- fingers on the handle
+    # are no longer rewarded on push.
     palm_handle_reward_w = 5.0
     robot_body_lin_vel_w = 1.0
     robot_body_ang_vel_w = 0.5
+    # Joint-limit penalty, applied to the FRANKA ARM JOINTS ONLY (see joint_limit_penalty_joints).
     joint_limit_penalty_w = 40.0
     joint_limit_penalty_margin_ratio = 0.05
+    # Which DOFs the joint-limit penalty is scored over. Everything else is excluded on purpose:
+    #  - base x/y/rotation are virtual chassis DOFs whose limits are the arena, not the hardware;
+    #  - the arx/x5 joints are pinned to a fixed tuck pose and never driven by the policy;
+    #  - the gripper's limits ARE its operating points. Fully open (0.04) and fully closed (0.0) are
+    #    exactly the URDF limits, so including it charged a constant penalty for simply holding the
+    #    reference gripper pose and punished every real grasp squeeze.
+    joint_limit_penalty_joints = list(arm_joints)
     # lambda_c in r = r_target - lambda_l*r_limit - lambda_c*r_contact
     self_collision_penalty_w = 5.0
-    # Penalty weight for the unified finger<->door protection penalty: applied while the panel-contact
-    # mask is on and the finger<->panel OR finger<->handle force exceeds finger_door_contact_force_threshold.
-    # Deliberately STRONG (this replaces the old weak graded panel/handle penalties). Tune it.
-    finger_door_contact_penalty_w = 10.0
     # Penalty weight (per non-front base face in contact with the door). High on purpose: a
     # base panel hitting the door in the real world means a securely-mounted robot is injured.
     base_door_contact_penalty_w = 10.0
@@ -783,11 +788,16 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_key_body_pos_scale = 3.0
     robot_base_joint_pos_scale = 0.5
     robot_arm_joint_pos_scale = 0.2
-    robot_finger_joint_pos_scale = 1.0
+    # Gripper tracking sharpness for exp(-scale * err^2). The error is a PRISMATIC opening in
+    # METRES, so the LEAP-era 1.0 (tuned for radians over a ~1.5 rad finger sweep) made the term
+    # numerically constant: the worst possible error is the 0.04 m stroke, i.e. err^2 = 1.6e-3, and
+    # exp(-1.6e-3) = 0.998 for every state. Scale is therefore derived from the stroke instead of
+    # hand-picked: 4 / stroke^2 puts a half-stroke error (0.02 m) at exp(-1) = 0.37.
+    gripper_stroke_m = 0.04
+    robot_gripper_joint_pos_scale = 4.0 / (gripper_stroke_m ** 2)
     robot_arx_tuck_joint_pos_scale = 0.2
     robot_base_joint_vel_scale = 0.5
     robot_arm_joint_vel_scale = 0.5
-    robot_finger_joint_vel_scale = 0.5
     door_joint_pos_scale = 5.0
     robot_body_lin_vel_scale = 10.0
     robot_body_ang_vel_scale = 10.0
@@ -843,12 +853,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "stiffness_distribution_params": (0.8, 1.2),
             "damping_distribution_params": (0.7, 1.3),
         },
-        "robot_finger_armature": {
-            # Widen from the nominal toward a small physical band around the screw drive's reflected mass.
-            # Kept low -- joint friction (0.01) now handles jitter damping, so armature can stay near
-            # the real reflected inertia; ceiling well under the ~0.03 stability limit.
-            "armature_distribution_params": (0.001, 0.005),
-        },
         "door_board_joint_stiffness_and_damping": {
             # Log-uniform over 20..800 Nm/rad: heaviness is set by the effort cap, so stiffness is free to
             # go very high (sharp breakaway, then constant resistance) and fairly low (soft swing).
@@ -873,12 +877,18 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     }
 
     # These terms are sampled inside the env because they perturb reset state, observations, and controller targets.
+    #
+    # NOTE: the gripper DOF is deliberately absent from EVERY group here. All four LEAP-era finger
+    # entries were in radians against a ~1.5 rad finger sweep, which on the 0.04 m prismatic gripper
+    # meant spawn noise of 2.5x the whole stroke, observation noise of half the stroke, and velocity
+    # noise 3x the joint's own speed limit -- i.e. randomization far larger than the signal. The real
+    # hand is a single actuator with an accurate width encoder, so it now carries no reset,
+    # observation, or PD-target noise at all.
     adr_custom_cfg_dict = {
         "robot_spawn": {
             "base_xy_joint_pos_noise": (0.0, 0.1),
             "base_rot_joint_pos_noise": (0.0, 0.05),
             "arm_joint_pos_noise": (0.0, 0.15),
-            "finger_joint_pos_noise": (0.0, 0.1),
         },
         "robot_state_noise": {
             "base_xy_joint_pos_noise": (0.0, 0.003),
@@ -887,8 +897,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "base_rot_joint_pos_bias": (0.0, 0.006),
             "arm_joint_pos_noise": (0.0, 0.01),
             "arm_joint_pos_bias": (0.0, 0.006),
-            "finger_joint_pos_noise": (0.0, 0.02),
-            "finger_joint_pos_bias": (0.0, 0.01),
             "key_body_pos_noise": (0.0, 0.01),
             "key_body_pos_bias": (0.0, 0.005),
             "key_body_quat_noise": (0.0, 0.01),
@@ -899,8 +907,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "base_rot_joint_vel_bias": (0.0, 0.04),
             "arm_joint_vel_noise": (0.0, 0.1),
             "arm_joint_vel_bias": (0.0, 0.05),
-            "finger_joint_vel_noise": (0.0, 0.15),
-            "finger_joint_vel_bias": (0.0, 0.08),
             "body_lin_vel_noise": (0.0, 0.05),
             "body_lin_vel_bias": (0.0, 0.03),
             "body_ang_vel_noise": (0.0, 0.1),
@@ -916,7 +922,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "base_xy_target_noise": (0.0, 0.0015),
             "base_rot_target_noise": (0.0, 0.005),
             "arm_target_noise": (0.0, 0.003),
-            "finger_target_noise": (0.0, 0.005),
         },
         # Action latency (in env/control steps; env dt = sim_dt * decimation = 1/30 s).
         # The PD target applied on a given step is the one the policy produced `latency` steps

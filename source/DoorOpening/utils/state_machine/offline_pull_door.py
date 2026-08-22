@@ -663,7 +663,7 @@ def state_machine_offline_left_pull_door(
     )
 
     base_target_rot = robot_initial_pose[:, 3:].to(device).clone()
-    default_palm_rot = get_rotation_quat(math.pi / 2, 0, -math.pi / 2 - math.pi / 3, device)
+    default_palm_rot = get_rotation_quat(math.pi / 2, 0, -math.pi / 2 - math.pi / 4, device)
 
     _append_state(
         robot_traj,
@@ -740,9 +740,9 @@ def state_machine_offline_left_pull_door(
     # (-x, toward the handle/door). Robot faces -x, so right=+y / left=-y / forward=-x.
     # Palm<->door x gap kept at 0.035, matching the right-door planner so left/right grasp the
     # same distance out from the panel.
-    grasp_palm_x_offset = 0.035
+    grasp_palm_x_offset = 0.06
     grasp_palm_y_offset = 0.015
-    grasp_palm_z_offset = 0.05
+    grasp_palm_z_offset = 0.04
     grasp_open_ratio = 0.7
 
     palm_target_pos = handle_pos.clone()
@@ -815,17 +815,17 @@ def state_machine_offline_left_pull_door(
     pull_theta_stop = 1.25
     pull_theta_step = 0.10
 
-    pull_base_x_offset = 0.55
+    pull_base_x_offset = 0.6
     pull_base_y_gain = -0.1 / 1.45
 
     pull_palm_x_offset_closed = 0.05
     pull_palm_y_offset_closed = 0.03
-    pull_palm_z_offset = 0.08
+    pull_palm_z_offset = 0.04
 
     pull_rot_roll_base = math.pi / 2
     pull_rot_roll_per_theta = 0.9
     pull_rot_pitch = 0
-    pull_rot_yaw = - 5 * math.pi / 6
+    pull_rot_yaw = - 3 * math.pi / 4
 
     theta_values = torch.arange(
         pull_theta_start,
@@ -900,13 +900,13 @@ def state_machine_offline_left_pull_door(
     release_base_x_delta_1 = -0.12
     # Blocking pose Y: +y approaches the open leaf, -y backs away. Kept a margin off the leaf.
     release_base_y = -0.20
-    release_palm_x_delta = 0.3
+    release_palm_x_delta = 0.25
     release_palm_y_delta = 0.0
     release_base_x_delta_2 = -0.18
     release_door_open_angle = 1.35
 
     # Positive relative yaw turns the base toward the opened panel on -y.
-    tilt_base_yaw = -1.0
+    tilt_base_yaw = -0.8
     tilted_base_rot = get_rotation_quat(
         0.0,
         0.0,
@@ -917,9 +917,9 @@ def state_machine_offline_left_pull_door(
     # Retract the arm further BACKWARD (away from the door): retreat_local_x is the base-local
     # forward offset of the retracted palm, so a more-negative value pulls the palm behind the base.
     # Was +0.10 (slightly forward of the base); now -0.10 to keep the arm clear of the panel.
-    retreat_local_x = -0.10
-    retreat_local_y = -0.42
-    retreat_z_lift = 0.04
+    retreat_local_x = -0.05
+    retreat_local_y = -0.3
+    retreat_z_lift = 0.15
     # Larger x offset magnitude (was -0.3) so the arm reaches a bit further forward into the panel.
     # Contact point is now the panel CENTER (get_board_pos); only a small x offset so we push
     # near the center, not toward the hinge axis (short lever -> strong forces on the franka).

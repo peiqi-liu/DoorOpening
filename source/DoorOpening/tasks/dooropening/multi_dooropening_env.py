@@ -40,8 +40,6 @@ from DoorOpening.tasks.dooropening.contact_force_utils import (
 from DoorOpening.utils.pose_utils import world_to_local
 from isaaclab.utils.math import quat_conjugate, quat_apply, quat_mul
 from DoorOpening.utils.quat_utils import quat_to_6d
-from DoorOpening.utils.extract_pointcloud_from_articulation import FrankaGripperSampler
-from DoorOpening.utils.viser_pt import format_iterated_record_path, prepare_pointcloud
 from typing import Tuple
 
 
@@ -171,6 +169,50 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_dof_lower_limits = self.robot.data.soft_joint_pos_limits[0, self._robot_dof_idx, 0].to(device=self.device)
         self.robot_dof_upper_limits = self.robot.data.soft_joint_pos_limits[0, self._robot_dof_idx, 1].to(device=self.device)
 
+        # DOFs scored by the joint-limit penalty (the franka arm only -- see the cfg field for why
+        # the base, arx and gripper DOFs are excluded). Indices are LOCAL to the actuated-joint
+        # ordering, so they index robot_dof_lower/upper_limits directly.
+        joint_limit_penalty_names = list(self.cfg.joint_limit_penalty_joints)
+        unknown_limit_joints = [name for name in joint_limit_penalty_names if name not in joint_names]
+        if unknown_limit_joints:
+            raise ValueError(
+                "cfg.joint_limit_penalty_joints must be a subset of the actuated joints; "
+                f"unknown: {unknown_limit_joints}."
+            )
+        # The gripper action scale is a LINEAR rate (m/s) on a prismatic DOF, while the joint's real
+        # ceiling is the DOF max velocity PhysX holds (written from ImplicitActuatorCfg.
+        # velocity_limit_sim). Report both once at startup so a mismatch -- a scale far below the cap
+        # (an artificially slow gripper) or far above it (a target that just runs away from the
+        # state) -- is visible instead of silent. joint_vel_limits is read back from the sim, so this
+        # reflects what the solver will actually enforce, not what the cfg asked for.
+        gripper_speed_cap = float(
+            self.robot.data.joint_vel_limits[0, self._robot_finger_dof_idx].min().item()
+        )
+        gripper_stroke = float(
+            (self.robot_dof_upper_limits - self.robot_dof_lower_limits)[
+                len(self.cfg.base_joints) + len(self.cfg.arm_joints)
+            ].item()
+        )
+        print(
+            f"[INFO] Gripper: stroke {gripper_stroke * 1e3:.1f} mm, PhysX max speed "
+            f"{gripper_speed_cap * 1e3:.1f} mm/s, commanded rate "
+            f"{self.cfg.finger_action_scale * 1e3:.1f} mm/s "
+            f"({self.cfg.finger_action_scale / max(gripper_speed_cap, 1e-9):.2f}x the cap; "
+            f"full stroke in {gripper_stroke / max(gripper_speed_cap, 1e-9):.2f} s)."
+        )
+        if self.cfg.finger_action_scale < gripper_speed_cap:
+            print(
+                "[WARNING] finger_action_scale is BELOW the gripper's simulated velocity limit, so the"
+                " policy can never drive the finger at full speed. Raise finger_action_scale (or lower"
+                " GRIPPER_VELOCITY_LIMIT) so they match."
+            )
+
+        joint_limit_penalty_local_idx = [joint_names.index(name) for name in joint_limit_penalty_names]
+        self._joint_limit_penalty_local_idx = torch.tensor(
+            joint_limit_penalty_local_idx, device=self.device, dtype=torch.long
+        )
+        self._joint_limit_penalty_dof_idx = self._robot_dof_idx[self._joint_limit_penalty_local_idx]
+
         # We are going to update this variables to control the robot
         self.robot_dof_targets = torch.zeros((self.num_envs, len(self._robot_dof_idx)), device=self.device)
         self.applied_robot_dof_targets = torch.zeros_like(self.robot_dof_targets)
@@ -201,10 +243,9 @@ class DooropeningEnv(DirectRLEnv):
         self.door_joint_pos_scale = self.cfg.door_joint_pos_scale
         self.robot_base_joint_pos_scale = self.cfg.robot_base_joint_pos_scale
         self.robot_arm_joint_pos_scale = self.cfg.robot_arm_joint_pos_scale
-        self.robot_finger_joint_pos_scale = self.cfg.robot_finger_joint_pos_scale
+        self.robot_gripper_joint_pos_scale = self.cfg.robot_gripper_joint_pos_scale
         self.robot_base_joint_vel_scale = self.cfg.robot_base_joint_vel_scale
         self.robot_arm_joint_vel_scale = self.cfg.robot_arm_joint_vel_scale
-        self.robot_finger_joint_vel_scale = self.cfg.robot_finger_joint_vel_scale
         self.robot_body_lin_vel_scale = self.cfg.robot_body_lin_vel_scale
         self.robot_body_ang_vel_scale = self.cfg.robot_body_ang_vel_scale
 
@@ -213,13 +254,12 @@ class DooropeningEnv(DirectRLEnv):
         self.door_joint_pos_w = self.cfg.door_joint_pos_w
         self.robot_base_joint_pos_w = self.cfg.robot_base_joint_pos_w
         self.robot_arm_joint_pos_w = self.cfg.robot_arm_joint_pos_w
-        self.robot_finger_joint_pos_w = self.cfg.robot_finger_joint_pos_w
+        self.robot_gripper_joint_pos_w = self.cfg.robot_gripper_joint_pos_w
         self.robot_arx_joint_pos_w = self.cfg.robot_arx_joint_pos_w
         self.robot_arx_tuck_joint_pos_w = self.cfg.robot_arx_tuck_joint_pos_w
         self.robot_base_joint_vel_w = self.cfg.robot_base_joint_vel_w
         self.robot_arm_joint_vel_w = self.cfg.robot_arm_joint_vel_w
-        self.robot_finger_joint_vel_w = self.cfg.robot_finger_joint_vel_w
-        self.hinge_contact_reward_w = self.cfg.hinge_contact_reward_w
+        self.hinge_gripper_contact_reward_w = self.cfg.hinge_gripper_contact_reward_w
         self.palm_handle_reward_w = self.cfg.palm_handle_reward_w
         self.base_door_contact_penalty_w = self.cfg.base_door_contact_penalty_w
         self.x5_door_contact_penalty_w = self.cfg.x5_door_contact_penalty_w
@@ -228,7 +268,6 @@ class DooropeningEnv(DirectRLEnv):
         self.joint_limit_penalty_w = self.cfg.joint_limit_penalty_w
         self.joint_limit_penalty_margin_ratio = self.cfg.joint_limit_penalty_margin_ratio
         self.self_collision_penalty_w = self.cfg.self_collision_penalty_w
-        self.finger_door_contact_penalty_w = self.cfg.finger_door_contact_penalty_w
         self.franka_box_contact_penalty_w = self.cfg.franka_box_contact_penalty_w
 
         self.reset_key_body_pos_delta_min = self.cfg.reset_key_body_pos_delta_min
@@ -352,12 +391,13 @@ class DooropeningEnv(DirectRLEnv):
             [key for key in door_state_cfg if key.endswith("_noise")]
         )
         self.door_state_biases = self._make_env_buffer_dict([key for key in door_state_cfg if key.endswith("_bias")])
+        # The gripper DOF carries no state noise (see the adr_custom_cfg_dict note): its width
+        # encoder is accurate and the LEAP-era finger noise was a large fraction of the 0.04 m stroke.
         self.student_joint_pos_noise_widths = self._make_env_buffer_dict(
             [
                 "base_xy_joint_pos_noise",
                 "base_rot_joint_pos_noise",
                 "arm_joint_pos_noise",
-                "finger_joint_pos_noise",
             ]
         )
         self.student_joint_pos_biases = self._make_env_buffer_dict(
@@ -365,7 +405,6 @@ class DooropeningEnv(DirectRLEnv):
                 "base_xy_joint_pos_bias",
                 "base_rot_joint_pos_bias",
                 "arm_joint_pos_bias",
-                "finger_joint_pos_bias",
             ]
         )
         # Action latency: the PD target applied on a step is the one computed `_action_latency_buf`
@@ -404,7 +443,6 @@ class DooropeningEnv(DirectRLEnv):
         )
         self._dr_metrics_interval = max(int(self.cfg.dr_metrics_interval), 1)
         self._log_verbose_dr_metrics = bool(self.cfg.log_verbose_dr_metrics)
-        self._init_viser_pointcloud_recording()
 
     def _get_filtered_contact_force_w(self, sensor, expected_num_envs=None, filter_indices=None) -> torch.Tensor:
         return get_filtered_contact_force_w(
@@ -505,287 +543,6 @@ class DooropeningEnv(DirectRLEnv):
     def _get_curriculum_step_count(self) -> int:
         # Curriculum/reset scheduling should follow actual env progress, not logging side effects.
         return int(self.common_step_counter)
-
-    def _init_viser_pointcloud_recording(self):
-        """Initialize optional teacher-training point-cloud replay dumps."""
-
-        self._reset_viser_pointcloud_runtime_state()
-
-        record_cfg = dict(getattr(self.cfg, "viser_pointcloud", {}) or {})
-        rank = int(os.environ.get("RANK", "0"))
-        if rank != 0 or not bool(record_cfg.get("enabled", False)):
-            return
-
-        self.viser_pointcloud_enabled = True
-        self._configure_viser_pointcloud_from_cfg(record_cfg)
-
-        self._init_viser_pointcloud_asset_samplers()
-        self._init_viser_pointcloud_metadata()
-
-        print(f"Viser .pt point-cloud capture enabled for env {self._viser_pointcloud_env_id}.")
-        print(
-            "Replay chunks will be written as "
-            f"{format_iterated_record_path(self.viser_pointcloud_path, '<chunk_tag>')}"
-        )
-        print(f"Replay chunks will flush every {self._viser_pointcloud_save_interval} iterations.")
-        if self._viser_pointcloud_max_frames > 0:
-            print(f"Each replay chunk will keep at most {self._viser_pointcloud_max_frames} frames.")
-
-    def _reset_viser_pointcloud_runtime_state(self):
-        self.viser_pointcloud_enabled = False
-        self.viser_pointcloud_path = ""
-        self.viser_pointcloud_frames = []
-        self.viser_pointcloud_frame_count = 0
-        self.viser_pointcloud_chunk_index = 0
-        self.viser_pointcloud_chunk_start_iteration = None
-        self.viser_pointcloud_latest_iteration = None
-        self._viser_pointcloud_metadata = {}
-        self._viser_robot_sampler = None
-        self._viser_door_samplers = {}
-        self._viser_env_asset_idx = None
-
-    def _configure_viser_pointcloud_from_cfg(self, record_cfg: dict):
-        self._viser_pointcloud_env_id = max(0, min(int(record_cfg["env_id"]), self.num_envs - 1))
-        self._viser_pointcloud_capture_interval = max(
-            1,
-            int(record_cfg.get("capture_interval", record_cfg.get("record_interval", 1))),
-        )
-        self._viser_pointcloud_save_interval = max(
-            1,
-            int(record_cfg.get("save_interval", record_cfg.get("raw_interval", 5000))),
-        )
-        self._viser_pointcloud_max_frames = max(0, int(record_cfg.get("max_frames", 2000)))
-        self._viser_pointcloud_max_points = int(record_cfg.get("max_points", 6000))
-        self._viser_robot_num_points = int(record_cfg.get("robot_num_points", record_cfg.get("num_points", 4096)))
-        self._viser_door_num_points = int(record_cfg.get("door_num_points", record_cfg.get("num_points", 4096)))
-
-        configured_path = Path(str(record_cfg.get("path", record_cfg.get("raw_path", "teacher_viser_replay.pt")))).expanduser()
-        if not configured_path.is_absolute():
-            log_dir = Path(str(getattr(self.cfg, "log_dir", os.getcwd())))
-            configured_path = log_dir / configured_path
-        self.viser_pointcloud_path = str(configured_path)
-        raw_dir = os.path.dirname(self.viser_pointcloud_path)
-        if raw_dir:
-            os.makedirs(raw_dir, exist_ok=True)
-
-    def _init_viser_pointcloud_asset_samplers(self):
-        asset_index_by_dir = {Path(asset_path).resolve().parent: idx for idx, asset_path in enumerate(door_asset_paths)}
-        if self.ref_motion_lib is None:
-            self._viser_env_asset_idx = self.env_asset_indices.to(device=self.device, dtype=torch.long)
-        else:
-            motion_to_asset_idx = []
-            for motion_path in motion_traj_paths:
-                motion_dir = Path(motion_path).resolve().parent
-                if motion_dir not in asset_index_by_dir:
-                    raise KeyError(f"Could not map motion file '{motion_path}' to a door asset path.")
-                motion_to_asset_idx.append(asset_index_by_dir[motion_dir])
-            motion_to_asset_idx = torch.tensor(motion_to_asset_idx, device=self.device, dtype=torch.long)
-            env_motion_idx = self.ref_motion_lib.env_to_file_map.to(device=self.device, dtype=torch.long)
-            self._viser_env_asset_idx = motion_to_asset_idx[env_motion_idx]
-
-        selected_asset_idx = int(self._viser_env_asset_idx[self._viser_pointcloud_env_id].detach().cpu().item())
-        self._viser_door_samplers = {
-            selected_asset_idx: FrankaGripperSampler(
-                door_asset_paths[selected_asset_idx],
-                device=self.device,
-                num_points=self._viser_door_num_points,
-            )
-        }
-
-        self._viser_robot_sampler = FrankaGripperSampler(
-            glorbot_urdf_path,
-            device=self.device,
-            num_points=self._viser_robot_num_points,
-        )
-        robot_sampler_joint_names = list(self._viser_robot_sampler.robot.actuated_joint_names)
-        robot_joint_ids, robot_joint_names = self.robot.find_joints(robot_sampler_joint_names)
-        if len(robot_joint_ids) != len(robot_sampler_joint_names):
-            raise ValueError("Could not map every robot sampler joint to the IsaacLab robot articulation.")
-        self._viser_robot_sampler_joint_ids = torch.tensor(robot_joint_ids, device=self.device, dtype=torch.long)
-        robot_joint_name_to_idx = {name: idx for idx, name in enumerate(robot_joint_names)}
-        self._viser_robot_sampler_joint_reorder = [robot_joint_name_to_idx[name] for name in robot_sampler_joint_names]
-        self._viser_robot_root_body_idx = int(self._robot_base_link_idx[0])
-
-    def _init_viser_pointcloud_metadata(self):
-        sim_cfg = getattr(self.cfg, "sim", None)
-        sim_dt = float(getattr(sim_cfg, "dt", self.cfg.sim_dt))
-        env_step_dt = max(float(getattr(self, "dt", sim_dt * int(getattr(self.cfg, "decimation", 1)))), 1e-6)
-        self._viser_pointcloud_metadata = {
-            "format": "dooropening_viser_replay_v2",
-            "capture_mode": "teacher_training_pointcloud_chunk",
-            "pointcloud_frame": "world",
-            "pointcloud_streams": [
-                {"name": "robot", "label": "Robot", "color": (79, 195, 247), "point_size_scale": 1.0},
-                {"name": "door", "label": "Door", "color": (255, 193, 7), "point_size_scale": 1.0},
-            ],
-            "pointcloud_source": "articulation_sampler",
-            "sim_dt": sim_dt,
-            "decimation": int(getattr(self.cfg, "decimation", 1)),
-            "env_step_dt": env_step_dt,
-            "env_step_fps": 1.0 / env_step_dt,
-            "frame_dt": env_step_dt * self._viser_pointcloud_capture_interval,
-            "frame_fps": 1.0 / (env_step_dt * self._viser_pointcloud_capture_interval),
-            "pointcloud_sensor_dt": env_step_dt * self._viser_pointcloud_capture_interval,
-            "pointcloud_sensor_fps": 1.0 / (env_step_dt * self._viser_pointcloud_capture_interval),
-            "raw_cloud_config": {
-                "max_points": self._viser_pointcloud_max_points,
-                "robot_num_points": self._viser_robot_num_points,
-                "door_num_points": self._viser_door_num_points,
-                "capture_interval": self._viser_pointcloud_capture_interval,
-            },
-            "glorbot_urdf_path": str(glorbot_urdf_path),
-            "robot_joint_names": list(getattr(self.robot, "joint_names", [])),
-            "door_joint_names": list(getattr(self.door, "joint_names", [])),
-        }
-
-    def _sample_viser_robot_pointcloud_world(self, env_id: int) -> torch.Tensor:
-        robot_joint_pos = self.robot.data.joint_pos[env_id : env_id + 1, self._viser_robot_sampler_joint_ids]
-        robot_joint_pos = robot_joint_pos[:, self._viser_robot_sampler_joint_reorder]
-        robot_local_pcd = self._viser_robot_sampler.sample(robot_joint_pos)
-        robot_root_pos_w = self.robot.data.body_pos_w[env_id : env_id + 1, self._viser_robot_root_body_idx]
-        robot_root_quat_w = self.robot.data.body_quat_w[env_id : env_id + 1, self._viser_robot_root_body_idx]
-        quat = robot_root_quat_w.unsqueeze(1).expand(-1, robot_local_pcd.shape[1], -1)
-        return (quat_apply(quat, robot_local_pcd) + robot_root_pos_w.unsqueeze(1))[0]
-
-    def _sample_viser_door_pointcloud_world(self, env_id: int) -> torch.Tensor:
-        asset_idx = int(self._viser_env_asset_idx[env_id].detach().cpu().item())
-        sampler = self._viser_door_samplers.get(asset_idx)
-        if sampler is None:
-            sampler = FrankaGripperSampler(
-                door_asset_paths[asset_idx],
-                device=self.device,
-                num_points=self._viser_door_num_points,
-            )
-            self._viser_door_samplers[asset_idx] = sampler
-
-        door_joint_pos = self.door.data.joint_pos[env_id : env_id + 1]
-        local_pcd = sampler.sample(door_joint_pos)
-        door_base_pos_w = self.door.data.body_pos_w[env_id : env_id + 1, self._door_base_link_idx]
-        door_base_quat_w = self.door.data.body_quat_w[env_id : env_id + 1, self._door_base_link_idx]
-        quat = door_base_quat_w.unsqueeze(1).expand(-1, local_pcd.shape[1], -1)
-        return (quat_apply(quat, local_pcd) + door_base_pos_w.unsqueeze(1))[0]
-
-    def _trim_viser_pointcloud_frames(self):
-        if (
-            self._viser_pointcloud_max_frames > 0
-            and len(self.viser_pointcloud_frames) > self._viser_pointcloud_max_frames
-        ):
-            self.viser_pointcloud_frames = self.viser_pointcloud_frames[-self._viser_pointcloud_max_frames :]
-        self.viser_pointcloud_frame_count = len(self.viser_pointcloud_frames)
-        if self.viser_pointcloud_frame_count > 0:
-            self.viser_pointcloud_chunk_start_iteration = int(self.viser_pointcloud_frames[0]["iteration"])
-        else:
-            self.viser_pointcloud_chunk_start_iteration = None
-
-    def _build_viser_pointcloud_payload(self, chunk_complete: bool) -> dict:
-        latest_iteration = int(self.viser_pointcloud_latest_iteration or 0)
-        payload = {
-            **self._viser_pointcloud_metadata,
-            "chunk_index": int(self.viser_pointcloud_chunk_index),
-            "chunk_env_id": int(self._viser_pointcloud_env_id),
-            "chunk_start_iteration": None
-            if self.viser_pointcloud_chunk_start_iteration is None
-            else int(self.viser_pointcloud_chunk_start_iteration),
-            "chunk_end_iteration": latest_iteration,
-            "chunk_complete": bool(chunk_complete),
-            "chunk_frame_count": int(self.viser_pointcloud_frame_count),
-            "episode_index": int(self.viser_pointcloud_chunk_index),
-            "episode_env_id": int(self._viser_pointcloud_env_id),
-            "episode_start_iteration": None
-            if self.viser_pointcloud_chunk_start_iteration is None
-            else int(self.viser_pointcloud_chunk_start_iteration),
-            "episode_end_iteration": latest_iteration,
-            "episode_complete": bool(chunk_complete),
-            "episode_frame_count": int(self.viser_pointcloud_frame_count),
-            "frames": self.viser_pointcloud_frames,
-        }
-        return payload
-
-    def _flush_viser_pointcloud_recording(self, chunk_complete: bool, reason: str):
-        if not self.viser_pointcloud_enabled or self.viser_pointcloud_frame_count <= 0:
-            return
-
-        latest_iteration = int(self.viser_pointcloud_latest_iteration or 0)
-        record_tag = f"chunk_{self.viser_pointcloud_chunk_index:04d}_iter_{latest_iteration}"
-        torch.save(
-            self._build_viser_pointcloud_payload(chunk_complete=chunk_complete),
-            format_iterated_record_path(self.viser_pointcloud_path, record_tag),
-        )
-        status = "complete" if chunk_complete else "partial"
-        print(
-            "Saved {} Viser .pt chunk {} for env {} with {} frames ({}).".format(
-                status,
-                self.viser_pointcloud_chunk_index,
-                self._viser_pointcloud_env_id,
-                self.viser_pointcloud_frame_count,
-                reason,
-            )
-        )
-
-        self.viser_pointcloud_frames = []
-        self.viser_pointcloud_frame_count = 0
-        self.viser_pointcloud_chunk_start_iteration = None
-        self.viser_pointcloud_latest_iteration = None
-
-    def _maybe_flush_viser_pointcloud_snapshot(self, iteration: int):
-        if not self.viser_pointcloud_enabled or self.viser_pointcloud_frame_count <= 0:
-            return
-        if (int(iteration) + 1) % self._viser_pointcloud_save_interval != 0:
-            return
-        self._flush_viser_pointcloud_recording(
-            chunk_complete=True,
-            reason=f"save_interval {self._viser_pointcloud_save_interval} reached at iteration {int(iteration)}",
-        )
-
-    def _maybe_record_viser_pointcloud(self):
-        if not self.viser_pointcloud_enabled or self._viser_env_asset_idx is None:
-            return
-        iteration = int(self.common_step_counter)
-        if iteration % self._viser_pointcloud_capture_interval != 0:
-            return
-
-        env_id = self._viser_pointcloud_env_id
-        robot_points_world = self._sample_viser_robot_pointcloud_world(env_id)
-        door_points_world = self._sample_viser_door_pointcloud_world(env_id)
-        robot_points_world = prepare_pointcloud(
-            robot_points_world,
-            max_points=self._viser_pointcloud_max_points,
-        ).to(dtype=torch.float16)
-        door_points_world = prepare_pointcloud(
-            door_points_world,
-            max_points=self._viser_pointcloud_max_points,
-        ).to(dtype=torch.float16)
-        door_asset_idx = int(self._viser_env_asset_idx[env_id].detach().cpu().item())
-
-        if self.viser_pointcloud_chunk_start_iteration is None:
-            self.viser_pointcloud_chunk_index += 1
-            self.viser_pointcloud_chunk_start_iteration = iteration
-        self.viser_pointcloud_latest_iteration = iteration
-
-        frame_record = {
-            "iteration": iteration,
-            "sim_frame": int(self._rlgames_env_frames if self._rlgames_env_frames > 0 else iteration),
-            "env_id": int(env_id),
-            "pointcloud_source": "articulation_sampler",
-            "robot_points_world": robot_points_world,
-            "door_points_world": door_points_world,
-            "pointclouds": {
-                "robot": robot_points_world,
-                "door": door_points_world,
-            },
-            "rlgames_env_frames": int(self._rlgames_env_frames),
-            "robot_joint_pos": self.robot.data.joint_pos[env_id].detach().cpu().to(dtype=torch.float32),
-            "door_joint_pos": self.door.data.joint_pos[env_id].detach().cpu().to(dtype=torch.float32),
-            "robot_base_pos_w": self.robot.data.body_pos_w[env_id, self._robot_base_body_link_idx].detach().cpu().to(dtype=torch.float32),
-            "robot_base_quat_w": self.robot.data.body_quat_w[env_id, self._robot_base_body_link_idx].detach().cpu().to(dtype=torch.float32),
-            "door_base_pos_w": self.door.data.body_pos_w[env_id, self._door_base_link_idx].detach().cpu().to(dtype=torch.float32),
-            "door_base_quat_w": self.door.data.body_quat_w[env_id, self._door_base_link_idx].detach().cpu().to(dtype=torch.float32),
-            "door_asset_idx": door_asset_idx,
-            "door_asset_path": str(door_asset_paths[door_asset_idx]),
-        }
-        self.viser_pointcloud_frames.append(frame_record)
-        self._trim_viser_pointcloud_frames()
-        self._maybe_flush_viser_pointcloud_snapshot(iteration)
 
     def _initialize_runtime_event_terms(self):
         if not self.cfg.events:
@@ -1094,9 +851,6 @@ class DooropeningEnv(DirectRLEnv):
         robot_damping = self._current_event_param(
             "robot_joint_stiffness_and_damping", "damping_distribution_params"
         )
-        robot_finger_armature = self._current_event_param(
-            "robot_finger_armature", "armature_distribution_params"
-        )
         board_stiffness = self._current_event_param(
             "door_board_joint_stiffness_and_damping", "stiffness_distribution_params"
         )
@@ -1121,8 +875,6 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["dr/robot_stiffness_max"] = float(robot_stiffness[1])
         self.extras["dr/robot_damping_min"] = float(robot_damping[0])
         self.extras["dr/robot_damping_max"] = float(robot_damping[1])
-        self.extras["dr/robot_finger_armature_min"] = float(robot_finger_armature[0])
-        self.extras["dr/robot_finger_armature_max"] = float(robot_finger_armature[1])
         self.extras["dr/door_board_stiffness_min"] = float(board_stiffness[0])
         self.extras["dr/door_board_stiffness_max"] = float(board_stiffness[1])
         self.extras["dr/door_board_damping_min"] = float(board_damping[0])
@@ -1141,20 +893,11 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["dr/door_latch_threshold_max"] = float(latch_max)
 
         self.extras["dr_limit/spawn_arm_joint_pos_noise"] = self._current_custom_param("robot_spawn", "arm_joint_pos_noise")
-        self.extras["dr_limit/spawn_finger_joint_pos_noise"] = self._current_custom_param(
-            "robot_spawn", "finger_joint_pos_noise"
-        )
         self.extras["dr_limit/obs_arm_joint_pos_noise"] = self._current_custom_param(
             "robot_state_noise", "arm_joint_pos_noise"
         )
-        self.extras["dr_limit/obs_finger_joint_pos_noise"] = self._current_custom_param(
-            "robot_state_noise", "finger_joint_pos_noise"
-        )
         self.extras["dr_limit/obs_arm_joint_vel_noise"] = self._current_custom_param(
             "robot_state_noise", "arm_joint_vel_noise"
-        )
-        self.extras["dr_limit/obs_finger_joint_vel_noise"] = self._current_custom_param(
-            "robot_state_noise", "finger_joint_vel_noise"
         )
         self.extras["dr_limit/door_handle_effort_limit_min"] = handle_effort_min
         self.extras["dr_limit/door_handle_effort_limit_max"] = handle_effort_max
@@ -1172,20 +915,11 @@ class DooropeningEnv(DirectRLEnv):
         hinge_nominal_damping = self._door_nominal_joint_damping[:, self._door_hinge_joint_idx]
 
         # self.extras["dr_sample/spawn_arm_joint_pos_noise_mean"] = self.robot_spawn_noise_widths["arm_joint_pos_noise"].mean().item()
-        # self.extras["dr_sample/spawn_finger_joint_pos_noise_mean"] = self.robot_spawn_noise_widths[
-        #     "finger_joint_pos_noise"
-        # ].mean().item()
         # self.extras["dr_sample/obs_arm_joint_pos_noise_mean"] = self.robot_state_noise_widths[
         #     "arm_joint_pos_noise"
         # ].mean().item()
-        # self.extras["dr_sample/obs_finger_joint_pos_noise_mean"] = self.robot_state_noise_widths[
-        #     "finger_joint_pos_noise"
-        # ].mean().item()
         # self.extras["dr_sample/obs_arm_joint_vel_noise_mean"] = self.robot_state_noise_widths[
         #     "arm_joint_vel_noise"
-        # ].mean().item()
-        # self.extras["dr_sample/obs_finger_joint_vel_noise_mean"] = self.robot_state_noise_widths[
-        #     "finger_joint_vel_noise"
         # ].mean().item()
         self.extras["dr_sample/door_board_stiffness_mean"] = board_nominal_stiffness.mean().item()
         self.extras["dr_sample/door_board_stiffness_min"] = board_nominal_stiffness.min().item()
@@ -1347,13 +1081,7 @@ class DooropeningEnv(DirectRLEnv):
             bias_buffers=self.student_joint_pos_biases,
             bias_key="arm_joint_pos_bias",
         )
-        student_joint_pos[:, self._robot_finger_dof_idx] = self._uniform_noise_from_buffers(
-            student_joint_pos[:, self._robot_finger_dof_idx],
-            width_buffers=self.student_joint_pos_noise_widths,
-            width_key="finger_joint_pos_noise",
-            bias_buffers=self.student_joint_pos_biases,
-            bias_key="finger_joint_pos_bias",
-        )
+        # The gripper DOF is left clean on purpose (see student_joint_pos_noise_widths).
         return student_joint_pos
 
     def get_student_base_joint_vel_obs(self, use_noise: bool = False) -> torch.Tensor:
@@ -1379,7 +1107,9 @@ class DooropeningEnv(DirectRLEnv):
         return noisy_base_joint_vel
 
     def _apply_spawn_noise(self, env_ids: torch.Tensor):
-        # Reset disturbance is applied around the reference motion state, with separate scales for base, arm, and fingers.
+        # Reset disturbance is applied around the reference motion state, with separate scales for
+        # base and arm. The gripper DOF is spawned exactly on the reference opening: its whole
+        # travel is 0.04 m, so any meaningful perturbation would randomize it open-to-closed.
         base_xy_noise = self.robot_spawn_noise_widths["base_xy_joint_pos_noise"][env_ids] * (
             2.0 * torch.rand((len(env_ids), len(self._robot_base_xy_dof_idx)), device=self.device) - 1.0
         )
@@ -1389,10 +1119,6 @@ class DooropeningEnv(DirectRLEnv):
         arm_noise = self.robot_spawn_noise_widths["arm_joint_pos_noise"][env_ids] * (
             2.0 * torch.rand((len(env_ids), len(self._robot_arm_dof_idx)), device=self.device) - 1.0
         )
-        finger_noise = self.robot_spawn_noise_widths["finger_joint_pos_noise"][env_ids] * (
-            2.0 * torch.rand((len(env_ids), len(self._robot_finger_dof_idx)), device=self.device) - 1.0
-        )
-
         self.joint_pos[env_ids[:, None], self._robot_base_xy_dof_idx[None, :]] += base_xy_noise
         self.joint_pos[env_ids[:, None], self._robot_base_rot_dof_idx[None, :]] += base_rot_noise
         self.joint_pos[env_ids[:, None], self._robot_arm_dof_idx[None, :]] += arm_noise
@@ -1401,7 +1127,6 @@ class DooropeningEnv(DirectRLEnv):
                 2.0 * torch.rand((len(env_ids), len(self._robot_arx_dof_idx)), device=self.device) - 1.0
             )
             self.joint_pos[env_ids[:, None], self._robot_arx_dof_idx[None, :]] += arx_noise
-        self.joint_pos[env_ids[:, None], self._robot_finger_dof_idx[None, :]] += finger_noise
 
         self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]] = torch.clamp(
             self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]],
@@ -1414,7 +1139,6 @@ class DooropeningEnv(DirectRLEnv):
         base_xy_target_noise = self._current_custom_param("pd_targets", "base_xy_target_noise")
         base_rot_target_noise = self._current_custom_param("pd_targets", "base_rot_target_noise")
         arm_target_noise = self._current_custom_param("pd_targets", "arm_target_noise")
-        finger_target_noise = self._current_custom_param("pd_targets", "finger_target_noise")
 
         target_noise[:, self._target_base_xy_slice] = base_xy_target_noise * (
             2.0 * torch.rand_like(target_noise[:, self._target_base_xy_slice]) - 1.0
@@ -1425,9 +1149,8 @@ class DooropeningEnv(DirectRLEnv):
         target_noise[:, self._target_arm_slice] = arm_target_noise * (
             2.0 * torch.rand_like(target_noise[:, self._target_arm_slice]) - 1.0
         )
-        target_noise[:, self._target_finger_slice] = finger_target_noise * (
-            2.0 * torch.rand_like(target_noise[:, self._target_finger_slice]) - 1.0
-        )
+        # No gripper-target noise: the commanded opening is a single actuator setpoint and the old
+        # per-substep perturbation was ~12% of the whole 0.04 m stroke.
         return target_noise
 
     def _scale_actions(self, actions: torch.Tensor) -> torch.Tensor:
@@ -1557,10 +1280,7 @@ class DooropeningEnv(DirectRLEnv):
         self._enforce_fixed_camera_joint_state()
         self.robot.set_joint_position_target(applied_targets, joint_ids=self._robot_dof_idx)
 
-    def _build_observations(
-        self,
-        record_viser: bool = True,
-    ) -> dict:
+    def _build_observations(self) -> dict:
         self._get_intermediate_values()
         self.joint_pos = self.robot.data.joint_pos
         self.joint_vel = self.robot.data.joint_vel
@@ -1621,9 +1341,7 @@ class DooropeningEnv(DirectRLEnv):
         policy_joint_pos[:, self._target_arm_slice] = self._uniform_noise_like(
             policy_joint_pos[:, self._target_arm_slice], "arm_joint_pos_noise", "arm_joint_pos_bias"
         )
-        policy_joint_pos[:, self._target_finger_slice] = self._uniform_noise_like(
-            policy_joint_pos[:, self._target_finger_slice], "finger_joint_pos_noise", "finger_joint_pos_bias"
-        )
+        # The gripper opening is observed clean (see the adr_custom_cfg_dict note).
         policy_joint_pos[:, self._target_arx_slice] = self._uniform_noise_like(
             policy_joint_pos[:, self._target_arx_slice], "arm_joint_pos_noise", "arm_joint_pos_bias"
         )
@@ -1636,9 +1354,6 @@ class DooropeningEnv(DirectRLEnv):
         )
         policy_joint_vel[:, self._target_arm_slice] = self._uniform_noise_like(
             policy_joint_vel[:, self._target_arm_slice], "arm_joint_vel_noise", "arm_joint_vel_bias"
-        )
-        policy_joint_vel[:, self._target_finger_slice] = self._uniform_noise_like(
-            policy_joint_vel[:, self._target_finger_slice], "finger_joint_vel_noise", "finger_joint_vel_bias"
         )
         policy_joint_vel[:, self._target_arx_slice] = self._uniform_noise_like(
             policy_joint_vel[:, self._target_arx_slice], "arm_joint_vel_noise", "arm_joint_vel_bias"
@@ -1769,9 +1484,6 @@ class DooropeningEnv(DirectRLEnv):
         # The actor sees noisy deployment-like inputs; the critic keeps the clean privileged state.
         policy_obs = policy_obs.squeeze(1)
         critic_obs = critic_obs.squeeze(1)
-
-        if record_viser:
-            self._maybe_record_viser_pointcloud()
 
         observations = {"policy": policy_obs, "critic": critic_obs}
         return observations
@@ -2201,9 +1913,10 @@ class DooropeningEnv(DirectRLEnv):
         rewards) for clarity. Each block also logs its own error/stats and updates its episode latch;
         this must be called exactly once per _get_rewards so those latches/logs stay correct.
 
-        Terms: joint-limit, non-finger self-collision, base<->door, x5/arx-arm<->door, and franka
-        control-box<->door contact. The finger<->door protection penalty is intentionally NOT here --
-        it was removed from the reward (hackable; pull never used it, push no longer uses it)."""
+        Terms: joint-limit (franka arm only), non-finger self-collision, base<->door, x5/arx-arm<->
+        door, and franka control-box<->door contact. There is no finger<->door contact penalty: it
+        was hackable, pull never used it and push no longer does, so it went away with the LEAP hand.
+        """
         # x5/arx camera arm <-> door contact penalty (frame/panel/handle). Harsh: the slender
         # camera arm striking the door is a serious real-world failure.
         x5_body_force_norm = self._get_x5_body_contact_force_norm(include_franka_box=False)
@@ -2254,11 +1967,14 @@ class DooropeningEnv(DirectRLEnv):
             (franka_box_force_norm > self.cfg.franka_box_contact_penalty_min_force).float().mean().detach().cpu().item()
         )
 
-        # Joint-limit penalty on the actuated robot DOFs (soft margin near each limit).
+        # Joint-limit penalty on the FRANKA ARM DOFs (soft margin near each limit). Scoped by
+        # cfg.joint_limit_penalty_joints: the gripper is excluded because fully open and fully
+        # closed ARE its limits, so scoring it charged a constant penalty for holding the reference
+        # gripper pose and punished every grasp squeeze.
         joint_limit_penalty, joint_limit_active_fraction = compute_joint_limit_penalty(
-            joint_pos=self.robot.data.joint_pos[:, self._robot_dof_idx],
-            joint_lower_limits=self.robot_dof_lower_limits,
-            joint_upper_limits=self.robot_dof_upper_limits,
+            joint_pos=self.robot.data.joint_pos[:, self._joint_limit_penalty_dof_idx],
+            joint_lower_limits=self.robot_dof_lower_limits[self._joint_limit_penalty_local_idx],
+            joint_upper_limits=self.robot_dof_upper_limits[self._joint_limit_penalty_local_idx],
             soft_ratio=self.joint_limit_penalty_margin_ratio,
         )
         weighted_joint_limit_penalty = self.joint_limit_penalty_w * joint_limit_penalty
@@ -2279,29 +1995,26 @@ class DooropeningEnv(DirectRLEnv):
         self._get_intermediate_values()
         self._log_dr_metrics()
 
-        # key_body_pos_err, key_body_quat_err, door_err, root_pos_err, root_rot_err, arm_joint_pos_err, finger_joint_pos_err, base_joint_vel_err, arm_joint_vel_err, finger_joint_vel_err, door_pos_err = compute_tracking_error(
-        key_body_pos_err, key_body_quat_err, door_err, base_joint_pos_err, arm_joint_pos_err, finger_joint_pos_err, arx_joint_pos_err, base_joint_vel_err, arm_joint_vel_err, finger_joint_vel_err = compute_tracking_error(
+        key_body_pos_err, key_body_quat_err, door_err, base_joint_pos_err, arm_joint_pos_err, gripper_joint_pos_err, arx_joint_pos_err, base_joint_vel_err, arm_joint_vel_err = compute_tracking_error(
             robot_key_body_pos = self.robot_key_body_pos,
             robot_key_body_quat = self.robot_key_body_quat,
             door_joint_pos = self.door_joint_pos,
             robot_base_joint_pos = self.robot_base_joint_pos,
             robot_arm_joint_pos = self.robot_arm_joint_pos,
-            robot_finger_joint_pos = self.robot_finger_joint_pos,
+            robot_gripper_joint_pos = self.robot_finger_joint_pos,
             robot_arx_joint_pos = self.robot_arx_joint_pos,
             robot_base_joint_vel = self.robot_base_joint_vel,
             robot_arm_joint_vel = self.robot_arm_joint_vel,
-            robot_finger_joint_vel = self.robot_finger_joint_vel,
 
             ref_robot_key_body_pos = self.ref_robot_key_body_pos,
             ref_robot_key_body_quat = self.ref_robot_key_body_quat,
             ref_door_joint_pos = self.ref_door_joint_pos,
             ref_robot_base_joint_pos = self.ref_robot_base_joint_pos,
             ref_robot_arm_joint_pos = self.ref_robot_arm_joint_pos,
-            ref_robot_finger_joint_pos = self.ref_robot_finger_joint_pos,
+            ref_robot_gripper_joint_pos = self.ref_robot_finger_joint_pos,
             ref_robot_arx_joint_pos = self.ref_robot_arx_joint_pos,
             ref_robot_base_joint_vel = self.ref_robot_base_joint_vel,
             ref_robot_arm_joint_vel = self.ref_robot_arm_joint_vel,
-            ref_robot_finger_joint_vel = self.ref_robot_finger_joint_vel,
         )
 
         self.extras["error/key_body_pos_err"] = math.sqrt(max(key_body_pos_err.reshape(self.num_envs, -1).mean().item(), 0.0))
@@ -2313,15 +2026,14 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["error/arm_joint_pos_err"] = math.sqrt(
             max(arm_joint_pos_err.reshape(self.num_envs, -1).mean().item() / len(self.cfg.arm_joints), 0.0)
         )
-        self.extras["error/finger_joint_pos_err"] = math.sqrt(
-            max(finger_joint_pos_err.reshape(self.num_envs, -1).mean().item() / len(self.cfg.finger_joints), 0.0)
+        self.extras["error/gripper_joint_pos_err"] = math.sqrt(
+            max(gripper_joint_pos_err.reshape(self.num_envs, -1).mean().item() / len(self.cfg.finger_joints), 0.0)
         )
         self.extras["error/arx_joint_pos_err"] = math.sqrt(
             max(arx_joint_pos_err.reshape(self.num_envs, -1).mean().item() / max(len(self.cfg.arx_joints), 1), 0.0)
         )
         # self.extras["error/base_joint_vel_err"] = base_joint_vel_err.mean()
         # self.extras["error/arm_joint_vel_err"] = arm_joint_vel_err.mean()
-        # self.extras["error/finger_joint_vel_err"] = finger_joint_vel_err.mean()
 
         if self.prob_get_first_key_frame is not None:
             self.extras["reset/prob_get_first_key_frame"] = float(self.prob_get_first_key_frame)
@@ -2332,19 +2044,18 @@ class DooropeningEnv(DirectRLEnv):
             self.scene.sensors["contact_forces_door2"],
             expected_num_envs=self.num_envs,
         )
-        # finger<->handle force. Fed (together with the finger<->panel force below) into the unified
-        # finger<->door contact PROTECTION penalty. The hinge contact REWARD still uses this force but
-        # is binary (rewards ANY contact above 1 N), so it alone never stops the fingers from crushing
-        # the handle -- the protection penalty below does.
+        # gripper<->handle force (panda_hand + both fingers, summed). Feeds the PULL-side
+        # gripper<->handle contact reward below, which is binary (any contact above 1 N counts) --
+        # nothing here bounds how hard the fingers may squeeze the handle.
         handle_force_norm = torch.linalg.vector_norm(contact_forces_door2, dim=-1)
         self.extras["stats/filtered_handle_force_norm_mean"] = float(handle_force_norm.mean().detach().cpu().item())
         self.extras["stats/filtered_handle_force_norm_max"] = float(handle_force_norm.max().detach().cpu().item())
 
         # --- PUSH-only palm-handle contact reward ---------------------------------------------------
         # Reward panda_hand pressing the handle (link_2) during the grasp->push-open window
-        # (ref_hinge_contact_mask == keyframes 2..5). Binary bonus, push envs only. On PUSH the old
-        # finger-inclusive hinge_contact reward is gated off (see the compute_reward call below), so
-        # fingers touching the handle are no longer rewarded for pushing. Pull is untouched.
+        # (ref_hinge_contact_mask == keyframes 2..5). Binary bonus, push envs only. On PUSH the
+        # finger-inclusive hinge_gripper_contact reward below is gated off, so fingers touching the
+        # handle are no longer rewarded for pushing. Pull is untouched.
         is_push_env = self._get_is_push_env()  # [num_envs] float (1 push / 0 pull)
         contact_forces_door2_palm = self._get_filtered_contact_force_w(
             self.scene.sensors["contact_forces_door2_palm"],
@@ -2363,51 +2074,35 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["reward/palm_handle_push_reward"] = weighted_palm_handle_reward.mean().item()
         self.extras["stats/palm_handle_force_norm_max"] = float(palm_handle_force_norm.max().detach().cpu().item())
 
-        # --- PULL-only hinge (handle) contact reward -----------------------------------------------
+        # --- PULL-only gripper<->handle contact reward ----------------------------------------------
         # Separated out of compute_deep_mimic_rewards (this is a task/contact reward, not a tracking
-        # term). Binary bonus for the hand contacting the handle (link_2) during the grasp/pull window
-        # (ref_hinge_contact_mask), gated to PULL envs (1 - is_push); PUSH uses the palm-only reward
-        # above instead. Reuses handle_force_norm computed above (||contact_forces_door2||), whose filter
-        # is the hand body + the two fingers (
-        # fingers 1/2/3, mcp excluded); behavior is identical to the old contact_force_w * contact_reward
-        # term inside deep-mimic.
-        hinge_contact = (handle_force_norm > self.cfg.handle_contact_force_threshold).to(
+        # term). Binary bonus for the GRIPPER touching the handle (link_2) during the grasp/pull
+        # window (ref_hinge_contact_mask), gated to PULL envs (1 - is_push); PUSH uses the palm-only
+        # reward above instead. Reuses handle_force_norm computed above (||contact_forces_door2||),
+        # whose filter is the whole gripper: panda_hand plus panda_leftfinger/panda_rightfinger (see
+        # HANDLE_CONTACT_FILTER_PRIM_PATHS). The force matrix is summed over those three, so this
+        # rewards contact by the gripper as a unit, not a two-sided pinch specifically.
+        hinge_gripper_contact = (handle_force_norm > self.cfg.handle_contact_force_threshold).to(
             dtype=handle_force_norm.dtype
         )
-        weighted_hinge_contact_reward = (
-            self.hinge_contact_reward_w
+        weighted_hinge_gripper_contact_reward = (
+            self.hinge_gripper_contact_reward_w
             * self.ref_hinge_contact_mask.squeeze()
             * (1.0 - is_push_env)
-            * hinge_contact
+            * hinge_gripper_contact
         )
-        self.extras["reward/hinge_contact_pull_reward"] = weighted_hinge_contact_reward.mean().item()
+        self.extras["reward/hinge_gripper_contact_pull_reward"] = (
+            weighted_hinge_gripper_contact_reward.mean().item()
+        )
 
-        # finger<->panel force (gripper fingers vs door panel Door/link_1).
+        # finger<->panel force (gripper fingers vs door panel Door/link_1). DIAGNOSTIC ONLY -- it
+        # drives no reward term; the old finger<->door contact penalty went away with the LEAP hand.
         contact_forces_door_panel = self._get_filtered_contact_force_w(
             self.scene.sensors["contact_forces_door_panel"],
             expected_num_envs=self.num_envs,
         )
         panel_force_norm = torch.linalg.vector_norm(contact_forces_door_panel, dim=-1)
         self.extras["stats/panel_contact_force_norm_max"] = float(panel_force_norm.max().detach().cpu().item())
-
-        # Finger<->door contact PROTECTION penalty: finger<->panel and finger<->handle are processed
-        # TOGETHER to protect the fingers. Whenever the fingers press EITHER door body
-        # (panel link_1 OR handle link_2) harder than finger_door_contact_force_threshold, a strong
-        # penalty is applied -- but ONLY while ref_panel_contact_mask is on (push: open-door +
-        # base-forward, keyframes 3..5; pull: retract-arm + push-panel + hold-traverse, keyframes
-        # 6..9). Off elsewhere so it never fights grasping/rotating the handle. Replaces the old weak
-        # graded panel + handle penalties.
-        combined_finger_door_force_norm = torch.maximum(panel_force_norm, handle_force_norm)
-        finger_door_over_threshold = combined_finger_door_force_norm > self.cfg.finger_door_contact_force_threshold
-        finger_door_penalty_active = (self.ref_panel_contact_mask.squeeze() > 0).to(dtype=combined_finger_door_force_norm.dtype)
-        weighted_finger_door_contact_penalty = (
-            self.finger_door_contact_penalty_w
-            * finger_door_over_threshold.to(dtype=combined_finger_door_force_norm.dtype)
-            * finger_door_penalty_active
-        )
-        self.extras["error/finger_door_contact_penalty"] = weighted_finger_door_contact_penalty.mean().item()
-        self.extras["stats/finger_door_contact_force_norm_max"] = float(combined_finger_door_force_norm.max().detach().cpu().item())
-        self.extras["stats/finger_door_contact_frac"] = float(finger_door_over_threshold.float().mean().detach().cpu().item())
 
         # Diagnostic contact forces surfaced for the eval/play scripts to print: (1) franka<->arx
         # (self-collision of the franka arm against the arx/x5 camera arm) and (2) the fingers
@@ -2432,12 +2127,11 @@ class DooropeningEnv(DirectRLEnv):
             robot_key_body_quat = self.robot_key_body_quat, 
             door_joint_pos = self.door_joint_pos,
             robot_base_joint_pos = self.robot_base_joint_pos,
-            robot_arm_joint_pos = self.robot_arm_joint_pos, 
-            robot_finger_joint_pos = self.robot_finger_joint_pos,
+            robot_arm_joint_pos = self.robot_arm_joint_pos,
+            robot_gripper_joint_pos = self.robot_finger_joint_pos,
             robot_arx_joint_pos = self.robot_arx_joint_pos,
             robot_base_joint_vel = self.robot_base_joint_vel,
             robot_arm_joint_vel = self.robot_arm_joint_vel,
-            robot_finger_joint_vel = self.robot_finger_joint_vel,
             robot_body_lin_vel = self.robot_body_lin_vel,
             robot_body_ang_vel = self.robot_body_ang_vel,
 
@@ -2446,11 +2140,10 @@ class DooropeningEnv(DirectRLEnv):
             ref_door_joint_pos = self.ref_door_joint_pos,
             ref_robot_base_joint_pos = self.ref_robot_base_joint_pos,
             ref_robot_arm_joint_pos = self.ref_robot_arm_joint_pos,
-            ref_robot_finger_joint_pos = self.ref_robot_finger_joint_pos,
+            ref_robot_gripper_joint_pos = self.ref_robot_finger_joint_pos,
             ref_robot_arx_joint_pos = self.ref_robot_arx_joint_pos,
             ref_robot_base_joint_vel = self.ref_robot_base_joint_vel,
             ref_robot_arm_joint_vel = self.ref_robot_arm_joint_vel,
-            ref_robot_finger_joint_vel = self.ref_robot_finger_joint_vel,
             ref_robot_body_lin_vel = self.ref_robot_body_lin_vel,
             ref_robot_body_ang_vel = self.ref_robot_body_ang_vel,
 
@@ -2459,10 +2152,9 @@ class DooropeningEnv(DirectRLEnv):
             door_joint_pos_scale = self.door_joint_pos_scale,
             robot_base_joint_pos_scale = self.robot_base_joint_pos_scale,
             robot_arm_joint_pos_scale = self.robot_arm_joint_pos_scale,
-            robot_finger_joint_pos_scale = self.robot_finger_joint_pos_scale,
+            robot_gripper_joint_pos_scale = self.robot_gripper_joint_pos_scale,
             robot_base_joint_vel_scale = self.robot_base_joint_vel_scale,
             robot_arm_joint_vel_scale = self.robot_arm_joint_vel_scale,
-            robot_finger_joint_vel_scale = self.robot_finger_joint_vel_scale,
             robot_body_lin_vel_scale = self.robot_body_lin_vel_scale,
             robot_body_ang_vel_scale = self.robot_body_ang_vel_scale,
 
@@ -2471,11 +2163,10 @@ class DooropeningEnv(DirectRLEnv):
             door_joint_pos_w = self.door_joint_pos_w,
             robot_base_joint_pos_w = self.robot_base_joint_pos_w,
             robot_arm_joint_pos_w = self.robot_arm_joint_pos_w,
-            robot_finger_joint_pos_w = self.robot_finger_joint_pos_w,
+            robot_gripper_joint_pos_w = self.robot_gripper_joint_pos_w,
             robot_arx_joint_pos_w = self.robot_arx_joint_pos_w,
             robot_base_joint_vel_w = self.robot_base_joint_vel_w,
             robot_arm_joint_vel_w = self.robot_arm_joint_vel_w,
-            robot_finger_joint_vel_w = self.robot_finger_joint_vel_w,
             robot_body_lin_vel_w = self.robot_body_lin_vel_w,
             robot_body_ang_vel_w = self.robot_body_ang_vel_w,
         )
@@ -2511,8 +2202,8 @@ class DooropeningEnv(DirectRLEnv):
             deep_mimic_reward
             + weighted_arx_tuck_reward
             + total_alive_reward
-            + weighted_palm_handle_reward    # PUSH-only palm-handle contact reward
-            + weighted_hinge_contact_reward  # PULL-only handle contact reward (was inside deep-mimic)
+            + weighted_palm_handle_reward             # PUSH-only palm-handle contact reward
+            + weighted_hinge_gripper_contact_reward   # PULL-only gripper<->handle contact reward
             - total_penalty
         )
         final_reward = torch.where(is_killed, final_reward + termination_penalty, final_reward)
@@ -2550,29 +2241,26 @@ class DooropeningEnv(DirectRLEnv):
         # contact is still computed here PURELY to keep logging its fraction to wandb.
         x5_arm_force_norm = self._get_x5_body_contact_force_norm(include_franka_box=False)
         unsafe_x5_arm_contact = x5_arm_force_norm > self.cfg.x5_body_contact_force_threshold
-        # key_body_pos_err, key_body_quat_err, door_err, root_pos_err, root_rot_err, arm_joint_pos_err, finger_joint_pos_err, base_joint_vel_err, arm_joint_vel_err, finger_joint_vel_err, door_pos_err = compute_tracking_error(
-        key_body_pos_err, key_body_quat_err, door_err, base_joint_pos_err, arm_joint_pos_err, finger_joint_pos_err, arx_joint_pos_err, base_joint_vel_err, arm_joint_vel_err, finger_joint_vel_err = compute_tracking_error(
+        key_body_pos_err, key_body_quat_err, door_err, base_joint_pos_err, arm_joint_pos_err, gripper_joint_pos_err, arx_joint_pos_err, base_joint_vel_err, arm_joint_vel_err = compute_tracking_error(
             robot_key_body_pos = self.robot_reset_key_body_pos,
             robot_key_body_quat = self.robot_key_body_quat,
             door_joint_pos = self.door_joint_pos,
             robot_base_joint_pos = self.robot_base_joint_pos,
             robot_arm_joint_pos = self.robot_arm_joint_pos,
-            robot_finger_joint_pos = self.robot_finger_joint_pos,
+            robot_gripper_joint_pos = self.robot_finger_joint_pos,
             robot_arx_joint_pos = self.robot_arx_joint_pos,
             robot_base_joint_vel = self.robot_base_joint_vel,
             robot_arm_joint_vel = self.robot_arm_joint_vel,
-            robot_finger_joint_vel = self.robot_finger_joint_vel,
 
             ref_robot_key_body_pos = self.ref_robot_reset_key_body_pos,
             ref_robot_key_body_quat = self.ref_robot_key_body_quat,
             ref_door_joint_pos = self.ref_door_joint_pos,
             ref_robot_base_joint_pos = self.ref_robot_base_joint_pos,
             ref_robot_arm_joint_pos = self.ref_robot_arm_joint_pos,
-            ref_robot_finger_joint_pos = self.ref_robot_finger_joint_pos,
+            ref_robot_gripper_joint_pos = self.ref_robot_finger_joint_pos,
             ref_robot_arx_joint_pos = self.ref_robot_arx_joint_pos,
             ref_robot_base_joint_vel = self.ref_robot_base_joint_vel,
             ref_robot_arm_joint_vel = self.ref_robot_arm_joint_vel,
-            ref_robot_finger_joint_vel = self.ref_robot_finger_joint_vel,
         )
         # Hard-termination failure modes are now robot/door tracking drift only; log each fraction
         # for diagnosis. x5-arm and franka-box door contact are (high) contact penalties in
@@ -2726,8 +2414,6 @@ class DooropeningEnv(DirectRLEnv):
         self._refresh_nominal_door_joint_gains(env_ids)
 
     def close(self):
-        if getattr(self, "viser_pointcloud_enabled", False):
-            self._flush_viser_pointcloud_recording(chunk_complete=False, reason="env close")
         return super().close()
 
 @torch.jit.script
@@ -2737,11 +2423,10 @@ def compute_deep_mimic_rewards(
     door_joint_pos: torch.Tensor,
     robot_base_joint_pos: torch.Tensor,
     robot_arm_joint_pos: torch.Tensor,
-    robot_finger_joint_pos: torch.Tensor,
+    robot_gripper_joint_pos: torch.Tensor,
     robot_arx_joint_pos: torch.Tensor,
     robot_base_joint_vel: torch.Tensor,
     robot_arm_joint_vel: torch.Tensor,
-    robot_finger_joint_vel: torch.Tensor,
     robot_body_lin_vel: torch.Tensor,
     robot_body_ang_vel: torch.Tensor,
 
@@ -2750,11 +2435,10 @@ def compute_deep_mimic_rewards(
     ref_door_joint_pos: torch.Tensor,
     ref_robot_base_joint_pos: torch.Tensor,
     ref_robot_arm_joint_pos: torch.Tensor,
-    ref_robot_finger_joint_pos: torch.Tensor,
+    ref_robot_gripper_joint_pos: torch.Tensor,
     ref_robot_arx_joint_pos: torch.Tensor,
     ref_robot_base_joint_vel: torch.Tensor,
     ref_robot_arm_joint_vel: torch.Tensor,
-    ref_robot_finger_joint_vel: torch.Tensor,
     ref_robot_body_lin_vel: torch.Tensor,
     ref_robot_body_ang_vel: torch.Tensor,
 
@@ -2763,10 +2447,9 @@ def compute_deep_mimic_rewards(
     door_joint_pos_scale: float,
     robot_base_joint_pos_scale: float,
     robot_arm_joint_pos_scale: float,
-    robot_finger_joint_pos_scale: float,
+    robot_gripper_joint_pos_scale: float,
     robot_base_joint_vel_scale: float,
     robot_arm_joint_vel_scale: float,
-    robot_finger_joint_vel_scale: float,
     robot_body_lin_vel_scale: float,
     robot_body_ang_vel_scale: float,
 
@@ -2775,11 +2458,10 @@ def compute_deep_mimic_rewards(
     door_joint_pos_w: float,
     robot_base_joint_pos_w: float,
     robot_arm_joint_pos_w: float,
-    robot_finger_joint_pos_w: float,
+    robot_gripper_joint_pos_w: float,
     robot_arx_joint_pos_w: float,
     robot_base_joint_vel_w: float,
     robot_arm_joint_vel_w: float,
-    robot_finger_joint_vel_w: float,
     robot_body_lin_vel_w: float,
     robot_body_ang_vel_w: float,
 ) -> torch.Tensor:
@@ -2821,8 +2503,10 @@ def compute_deep_mimic_rewards(
     base_joint_pos_err = torch.sum(base_joint_pos_diff * base_joint_pos_diff, dim=-1)  # [B]
     arm_joint_pos_diff = hinge_angle_diff(ref_robot_arm_joint_pos, robot_arm_joint_pos)
     arm_joint_pos_err = torch.sum(arm_joint_pos_diff * arm_joint_pos_diff, dim=-1)  # [B]
-    finger_joint_pos_diff = hinge_angle_diff(ref_robot_finger_joint_pos, robot_finger_joint_pos)
-    finger_joint_pos_err = torch.sum(finger_joint_pos_diff * finger_joint_pos_diff, dim=-1)  # [B]
+    # The gripper DOF is PRISMATIC (an opening in metres), so its error is a plain difference --
+    # hinge_angle_diff would wrap it into [-pi, pi], which is meaningless for a linear joint.
+    gripper_joint_pos_diff = ref_robot_gripper_joint_pos - robot_gripper_joint_pos
+    gripper_joint_pos_err = torch.sum(gripper_joint_pos_diff * gripper_joint_pos_diff, dim=-1)  # [B]
     arx_joint_pos_diff = hinge_angle_diff(ref_robot_arx_joint_pos, robot_arx_joint_pos)
     arx_joint_pos_err = torch.sum(arx_joint_pos_diff * arx_joint_pos_diff, dim=-1)  # [B]
 
@@ -2830,8 +2514,6 @@ def compute_deep_mimic_rewards(
     base_joint_vel_err = torch.sum(base_joint_vel_diff * base_joint_vel_diff, dim=-1)  # [B]
     arm_joint_vel_diff = ref_robot_arm_joint_vel - robot_arm_joint_vel
     arm_joint_vel_err = torch.sum(arm_joint_vel_diff * arm_joint_vel_diff, dim=-1)  # [B]
-    finger_joint_vel_diff = ref_robot_finger_joint_vel - robot_finger_joint_vel
-    finger_joint_vel_err = torch.sum(finger_joint_vel_diff * finger_joint_vel_diff, dim=-1)  # [B]
 
     # ----------------------------------
     # Exponential rewards (DeepMimic style)
@@ -2841,11 +2523,10 @@ def compute_deep_mimic_rewards(
     door_r = torch.exp(-door_joint_pos_scale * door_err)
     base_joint_pos_r = torch.exp(-robot_base_joint_pos_scale * base_joint_pos_err)
     arm_joint_pos_r = torch.exp(-robot_arm_joint_pos_scale * arm_joint_pos_err)
-    finger_joint_pos_r = torch.exp(-robot_finger_joint_pos_scale * finger_joint_pos_err)
+    gripper_joint_pos_r = torch.exp(-robot_gripper_joint_pos_scale * gripper_joint_pos_err)
     arx_joint_pos_r = torch.exp(-robot_arm_joint_pos_scale * arx_joint_pos_err)
     base_joint_vel_r = torch.exp(-robot_base_joint_vel_scale * base_joint_vel_err)
     arm_joint_vel_r = torch.exp(-robot_arm_joint_vel_scale * arm_joint_vel_err)
-    finger_joint_vel_r = torch.exp(-robot_finger_joint_vel_scale * finger_joint_vel_err)
     if robot_body_lin_vel_err is not None:
         robot_body_lin_vel_r = torch.exp(-robot_body_lin_vel_scale * robot_body_lin_vel_err)
     else:
@@ -2863,11 +2544,10 @@ def compute_deep_mimic_rewards(
          + door_joint_pos_w * door_r\
          + robot_base_joint_pos_w * base_joint_pos_r\
          + robot_arm_joint_pos_w * arm_joint_pos_r\
-         + robot_finger_joint_pos_w * finger_joint_pos_r\
+         + robot_gripper_joint_pos_w * gripper_joint_pos_r\
          + robot_arx_joint_pos_w * arx_joint_pos_r\
          + robot_base_joint_vel_w * base_joint_vel_r\
          + robot_arm_joint_vel_w * arm_joint_vel_r\
-         + robot_finger_joint_vel_w * finger_joint_vel_r\
          + robot_body_lin_vel_w * robot_body_lin_vel_r\
          + robot_body_ang_vel_w * robot_body_ang_vel_r
     return reward
@@ -2878,22 +2558,20 @@ def compute_tracking_error(
     door_joint_pos: torch.Tensor,
     robot_base_joint_pos: torch.Tensor,
     robot_arm_joint_pos: torch.Tensor,
-    robot_finger_joint_pos: torch.Tensor,
+    robot_gripper_joint_pos: torch.Tensor,
     robot_arx_joint_pos: torch.Tensor,
     robot_base_joint_vel: torch.Tensor,
     robot_arm_joint_vel: torch.Tensor,
-    robot_finger_joint_vel: torch.Tensor,
 
     ref_robot_key_body_pos: torch.Tensor,
     ref_robot_key_body_quat: torch.Tensor,
     ref_door_joint_pos: torch.Tensor,
     ref_robot_base_joint_pos: torch.Tensor,
     ref_robot_arm_joint_pos: torch.Tensor,
-    ref_robot_finger_joint_pos: torch.Tensor,
+    ref_robot_gripper_joint_pos: torch.Tensor,
     ref_robot_arx_joint_pos: torch.Tensor,
     ref_robot_base_joint_vel: torch.Tensor,
     ref_robot_arm_joint_vel: torch.Tensor,
-    ref_robot_finger_joint_vel: torch.Tensor,
 ) -> torch.Tensor:
     # ----------------------------------
     # Robot body position error
@@ -2926,27 +2604,24 @@ def compute_tracking_error(
     # root_rot_err = torch.sum(root_rot_diff * root_rot_diff, dim=-1)  # [B]
     arm_joint_pos_diff = ref_robot_arm_joint_pos - robot_arm_joint_pos
     arm_joint_pos_err = torch.sum(arm_joint_pos_diff * arm_joint_pos_diff, dim=-1)  # [B]
-    finger_joint_pos_diff = ref_robot_finger_joint_pos - robot_finger_joint_pos
-    finger_joint_pos_err = torch.sum(finger_joint_pos_diff * finger_joint_pos_diff, dim=-1)  # [B]
+    gripper_joint_pos_diff = ref_robot_gripper_joint_pos - robot_gripper_joint_pos
+    gripper_joint_pos_err = torch.sum(gripper_joint_pos_diff * gripper_joint_pos_diff, dim=-1)  # [B]
     arx_joint_pos_diff = ref_robot_arx_joint_pos - robot_arx_joint_pos
     arx_joint_pos_err = torch.sum(arx_joint_pos_diff * arx_joint_pos_diff, dim=-1)  # [B]
     base_joint_vel_diff = ref_robot_base_joint_vel - robot_base_joint_vel
     base_joint_vel_err = torch.sum(base_joint_vel_diff * base_joint_vel_diff, dim=-1)  # [B]
     arm_joint_vel_diff = ref_robot_arm_joint_vel - robot_arm_joint_vel
     arm_joint_vel_err = torch.sum(arm_joint_vel_diff * arm_joint_vel_diff, dim=-1)  # [B]
-    finger_joint_vel_diff = ref_robot_finger_joint_vel - robot_finger_joint_vel
-    finger_joint_vel_err = torch.sum(finger_joint_vel_diff * finger_joint_vel_diff, dim=-1)  # [B]
     return (
         key_body_pos_err,
         key_body_quat_err,
         door_err,
         base_joint_pos_err,
         arm_joint_pos_err,
-        finger_joint_pos_err,
+        gripper_joint_pos_err,
         arx_joint_pos_err,
         base_joint_vel_err,
         arm_joint_vel_err,
-        finger_joint_vel_err,
     )
 
 def compute_joint_limit_penalty(

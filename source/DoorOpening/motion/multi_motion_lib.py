@@ -2,6 +2,13 @@ import torch
 import pickle as pkl
 from typing import Optional, Sequence
 
+from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES
+
+# Width of one reference robot joint vector: base(3) + franka(7) + gripper(1) + x5 camera(6) = 17.
+# Derived from FULL_JOINT_NAMES rather than hardcoded -- it was 32 with the 16-DOF LEAP hand, and a
+# literal here silently outlives the hand it was written for.
+NUM_REF_ROBOT_JOINTS = len(FULL_JOINT_NAMES)
+
 class ReferenceMotionManager:
     def __init__(
         self,
@@ -226,6 +233,23 @@ class ReferenceMotionManager:
         ]
         for k in required_keys:
             assert k in motions, f"{k} not found in motion file"
+
+        # Fail at LOAD time, naming the file, if the motion was generated for a different robot.
+        # The joint vector is laid out by FULL_JOINT_NAMES, so a stale width silently misaligns
+        # every downstream slice (ref_finger_joint_idx would index into the old hand's block)
+        # instead of erroring -- 32 is the 16-DOF LEAP hand, 17 is the Franka gripper.
+        loaded_width = int(motions["robot_joint_pos_traj"].shape[-1])
+        if loaded_width != NUM_REF_ROBOT_JOINTS:
+            raise ValueError(
+                f"Motion file '{motion_file}' stores {loaded_width} robot joints, but this robot has "
+                f"{NUM_REF_ROBOT_JOINTS} ({FULL_JOINT_NAMES}). "
+                + (
+                    "A width of 32 means it was generated for the 16-DOF LEAP hand: regenerate the "
+                    "reference motions for the Franka gripper."
+                    if loaded_width == 32
+                    else "Regenerate the reference motions for this robot."
+                )
+            )
 
         motion_dt = max(float(motions.get("sim_dt", self.frame_dt)), 1e-6)
         if self._loaded_motion_dt is None:
@@ -691,7 +715,15 @@ class ReferenceMotionManager:
     def get_robot_joint_pos_twist(self, env_ids: Optional[Sequence[int]] = None, motion_indices: Optional[torch.Tensor] = None):
         if motion_indices is not None:
             return self._sample_reference_traj("robot_joint_pos_twist", env_ids=env_ids, motion_indices=motion_indices)
-        assert self.ref_robot_joint_pos_twist.shape[-1] == 32 and self.ref_robot_joint_pos_twist.ndim == 3
+        assert (
+            self.ref_robot_joint_pos_twist.ndim == 3
+            and self.ref_robot_joint_pos_twist.shape[-1] == NUM_REF_ROBOT_JOINTS
+        ), (
+            "Reference robot joint vector has "
+            f"{self.ref_robot_joint_pos_twist.shape[-1]} entries, expected {NUM_REF_ROBOT_JOINTS} "
+            f"({FULL_JOINT_NAMES}). A width of 32 means the motion file was generated for the "
+            "16-DOF LEAP hand and must be regenerated for the Franka gripper."
+        )
         if env_ids is None:
             return self.ref_robot_joint_pos_twist
         return self.ref_robot_joint_pos_twist[env_ids]
