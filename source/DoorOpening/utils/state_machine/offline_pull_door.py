@@ -67,6 +67,38 @@ def _append_state(
         key_indices.append(len(robot_traj) - 1)
 
 
+def _pull_hinge_angle(
+    theta: float,
+    unlatch_angle: float,
+    hold_until_theta: float,
+    release_by_theta: float,
+) -> float:
+    """Lever (joint_2) angle to command at panel angle ``theta`` during the pull sweep.
+
+    The lever is HELD down at ``unlatch_angle`` (i.e. against its mechanical stop) until the panel
+    has opened to ``hold_until_theta``, then ramps linearly back to 0 by ``release_by_theta``.
+
+    This replaces dropping the lever to 0 on the first pull frame, which was wrong in three ways:
+
+    1. Mechanically, a depressed lever resting on its hard stop is what gives the pull a RIGID
+       reaction point. Released to 0, the lever is free to swing back down through its whole travel,
+       so a gripper pulling on the handle first re-rotates the lever (up to the stop again) before
+       any of that force reaches the panel. The handle turns under the grasp instead of moving the
+       door -- which matters far more for a 2-finger pinch than it did for a wrapped hand.
+    2. It is what a person does: you keep the lever pressed while you are still holding the handle
+       and let it spring back only as you release, which is now Step 5.
+    3. It keeps ``edit_door_articulation``'s relock test (panel near closed AND lever below the
+       unlatch threshold) decisively false through the early pull, so the latch cannot re-catch if
+       the panel drifts back toward closed.
+    """
+    if theta <= hold_until_theta:
+        return unlatch_angle
+    if theta >= release_by_theta:
+        return 0.0
+    span = release_by_theta - hold_until_theta
+    return unlatch_angle * (release_by_theta - theta) / span
+
+
 def _rotate_xy_clockwise(x_offset: float, y_offset: float, theta: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     c = torch.cos(theta)
     s = torch.sin(theta)
@@ -149,7 +181,11 @@ def state_machine_offline_right_pull_door(
     # (keeps the base off the side wall, like the push planner).
     # Base pulled back for more grasp standoff (0.67); the robot grasps from a bit more standoff (palm offsets
     # unchanged -> the arm just reaches slightly further forward).
-    pregrasp_base_x_offset = 0.67
+    # Base stands 5 cm further BACK from the door (0.67 -> 0.72; +x is away from the panel, the
+    # robot faces -x). Shared by pregrasp, grasp AND unlatch -- Steps 2 and 3 reuse this same
+    # base_target_pose -- so this one value backs the whole approach off. Palm offsets are
+    # unchanged and measured from the handle, so the arm simply reaches 5 cm further forward.
+    pregrasp_base_x_offset = 0.72
     pregrasp_base_y_offset = -0.35
     # Moved back (0.40 -> 0.45): larger palm<->door x gap to compensate for removing the
     # finger<->panel contact penalty (the demo grasps from further out so fingers don't press panel).
@@ -226,7 +262,11 @@ def state_machine_offline_right_pull_door(
     # -------------------------
     # Step 3: Rotate hinge (unlatch)
     # -------------------------
-    unlatch_hinge_angle = 1.05
+    # Target the lever's HARD STOP (HANDLE_OPEN_LIMIT_RAD = 0.95 rad in the door generator), not
+    # past it: the reference presses the handle firmly against its mechanical stop, which is both
+    # what a person does and what gives the pull a rigid reaction point. Must stay above the
+    # highest randomized unlatch threshold (0.85 rad) so every door actually unlatches.
+    unlatch_hinge_angle = 0.95
     unlatch_palm_y_delta = 0.0
     unlatch_palm_z_delta = -0.08
     unlatch_rot_roll = math.pi
@@ -269,7 +309,17 @@ def state_machine_offline_right_pull_door(
     pull_theta_stop = 1.25
     pull_theta_step = 0.10
 
-    pull_base_x_offset = 0.55
+    # Keep the lever pressed against its stop for most of the pull, then let it spring back over the
+    # last stretch so it is fully restored by the time Step 5 releases the handle. See
+    # _pull_hinge_angle for why holding beats releasing on the first frame.
+    # Start restoring once the panel is ~29 deg open (0.5 rad). By then the latch bolt is long
+    # clear of the strike, so holding the lever down further only fights the return spring.
+    pull_hinge_hold_until_theta = 0.5
+    pull_hinge_release_by_theta = pull_theta_stop
+
+    # Base held 5 cm further back through the pull sweep too (0.55 -> 0.60), matching the
+    # backed-off approach above so the arm does not have to re-close the gap mid-pull.
+    pull_base_x_offset = 0.60
     pull_base_y_gain = -0.25 / 1.45
 
     pull_palm_x_offset_closed = 0.05
@@ -289,7 +339,18 @@ def state_machine_offline_right_pull_door(
     )
 
     for theta in theta_values:
-        q_door = torch.tensor([theta.item(), 0.0], device=device)
+        q_door = torch.tensor(
+            [
+                theta.item(),
+                _pull_hinge_angle(
+                    theta.item(),
+                    unlatch_hinge_angle,
+                    pull_hinge_hold_until_theta,
+                    pull_hinge_release_by_theta,
+                ),
+            ],
+            device=device,
+        )
 
         handle_pos = get_hinge_pos(
             door_urdf_path,
@@ -687,12 +748,16 @@ def state_machine_offline_left_pull_door(
     # (keeps the base off the side wall, like the push planner).
     # Base standoff kept CONSTANT with the right-door planner (0.67) so left/right grasp the same
     # distance out; palm offsets unchanged -> the arm just reaches slightly further forward.
-    pregrasp_base_x_offset = 0.67
+    # Base stands 5 cm further BACK from the door (0.67 -> 0.72; +x is away from the panel, the
+    # robot faces -x). Shared by pregrasp, grasp AND unlatch -- Steps 2 and 3 reuse this same
+    # base_target_pose -- so this one value backs the whole approach off. Palm offsets are
+    # unchanged and measured from the handle, so the arm simply reaches 5 cm further forward.
+    pregrasp_base_x_offset = 0.72
     # Pulled 5cm back off the +y side so the left door pregrasp doesn't reach so far right.
     pregrasp_base_y_offset = 0.25
     # Moved back (0.35 -> 0.40): larger palm<->door x gap to compensate for removing the
     # finger<->panel penalty.
-    pregrasp_palm_x_offset = 0.40
+    pregrasp_palm_x_offset = 0.25
     pregrasp_palm_y_offset = 0.15
     pregrasp_palm_z_offset = 0.25
 
@@ -772,9 +837,13 @@ def state_machine_offline_left_pull_door(
     # -------------------------
     # Step 3: Rotate hinge (unlatch)
     # -------------------------
-    unlatch_hinge_angle = 1.05
-    unlatch_palm_y_delta = 0.03
-    unlatch_palm_z_delta = -0.08
+    # Target the lever's HARD STOP (HANDLE_OPEN_LIMIT_RAD = 0.95 rad in the door generator), not
+    # past it: the reference presses the handle firmly against its mechanical stop, which is both
+    # what a person does and what gives the pull a rigid reaction point. Must stay above the
+    # highest randomized unlatch threshold (0.85 rad) so every door actually unlatches.
+    unlatch_hinge_angle = 0.95
+    unlatch_palm_y_delta = 0.015
+    unlatch_palm_z_delta = -0.10
     unlatch_rot_roll = math.pi / 2
     unlatch_rot_pitch = 0.85
     unlatch_rot_yaw = -math.pi / 2 - math.pi / 3
@@ -815,12 +884,22 @@ def state_machine_offline_left_pull_door(
     pull_theta_stop = 1.25
     pull_theta_step = 0.10
 
-    pull_base_x_offset = 0.6
+    # Base held 5 cm further back through the pull sweep too (0.6 -> 0.65), matching the
+    # backed-off approach above so the arm does not have to re-close the gap mid-pull.
+    pull_base_x_offset = 0.65
     pull_base_y_gain = -0.1 / 1.45
 
-    pull_palm_x_offset_closed = 0.05
+    # Keep the lever pressed against its stop for most of the pull, then let it spring back over the
+    # last stretch so it is fully restored by the time Step 5 releases the handle. Same values as the
+    # right-door planner; see _pull_hinge_angle for why holding beats releasing on the first frame.
+    # Start restoring once the panel is ~29 deg open (0.5 rad). By then the latch bolt is long
+    # clear of the strike, so holding the lever down further only fights the return spring.
+    pull_hinge_hold_until_theta = 0.5
+    pull_hinge_release_by_theta = pull_theta_stop
+
+    pull_palm_x_offset_closed = 0.055
     pull_palm_y_offset_closed = 0.03
-    pull_palm_z_offset = 0.04
+    pull_palm_z_offset = 0.05
 
     pull_rot_roll_base = math.pi / 2
     pull_rot_roll_per_theta = 0.9
@@ -837,7 +916,18 @@ def state_machine_offline_left_pull_door(
     # Retract active perception arms to safe range
 
     for theta in theta_values:
-        q_door = torch.tensor([theta.item(), 0.0], device=device)
+        q_door = torch.tensor(
+            [
+                theta.item(),
+                _pull_hinge_angle(
+                    theta.item(),
+                    unlatch_hinge_angle,
+                    pull_hinge_hold_until_theta,
+                    pull_hinge_release_by_theta,
+                ),
+            ],
+            device=device,
+        )
 
         handle_pos = get_hinge_pos(
             door_urdf_path,

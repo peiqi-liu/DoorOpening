@@ -88,15 +88,24 @@ DEFAULT_HANDLE_RADIUS_RANGE_M = (0.007, 0.013)
 # Lever grip bar RADIUS (half cross-section), decoupled from the stem radius -- same convention as
 # handle_radius_m, so a value of 0.010 = a 1 cm-radius (2 cm across) bar, matching real lever handles.
 # The bar's full cross-section is 2x this. Left at 0 -> falls back to the stem radius.
-DEFAULT_HANDLE_LEVER_THICKNESS_RANGE_M = (0.007, 0.013)
+# Ceiling lowered 0.013 -> 0.010 (bar 14-26 mm -> 14-20 mm across) for the 2-finger gripper: a fat bar
+# is harder to seat squarely in the jaw and leaves less room to pass a 21 mm finger alongside it. NOTE
+# the side effect on grasp force -- commanding fully closed on a bar of side s stops the finger at s/2,
+# so the spring compression IS s/2 and F_grip = 5000 * s/2 (capped at 70 N): 26 mm bars gripped at
+# 65 N, 20 mm at 50 N, 14 mm at 35 N. Narrower bars are easier to enclose but squeeze more weakly, and
+# pull holding force is 2*mu*F_grip.
+DEFAULT_HANDLE_LEVER_THICKNESS_RANGE_M = (0.007, 0.010)
 # CLEAR underside gap the fingers get between the door PANEL face and the panel-facing (near) surface
 # of the lever grip bar. This already ACCOUNTS FOR the lever bar half-thickness -- the stem cylinder is
 # extended by that half-thickness so the lever's near surface sits exactly this far above the panel (see
 # build_handle_spec). So this range IS the finger clearance under the lever, not the lever-center offset.
-# Floor lowered 0.043 -> 0.040 to tighten the worst-case finger clearance under the lever. Still ~2x the
-# 21 mm finger cross-section (the Franka fingertip is 21 mm wide too). Doors sampled into the 40-50 mm band never get a raised mount --
-# build_handle_spec drops the bump below MIN_HANDLE_PLATE_GRASP_GAP_M rather than shrink the grasp gap.
-DEFAULT_HANDLE_STEM_LENGTH_RANGE_M = (0.040, 0.085)
+# Floor RAISED 0.040 -> 0.045 for the 2-finger gripper. This slot is what makes a pull form-closed
+# instead of friction-closed: the finger goes THROUGH it and hooks the bar, so the door load is carried
+# by finger geometry rather than by 2*mu*F_grip (which at the mu=0.05 end of the handle friction range
+# transmits only ~5 N against the 12-31 N a panel needs). At the old 0.040 floor a 21 mm finger had
+# under 20 mm of total clearance to spare; 0.045 gives 2.1x the finger width. Raise it further (0.055
+# is 2.6x) if hooking still misses on the tightest doors.
+DEFAULT_HANDLE_STEM_LENGTH_RANGE_M = (0.045, 0.085)
 DEFAULT_HANDLE_LENGTH_RANGE_M = (0.09, 0.14)
 DEFAULT_HANDLE_RETURN_LENGTH_RANGE_M = (0.035, 0.08)
 DEFAULT_HANDLE_RETURN_TIP_CLEARANCE_RANGE_M = (0.025, 0.050)
@@ -168,7 +177,19 @@ FRANKA_DEFAULT_JOINT_POS = [
 ]
 
 DOOR_OPEN_LIMIT_RAD = 1.57
-HANDLE_OPEN_LIMIT_RAD = 1.57
+# Lever (joint_2) HARD STOP, i.e. how far the handle can rotate before it bottoms out. Lowered
+# 1.57 -> 0.95 rad (90 deg -> 54 deg) to model a real lockcase: a lever turns only until the latch
+# follower bottoms out, a little past full latch retraction, and then it is a rigid mechanical stop.
+# At 1.57 the lever kept winding ~41 deg PAST the unlatch threshold under load, so a pulling gripper
+# just rotated the handle out from under its own grasp instead of getting a reaction point; on a real
+# door the stop is what lets you transfer the pull through the handle rather than through grip
+# friction alone.
+#
+# The floor on this value is the unlatch threshold: door_latch_threshold_range_rad randomizes it up
+# to 0.85 rad, so the stop MUST stay above 0.85 or some doors could never unlatch at all. 0.95 leaves
+# 0.10 rad (5.7 deg) of margin, which also gives the useful invariant that pressing the lever to its
+# stop unlatches EVERY door regardless of the sampled threshold.
+HANDLE_OPEN_LIMIT_RAD = 0.95
 ROOT_JOINT_RPY = [math.pi / 2.0, 0.0, -math.pi / 2.0]
 # With the fixed root rotation above, link_1 local -z points toward the
 # default front view used by scripts/test_door.py, while +z points to the back.
