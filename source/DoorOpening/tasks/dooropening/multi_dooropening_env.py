@@ -1407,9 +1407,9 @@ class DooropeningEnv(DirectRLEnv):
         #     dim=-1,
         # )
 
-        # Reference joint-angle error fed to the policy (DISABLED -- found not very useful; kept
-        # commented for easy re-enable). Must stay in sync with the critic term and the
-        # joint_reference_error_observation_space in the cfg.
+        # Reference joint-angle error fed to the policy: base + arm only (the gripper opening is
+        # NOT differenced against the reference here). Must stay in sync with the critic term below
+        # and with the `+ len(base_joints) + len(arm_joints)` line in the cfg's observation_space.
         policy_joint_ref_err = torch.cat(
             (
                 policy_joint_pos[:, self._target_base_rot_slice.start : self._target_base_xy_slice.stop]
@@ -1448,8 +1448,7 @@ class DooropeningEnv(DirectRLEnv):
             dim=-1,
         )
 
-        # Reference joint-angle error fed to the critic (DISABLED -- found not very useful; kept
-        # commented for easy re-enable). Must stay in sync with the policy term and the cfg.
+        # Reference joint-angle error fed to the critic. Same layout as the policy term above.
         clean_joint_ref_err = torch.cat(
             (
                 clean_joint_pos[:, self._target_base_rot_slice.start : self._target_base_xy_slice.stop]

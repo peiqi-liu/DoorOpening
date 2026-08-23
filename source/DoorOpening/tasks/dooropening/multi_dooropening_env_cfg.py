@@ -388,7 +388,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     asymmetric_obs = True
 
     viewer: ViewerCfg = ViewerCfg(eye=(1.5, -2.0, 1.0), lookat=(0.4, 0.0, 0.7), origin_type="env")
-    door_handle_effort_limit_range_nm = (1.0, 3.0)
+    door_handle_effort_limit_range_nm = (1.0, 5.0)
     door_handle_effort_limit_sim = door_handle_effort_limit_range_nm[0]
 
     # Panel-swing (joint_1) effort-limit CAP applied while unlatched (edit_door_articulation switches it
@@ -409,7 +409,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # (~50 N of clamp on a 20 mm bar), so this moves the slip threshold from mu >= 0.31 down to
     # mu >= 0.19 -- i.e. from ~23% of the handle-friction draws slipping to ~12%.
     door_panel_effort_limit_start_range_nm = (5.0, 15.0)
-    door_panel_effort_limit_range_nm = (3.0, 40.0)
+    door_panel_effort_limit_range_nm = (3.0, 60.0)
 
     # Handle (joint_2) unlatch angle threshold (radians): the door stays latched until the handle is
     # rotated past this. Per-env, ADR-ramped from the fixed 0.8 start out to (0.65, 0.95) so the policy
@@ -661,8 +661,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # - proprioception: current actuated joint positions + joint velocities + PD targets
     #   => `actuated_joints_num * 3`
     #   Adding the 4 ARX joints increases this block by `4 * 3 = 12` dims.
-    # - current base and arm joint diffs to the reference motion
-    #   => currently disabled in _build_observations()
+    # - current base and arm joint diffs to the reference motion (ENABLED in _build_observations)
+    #   => `len(base_joints) + len(arm_joints)`, counted at the bottom of observation_space.
+    #      NOT joint_reference_error_observation_space: that constant still includes the gripper
+    #      DOF, which the observation no longer carries.
     # - key-body position tracking error in the base frame
     #   => `len(robot_key_bodies) * 3`
     # - non-base key-body poses in the base frame:
@@ -679,7 +681,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # - future reference motion summary at twist indices
     #   => currently disabled in _build_observations(), so not counted in observation_space
     proprioception_observation_space = actuated_joints_num * 3
-    # Reference joint-angle error (sim reading - reference) for base + arm(franka) + finger.
+    # Reference joint-angle error (sim reading - reference) for base + arm(franka) + gripper.
+    # UNUSED by observation_space: the live obs term covers base + arm only (the gripper's
+    # reference opening is not differenced), so it is counted as len(base_joints)+len(arm_joints)
+    # below. Kept for the day the gripper term is added back to _build_observations.
     joint_reference_error_observation_space = len(base_joints) + len(arm_joints) + len(finger_joints)
     key_body_error_observation_space = len(robot_key_bodies) * 3
     robot_pose_observation_space = (len(robot_key_bodies) - 1) * (3 + 6)
@@ -690,13 +695,13 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     observation_space = (
         proprioception_observation_space
-        # + joint_reference_error_observation_space  # DISABLED: joint-angle-diff obs commented out
         + key_body_error_observation_space
         + robot_pose_observation_space
         + base_velocity_observation_space
         + door_body_observation_space
         + door_joint_observation_space
         + arx_joint_reference_observation_space
+        # base + arm reference joint-angle error (policy_joint_ref_err / clean_joint_ref_err).
         + len(base_joints)
         + len(arm_joints)
     )
@@ -866,7 +871,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             # after 0.067 rad (3.8 deg) -- an almost instantaneous wall -- while k = 400 gives 0.1 rad
             # (5.7 deg) and k = 5 stays soft over the whole swing. Keeps a sharp breakaway in the
             # distribution without the very hardest hit, which is what tears a pinch grasp loose.
-            "stiffness_distribution_params": (5.0, 400.0),
+            "stiffness_distribution_params": (5.0, 600.0),
             # Nm*s/rad. zeta = c/(2*sqrt(k*I)), I ~= 24 kg*m^2. Floor lowered 4 -> 2 to match the start
             # band's 3 (otherwise ADR would RAISE the damping floor as it progressed) and to keep the
             # k = 5 doors genuinely free-swinging rather than overdamped.

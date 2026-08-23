@@ -98,7 +98,9 @@ state_encoders_cfg:
     dropout: 0.0
     use_state: true
   q_hand:
-    input_dim: 12
+    # The gripper opening: ONE prismatic DOF (env cfg finger_joints), not the LEAP hand's 12.
+    # Must equal len(env._robot_finger_dof_idx) -- the dagger feeds exactly those columns.
+    input_dim: 1
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
@@ -124,7 +126,7 @@ state_encoders_cfg:
   #   dropout: 0.0
   #   use_state: true
   # target_err_hand:
-  #   input_dim: 12
+  #   input_dim: 1  # gripper opening error (one DOF)
   #   hidden_dims: [128, 256]
   #   dropout: 0.0
   #   use_state: true
