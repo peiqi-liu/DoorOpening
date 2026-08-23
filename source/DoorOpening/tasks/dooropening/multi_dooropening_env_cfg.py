@@ -388,7 +388,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     asymmetric_obs = True
 
     viewer: ViewerCfg = ViewerCfg(eye=(1.5, -2.0, 1.0), lookat=(0.4, 0.0, 0.7), origin_type="env")
-    door_handle_effort_limit_range_nm = (1.0, 3.0)
+    door_handle_effort_limit_range_nm = (1.0, 5.0)
     door_handle_effort_limit_sim = door_handle_effort_limit_range_nm[0]
 
     # Panel-swing (joint_1) effort-limit CAP applied while unlatched (edit_door_articulation switches it
@@ -409,7 +409,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # (~50 N of clamp on a 20 mm bar), so this moves the slip threshold from mu >= 0.31 down to
     # mu >= 0.19 -- i.e. from ~23% of the handle-friction draws slipping to ~12%.
     door_panel_effort_limit_start_range_nm = (5.0, 15.0)
-    door_panel_effort_limit_range_nm = (3.0, 40.0)
+    door_panel_effort_limit_range_nm = (3.0, 60.0)
 
     # Handle (joint_2) unlatch angle threshold (radians): the door stays latched until the handle is
     # rotated past this. Per-env, ADR-ramped from the fixed 0.8 start out to (0.65, 0.95) so the policy
@@ -866,7 +866,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             # after 0.067 rad (3.8 deg) -- an almost instantaneous wall -- while k = 400 gives 0.1 rad
             # (5.7 deg) and k = 5 stays soft over the whole swing. Keeps a sharp breakaway in the
             # distribution without the very hardest hit, which is what tears a pinch grasp loose.
-            "stiffness_distribution_params": (5.0, 400.0),
+            "stiffness_distribution_params": (5.0, 600.0),
             # Nm*s/rad. zeta = c/(2*sqrt(k*I)), I ~= 24 kg*m^2. Floor lowered 4 -> 2 to match the start
             # band's 3 (otherwise ADR would RAISE the damping floor as it progressed) and to keep the
             # k = 5 doors genuinely free-swinging rather than overdamped.
