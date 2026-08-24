@@ -18,7 +18,11 @@ door_joint_prediction:
   weight: 0.01
 
 push_pull_condition:
-  enabled: true
+  # TEMPORARILY OFF: single-family distillation (PartNetv5_plusplus is 100% pull), so this one-hot
+  # is a constant and carries no information. Set back to true when training on mixed push+pull
+  # families. Disabling it also drops the `push_pull_cond` state encoder below (the model pops that
+  # entry when this block is present and disabled), so nothing else needs changing here.
+  enabled: false
   source: oracle
   obs_key: push_pull_cond
   detach_predicted_condition: true
@@ -31,7 +35,9 @@ left_right_condition:
   # Additive oracle one-hot for handle side (left/right), independent of push/pull. Oracle only
   # (no predicted source) and no temporal history input. Flip enabled to true to turn it on; it
   # auto-creates its own state encoder under obs_key from the hidden_dims below.
-  enabled: true
+  # TEMPORARILY OFF: PartNetv5_plusplus is 100% left-handle ('min'), so this one-hot is constant.
+  # Set back to true when training on families that mix handle sides.
+  enabled: false
   obs_key: left_right_cond
   input_dim: 2
   hidden_dims: [64, 256]
