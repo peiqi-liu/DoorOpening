@@ -48,6 +48,25 @@ FINGER_STIFFNESS = 600
 FINGER_DAMPING = 40
 ABDUCTION_GAIN_SCALE = 0.75
 
+# Per-motor torque ceiling for EVERY LEAP joint (Nm). Set here and NOT in glorbot.urdf: on an implicit
+# actuator IsaacLab falls back to the URDF-authored limit only when effort_limit_sim is None, so a
+# value here overrides the asset outright. The URDF therefore keeps describing the HARDWARE (0.95) and
+# this constant expresses the derating we train against -- editing the URDF too would be a no-op.
+#
+# 0.95 is the Dynamixel XC330-M288's STALL torque at 12 V -- a number the motor can hit for an
+# instant, not one it can hold: stall means zero speed at full current, and the real hand browns out
+# / thermally folds back long before a grasp that has to be maintained for the whole pull. 0.35 Nm is
+# roughly the continuous working point, so a policy trained against it cannot learn a squeeze the
+# hardware will not reproduce.
+#
+# This is set on ALL THREE actuator groups below, thumb included, because they are the same motor.
+# NOTE the thumb consequence: its group used to run at 5.0 Nm purely so the (non-policy-controlled)
+# thumb could hold its reset target against self-collision from the closing fingers. At 0.35 that
+# margin is gone, so watch for the thumb being shoved off target during grasp. The fix if it happens
+# is to move the thumb's REST TARGET out of the fingers' path (or re-enable it as a controlled DOF) --
+# not to raise this back up, since the real thumb has no such reserve either.
+LEAP_MOTOR_EFFORT_LIMIT = 0.35
+
 
 def disable_collision_scope_instancing(robot_prim_path_expr: str = "/World/envs/env_.*/Robot") -> int:
     """De-instance each link's ``collisions`` scope so the collider debug viz renders.
@@ -202,14 +221,14 @@ GLORBOT_CONFIG = ArticulationCfg(
         # Thumb (finger_joint_12..15) is a separate group so it can carry a higher effort limit.
         "finger": ImplicitActuatorCfg(
             joint_names_expr=["finger_joint_(1|2|3|5|6|7|9|1[01])"],
-            effort_limit_sim=1.0,
+            effort_limit_sim=LEAP_MOTOR_EFFORT_LIMIT,
             stiffness=FINGER_STIFFNESS,
             damping=FINGER_DAMPING,
             # Joint friction for the LEAP fingers (was unset -> 0). Matches the real geared-Dynamixel
             # finger friction and damps overshoot alongside the armature below.
             friction=0.01,
-            # The LEAP finger links are ultralight (izz ~1e-5 kg m^2). With a 1.0 Nm effort limit that
-            # is ~1e5 rad/s^2 of angular acceleration when the PD saturates, so the fingers overshoot
+            # The LEAP finger links are ultralight (izz ~1e-5 kg m^2). With a 0.35 Nm effort limit that
+            # is ~3.5e4 rad/s^2 of angular acceleration when the PD saturates, so the fingers overshoot
             # in a single step and jitter. Armature adds effective rotor inertia the implicit PD sees,
             # capping the per-step acceleration. NOTE: this is only the nominal / ADR-increment-0 value;
             # at training time the `robot_finger_armature` EventTerm (see multi_dooropening_env_cfg.py)
@@ -221,7 +240,7 @@ GLORBOT_CONFIG = ArticulationCfg(
         # real hand's softer side-to-side PD (kp/kd 0.75x), reproducing its grasp-load droop in sim.
         "finger_abduction": ImplicitActuatorCfg(
             joint_names_expr=["finger_joint_(0|4|8)"],
-            effort_limit_sim=1.0,
+            effort_limit_sim=LEAP_MOTOR_EFFORT_LIMIT,
             stiffness=FINGER_STIFFNESS * ABDUCTION_GAIN_SCALE,
             damping=FINGER_DAMPING * ABDUCTION_GAIN_SCALE,
             friction=0.01,
@@ -235,7 +254,7 @@ GLORBOT_CONFIG = ArticulationCfg(
         # armature still caps per-step acceleration so the higher cap stays stable. Tune if needed.
         "thumb": ImplicitActuatorCfg(
             joint_names_expr=["finger_joint_1[2-5]"],
-            effort_limit_sim=5.0,
+            effort_limit_sim=LEAP_MOTOR_EFFORT_LIMIT,
             stiffness=600,
             damping=40,
             friction=0.01,

@@ -323,23 +323,26 @@ class EventCfg:
     # cap, so a stiff panel means a sharp breakaway that then holds a constant resistance in Nm, while
     # the low-stiffness end still gives a soft, freer-swinging door.
     #
-    # Both gains are sampled LOG-uniformly in absolute physical units: the stiffness range spans 40x
-    # (20..800 Nm/rad at full ADR), and uniform sampling would put ~95% of doors above 60 Nm/rad and
-    # almost never visit the soft regime.
+    # Both gains are sampled LOG-uniformly in absolute physical units: the stiffness range spans 80x
+    # (5..400 Nm/rad at full ADR), and uniform sampling would put almost every door at the stiff end
+    # and almost never visit the soft regime.
     door_board_joint_stiffness_and_damping = EventTerm(
         func=randomize_actuator_gains,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("door", joint_names="joint_1"),
-            # Start band 40..150 Nm/rad; ADR endpoint widens to 20..800.
-            "stiffness_distribution_params": (40.0, 150.0),
+            # Start band 5..150 Nm/rad; ADR endpoint widens to 5..400. The FLOOR is now the same at
+            # both ends (was 40 at the start, 20 at the endpoint), so genuinely free-swinging doors are
+            # in the mix from step 0 and ADR only widens the stiff side.
+            "stiffness_distribution_params": (5.0, 150.0),
             # Damping is sampled independently of stiffness, so its range is CHOSEN via the damping
             # ratio zeta = c / (2*sqrt(k*I)), with I ~= 24 kg*m^2 (panel about its hinge: m*w^2/3 for
             # the nominal 80 kg board at the ~0.95 m mid panel width the generator emits). The old
-            # validated tuning (k=63, c=8.8) is zeta ~= 0.11, and this start band spans zeta ~0.08..0.36
-            # against the 40..150 stiffness band. The ADR endpoint (4, 60) keeps the median near
-            # zeta ~0.14 across 20..800 stiffness, with only ~1% of draws landing overdamped.
-            "damping_distribution_params": (7.0, 30.0),
+            # validated tuning (k=63, c=8.8) is zeta ~= 0.11. Damping floor lowered 7 -> 3 alongside the
+            # stiffness floor: at k = 5 the old floor of 7 was already zeta ~= 0.32 and the top of the
+            # range (30) was zeta ~= 1.4, i.e. the softest doors came out OVERDAMPED and sluggish rather
+            # than freely swinging -- which defeats the point of lowering the stiffness floor at all.
+            "damping_distribution_params": (3.0, 30.0),
             # Absolute physical gains, not multipliers of the board actuator defaults.
             "operation": "abs",
             "distribution": "log_uniform",
@@ -414,10 +417,16 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     #
     # This is now the PRIMARY door-difficulty knob: panel stiffness is sampled very wide and high
     # (see door_board_joint_stiffness_and_damping) precisely so that the restoring torque saturates
-    # here, making the door feel like a constant-torque load of this many Nm. Start band 40..60 Nm;
-    # ADR endpoint widens to 5..80 -- nearly free-swinging (5 Nm) up to heavy (80 Nm).
+    # here, making the door feel like a constant-torque load of this many Nm. Start band 10..25 Nm;
+    # ADR endpoint widens to 5..40 -- nearly free-swinging (5 Nm) up to heavy (40 Nm).
+    #
+    # ADR CEILING LOWERED 60 -> 40 alongside the LEAP motor limit (LEAP_MOTOR_EFFORT_LIMIT, 0.95 ->
+    # 0.35 Nm). These Nm convert almost directly into the force the grasp has to transmit: with the
+    # handle ~0.8 m from the hinge, required pull = cap / 0.8, so the ceiling drops from 75 N to 50 N.
+    # At a third of the finger torque the hand can no longer generate the grip that 75 N of pull
+    # needed, so the old ceiling was asking for doors the real hardware could never hold onto.
     door_panel_effort_limit_start_range_nm = (10.0, 25.0)
-    door_panel_effort_limit_range_nm = (5.0, 60.0)
+    door_panel_effort_limit_range_nm = (5.0, 40.0)
 
     # Handle (joint_2) unlatch angle threshold (radians): the door stays latched until the handle is
     # rotated past this. Per-env, ADR-ramped from the fixed 0.8 start out to (0.65, 0.95) so the policy
@@ -643,20 +652,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         offset=CameraCfg.OffsetCfg(pos=(0.0, 0.0, 0.0), rot=POINTCLOUD_CAMERA_QUAT, convention="world"),
     )
 
-    # Raw `.pt` point-cloud replay dumps for teacher RL training on headless/HPC nodes.
-    # This uses geometry samplers, not cameras or renderer video: one robot cloud and one door cloud per saved frame.
-    viser_pointcloud = {
-        "enabled": False,
-        "path": "teacher_viser_replay.pt",
-        "env_id": 80,
-        "capture_interval": 3,
-        "save_interval": 10_000,
-        "max_points": 18_000,
-        "robot_num_points": 15_000,
-        "door_num_points": 3_000,
-        "max_frames": 1000,
-    }
-
     door_body_names = DOOR_BODY_NAMES
 
     door_base_frame_name = "base"
@@ -710,8 +705,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # - proprioception: current actuated joint positions + joint velocities + PD targets
     #   => `actuated_joints_num * 3`
     #   Adding the 4 ARX joints increases this block by `4 * 3 = 12` dims.
-    # - current base and arm joint diffs to the reference motion
-    #   => currently disabled in _build_observations()
+    # - current base, arm and finger joint diffs to the reference motion (ENABLED in
+    #   _build_observations)
+    #   => `joint_reference_error_observation_space`
     # - key-body position tracking error in the base frame
     #   => `len(robot_key_bodies) * 3`
     # - non-base key-body poses in the base frame:
@@ -739,7 +735,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     observation_space = (
         proprioception_observation_space
-        # + joint_reference_error_observation_space  # DISABLED: joint-angle-diff obs commented out
+        + joint_reference_error_observation_space
         + key_body_error_observation_space
         + robot_pose_observation_space
         + base_velocity_observation_space
@@ -873,12 +869,21 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "armature_distribution_params": (0.001, 0.005),
         },
         "door_board_joint_stiffness_and_damping": {
-            # Log-uniform over 20..800 Nm/rad: heaviness is set by the effort cap, so stiffness is free to
-            # go very high (sharp breakaway, then constant resistance) and fairly low (soft swing).
-            "stiffness_distribution_params": (20.0, 800.0),
-            # Nm*s/rad. Chosen so the implied zeta = c/(2*sqrt(k*I)) stays sane across the whole
-            # stiffness span: median ~0.14, p95 ~0.68, ~1% overdamped. See the EventTerm comment.
-            "damping_distribution_params": (4.0, 60.0),
+            # FINAL (full-ADR) stiffness band, log-uniform over 5..400 Nm/rad: heaviness is set by the
+            # effort cap, so stiffness is free to go high (sharp breakaway, then constant resistance)
+            # and fairly low (soft swing).
+            #
+            # CEILING CUT 800 -> 400 alongside the effort-cap reduction. Stiffness only decides how
+            # ABRUPTLY the restoring torque reaches the cap: the panel saturates at theta = cap/k, so
+            # with the ADR cap now 40 Nm, k = 800 saturated after 0.05 rad (2.9 deg) -- an almost
+            # instantaneous wall -- while k = 400 gives 0.1 rad (5.7 deg). Keeps a sharp breakaway in
+            # the distribution without the very hardest hit, which is what tears a grasp loose.
+            # FLOOR lowered 20 -> 5 to match the start band, so ADR only ever widens the band.
+            "stiffness_distribution_params": (5.0, 400.0),
+            # Nm*s/rad. zeta = c/(2*sqrt(k*I)), I ~= 24 kg*m^2. Floor lowered 4 -> 2 to sit under the
+            # start band's 3 (otherwise ADR would RAISE the damping floor as it progressed) and to keep
+            # the k = 5 doors genuinely free-swinging rather than overdamped.
+            "damping_distribution_params": (2.0, 60.0),
         },
         "door_board_joint_friction": {
             # Coulomb breakaway friction on the panel swing. Ramps from the (0, 0) EventTerm base out to

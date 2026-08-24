@@ -49,88 +49,6 @@ parser = argparse.ArgumentParser(description="Train an RL agent with RL-Games.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
 parser.add_argument("--video_length", type=int, default=600, help="Length of the recorded video (in steps).")
 parser.add_argument("--video_interval", type=int, default=10000, help="Interval between video recordings (in steps).")
-parser.add_argument(
-    "--viser",
-    "--viser-raw",
-    "--viser-pt",
-    "--viser_pt",
-    dest="viser_pt",
-    action="store_true",
-    default=False,
-    help="Save raw robot/door point-cloud .pt chunks for Viser replay during teacher training.",
-)
-parser.add_argument(
-    "--viser-raw-path",
-    "--viser-pt-path",
-    "--viser_pt_path",
-    dest="viser_pt_path",
-    type=str,
-    default=None,
-    help="Output path for Viser .pt replay chunks.",
-)
-parser.add_argument(
-    "--viser-env-id",
-    "--viser-pt-env-id",
-    "--viser_pt_env_id",
-    dest="viser_pt_env_id",
-    type=int,
-    default=None,
-    help="Environment index to record in Viser .pt dumps.",
-)
-parser.add_argument(
-    "--viser-raw-interval",
-    "--viser-pt-interval",
-    "--viser_pt_interval",
-    dest="viser_pt_interval",
-    type=int,
-    default=None,
-    help="Environment-step interval between recorded point-cloud frames.",
-)
-parser.add_argument(
-    "--viser-raw-save-interval",
-    "--viser-pt-save-interval",
-    "--viser_pt_save_interval",
-    dest="viser_pt_save_interval",
-    type=int,
-    default=None,
-    help="Iteration interval between saved Viser .pt chunks.",
-)
-parser.add_argument(
-    "--viser-raw-max-frames",
-    "--viser-pt-max-frames",
-    "--viser_pt_max_frames",
-    dest="viser_pt_max_frames",
-    type=int,
-    default=None,
-    help="Maximum frames kept in each Viser .pt chunk.",
-)
-parser.add_argument(
-    "--viser-raw-max-points",
-    "--viser-pt-max-points",
-    "--viser_pt_max_points",
-    dest="viser_pt_max_points",
-    type=int,
-    default=None,
-    help="Maximum exported points per cloud in each Viser .pt frame.",
-)
-parser.add_argument(
-    "--viser-raw-robot-points",
-    "--viser-pt-robot-points",
-    "--viser_pt_robot_points",
-    dest="viser_pt_robot_points",
-    type=int,
-    default=None,
-    help="Robot sampler point count before export.",
-)
-parser.add_argument(
-    "--viser-raw-door-points",
-    "--viser-pt-door-points",
-    "--viser_pt_door_points",
-    dest="viser_pt_door_points",
-    type=int,
-    default=None,
-    help="Door sampler point count before export.",
-)
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default="DooropeningMulti", help="Name of the task.")
 parser.add_argument(
@@ -395,53 +313,6 @@ def _bind_distributed_cuda_device(enabled: bool):
     print(f"[INFO][rank {global_rank}] Bound torch CUDA device to cuda:{local_rank} before RL-Games init.")
 
 
-def _configure_viser_pt_recording(env_cfg, log_dir: str):
-    """Apply CLI overrides for headless point-cloud replay dumps."""
-
-    has_any_override = any(
-        value is not None
-        for value in (
-            args_cli.viser_pt_path,
-            args_cli.viser_pt_env_id,
-            args_cli.viser_pt_interval,
-            args_cli.viser_pt_save_interval,
-            args_cli.viser_pt_max_frames,
-            args_cli.viser_pt_max_points,
-            args_cli.viser_pt_robot_points,
-            args_cli.viser_pt_door_points,
-        )
-    )
-    if not args_cli.viser_pt and not has_any_override:
-        return
-    if not hasattr(env_cfg, "viser_pointcloud"):
-        logger.warning("--viser_pt was requested, but this task config has no `viser_pointcloud` field.")
-        return
-
-    record_cfg = dict(getattr(env_cfg, "viser_pointcloud", {}) or {})
-    if args_cli.viser_pt:
-        record_cfg["enabled"] = True
-    if args_cli.viser_pt_path is not None:
-        record_cfg["path"] = args_cli.viser_pt_path
-    if args_cli.viser_pt_env_id is not None:
-        record_cfg["env_id"] = int(args_cli.viser_pt_env_id)
-    if args_cli.viser_pt_interval is not None:
-        record_cfg["capture_interval"] = max(1, int(args_cli.viser_pt_interval))
-    if args_cli.viser_pt_save_interval is not None:
-        record_cfg["save_interval"] = max(1, int(args_cli.viser_pt_save_interval))
-    if args_cli.viser_pt_max_frames is not None:
-        record_cfg["max_frames"] = max(0, int(args_cli.viser_pt_max_frames))
-    if args_cli.viser_pt_max_points is not None:
-        record_cfg["max_points"] = int(args_cli.viser_pt_max_points)
-    if args_cli.viser_pt_robot_points is not None:
-        record_cfg["robot_num_points"] = int(args_cli.viser_pt_robot_points)
-    if args_cli.viser_pt_door_points is not None:
-        record_cfg["door_num_points"] = int(args_cli.viser_pt_door_points)
-
-    env_cfg.viser_pointcloud = record_cfg
-    print(f"[INFO] Viser .pt point-cloud recording config: {record_cfg}")
-    print(f"[INFO] Relative Viser .pt paths will be resolved under: {log_dir}")
-
-
 def _inherit_central_value_config(agent_cfg: dict):
     """Fill central critic training defaults from the main RL-Games config."""
 
@@ -617,7 +488,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     wandb_project = config_name if args_cli.wandb_project_name is None else args_cli.wandb_project_name
     experiment_name = base_experiment_name if args_cli.wandb_name is None else args_cli.wandb_name
     env_cfg.log_dir = os.path.join(log_root_path, log_dir)
-    _configure_viser_pt_recording(env_cfg, env_cfg.log_dir)
     _inherit_central_value_config(agent_cfg)
 
     # dump the configuration into log-directory
@@ -787,7 +657,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         else:
             runner.run({"train": True, "play": False, "sigma": train_sigma})
     finally:
-        # Let the env flush any pending Viser replay chunk even on early shutdown.
+        # Close the env (and the sim) even on an early/failed shutdown.
         env.close()
 
 
