@@ -661,10 +661,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # - proprioception: current actuated joint positions + joint velocities + PD targets
     #   => `actuated_joints_num * 3`
     #   Adding the 4 ARX joints increases this block by `4 * 3 = 12` dims.
-    # - current base and arm joint diffs to the reference motion (ENABLED in _build_observations)
-    #   => `len(base_joints) + len(arm_joints)`, counted at the bottom of observation_space.
-    #      NOT joint_reference_error_observation_space: that constant still includes the gripper
-    #      DOF, which the observation no longer carries.
     # - key-body position tracking error in the base frame
     #   => `len(robot_key_bodies) * 3`
     # - non-base key-body poses in the base frame:
@@ -681,11 +677,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # - future reference motion summary at twist indices
     #   => currently disabled in _build_observations(), so not counted in observation_space
     proprioception_observation_space = actuated_joints_num * 3
-    # Reference joint-angle error (sim reading - reference) for base + arm(franka) + gripper.
-    # UNUSED by observation_space: the live obs term covers base + arm only (the gripper's
-    # reference opening is not differenced), so it is counted as len(base_joints)+len(arm_joints)
-    # below. Kept for the day the gripper term is added back to _build_observations.
-    joint_reference_error_observation_space = len(base_joints) + len(arm_joints) + len(finger_joints)
     key_body_error_observation_space = len(robot_key_bodies) * 3
     robot_pose_observation_space = (len(robot_key_bodies) - 1) * (3 + 6)
     base_velocity_observation_space = 6
@@ -701,9 +692,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         + door_body_observation_space
         + door_joint_observation_space
         + arx_joint_reference_observation_space
-        # base + arm reference joint-angle error (policy_joint_ref_err / clean_joint_ref_err).
-        + len(base_joints)
-        + len(arm_joints)
     )
     state_space = observation_space
     num_observations = observation_space
@@ -712,10 +700,11 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=False)
 
+
     base_action_scale = 1.0
     arm_action_scale = 0.6
-    # Actions are integrated into the PD target (target += dt * scale * action, dt = 1/30 s), so a
-    # scale is a commanded RATE. The gripper DOF is PRISMATIC, so unlike every other scale here this
+    # Actions are a delta on the measured joint angle (target = q + dt * scale * action, dt = 1/30 s),
+    # so a scale is a commanded RATE. The gripper DOF is PRISMATIC, so unlike every other scale here this
     # one is a linear speed in METRES PER SECOND, not rad/s. Same convention as IsaacLab's own
     # franka_cabinet direct env, whose finger target rate is dof_speed_scale * action_scale =
     # 0.1 * 7.5 = 0.75 m/s (franka_cabinet_env.py:199/285).
@@ -731,8 +720,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # 2x is deliberate headroom rather than an exact match:
     #  - the drive lags the target, so a 1.0x command settles slightly BELOW the velocity cap;
     #  - once the fingers are blocked by the handle, grasp force is stiffness * (target - actual),
-    #    so the target has to keep travelling past the contact point -- at 2x that force builds in
-    #    half the time (full stroke of target travel: 0.4 s instead of 0.8 s);
+    #    and since the target is re-referenced to q every step that error is exactly dt * scale --
+    #    so this multiplier sets the clamp force outright (2x -> 5e3 * 0.1/30 = 16.7 N);
     #  - it leaves room if GRIPPER_VELOCITY_LIMIT is ever raised toward the 0.2 m/s the official
     #    franka_description URDF and IsaacLab's stock Franka asset use.
     # The cost is that |action| > 0.5 all produces the same (velocity-capped) motion, so push this
@@ -778,8 +767,19 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     #    exactly the URDF limits, so including it charged a constant penalty for simply holding the
     #    reference gripper pose and punished every real grasp squeeze.
     joint_limit_penalty_joints = list(arm_joints)
-    # lambda_c in r = r_target - lambda_l*r_limit - lambda_c*r_contact
-    self_collision_penalty_w = 5.0
+    # lambda_c in r = r_target - lambda_l*r_limit - lambda_c*r_contact.
+    # Raised 5 -> 25, i.e. above even x5_door_contact_penalty_w, because franka<->arx interpenetration
+    # was visibly happening and being tolerated. This is charged PER COLLIDING LINK per step, so a
+    # 2-link franka/camera-arm contact now costs 50/step against an alive reward of 10 (30 during
+    # grasp/pull) -- self-collision is meant to be strictly worse than making no progress.
+    #
+    # PAIRED WITH the sensing fix in contact_force_utils (panda_link7/panda_hand/fingers vs the x5
+    # arm were previously in NO sensor, so any weight here was zero for exactly the collision this
+    # is aimed at) and with the reference-motion changes in offline_pull_door.py. Order matters: a
+    # harsh weight on a reference trajectory that itself passes through collision is unlearnable --
+    # the policy gets punished for tracking the demo. Verify stats/self_collision_body_count_mean is
+    # ~0 on a reference replay before trusting a training run at this weight.
+    self_collision_penalty_w = 25.0
     # Penalty weight (per non-front base face in contact with the door). High on purpose: a
     # base panel hitting the door in the real world means a securely-mounted robot is injured.
     base_door_contact_penalty_w = 10.0
@@ -906,38 +906,66 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "base_rot_joint_pos_noise": (0.0, 0.05),
             "arm_joint_pos_noise": (0.0, 0.15),
         },
+        # MATCHED to the sibling config: a flat additive noise with the SAME magnitude on every
+        # observation entry regardless of its units, because that is literally what their
+        # noise_lambda does (one torch.randn_like(obs_buf) * 0.002 over the whole concatenated,
+        # unnormalized vector -- radians on joints, metres on positions, unitless on 6D rotations).
+        #
+        # UNITS OF THE NUMBERS BELOW ARE NOT THE NOISE MAGNITUDE. This env samples
+        #     width ~ U(0, value)  per episode,   noise ~ U(-width, +width)  per step
+        # so the effective standard deviations are value/3 (white) and value/6 (bias), NOT value.
+        # Their targets are Gaussian std 0.002 white and 0.001 correlated, so:
+        #     0.006 / 3 = 0.002   and   0.006 / 6 = 0.001   -> 0.006 everywhere.
+        # Note the original 0.006 bias here was ALREADY an exact match; only the white term moved.
+        #
+        # Two remaining differences, deliberate: this stays UNIFORM (hard-bounded, no tails) where
+        # theirs is Gaussian, and the width resamples per episode where theirs redraws the
+        # correlated term every 720 steps.
         "robot_state_noise": {
-            "base_xy_joint_pos_noise": (0.0, 0.003),
-            "base_xy_joint_pos_bias": (0.0, 0.002),
-            "base_rot_joint_pos_noise": (0.0, 0.01),
+            "base_xy_joint_pos_noise": (0.0, 0.006),
+            "base_xy_joint_pos_bias": (0.0, 0.006),
+            "base_rot_joint_pos_noise": (0.0, 0.006),
             "base_rot_joint_pos_bias": (0.0, 0.006),
-            "arm_joint_pos_noise": (0.0, 0.01),
+            "arm_joint_pos_noise": (0.0, 0.006),
             "arm_joint_pos_bias": (0.0, 0.006),
-            "key_body_pos_noise": (0.0, 0.01),
-            "key_body_pos_bias": (0.0, 0.005),
-            "key_body_quat_noise": (0.0, 0.01),
-            "key_body_quat_bias": (0.0, 0.005),
-            "base_xy_joint_vel_noise": (0.0, 0.03),
-            "base_xy_joint_vel_bias": (0.0, 0.015),
-            "base_rot_joint_vel_noise": (0.0, 0.08),
-            "base_rot_joint_vel_bias": (0.0, 0.04),
-            "arm_joint_vel_noise": (0.0, 0.1),
-            "arm_joint_vel_bias": (0.0, 0.05),
-            "body_lin_vel_noise": (0.0, 0.05),
-            "body_lin_vel_bias": (0.0, 0.03),
-            "body_ang_vel_noise": (0.0, 0.1),
-            "body_ang_vel_bias": (0.0, 0.05),
+            "key_body_pos_noise": (0.0, 0.006),
+            "key_body_pos_bias": (0.0, 0.006),
+            "key_body_quat_noise": (0.0, 0.006),
+            "key_body_quat_bias": (0.0, 0.006),
+            "base_xy_joint_vel_noise": (0.0, 0.006),
+            "base_xy_joint_vel_bias": (0.0, 0.006),
+            "base_rot_joint_vel_noise": (0.0, 0.006),
+            "base_rot_joint_vel_bias": (0.0, 0.006),
+            "arm_joint_vel_noise": (0.0, 0.006),
+            "arm_joint_vel_bias": (0.0, 0.006),
+            "body_lin_vel_noise": (0.0, 0.006),
+            "body_lin_vel_bias": (0.0, 0.006),
+            "body_ang_vel_noise": (0.0, 0.006),
+            "body_ang_vel_bias": (0.0, 0.006),
         },
         "door_state_noise": {
-            "door_pos_noise": (0.0, 0.01),
-            "door_pos_bias": (0.0, 0.005),
-            "door_joint_pos_noise": (0.0, 0.01),
-            "door_joint_pos_bias": (0.0, 0.005),
+            "door_pos_noise": (0.0, 0.006),
+            "door_pos_bias": (0.0, 0.006),
+            "door_joint_pos_noise": (0.0, 0.006),
+            "door_joint_pos_bias": (0.0, 0.006),
         },
-        "pd_targets": {
-            "base_xy_target_noise": (0.0, 0.0015),
-            "base_rot_target_noise": (0.0, 0.005),
-            "arm_target_noise": (0.0, 0.003),
+        # Noise on the ACTION, replacing the old per-DOF PD-target noise.
+        #
+        # Placement matters more than magnitude here. Perturbing the PD target (or the measured
+        # angle the target is built from) injects an error that sim's PD sees but hardware's does
+        # not -- on the real robot the controller and the PD read the SAME encoder, so that error
+        # cancels. Perturbing the action instead models command/actuation error, which is a real
+        # channel and survives the cancellation. This is what the sibling config does.
+        #
+        # Applied to the RAW policy output before clamping and scaling, so the units are fractions
+        # of the [-1, 1] action range: 0.05 white per step + 0.015 constant per episode, matching
+        # the sibling's action noise.
+        "action_noise": {
+            # Same width-then-uniform pipeline as above, so effective std is value/3 and value/6.
+            # Their action noise is Gaussian std 0.05 white + 0.015 correlated on the normalized
+            # [-1, 1] action, so: 0.15/3 = 0.05 and 0.09/6 = 0.015.
+            "action_noise": (0.0, 0.15),
+            "action_bias": (0.0, 0.09),
         },
         # Action latency (in env/control steps; env dt = sim_dt * decimation = 1/30 s).
         # The PD target applied on a given step is the one the policy produced `latency` steps

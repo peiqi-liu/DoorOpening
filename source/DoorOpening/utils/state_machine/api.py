@@ -60,7 +60,12 @@ def compute_base_joint(base_pos_w, base_quat_w, abs_pos):
 
     return torch.cat([x_r, y_r, theta_r], dim=-1)
 
-def solve_ik(robot_urdf_path, q, palm_pose, base_pose, robot_initial_pose, num_attempts=8):
+def solve_ik(robot_urdf_path, q, palm_pose, base_pose, robot_initial_pose, num_attempts=8,
+             reference_joint_pos=None):
+    # reference_joint_pos: the null-space ANCHOR the redundant arm DOF resolves toward
+    # (PinocchioIKSolver applies it at reference_joint_gain=0.5, so it genuinely shapes the
+    # solution branch, not just the seed). Defaults to FRANKA_DEFAULT_JOINT_POS; planners pass
+    # their own when that posture puts a link somewhere the task cannot tolerate.
     # num_attempts>1 lets a failed solve retry from randomized arm seeds (robust reposition), at
     # the cost of possibly jumping to a different IK branch. Pass num_attempts=1 inside continuity
     # -critical for-loops so a hard frame returns the best-effort NEAR the previous pose (smooth)
@@ -74,7 +79,7 @@ def solve_ik(robot_urdf_path, q, palm_pose, base_pose, robot_initial_pose, num_a
         urdf_path=robot_urdf_path, 
         ee_link_name="panda_hand", 
         controlled_joints=BASE_JOINT_NAMES + FRANKA_JOINT_NAMES,
-        reference_joint_pos=FRANKA_DEFAULT_JOINT_POS,
+        reference_joint_pos=reference_joint_pos or FRANKA_DEFAULT_JOINT_POS,
     )
     # if palm_pose is not None:
     #     palm_pose[:, 0] += 0.08

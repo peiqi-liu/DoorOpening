@@ -216,6 +216,8 @@ class DooropeningEnv(DirectRLEnv):
         # We are going to update this variables to control the robot
         self.robot_dof_targets = torch.zeros((self.num_envs, len(self._robot_dof_idx)), device=self.device)
         self.applied_robot_dof_targets = torch.zeros_like(self.robot_dof_targets)
+        # This step's noisy joint reading, refreshed by _build_observations.
+        self._measured_joint_pos_buf = None
         self._target_base_rot_slice = slice(0, 1)
         self._target_base_xy_slice = slice(1, self.num_base_joints)
         self._target_arm_slice = slice(self.num_base_joints, self.num_base_joints + self.num_arm_joints)
@@ -393,6 +395,10 @@ class DooropeningEnv(DirectRLEnv):
         self.door_state_biases = self._make_env_buffer_dict([key for key in door_state_cfg if key.endswith("_bias")])
         # The gripper DOF carries no state noise (see the adr_custom_cfg_dict note): its width
         # encoder is accurate and the LEAP-era finger noise was a large fraction of the 0.04 m stroke.
+        # Action noise (replaces the old PD-target noise): per-step white width + a per-episode
+        # constant bias, both as fractions of the [-1, 1] action range.
+        self.action_noise_widths = self._make_env_buffer_dict(["action_noise"])
+        self.action_biases = self._make_env_buffer_dict(["action_bias"])
         self.student_joint_pos_noise_widths = self._make_env_buffer_dict(
             [
                 "base_xy_joint_pos_noise",
@@ -987,6 +993,14 @@ class DooropeningEnv(DirectRLEnv):
             width = value * torch.rand(num_ids, device=self.device)
             self.door_state_biases[key][env_ids, 0] = width * (torch.rand(num_ids, device=self.device) - 0.5)
 
+        width = self._current_custom_param("action_noise", "action_noise")
+        self.action_noise_widths["action_noise"][env_ids, 0] = width * torch.rand(num_ids, device=self.device)
+        bias_limit = self._current_custom_param("action_noise", "action_bias")
+        bias_width = bias_limit * torch.rand(num_ids, device=self.device)
+        self.action_biases["action_bias"][env_ids, 0] = bias_width * (
+            torch.rand(num_ids, device=self.device) - 0.5
+        )
+
         for key in self.student_joint_pos_noise_widths:
             self.student_joint_pos_noise_widths[key][env_ids, 0] = self._custom_param_upper_limit(
                 "robot_state_noise", key
@@ -1134,47 +1148,18 @@ class DooropeningEnv(DirectRLEnv):
             self.robot_dof_upper_limits[None, :],
         )
 
-    def _get_policy_target_noise(self):
-        target_noise = torch.zeros_like(self.robot_dof_targets)
-        base_xy_target_noise = self._current_custom_param("pd_targets", "base_xy_target_noise")
-        base_rot_target_noise = self._current_custom_param("pd_targets", "base_rot_target_noise")
-        arm_target_noise = self._current_custom_param("pd_targets", "arm_target_noise")
+    def _apply_action_noise(self, actions: torch.Tensor) -> torch.Tensor:
+        """Corrupt the RAW policy output before it is clamped and scaled.
 
-        target_noise[:, self._target_base_xy_slice] = base_xy_target_noise * (
-            2.0 * torch.rand_like(target_noise[:, self._target_base_xy_slice]) - 1.0
-        )
-        target_noise[:, self._target_base_rot_slice] = base_rot_target_noise * (
-            2.0 * torch.rand_like(target_noise[:, self._target_base_rot_slice]) - 1.0
-        )
-        target_noise[:, self._target_arm_slice] = arm_target_noise * (
-            2.0 * torch.rand_like(target_noise[:, self._target_arm_slice]) - 1.0
-        )
-        # No gripper-target noise: the commanded opening is a single actuator setpoint and the old
-        # per-substep perturbation was ~12% of the whole 0.04 m stroke.
-        return target_noise
-
-    def _scale_actions(self, actions: torch.Tensor) -> torch.Tensor:
-        if actions.ndim != 2 or actions.shape[-1] != self.num_policy_actions:
-            raise RuntimeError(
-                f"Expected policy action shape [N, {self.num_policy_actions}], got {tuple(actions.shape)}."
-            )
-        clamped_actions = actions.clamp(-1.0, 1.0)
-        scaled_actions = torch.zeros(
-            (actions.shape[0], self.num_robot_actions),
-            device=actions.device,
-            dtype=actions.dtype,
-        )
-        scaled_actions[:, self._target_base_rot_slice.start : self._target_base_xy_slice.stop] = (
-            clamped_actions[:, self._policy_base_rot_slice.start : self._policy_base_xy_slice.stop]
-            * self.cfg.base_action_scale
-        )
-        scaled_actions[:, self._target_arm_slice] = (
-            clamped_actions[:, self._policy_arm_slice] * self.cfg.arm_action_scale
-        )
-        scaled_actions[:, self._target_finger_slice] = (
-            clamped_actions[:, self._policy_finger_slice] * self.cfg.finger_action_scale
-        )
-        return scaled_actions
+        Two components, matching the sibling config: per-step white noise and a constant per-episode
+        bias, both as fractions of the [-1, 1] action range. This is the honest place for command
+        noise -- perturbing the PD target or the measured angle instead injects an error that sim's
+        PD sees but hardware's does not, because on the real robot the controller and the PD read
+        the same encoder and that error cancels.
+        """
+        width = self.action_noise_widths["action_noise"]
+        bias = self.action_biases["action_bias"]
+        return actions + width * (2.0 * torch.rand_like(actions) - 1.0) + bias
 
     def _pin_arx_targets_to_fixed_pose(self, target_tensor: torch.Tensor) -> torch.Tensor:
         if not self.fixed_arx_pose or self.num_arx_joints <= 0:
@@ -1223,10 +1208,20 @@ class DooropeningEnv(DirectRLEnv):
         )
         return applied
 
+    def _measured_joint_pos(self) -> torch.Tensor:
+        """The noisy joint reading the actor saw this step, cached by `_build_observations`.
+
+        On hardware one encoder read feeds both the observation and the command, so the command uses
+        that same vector. Clean state only before the first observation exists.
+        """
+        if self._measured_joint_pos_buf is None:
+            return self.robot.data.joint_pos[:, self._robot_dof_idx]
+        return self._measured_joint_pos_buf
+
     def _pre_physics_step(self, actions: torch.Tensor):
-        # delta actions
-        self.scaled_actions = self._scale_actions(actions)
-        targets = self.robot_dof_targets + self.dt * self.scaled_actions
+        # delta actions applied on the measured joint angle
+        self.scaled_actions = self._scale_actions(self._apply_action_noise(actions))
+        targets = self._measured_joint_pos() + self.dt * self.scaled_actions
         targets = self._pin_arx_targets_to_fixed_pose(targets)
         # NOTE: no explicit contact-sensor update() here. This runs BEFORE the physics step, so it
         # could only ever refresh last step's contacts, and scene.update() (called by
@@ -1272,7 +1267,6 @@ class DooropeningEnv(DirectRLEnv):
         # applied_robot_dof_targets already carries the lag-filtered target from _pre_physics_step.
         # Add per-substep controller noise on top without polluting the lag history.
         applied_targets = self.applied_robot_dof_targets.clone()
-        applied_targets += self._get_policy_target_noise()
         applied_targets = self._pin_arx_targets_to_fixed_pose(applied_targets)
         applied_targets = torch.clamp(applied_targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
         applied_targets = self._pin_arx_targets_to_fixed_pose(applied_targets)
@@ -1345,6 +1339,9 @@ class DooropeningEnv(DirectRLEnv):
         policy_joint_pos[:, self._target_arx_slice] = self._uniform_noise_like(
             policy_joint_pos[:, self._target_arx_slice], "arm_joint_pos_noise", "arm_joint_pos_bias"
         )
+        # The reading _measured_joint_pos hands to next step's command: the SAME vector, not a fresh
+        # draw, because on hardware one encoder read feeds both the observation and the controller.
+        self._measured_joint_pos_buf = policy_joint_pos.detach().clone()
 
         policy_joint_vel[:, self._target_base_rot_slice] = self._uniform_noise_like(
             policy_joint_vel[:, self._target_base_rot_slice], "base_rot_joint_vel_noise", "base_rot_joint_vel_bias"
@@ -1407,33 +1404,11 @@ class DooropeningEnv(DirectRLEnv):
         #     dim=-1,
         # )
 
-        # Reference joint-angle error fed to the policy: base + arm only (the gripper opening is
-        # NOT differenced against the reference here). Must stay in sync with the critic term below
-        # and with the `+ len(base_joints) + len(arm_joints)` line in the cfg's observation_space.
-        policy_joint_ref_err = torch.cat(
-            (
-                policy_joint_pos[:, self._target_base_rot_slice.start : self._target_base_xy_slice.stop]
-                - self.ref_robot_base_joint_pos.to(policy_joint_pos),
-                policy_joint_pos[:, self._target_arm_slice] - self.ref_robot_arm_joint_pos.to(policy_joint_pos),
-            ),
-            dim=-1,
-        ).unsqueeze(dim=1)
-        # policy_joint_ref_err = torch.cat(
-        #     (
-        #         clean_joint_pos[:, self._target_base_rot_slice.start : self._target_base_xy_slice.stop]
-        #         - self.ref_robot_base_joint_pos.to(clean_joint_pos),
-        #         clean_joint_pos[:, self._target_arm_slice] - self.ref_robot_arm_joint_pos.to(clean_joint_pos),
-        #         clean_joint_pos[:, self._target_finger_slice] - self.ref_robot_finger_joint_pos.to(clean_joint_pos),
-        #     ),
-        #     dim=-1,
-        # ).unsqueeze(dim=1)
-
         policy_obs = torch.cat(
             (
                 policy_joint_pos.unsqueeze(dim=1),
                 policy_joint_vel.unsqueeze(dim=1),
                 self.robot_dof_targets.unsqueeze(dim = 1),
-                policy_joint_ref_err,
                 policy_key_pos_err,
                 policy_robot_key_body_pos_local.reshape(self.num_envs, 1, -1),
                 policy_robot_key_body_euler.reshape(self.num_envs, 1, -1),
@@ -1448,22 +1423,11 @@ class DooropeningEnv(DirectRLEnv):
             dim=-1,
         )
 
-        # Reference joint-angle error fed to the critic. Same layout as the policy term above.
-        clean_joint_ref_err = torch.cat(
-            (
-                clean_joint_pos[:, self._target_base_rot_slice.start : self._target_base_xy_slice.stop]
-                - self.ref_robot_base_joint_pos.to(clean_joint_pos),
-                clean_joint_pos[:, self._target_arm_slice] - self.ref_robot_arm_joint_pos.to(clean_joint_pos),
-            ),
-            dim=-1,
-        ).unsqueeze(dim=1)
-
         critic_obs = torch.cat(
             (
                 clean_joint_pos.unsqueeze(dim=1),
                 clean_joint_vel.unsqueeze(dim=1),
                 self.robot_dof_targets.unsqueeze(dim=1),
-                clean_joint_ref_err,
                 key_pos_err,
                 robot_key_body_pos.reshape(self.num_envs, 1, -1),
                 robot_key_body_euler.reshape(self.num_envs, 1, -1),

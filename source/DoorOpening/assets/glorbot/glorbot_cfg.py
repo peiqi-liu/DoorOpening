@@ -177,21 +177,22 @@ GLORBOT_CONFIG = ArticulationCfg(
         rot=ROBOT_INITIAL_ROT,
     ),
     actuators={
-        # Split translation/rotation into separate groups -- their gains are not the same physical
-        # quantity (prismatic N/m vs revolute N-m/rad), and both land overdamped where the dominant
-        # pole is -k/d, so a shared group gave translation (56.5 kg) and yaw (~3 kg-m^2) an identical
-        # 0.3 s lag. Rotation damping is 10x lower so yaw responds ~10x faster, as on the real base.
         "base_translation": ImplicitActuatorCfg(
             joint_names_expr=["base_x_joint", "base_y_joint"],
             effort_limit_sim=1000.0,
-            stiffness=10000,
-            damping=3000,
+            stiffness=80000,
+            damping=4000,
         ),
         "base_rotation": ImplicitActuatorCfg(
             joint_names_expr=["base_rotation_joint"],
             effort_limit_sim=1000.0,
-            stiffness=10000,
-            damping=300,
+            # Sibling config uses 8000/400 (ratio 20), but that yields only 0.500 rad/s and this
+            # reference peaks at 0.599 rad/s during the door-blocking yaw slew -- it would lag.
+            # kd=400 is kept from that config and kp raised to 11000, giving ratio 27.5 and
+            # 0.629 rad/s, which clears the peak. kp*lead = 367 N-m stays under the 1000 N-m limit,
+            # so unlike translation this one never saturates.
+            stiffness=11000,
+            damping=400,
         ),
         # Per-joint Franka PD gains matched to the REAL-WORLD deploy controller (kp/kd used on
         # hardware), set per joint because the real values vary within each group. effort_limit_sim
