@@ -1161,6 +1161,29 @@ class DooropeningEnv(DirectRLEnv):
         bias = self.action_biases["action_bias"]
         return actions + width * (2.0 * torch.rand_like(actions) - 1.0) + bias
 
+    def _scale_actions(self, actions: torch.Tensor) -> torch.Tensor:
+        if actions.ndim != 2 or actions.shape[-1] != self.num_policy_actions:
+            raise RuntimeError(
+                f"Expected policy action shape [N, {self.num_policy_actions}], got {tuple(actions.shape)}."
+            )
+        clamped_actions = actions.clamp(-1.0, 1.0)
+        scaled_actions = torch.zeros(
+            (actions.shape[0], self.num_robot_actions),
+            device=actions.device,
+            dtype=actions.dtype,
+        )
+        scaled_actions[:, self._target_base_rot_slice.start : self._target_base_xy_slice.stop] = (
+            clamped_actions[:, self._policy_base_rot_slice.start : self._policy_base_xy_slice.stop]
+            * self.cfg.base_action_scale
+        )
+        scaled_actions[:, self._target_arm_slice] = (
+            clamped_actions[:, self._policy_arm_slice] * self.cfg.arm_action_scale
+        )
+        scaled_actions[:, self._target_finger_slice] = (
+            clamped_actions[:, self._policy_finger_slice] * self.cfg.finger_action_scale
+        )
+        return scaled_actions
+
     def _pin_arx_targets_to_fixed_pose(self, target_tensor: torch.Tensor) -> torch.Tensor:
         if not self.fixed_arx_pose or self.num_arx_joints <= 0:
             return target_tensor
