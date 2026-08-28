@@ -223,6 +223,10 @@ class DooropeningEnv(DirectRLEnv):
         self._target_arx_slice = slice(self._target_finger_slice.stop, self.robot_dof_targets.shape[1])
         self.num_policy_actions = int(self.cfg.action_space)
         self.num_robot_actions = int(self.robot_dof_targets.shape[1])
+        # Previous CLEAN policy action, for the action-rate penalty. Zeroed at reset so the first
+        # step of an episode is not charged against the last one.
+        self._prev_policy_action = torch.zeros((self.num_envs, self.num_policy_actions), device=self.device)
+        self._action_rate_sq = torch.zeros(self.num_envs, device=self.device)
         expected_policy_actions = self.num_base_joints + self.num_arm_joints + self.num_finger_joints
         if self.num_policy_actions != expected_policy_actions:
             raise ValueError(
@@ -268,6 +272,7 @@ class DooropeningEnv(DirectRLEnv):
         self.joint_limit_penalty_w = self.cfg.joint_limit_penalty_w
         self.joint_limit_penalty_margin_ratio = self.cfg.joint_limit_penalty_margin_ratio
         self.self_collision_penalty_w = self.cfg.self_collision_penalty_w
+        self.action_rate_penalty_w = self.cfg.action_rate_penalty_w
         self.franka_box_contact_penalty_w = self.cfg.franka_box_contact_penalty_w
 
         self.reset_key_body_pos_delta_min = self.cfg.reset_key_body_pos_delta_min
@@ -393,10 +398,12 @@ class DooropeningEnv(DirectRLEnv):
         self.door_state_biases = self._make_env_buffer_dict([key for key in door_state_cfg if key.endswith("_bias")])
         # The gripper DOF carries no state noise (see the adr_custom_cfg_dict note): its width
         # encoder is accurate and the LEAP-era finger noise was a large fraction of the 0.04 m stroke.
-        # Action noise (replaces the old PD-target noise): per-step white width + a per-episode
-        # constant bias, both as fractions of the [-1, 1] action range.
-        self.action_noise_widths = self._make_env_buffer_dict(["action_noise"])
-        self.action_biases = self._make_env_buffer_dict(["action_bias"])
+        # PD-target noise: per-step white width + a per-episode constant bias, per DOF group.
+        pd_target_cfg = self.cfg.adr_custom_cfg_dict["pd_targets"]
+        self.pd_target_noise_widths = self._make_env_buffer_dict(
+            [k for k in pd_target_cfg if k.endswith("_noise")]
+        )
+        self.pd_target_biases = self._make_env_buffer_dict([k for k in pd_target_cfg if k.endswith("_bias")])
         self.student_joint_pos_noise_widths = self._make_env_buffer_dict(
             [
                 "base_xy_joint_pos_noise",
@@ -419,7 +426,8 @@ class DooropeningEnv(DirectRLEnv):
             1, int(round(float(self.cfg.adr_custom_cfg_dict["action_latency"]["latency_steps"][1])))
         )
         self._action_latency_buf = torch.ones(self.num_envs, dtype=torch.long, device=self.device)
-        self._action_target_history = torch.zeros(
+        # History of SCALED ACTIONS (not targets) -- see _apply_action_latency for why.
+        self._action_history = torch.zeros(
             (self.num_envs, self._max_action_latency, self.num_robot_actions), device=self.device
         )
         self._door_nominal_joint_stiffness = self.door.data.joint_stiffness.clone()
@@ -991,13 +999,15 @@ class DooropeningEnv(DirectRLEnv):
             width = value * torch.rand(num_ids, device=self.device)
             self.door_state_biases[key][env_ids, 0] = width * (torch.rand(num_ids, device=self.device) - 0.5)
 
-        width = self._current_custom_param("action_noise", "action_noise")
-        self.action_noise_widths["action_noise"][env_ids, 0] = width * torch.rand(num_ids, device=self.device)
-        bias_limit = self._current_custom_param("action_noise", "action_bias")
-        bias_width = bias_limit * torch.rand(num_ids, device=self.device)
-        self.action_biases["action_bias"][env_ids, 0] = bias_width * (
-            torch.rand(num_ids, device=self.device) - 0.5
-        )
+        for key in self.pd_target_noise_widths:
+            width = self._current_custom_param("pd_targets", key)
+            self.pd_target_noise_widths[key][env_ids, 0] = width * torch.rand(num_ids, device=self.device)
+        for key in self.pd_target_biases:
+            bias_limit = self._current_custom_param("pd_targets", key)
+            bias_width = bias_limit * torch.rand(num_ids, device=self.device)
+            self.pd_target_biases[key][env_ids, 0] = bias_width * (
+                torch.rand(num_ids, device=self.device) - 0.5
+            )
 
         for key in self.student_joint_pos_noise_widths:
             self.student_joint_pos_noise_widths[key][env_ids, 0] = self._custom_param_upper_limit(
@@ -1146,18 +1156,31 @@ class DooropeningEnv(DirectRLEnv):
             self.robot_dof_upper_limits[None, :],
         )
 
-    def _apply_action_noise(self, actions: torch.Tensor) -> torch.Tensor:
-        """Corrupt the RAW policy output before it is clamped and scaled.
+    def _get_policy_target_noise(self) -> torch.Tensor:
+        """Per-DOF noise added to the PD target actually sent to the drive.
 
-        Two components, matching the sibling config: per-step white noise and a constant per-episode
-        bias, both as fractions of the [-1, 1] action range. This is the honest place for command
-        noise -- perturbing the PD target or the measured angle instead injects an error that sim's
-        PD sees but hardware's does not, because on the real robot the controller and the PD read
-        the same encoder and that error cancels.
+        White (per step) plus a constant per-episode bias, per DOF group, from cfg's `pd_targets`.
+        Applied to the target rather than to the measured joint angle on purpose: perturbing the
+        measurement injects an error sim's PD sees but hardware's does not, because on the real robot
+        the controller and the drive read the same encoder and a shared offset cancels.
+
+        The gripper and the arx DOFs are left clean -- the gripper has an accurate width encoder and
+        carries no observation noise either, and the arx is pinned to a fixed pose.
         """
-        width = self.action_noise_widths["action_noise"]
-        bias = self.action_biases["action_bias"]
-        return actions + width * (2.0 * torch.rand_like(actions) - 1.0) + bias
+        noise = torch.zeros_like(self.robot_dof_targets)
+        for sl, wkey, bkey in (
+            (self._target_base_xy_slice, "base_xy_target_noise", "base_xy_target_bias"),
+            (self._target_base_rot_slice, "base_rot_target_noise", "base_rot_target_bias"),
+            (self._target_arm_slice, "arm_target_noise", "arm_target_bias"),
+        ):
+            noise[:, sl] = self._uniform_noise_from_buffers(
+                noise[:, sl],
+                width_buffers=self.pd_target_noise_widths,
+                width_key=wkey,
+                bias_buffers=self.pd_target_biases,
+                bias_key=bkey,
+            )
+        return noise
 
     def _scale_actions(self, actions: torch.Tensor) -> torch.Tensor:
         if actions.ndim != 2 or actions.shape[-1] != self.num_policy_actions:
@@ -1213,56 +1236,63 @@ class DooropeningEnv(DirectRLEnv):
         self.robot.write_joint_state_to_sim(cam_joint_pos, cam_joint_vel, joint_ids=self._robot_extra_camera_dof_idx)
         self.robot.set_joint_position_target(cam_joint_pos, joint_ids=self._robot_extra_camera_dof_idx)
 
-    def _apply_action_latency(self, new_targets: torch.Tensor) -> torch.Tensor:
-        """Return the target to apply this step after a per-env action delay, then record the new one.
+    def _apply_action_latency(self, new_actions: torch.Tensor) -> torch.Tensor:
+        """Return the SCALED ACTION that takes effect this step, then record the new one.
 
-        ``_action_target_history[:, k]`` holds the target computed ``k + 1`` steps ago, so the target
-        applied for an env with latency ``L`` is ``_action_target_history[:, L - 1]``. After reading it
-        out, the freshly computed ``new_targets`` is pushed to the front of the history and the oldest
-        entry is dropped.
+        Latency is modelled on the ACTION, not on the target. The policy decides late -- its action
+        is stale by ``L`` control steps -- but the controller that turns that action into a joint
+        target still reads the encoder NOW:
+
+            target(t) = q(t) + dt * scale * a(t - L)      <- fresh q, stale action
+
+        Delaying the whole target instead (the previous behaviour) applies
+        ``q(t-L) + dt*scale*a(t-L)``, i.e. a STALE MEASUREMENT too. That is not what a real pipeline
+        does, and under the delta action law it is actively harmful: the PD error picks up a term
+        ``-(q(t) - q(t-L)) = -L*dt*v``, i.e. DELAYED VELOCITY FEEDBACK, which rings an underdamped
+        joint. On a 1-DOF model of panda_joint1-4 (kp 1600, kd 24, zeta ~0.4, natural period
+        0.11-0.22 s against 0.100 s of delay at L=3) delaying the target diverges while delaying the
+        action stays stable at every inertia tried; it also cost the base 60% of its steady speed at
+        L=3 (0.441 -> 0.171 m/s) for no physical reason.
+
+        ``_action_history[:, k]`` holds the action produced ``k + 1`` steps ago, so an env with
+        latency ``L`` applies ``_action_history[:, L - 1]``. After reading it out, the fresh action is
+        pushed to the front and the oldest entry dropped.
         """
         lag_idx = (self._action_latency_buf - 1).clamp(0, self._max_action_latency - 1)
         env_idx = torch.arange(self.num_envs, device=self.device)
-        applied = self._action_target_history[env_idx, lag_idx]
-        self._action_target_history = torch.cat(
-            [new_targets.unsqueeze(1), self._action_target_history[:, :-1]], dim=1
+        applied = self._action_history[env_idx, lag_idx]
+        self._action_history = torch.cat(
+            [new_actions.unsqueeze(1), self._action_history[:, :-1]], dim=1
         )
         return applied
 
     def _measured_joint_pos(self) -> torch.Tensor:
         """The joint reading the action delta is added to (target = this + dt * scale * action).
 
-        Deliberately NOT the vector the policy observes. The observation bundles calibration,
-        latency and estimation error and should be noisy; the controller adds its delta to the raw
-        sensor, which is far cleaner. Scaled by the `command_*` entries, per limb, because the base
-        and the arm have different sensor architectures -- see the cfg for why the arm's bias is
-        zero and the base's is not.
-
-        The gripper and the arx joints are left clean: the gripper carries no observation noise
-        either (accurate width encoder) and the arx is pinned to a fixed pose.
+        Returned CLEAN, on purpose. Command-path noise is modelled once, downstream, on the PD
+        target itself (`_get_policy_target_noise`). Adding it here as well would double-count, and
+        would do it in a way hardware cannot reproduce: on the real robot the controller builds the
+        target from the encoder and the drive measures error against the SAME encoder, so a shared
+        offset cancels -- but sim's PD reads ground truth, so nothing cancels and the error becomes a
+        random walk the policy cannot reject.
         """
-        q = self.robot.data.joint_pos[:, self._robot_dof_idx].clone()
-        # base_slice = slice(self._target_base_rot_slice.start, self._target_base_xy_slice.stop)
-        # q[:, base_slice] = self._uniform_noise_from_buffers(
-        #     q[:, base_slice],
-        #     width_buffers=self.robot_state_noise_widths,
-        #     width_key="command_base_joint_pos_noise",
-        #     bias_buffers=self.robot_state_biases,
-        #     bias_key="command_base_joint_pos_bias",
-        # )
-        # q[:, self._target_arm_slice] = self._uniform_noise_from_buffers(
-        #     q[:, self._target_arm_slice],
-        #     width_buffers=self.robot_state_noise_widths,
-        #     width_key="command_arm_joint_pos_noise",
-        #     bias_buffers=self.robot_state_biases,
-        #     bias_key="command_arm_joint_pos_bias",
-        # )
-        return q
+        return self.robot.data.joint_pos[:, self._robot_dof_idx]
 
     def _pre_physics_step(self, actions: torch.Tensor):
+        # Action-rate term, on the CLEAN policy output BEFORE noise: this charges the policy's own
+        # chatter, which it can smooth, not the injected noise, which it cannot.
+        clamped_actions = actions.clamp(-1.0, 1.0)
+        self._action_rate_sq = ((clamped_actions - self._prev_policy_action) ** 2).mean(dim=-1)
+        self._prev_policy_action.copy_(clamped_actions)
+
         # delta actions applied on the measured joint angle
-        self.scaled_actions = self._scale_actions(self._apply_action_noise(actions))
-        targets = self._measured_joint_pos() + self.dt * self.scaled_actions
+        self.scaled_actions = self._scale_actions(actions)
+        # Latency delays the ACTION; the target is always built from a FRESH measurement.
+        delayed_scaled_actions = self._apply_action_latency(self.scaled_actions)
+        measured_joint_pos = self._measured_joint_pos()
+
+        # What the policy just commanded. Reported to it as proprioception; NOT what is sent to sim.
+        targets = measured_joint_pos + self.dt * self.scaled_actions
         targets = self._pin_arx_targets_to_fixed_pose(targets)
         # NOTE: no explicit contact-sensor update() here. This runs BEFORE the physics step, so it
         # could only ever refresh last step's contacts, and scene.update() (called by
@@ -1271,10 +1301,13 @@ class DooropeningEnv(DirectRLEnv):
         # demand. Updating here just bought an extra PhysX readback + CUDA sync per sensor per step.
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
         self.robot_dof_targets[:] = self._pin_arx_targets_to_fixed_pose(self.robot_dof_targets)
-        # Action latency: apply the target the policy produced `_action_latency_buf` env steps ago
-        # (sampled per-env at reset, ramping from 1 step up to the ADR max). This replaces the old
-        # EMA lag filter with a true delayed-action model of the real robot's control pipeline.
-        self.applied_robot_dof_targets[:] = self._apply_action_latency(self.robot_dof_targets)
+        # What is actually applied: FRESH measurement, DELAYED action, then PD-target noise.
+        applied = measured_joint_pos + self.dt * delayed_scaled_actions
+        applied = applied + self._get_policy_target_noise()
+        applied = self._pin_arx_targets_to_fixed_pose(applied)
+        self.applied_robot_dof_targets[:] = torch.clamp(
+            applied, self.robot_dof_lower_limits, self.robot_dof_upper_limits
+        )
         self.applied_robot_dof_targets[:] = self._pin_arx_targets_to_fixed_pose(self.applied_robot_dof_targets)
         # Advance the reference once per RL/env step. IsaacLab will call _apply_action()
         # decimation times, so stepping here keeps replay duration tied to env dt instead
@@ -1972,8 +2005,13 @@ class DooropeningEnv(DirectRLEnv):
             joint_limit_active_fraction.reshape(self.num_envs, -1).mean().item()
         )
 
+        weighted_action_rate_penalty = self.action_rate_penalty_w * self._action_rate_sq
+        self.extras["error/action_rate_penalty"] = weighted_action_rate_penalty.mean().item()
+        self.extras["stats/action_rate_sq_mean"] = self._action_rate_sq.mean().item()
+
         return (
             weighted_joint_limit_penalty
+            + weighted_action_rate_penalty
             + weighted_self_collision_penalty
             + weighted_base_door_contact_penalty
             + weighted_x5_door_contact_penalty
@@ -2328,9 +2366,11 @@ class DooropeningEnv(DirectRLEnv):
             door_joint_vel = self.door.data.default_joint_vel[env_ids].clone()
             self.door.write_joint_state_to_sim(door_joint_pos, door_joint_vel, None, env_ids)
 
+            self._prev_policy_action[env_ids] = 0.0
+            self._action_rate_sq[env_ids] = 0.0
             self.robot_dof_targets[env_ids, :] = self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]]
             self.applied_robot_dof_targets[env_ids, :] = self.robot_dof_targets[env_ids, :]
-            self._action_target_history[env_ids] = self.robot_dof_targets[env_ids].unsqueeze(1)
+            self._action_history[env_ids] = 0.0
             self.episode_reached_last_frame[env_ids] = False
             self.episode_x5_collided[env_ids] = False
             self.episode_franka_box_collided[env_ids] = False
@@ -2388,10 +2428,12 @@ class DooropeningEnv(DirectRLEnv):
         self.door.write_joint_state_to_sim(door_joint_pos, door_joint_vel, None, env_ids)
         # self.door.set_joint_position_target(door_joint_pos, None, env_ids)
 
+        self._prev_policy_action[env_ids] = 0.0
+        self._action_rate_sq[env_ids] = 0.0
         # self.last_actions[env_ids] = 0.0
         self.robot_dof_targets[env_ids, :] = self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]]
         self.applied_robot_dof_targets[env_ids, :] = self.robot_dof_targets[env_ids, :]
-        self._action_target_history[env_ids] = self.robot_dof_targets[env_ids].unsqueeze(1)
+        self._action_history[env_ids] = 0.0
         self.episode_reached_last_frame[env_ids] = False
         self.episode_x5_collided[env_ids] = False
         self.episode_franka_box_collided[env_ids] = False

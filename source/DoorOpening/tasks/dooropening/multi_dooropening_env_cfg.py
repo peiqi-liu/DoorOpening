@@ -779,7 +779,25 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # harsh weight on a reference trajectory that itself passes through collision is unlearnable --
     # the policy gets punished for tracking the demo. Verify stats/self_collision_body_count_mean is
     # ~0 on a reference replay before trusting a training run at this weight.
-    self_collision_penalty_w = 25.0
+    # Lowered 25 -> 10 (back in line with base_door_contact_penalty_w). At 25 it sat above even
+    # x5_door_contact_penalty_w and the arm was visibly over-avoiding the camera arm, buying
+    # clearance at the cost of the task. The sensing fix in contact_force_utils is what actually
+    # made this collision visible; the weight no longer has to be extreme to be felt.
+    # Back to 5.0, the value this had before the sensing fix. The reason it can be low again: the
+    # franka wrist/hand vs x5 pairs used to be in NO contact sensor at all (see contact_force_utils),
+    # so the weight was doing nothing for the collision it was aimed at. Now that the pair is
+    # actually measured, 5 per colliding link is felt without the arm over-avoiding the camera arm.
+    self_collision_penalty_w = 5.0
+    # Action-rate penalty: mean over action dims of (a_t - a_{t-1})^2, on the CLEAN policy output
+    # BEFORE action noise. That placement is the point -- the injected noise lands after the policy,
+    # so charging the policy for it would penalise something it cannot control and would just add
+    # reward variance. This term charges only the policy's OWN chatter, which it can smooth.
+    #
+    # Weight 10 -> 2. Actions are in [-1, 1] so the mean squared step is ~0.01-0.04 for a smooth
+    # policy (penalty 0.02-0.08, negligible against a 10-30 alive reward) and 0.25-1.0 for a
+    # chattering one (penalty 0.5-2.0, i.e. 2-7% of the alive reward -- felt, but not dominant).
+    # Watch stats/action_rate_sq_mean to see which regime the policy is actually in.
+    action_rate_penalty_w = 2.0
     # Penalty weight (per non-front base face in contact with the door). High on purpose: a
     # base panel hitting the door in the real world means a securely-mounted robot is injured.
     base_door_contact_penalty_w = 10.0
@@ -898,6 +916,15 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # noise 3x the joint's own speed limit -- i.e. randomization far larger than the signal. The real
     # hand is a single actuator with an accurate width encoder, so it now carries no reset,
     # observation, or PD-target noise at all.
+    #
+    # Each entry is (value at increment 0, value at full ADR), interpolated by
+    # DoorOpeningADR.get_custom_param_value. EVERY group ramps from zero.
+    #
+    # There are deliberately no command-path joint-noise entries here. Noise on the COMMAND is
+    # modelled once, on the PD target (see the pd_targets group) -- perturbing the measured joint
+    # angle as well would double-count it, and would do so in a way hardware cannot reproduce: on
+    # the real robot the controller and the drive read the same encoder, so a shared offset cancels,
+    # whereas sim's PD reads ground truth and it does not.
     adr_custom_cfg_dict = {
         "robot_spawn": {
             "base_xy_joint_pos_noise": (0.0, 0.1),
@@ -920,115 +947,100 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         # theirs is Gaussian, and the width resamples per episode where theirs redraws the
         # correlated term every 720 steps.
         "robot_state_noise": {
-            # BASE POSITION IS NOT AN ENCODER. base_x/base_y are virtual DOFs standing in for where
-            # the chassis is in the world, which on hardware comes from wheel odometry or lidar SLAM.
-            # That signal is SMOOTH short-term and DRIFTS long-term, so its error is mostly bias, not
-            # white noise -- the flat 0.006 gave it 2 mm of per-step jitter, which odometry does not
-            # have. White cut to 0.0015 (std 0.5 mm); the bias term is left at full size.
+            # BASE POSE IS NOT AN ENCODER READING. base_x/base_y/base_rotation are virtual DOFs
+            # standing in for where the chassis is in the world, which on hardware comes from wheel
+            # odometry or lidar SLAM: 10-50 mm of position error and 1-5 deg of yaw drift, not the
+            # 2 mm / 2 mrad the flat port left here. Raised to std 20 mm / 30 mrad.
             #
-            # This matters here specifically because base kp is 80000: force noise = kp * position
-            # noise, so 2 mm of white noise became 160 N of random force on a 56.5 kg chassis.
-            "base_xy_joint_pos_noise": (0.006, 0.006),
-            "base_xy_joint_pos_bias": (0.006, 0.006),
-            # Same reasoning; base yaw comes from odometry/IMU fusion, not a joint encoder.
-            # Reduced 3x alongside base_xy. Yaw also comes from odometry/IMU fusion rather than a
-            # joint encoder, and its kp is 11000, so it amplifies command-path noise too -- just less
-            # than translation's 80000. The BIAS stays at full: a per-episode offset with randomized
-            # magnitude and sign is useful randomization, and it is the white term that drives the
-            # per-step random walk.
-            "base_rot_joint_pos_noise": (0.006, 0.006),
-            "base_rot_joint_pos_bias": (0.006, 0.006),
-            # Reduced 3x alongside the base, same reason: this vector also feeds the COMMAND path
-            # (_measured_joint_pos), so its white term drives an arm random walk as well as an
-            # observation error. 0.006 -> std 2.0 mrad, which is ~20x a real Franka joint encoder
-            # (the arm's +/-0.1 mm pose repeatability back-solves to ~0.1-0.2 mrad). 0.002 -> std
-            # 0.67 mrad is still generous for that hardware. The BIAS stays at full.
-            "arm_joint_pos_noise": (0.006, 0.006),
-            "arm_joint_pos_bias": (0.006, 0.006),
-            "key_body_pos_noise": (0.006, 0.006),
-            "key_body_pos_bias": (0.006, 0.006),
-            "key_body_quat_noise": (0.006, 0.006),
-            "key_body_quat_bias": (0.006, 0.006),
-            "base_xy_joint_vel_noise": (0.006, 0.006),
-            "base_xy_joint_vel_bias": (0.006, 0.006),
-            "base_rot_joint_vel_noise": (0.006, 0.006),
-            "base_rot_joint_vel_bias": (0.006, 0.006),
-            "arm_joint_vel_noise": (0.006, 0.006),
-            "arm_joint_vel_bias": (0.006, 0.006),
-            "body_lin_vel_noise": (0.006, 0.006),
-            "body_lin_vel_bias": (0.006, 0.006),
-            "body_ang_vel_noise": (0.006, 0.006),
-            "body_ang_vel_bias": (0.006, 0.006),
-            # ---- COMMAND PATH ONLY (see env._measured_joint_pos) ----------------------------
-            # The joint reading the DELTA IS ADDED TO, deliberately far cleaner than what the policy
-            # observes. These are different physical quantities, not one signal at two settings:
-            #
-            #  * the observation noise above bundles calibration, latency and estimation error --
-            #    everything that makes the policy's picture of the world wrong. The policy should be
-            #    robust to all of it.
-            #  * the command path sees the RAW ENCODER, which on a Franka is ~1e-4 rad (its +/-0.1 mm
-            #    pose repeatability back-solves to ~0.1-0.2 mrad). Nothing about calibration error
-            #    enters here, because the controller adds its delta to whatever the encoder says.
-            #
-            # And the BIAS is 0 on purpose, not as a shortcut: on hardware a constant offset appears
-            # in BOTH the commanded target and the drive's own error term and cancels exactly. Only
-            # sim keeps it, because PhysX's PD reads ground truth. Leaving it in models a
-            # disturbance the real robot cannot have -- it is the term that produced steady drift.
-            #
-            # This matters because target = q_measured + delta re-references to the robot every step,
-            # so any white noise here is not bounded jitter but a RANDOM WALK, and the base amplifies
-            # it by kp = 80000.
-            # ARM: bias is SMALL but nonzero. The theory says it should cancel -- the Franka is a
-            # single-encoder loop, you read robot_state.q to build the target and the 1 kHz internal
-            # controller closes on robot_state.q, so a constant offset appears in both terms and
-            # subtracts out. But that rests on an assumption about what FCI does internally that has
-            # not been verified against the hardware, so this is a hedge rather than a model.
-            #
-            # Kept well under the base's: std 3.3e-4 rad is ~3x a real Franka encoder, and costs
-            # a = b/(dt*scale) = 1.7% of the action range to cancel (the arm costs MORE per unit
-            # bias than the base, 50x vs 30x, because arm_action_scale is 0.6 not 1.0).
-            # Raise it if FCI turns out not to cancel; drop to 0.0 if you confirm that it does.
-            "command_arm_joint_pos_noise": (0.0005, 0.0005),
-            "command_arm_joint_pos_bias": (0.002, 0.002),
-            # BASE: bias is small but NONZERO, because the base is not one sensor. If the policy's
-            # chassis pose comes from SLAM while the base controller closes on wheel odometry, those
-            # are two different estimates and the offset between them does NOT cancel.
-            # Raised to the same magnitude as the OBSERVATION bias (0.006 -> std 1 mm), because a
-            # constant offset is a fundamentally different animal from white noise:
-            #   * white noise re-references every step, so it is an unrejectable RANDOM WALK;
-            #   * a bias is a constant DRIFT the policy cancels with a constant action offset of
-            #     a = b / (dt * scale). Note kp/kd cancels out of that -- the cost does not depend on
-            #     the gains -- and it works out to just 3% of the [-1, 1] action range here. The base
-            #     position error is directly observable, so even a memoryless MLP can hold it.
-            # So this costs authority, not stability. Beyond ~0.012 (6%) it starts to eat into the
-            # action range meaningfully; 0.030 would take 15% and is not worth it.
-            # Set to 0.0 if your deploy stack reads base pose from the same source it controls on.
-            "command_base_joint_pos_noise": (0.0005, 0.0005),
-            "command_base_joint_pos_bias": (0.006, 0.006),
+            # This is only affordable because the COMMAND path is now clean (_measured_joint_pos
+            # returns true q, and command noise lives solely in pd_targets). While observation noise
+            # still fed the command, base kp = 80000 turned this straight into force noise and drift.
+            "base_xy_joint_pos_noise": (0.0, 0.06),
+            "base_xy_joint_pos_bias": (0.0, 0.06),
+            "base_rot_joint_pos_noise": (0.0, 0.09),
+            "base_rot_joint_pos_bias": (0.0, 0.09),
+            # Arm joint angles ARE encoder reads. std 2 mrad is ~10-20x a real Franka encoder
+            # (its +/-0.1 mm repeatability back-solves to 0.1-0.2 mrad), which is the right kind of
+            # margin for calibration and latency on top. Left alone.
+            "arm_joint_pos_noise": (0.0, 0.006),
+            "arm_joint_pos_bias": (0.0, 0.006),
+            # Key bodies are FK of the arm joints expressed in the BASE frame, so base localization
+            # error does not propagate into them. std 2 mm matches 2 mrad over the ~0.8 m reach.
+            "key_body_pos_noise": (0.0, 0.006),
+            "key_body_pos_bias": (0.0, 0.006),
+            "key_body_quat_noise": (0.0, 0.006),
+            "key_body_quat_bias": (0.0, 0.006),
+            # VELOCITIES restored to this repo's pre-port values, which were physically derived and
+            # which the flat 0.006 had flattened to a meaningless 2 mm/s and 2 mrad/s.
+            # Base velocity does NOT scale from base position error: odometry POSITION drifts because
+            # it integrates, while velocity is read directly off the wheel encoders and stays good
+            # (~10 mm/s). Arm velocity is differentiated encoder, sigma_v ~ sigma_q*sqrt(2)/dt with a
+            # filtering discount -> ~33 mrad/s.
+            "base_xy_joint_vel_noise": (0.0, 0.03),
+            "base_xy_joint_vel_bias": (0.0, 0.015),
+            "base_rot_joint_vel_noise": (0.0, 0.08),
+            "base_rot_joint_vel_bias": (0.0, 0.04),
+            "arm_joint_vel_noise": (0.0, 0.1),
+            "arm_joint_vel_bias": (0.0, 0.05),
+            "body_lin_vel_noise": (0.0, 0.05),
+            "body_lin_vel_bias": (0.0, 0.03),
+            "body_ang_vel_noise": (0.0, 0.1),
+            "body_ang_vel_bias": (0.0, 0.05),
         },
         "door_state_noise": {
-            "door_pos_noise": (0.006, 0.006),
-            "door_pos_bias": (0.006, 0.006),
-            "door_joint_pos_noise": (0.006, 0.006),
-            "door_joint_pos_bias": (0.006, 0.006),
+            # The door pose is a PERCEPTION estimate (point cloud / pose fit), not a sensor read:
+            # 10-30 mm is realistic, not the 2 mm the flat port left. std 10 mm / 10 mrad.
+            "door_pos_noise": (0.0, 0.03),
+            "door_pos_bias": (0.0, 0.03),
+            "door_joint_pos_noise": (0.0, 0.03),
+            "door_joint_pos_bias": (0.0, 0.03),
         },
-        # Noise on the ACTION, replacing the old per-DOF PD-target noise.
+        # PD-TARGET noise: perturbs the joint target actually sent to the drive, per DOF group.
+        # This is this repo's own scheme (it was here through 90e1aed); the action-space variant that
+        # briefly replaced it was borrowed from a sibling config and is gone again.
         #
-        # Placement matters more than magnitude here. Perturbing the PD target (or the measured
-        # angle the target is built from) injects an error that sim's PD sees but hardware's does
-        # not -- on the real robot the controller and the PD read the SAME encoder, so that error
-        # cancels. Perturbing the action instead models command/actuation error, which is a real
-        # channel and survives the cancellation. This is what the sibling config does.
+        # NOISE AND BIAS ARE SYNCED: each group uses the same cfg value for both, so the effective
+        # bias std is exactly half the white std (value/6 vs value/3) -- the same relationship the
+        # observation noise carries. The bias is new; the old block had white noise only.
         #
-        # Applied to the RAW policy output before clamping and scaling, so the units are fractions
-        # of the [-1, 1] action range: 0.05 white per step + 0.015 constant per episode, matching
-        # the sibling's action noise.
-        "action_noise": {
-            # Same width-then-uniform pipeline as above, so effective std is value/3 and value/6.
-            # Their action noise is Gaussian std 0.05 white + 0.015 correlated on the normalized
-            # [-1, 1] action, so: 0.15/3 = 0.05 and 0.09/6 = 0.015.
-            "action_noise": (0.15, 0.15),
-            "action_bias": (0.09, 0.09),
+        # Magnitudes are the historical ones. They now flow through the standard width-then-uniform
+        # sampler (width ~ U(0, value) per episode, then U(+/-width) per step) rather than a fixed
+        # half-width, so the effective std is value/3 instead of value/sqrt(3) -- i.e. ~0.58x the old
+        # level, which is the reduction we wanted anyway.
+        #
+        # ARM values are MATCHED to the sibling config. Its action-space noise (white std 0.05,
+        # correlated 0.015 on the normalized action) reaches the PD target as
+        #     white = 0.05 * action_scale(0.6) * dt(1/60) * joint_range = 0.0005 * joint_range
+        #     bias  = 0.015 * ...                                      = 0.00015 * joint_range
+        # Over the seven Franka joint ranges (3.14 .. 5.93 rad, from the URDF) that averages
+        # white 2.46 mrad and bias 0.74 mrad. Ours was 1.00 / 0.50, i.e. 2.5x / 1.5x too LOW.
+        # 0.0075 / 0.0045 through this repo's value/3 and value/6 sampler give 2.50 / 0.75 mrad,
+        # i.e. their averages to within 2%, at round numbers that step cleanly over 20 increments.
+        # NOTE the sibling applies its noise per-joint scaled by that joint's range; this is a single
+        # scalar per group, so it matches their MEAN rather than their per-joint spread.
+        #
+        # BASE values are unchanged and NOT matched: the sibling's table covers only its arm and
+        # hand, so there is no base figure to copy. These stay at this repo's historical numbers.
+        #
+        #   base_xy : white std 0.50 mm , bias std 0.25 mm   (ours, unmatched)
+        #   base_rot: white std 1.67 mrad, bias std 0.83 mrad (ours, unmatched)
+        #   arm     : white std 2.50 mrad, bias std 0.75 mrad (matched to sibling)
+        #
+        # Why the target and not the measured angle: perturbing the measured angle injects an error
+        # sim's PD sees but hardware's does not, because on the real robot the controller and the
+        # drive read the same encoder and a shared offset cancels. Perturbing the target is the
+        # honest model of command/actuation error.
+        "pd_targets": {
+            # These RAMP: (start at increment 0, end at full ADR). Unlike robot_state_noise and
+            # door_state_noise, which are pinned at full, the PD-target noise grows over the
+            # schedule -- so the policy learns the task on a clean command first and the actuation
+            # error widens in as it gets competent.
+            "base_xy_target_noise": (0.0, 0.0015),
+            "base_xy_target_bias": (0.0, 0.0015),
+            "base_rot_target_noise": (0.0, 0.005),
+            "base_rot_target_bias": (0.0, 0.005),
+            "arm_target_noise": (0.0, 0.0075),
+            "arm_target_bias": (0.0, 0.0045),
         },
         # Action latency (in env/control steps; env dt = sim_dt * decimation = 1/30 s).
         # The PD target applied on a given step is the one the policy produced `latency` steps
