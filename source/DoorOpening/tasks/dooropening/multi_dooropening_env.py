@@ -666,16 +666,18 @@ class DooropeningEnv(DirectRLEnv):
         return float(effort_limits[0]), float(effort_limits[1])
 
     def _current_action_latency_bounds(self) -> tuple[int, int]:
-        """Current per-env action-latency sampling bounds, in env/control steps.
+        """Per-env action-latency sampling bounds, in env/control steps.
 
-        The lower bound is fixed at the configured starting latency; the upper bound ramps with
-        ADR from the starting latency up to the configured max. With ADR disabled the latency is
-        pinned to the starting value.
+        Action latency is deliberately NOT on the ADR ramp: the config tuple is read as a static
+        (min, max) and every env samples uniformly in [min, max] from step 0. Latency is the only
+        discrete ADR knob, so ramping it stepped the whole population's lag by a full control
+        period at one increment (e.g. 2 -> 3 = +50 ms), which showed up as an abrupt policy
+        collapse rather than the gradual degradation the continuous knobs produce. Holding the
+        full range from the start makes the policy latency-robust up front instead.
         """
         latency_range = self.cfg.adr_custom_cfg_dict["action_latency"]["latency_steps"]
         min_lag = max(1, int(round(float(latency_range[0]))))
-        current_max = self._current_custom_param("action_latency", "latency_steps")
-        max_lag = max(min_lag, int(round(current_max)))
+        max_lag = max(min_lag, int(round(float(latency_range[1]))))
         max_lag = min(max_lag, self._max_action_latency)
         return min_lag, max_lag
 

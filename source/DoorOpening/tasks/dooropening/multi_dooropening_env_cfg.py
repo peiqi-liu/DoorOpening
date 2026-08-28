@@ -1043,10 +1043,12 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "arm_target_bias": (0.0, 0.0045),
         },
         # Action latency (in env/control steps; env dt = sim_dt * decimation = 1/30 s).
-        # The PD target applied on a given step is the one the policy produced `latency` steps
-        # earlier. ADR ramps the upper bound from 1 step up to 4 steps (~4/30 s ≈ 133 ms); the
-        # lower bound stays at 1, so latency is sampled uniformly in [1, current_max] per env at
-        # each reset. Index [0] is the starting/minimum latency, index [1] the max at full ADR.
+        # The action applied on a given step is the one the policy produced `latency` steps
+        # earlier. NOT on the ADR ramp: this is a static (min, max) and every env samples
+        # uniformly in [min, max] at each reset, from step 0 onward. Latency is the only discrete
+        # knob here, so ramping it moved the whole population's lag by a full control period at a
+        # single increment (33 ms), which read as an abrupt collapse instead of the gradual
+        # degradation the continuous knobs give. (1, 3) = 33 ms to 100 ms.
         "action_latency": {
             "latency_steps": (1, 3),
         },
