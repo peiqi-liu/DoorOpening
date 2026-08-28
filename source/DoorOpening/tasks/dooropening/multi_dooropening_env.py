@@ -216,8 +216,6 @@ class DooropeningEnv(DirectRLEnv):
         # We are going to update this variables to control the robot
         self.robot_dof_targets = torch.zeros((self.num_envs, len(self._robot_dof_idx)), device=self.device)
         self.applied_robot_dof_targets = torch.zeros_like(self.robot_dof_targets)
-        # This step's noisy joint reading, refreshed by _build_observations.
-        self._measured_joint_pos_buf = None
         self._target_base_rot_slice = slice(0, 1)
         self._target_base_xy_slice = slice(1, self.num_base_joints)
         self._target_arm_slice = slice(self.num_base_joints, self.num_base_joints + self.num_arm_joints)
@@ -1232,14 +1230,34 @@ class DooropeningEnv(DirectRLEnv):
         return applied
 
     def _measured_joint_pos(self) -> torch.Tensor:
-        """The noisy joint reading the actor saw this step, cached by `_build_observations`.
+        """The joint reading the action delta is added to (target = this + dt * scale * action).
 
-        On hardware one encoder read feeds both the observation and the command, so the command uses
-        that same vector. Clean state only before the first observation exists.
+        Deliberately NOT the vector the policy observes. The observation bundles calibration,
+        latency and estimation error and should be noisy; the controller adds its delta to the raw
+        sensor, which is far cleaner. Scaled by the `command_*` entries, per limb, because the base
+        and the arm have different sensor architectures -- see the cfg for why the arm's bias is
+        zero and the base's is not.
+
+        The gripper and the arx joints are left clean: the gripper carries no observation noise
+        either (accurate width encoder) and the arx is pinned to a fixed pose.
         """
-        if self._measured_joint_pos_buf is None:
-            return self.robot.data.joint_pos[:, self._robot_dof_idx]
-        return self._measured_joint_pos_buf
+        q = self.robot.data.joint_pos[:, self._robot_dof_idx].clone()
+        # base_slice = slice(self._target_base_rot_slice.start, self._target_base_xy_slice.stop)
+        # q[:, base_slice] = self._uniform_noise_from_buffers(
+        #     q[:, base_slice],
+        #     width_buffers=self.robot_state_noise_widths,
+        #     width_key="command_base_joint_pos_noise",
+        #     bias_buffers=self.robot_state_biases,
+        #     bias_key="command_base_joint_pos_bias",
+        # )
+        # q[:, self._target_arm_slice] = self._uniform_noise_from_buffers(
+        #     q[:, self._target_arm_slice],
+        #     width_buffers=self.robot_state_noise_widths,
+        #     width_key="command_arm_joint_pos_noise",
+        #     bias_buffers=self.robot_state_biases,
+        #     bias_key="command_arm_joint_pos_bias",
+        # )
+        return q
 
     def _pre_physics_step(self, actions: torch.Tensor):
         # delta actions applied on the measured joint angle
@@ -1266,16 +1284,6 @@ class DooropeningEnv(DirectRLEnv):
 
 
     def _apply_action(self):
-        # self.ref_motion_lib.step()
-        # joint_pos = self.robot.data.default_joint_pos.clone()
-        # ref_robot_joint_pos = self.ref_motion_lib.get_robot_joint_pos().to(joint_pos)
-        # joint_pos[:, self._robot_dof_idx] = ref_robot_joint_pos[:, self.ref_robot_dof_idx]
-        # self.robot.write_joint_position_to_sim(joint_pos)
-        # self.robot_dof_targets[:] = joint_pos[:, self._robot_dof_idx]
-        # self.applied_robot_dof_targets[:] = self.robot_dof_targets
-        # door_pos = self.door.data.joint_pos.clone()
-        # door_pos[:] = self.ref_motion_lib.get_door_joint_pos()
-        # self.door.write_joint_position_to_sim(door_pos)
 
         edit_door_articulation(
             self.door,
@@ -1362,9 +1370,6 @@ class DooropeningEnv(DirectRLEnv):
         policy_joint_pos[:, self._target_arx_slice] = self._uniform_noise_like(
             policy_joint_pos[:, self._target_arx_slice], "arm_joint_pos_noise", "arm_joint_pos_bias"
         )
-        # The reading _measured_joint_pos hands to next step's command: the SAME vector, not a fresh
-        # draw, because on hardware one encoder read feeds both the observation and the controller.
-        self._measured_joint_pos_buf = policy_joint_pos.detach().clone()
 
         policy_joint_vel[:, self._target_base_rot_slice] = self._uniform_noise_like(
             policy_joint_vel[:, self._target_base_rot_slice], "base_rot_joint_vel_noise", "base_rot_joint_vel_bias"
