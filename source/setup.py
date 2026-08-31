@@ -25,7 +25,6 @@ INSTALL_REQUIRES = [
     "geometrout",
     "trimesh",
     "usd_core",
-    "bpy",
     "scipy",
     "viser",
     "yourdfpy",
