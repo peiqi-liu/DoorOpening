@@ -457,7 +457,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.latest_obs_lag_max_ms = 0.0
         self.latest_obs_lag_effective_age_ms_by_timestamp = OrderedDict()
         self.teacher_forcing_env_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self.current_rewards = torch.zeros((self.num_envs, 1), dtype=torch.float32, device=self.device)
         self.current_lengths = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         self.interval_success_count = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         self.interval_completed_count = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
@@ -465,7 +464,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         if self.use_ddp:
             dist.all_reduce(global_num_envs_tensor, op=dist.ReduceOp.SUM)
         self.global_num_envs = max(1, int(global_num_envs_tensor.item()))
-        self.completed_rewards = deque(maxlen=self.games_to_track)
         self.completed_lengths = deque(maxlen=self.games_to_track)
         self.student_update_steps = 0
         self.last_local_update_batch_size = 0
@@ -491,7 +489,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.left_right_condition_obs_key = "left_right_cond"
         self.left_right_family_one_hot = None
         self.latest_fraction_left = 0.0
-        self.latest_fraction_right = 0.0
         # How aux_handle_pos is seeded at the first rollout step after each reset:
         # "zeros" -> seed the aux feedback buffer with zeros; "ground_truth" -> seed with the
         # sim handle pose. After the first step the predicted aux overwrites the buffer either way.
@@ -502,16 +499,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.push_pull_detach_predicted_condition = True
         self.push_pull_family_one_hot = None
         self.push_pull_condition_buffer = None
-        self.latest_fraction_push = 0.0
         self.latest_fraction_pull = 0.0
-        self.latest_push_pull_pred_entropy = 0.0
-        self.latest_push_pull_pred_acc = None
-        self.latest_push_pull_condition_source = "disabled"
-        self.latest_push_pull_perturb_to_push_count = 0
-        self.latest_push_pull_perturb_to_pull_count = 0
         self.latest_push_pull_belief_input = None
-        self.latest_push_pull_belief_hist_entropy_now = 0.0
-        self.latest_push_pull_belief_hist_entropy_mean = 0.0
         self._logged_temporal_state_input_keys = False
         self._timing_stats = {"sum_ms": 0.0, "count": 0}
         self.logged_env_metric_prefixes = ("dr/", "dr_limit/", "dr_sample/", "reset/")
@@ -945,15 +934,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.mode_prediction_loss_enabled = self.mode_prediction_enabled and self.mode_weight > 0.0
         self.mode_family_semantics = {}
         self.mode_family_direction_ids = None
-        self.latest_mode_direction_acc = None
-        self.latest_dir_window_acc = 0.0
-        self.latest_dir_window_balanced_acc = 0.0
-        self.latest_dir_window_push_acc = 0.0
-        self.latest_dir_window_pull_acc = 0.0
-        self.latest_dir_window_num_push_labels = 0
-        self.latest_dir_window_num_pull_labels = 0
-        self.latest_dir_window_num_push_preds = 0
-        self.latest_dir_window_num_pull_preds = 0
 
     def _init_prediction_training_state(self):
         cfg = dict(self.runtime_cfg.get("prediction_training", {}) or {})
@@ -1003,10 +983,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 f"door_joint_prediction.output_dim ({self.door_joint_output_dim}) must match the "
                 f"number of door_joint_training.joints ({len(joint_names)})."
             )
-
-        # Per-joint mean absolute error (rad), one entry per predicted joint; None until first update.
-        self.latest_door_joint_abs_err = None
-        self.latest_door_joint_target_mean = None
 
     def _init_observation_lag_state(self):
         cfg = dict(self.observation_lag_cfg or {})
@@ -1127,10 +1103,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.push_pull_family_one_hot = None
         self.left_right_family_one_hot = None
         self.mode_family_direction_ids = None
-        self.latest_fraction_push = 0.0
         self.latest_fraction_pull = 0.0
         self.latest_fraction_left = 0.0
-        self.latest_fraction_right = 0.0
         push_pull_needed = (
             self.push_pull_condition_enabled
             or self.push_pull_condition_perturb_enabled
@@ -1299,10 +1273,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         wrong_condition[~gt_is_push, 1] = 1.0 - wrong_confidence[~gt_is_push]
         return wrong_condition
 
-    def _build_gt_push_pull_class_ids(self):
-        gt_condition = self._build_gt_push_pull_condition()
-        return gt_condition[:, 0].round().to(dtype=torch.long)
-
     def _mode_logits_to_push_pull_condition(self, mode_logits):
         if not isinstance(mode_logits, torch.Tensor):
             raise RuntimeError("Predicted push/pull condition requires mode logits from the student.")
@@ -1314,20 +1284,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         mode_probs = torch.softmax(mode_logits, dim=-1)
         push_pull_cond = torch.stack([mode_probs[:, 1], mode_probs[:, 0]], dim=-1)
         return push_pull_cond
-
-    def _record_push_pull_prediction_metrics(self, mode_logits):
-        if mode_logits is None:
-            self.latest_push_pull_pred_entropy = 0.0
-            self.latest_push_pull_pred_acc = None
-            return
-        push_pull_cond = self._mode_logits_to_push_pull_condition(mode_logits.detach())
-        entropy = -(push_pull_cond * torch.log(push_pull_cond.clamp_min(1.0e-6))).sum(dim=-1)
-        self.latest_push_pull_pred_entropy = float(entropy.mean().detach().cpu().item())
-        gt_class_ids = self._build_gt_push_pull_class_ids()
-        pred_class_ids = mode_logits.detach().argmax(dim=-1)
-        self.latest_push_pull_pred_acc = float(
-            (pred_class_ids == gt_class_ids).float().mean().detach().cpu().item()
-        )
 
     def _build_push_pull_condition_from_source(self, source):
         source = str(source).lower()
@@ -1345,10 +1301,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
 
     def _apply_push_pull_condition_perturb(self, push_pull_cond):
         perturb_active = self._is_push_pull_condition_perturb_active()
-        self.latest_push_pull_perturb_to_push_count = 0
-        self.latest_push_pull_perturb_to_pull_count = 0
         if not perturb_active:
-            self.latest_fraction_push = float(push_pull_cond[:, 0].mean().detach().cpu().item())
             self.latest_fraction_pull = float(push_pull_cond[:, 1].mean().detach().cpu().item())
             return push_pull_cond
 
@@ -1362,14 +1315,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             perturbed_argmax = perturbed.argmax(dim=-1)
             if not torch.all(perturbed_argmax[perturb_mask] != gt_argmax[perturb_mask]):
                 raise RuntimeError("push_pull_condition perturbation did not flip GT labels.")
-            self.latest_push_pull_perturb_to_push_count = int(
-                (perturbed_argmax[perturb_mask] == 0).sum().detach().cpu().item()
-            )
-            self.latest_push_pull_perturb_to_pull_count = int(
-                (perturbed_argmax[perturb_mask] == 1).sum().detach().cpu().item()
-            )
 
-        self.latest_fraction_push = float(perturbed[:, 0].mean().detach().cpu().item())
         self.latest_fraction_pull = float(perturbed[:, 1].mean().detach().cpu().item())
         return perturbed
 
@@ -1460,53 +1406,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             torch.full_like(rollout_step_ids, self.direction_loss_outside_window_weight, dtype=torch.float32),
         )
 
-    def _update_direction_window_metrics(
-        self,
-        mode_logits,
-        direction_target,
-        direction_valid,
-        active_mask,
-        rollout_step_ids,
-    ):
-        window_mask = direction_valid & active_mask & self._get_direction_step_mask(rollout_step_ids)
-        direction_pred = mode_logits.argmax(dim=-1)
-
-        push_label_mask = window_mask & (direction_target == 1)
-        pull_label_mask = window_mask & (direction_target == 0)
-        push_pred_mask = window_mask & (direction_pred == 1)
-        pull_pred_mask = window_mask & (direction_pred == 0)
-
-        num_push_labels = int(push_label_mask.sum().detach().cpu().item())
-        num_pull_labels = int(pull_label_mask.sum().detach().cpu().item())
-        num_push_preds = int(push_pred_mask.sum().detach().cpu().item())
-        num_pull_preds = int(pull_pred_mask.sum().detach().cpu().item())
-
-        correct_mask = direction_pred == direction_target
-        correct_push = int((correct_mask & push_label_mask).sum().detach().cpu().item())
-        correct_pull = int((correct_mask & pull_label_mask).sum().detach().cpu().item())
-        total_labels = num_push_labels + num_pull_labels
-        total_correct = correct_push + correct_pull
-
-        push_acc = float(correct_push / num_push_labels) if num_push_labels > 0 else 0.0
-        pull_acc = float(correct_pull / num_pull_labels) if num_pull_labels > 0 else 0.0
-        available_class_accs = []
-        if num_push_labels > 0:
-            available_class_accs.append(push_acc)
-        if num_pull_labels > 0:
-            available_class_accs.append(pull_acc)
-        balanced_acc = float(sum(available_class_accs) / len(available_class_accs)) if available_class_accs else 0.0
-
-        self.latest_dir_window_acc = float(total_correct / total_labels) if total_labels > 0 else 0.0
-        self.latest_dir_window_balanced_acc = balanced_acc
-        self.latest_dir_window_push_acc = push_acc
-        self.latest_dir_window_pull_acc = pull_acc
-        self.latest_dir_window_num_push_labels = num_push_labels
-        self.latest_dir_window_num_pull_labels = num_pull_labels
-        self.latest_dir_window_num_push_preds = num_push_preds
-        self.latest_dir_window_num_pull_preds = num_pull_preds
-        return window_mask
-
-    def _compute_mode_prediction_loss(self, mode_logits, env_mask=None, update_metrics=True):
+    def _compute_mode_prediction_loss(self, mode_logits, env_mask=None):
         if not self.mode_prediction_loss_enabled:
             return None
         if self.mode_family_direction_ids is None:
@@ -1518,15 +1418,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         if not torch.any(direction_valid):
             raise RuntimeError("No valid direction targets are available for mode prediction.")
 
-        if update_metrics:
-            self._update_direction_window_metrics(
-                mode_logits,
-                direction_target,
-                direction_valid,
-                active_mask,
-                rollout_step_ids,
-            )
-
         valid_mask = direction_valid & active_mask
         if torch.any(valid_mask):
             per_sample_loss = torch.nn.functional.cross_entropy(
@@ -1536,17 +1427,11 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             )
             step_weights = self._get_direction_step_weights(rollout_step_ids[valid_mask])
             direction_loss = (per_sample_loss * step_weights).sum() / step_weights.sum().clamp_min(1.0e-6)
-            if update_metrics:
-                direction_pred = mode_logits[valid_mask].argmax(dim=-1)
-                direction_correct = (direction_pred == direction_target[valid_mask]).float()
-                self.latest_mode_direction_acc = float(direction_correct.mean().detach().cpu().item())
         else:
             direction_loss = mode_logits.mean() * 0.0
-            if update_metrics:
-                self.latest_mode_direction_acc = None
         return direction_loss
 
-    def _get_door_joint_prediction_target_raw(self, env_mask=None, update_metrics=True):
+    def _get_door_joint_prediction_target_raw(self, env_mask=None):
         door_joint_pos = self.ov_env.door.data.joint_pos[:, self.door_joint_prediction_joint_idx]
         if env_mask is not None:
             env_mask = env_mask.to(device=door_joint_pos.device, dtype=torch.bool)
@@ -1557,18 +1442,16 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 f"Expected door joint target shape [N, {len(self.door_joint_prediction_joint_names)}], "
                 f"got {tuple(door_joint_pos.shape)}"
             )
-        if update_metrics:
-            self.latest_door_joint_target_mean = door_joint_pos.mean(dim=0).detach().cpu().tolist()
         return door_joint_pos
 
-    def _compute_door_joint_prediction_loss(self, door_joint_pred, env_mask=None, update_metrics=True):
+    def _compute_door_joint_prediction_loss(self, door_joint_pred, env_mask=None):
         if not self.door_joint_prediction_enabled:
             return None
 
         if env_mask is not None and door_joint_pred.shape[0] == self.num_envs:
             env_mask = env_mask.to(device=self.device, dtype=torch.bool)
             door_joint_pred = door_joint_pred[env_mask]
-        target = self._get_door_joint_prediction_target_raw(env_mask=env_mask, update_metrics=update_metrics)
+        target = self._get_door_joint_prediction_target_raw(env_mask=env_mask)
         if door_joint_pred.ndim == 3:
             door_joint_pred = door_joint_pred[:, 0, :]
         if door_joint_pred.shape[-1] != target.shape[-1]:
@@ -1587,10 +1470,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             rollout_step_ids = rollout_step_ids[env_mask]
             valid_mask = valid_mask[env_mask]
         if not torch.any(valid_mask):
-            loss = door_joint_pred.mean() * 0.0
-            if update_metrics:
-                self.latest_door_joint_abs_err = None
-            return loss
+            return door_joint_pred.mean() * 0.0
         step_weights = self._get_direction_step_weights(rollout_step_ids[valid_mask])
 
         if self.door_joint_prediction_loss_type == "smooth_l1":
@@ -1602,10 +1482,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 door_joint_pred, target, reduction="none"
             ).mean(dim=-1)
         loss = (per_env_loss[valid_mask] * step_weights).sum() / step_weights.sum().clamp_min(1.0e-6)
-
-        if update_metrics:
-            abs_err = (door_joint_pred - target).abs()[valid_mask]
-            self.latest_door_joint_abs_err = abs_err.mean(dim=0).detach().cpu().tolist()
 
         return loss
 
@@ -1794,10 +1670,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         if self.latest_push_pull_belief_input is not None:
             return self.latest_push_pull_belief_input.detach().clone()
         return self._build_initial_temporal_push_pull_belief()
-
-    def _reset_push_pull_belief_history_metrics(self):
-        self.latest_push_pull_belief_hist_entropy_now = 0.0
-        self.latest_push_pull_belief_hist_entropy_mean = 0.0
 
     def _init_history_buffers(self):
         self.temporal_dt_s = max(float(getattr(self.ov_env, "dt", 1.0 / 15.0)), 1e-6)
@@ -2443,29 +2315,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 f"got {tuple(value.shape)}."
             )
         return value
-
-    def _record_push_pull_belief_history_metrics(self, sample_cache):
-        self._reset_push_pull_belief_history_metrics()
-        if not self.temporal_push_pull_belief_enabled:
-            return
-        if sample_cache is None or "push_pull_belief" not in sample_cache:
-            raise RuntimeError(
-                "temporal_state_encoders field 'push_pull_belief' requires push_pull_belief entries in the temporal sample cache."
-            )
-        belief_samples = sample_cache["push_pull_belief"]
-        if belief_samples.ndim != 3 or belief_samples.shape[-1] != 2:
-            raise RuntimeError(
-                "push_pull_belief temporal samples must have shape [N, T, 2], "
-                f"got {tuple(belief_samples.shape)}."
-            )
-        belief_probs = belief_samples.clamp_min(1.0e-6)
-        entropy = -(belief_samples * torch.log(belief_probs)).sum(dim=-1)
-        offset_to_index = sample_cache["offset_to_index"]
-        idx_now = offset_to_index.get(0.0)
-        if idx_now is None:
-            raise RuntimeError("push_pull_belief temporal metrics require a 0.0s timestamp in the sample cache.")
-        self.latest_push_pull_belief_hist_entropy_now = float(entropy[:, idx_now].mean().detach().cpu().item())
-        self.latest_push_pull_belief_hist_entropy_mean = float(entropy.mean().detach().cpu().item())
 
     def _build_proprio_temporal_obs(self, sample_cache):
         if not self.proprio_temporal_enabled:
@@ -4003,7 +3852,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             aux_input_vector = None
         push_pull_cond = None
         if self.push_pull_condition_enabled:
-            self.latest_push_pull_condition_source = self.push_pull_condition_source
             # Oracle source uses GT one-hot. Predicted source uses the recurrent condition carried from the previous step.
             push_pull_cond = self._build_push_pull_condition_from_source(self.push_pull_condition_source)
             # Perturbation modifies only the condition input fed to the action policy, not labels or target actions.
@@ -4040,7 +3888,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         else:
             self._reset_observation_lag_stats()
             self.latest_obs_lag_enabled = 1.0 if lag_active else 0.0
-        self._record_push_pull_belief_history_metrics(temporal_sample_cache)
         temporal_state_values = self._build_temporal_derived_state_values(
             q_pos,
             target_t,
@@ -4088,7 +3935,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         if self.left_right_condition_enabled:
             left_right_cond = self._build_gt_left_right_condition()
             self.latest_fraction_left = float(left_right_cond[:, 0].mean().detach().cpu().item())
-            self.latest_fraction_right = float(left_right_cond[:, 1].mean().detach().cpu().item())
             obs[self.left_right_condition_obs_key] = left_right_cond
 
         if self.proprio_temporal_enabled:
@@ -4145,17 +3991,10 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
     def _student_forward(self, student_obs, iteration=None):
         base_obs = OrderedDict(student_obs)
         if not self.push_pull_condition_enabled:
-            self.latest_push_pull_condition_source = "disabled"
-            self.latest_push_pull_perturb_to_push_count = 0
-            self.latest_push_pull_perturb_to_pull_count = 0
-            student_output = self.student_model_ddp(base_obs)
-            if self.mode_prediction_enabled and "mode_logits" in student_output:
-                self._record_push_pull_prediction_metrics(student_output["mode_logits"])
-            return student_output
+            return self.student_model_ddp(base_obs)
 
         student_output = self.student_model_ddp(base_obs)
         if self.mode_prediction_enabled and "mode_logits" in student_output:
-            self._record_push_pull_prediction_metrics(student_output["mode_logits"])
             # Recurrent predicted conditioning: timestep t consumes the current condition and writes the next one.
             self._update_push_pull_condition_buffer(student_output["mode_logits"])
         return student_output
@@ -4170,7 +4009,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 sliced[key] = value
         return sliced
 
-    def _compute_student_loss(self, student_output, teacher_actions, aux_target=None, env_mask=None, update_metrics=True):
+    def _compute_student_loss(self, student_output, teacher_actions, aux_target=None, env_mask=None):
         if env_mask is not None:
             env_mask = env_mask.to(device=self.device, dtype=torch.bool)
             if not torch.any(env_mask):
@@ -4194,7 +4033,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             mode_loss = self._compute_mode_prediction_loss(
                 student_output["mode_logits"],
                 env_mask=env_mask,
-                update_metrics=update_metrics,
             )
             total_loss = total_loss + self.mode_weight * mode_loss
         if self.door_joint_prediction_enabled:
@@ -4203,7 +4041,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             door_joint_loss = self._compute_door_joint_prediction_loss(
                 student_output["door_joint"],
                 env_mask=env_mask,
-                update_metrics=update_metrics,
             )
             total_loss = total_loss + self.door_joint_prediction_weight * door_joint_loss
         return total_loss, action_loss, aux_loss, mode_loss, door_joint_loss
@@ -4370,7 +4207,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                         teacher_output["mus"],
                         aux_target=aux_target,
                         env_mask=self.train_env_mask,
-                        update_metrics=True,
                     )
                     if train_total_loss is None:
                         raise RuntimeError("Training loss could not be computed because the training split is empty.")
@@ -4379,7 +4215,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                         teacher_output["mus"],
                         aux_target=aux_target,
                         env_mask=self.validation_env_mask,
-                        update_metrics=False,
                     )
                     local_batch_size = int(self.train_env_mask.sum().detach().cpu().item())
                     global_batch_size = self._get_global_batch_size(local_batch_size)
@@ -4413,12 +4248,10 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 )
                 self.frame += self.num_envs
 
-                self.current_rewards += rew.unsqueeze(-1)
                 self.current_lengths += 1
                 done_mask = torch.nonzero(out_of_reach | timed_out, as_tuple=False).squeeze(-1)
                 if done_mask.numel() > 0:
                     self._update_completed_episode_metrics(done_mask, timed_out)
-                    self.current_rewards[done_mask] = 0.0
                     self.current_lengths[done_mask] = 0.0
                     self._resample_wall_distractors(done_mask)
                     self._resample_door_frame_visibility(done_mask)

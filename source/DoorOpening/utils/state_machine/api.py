@@ -61,7 +61,7 @@ def compute_base_joint(base_pos_w, base_quat_w, abs_pos):
     return torch.cat([x_r, y_r, theta_r], dim=-1)
 
 def solve_ik(robot_urdf_path, q, palm_pose, base_pose, robot_initial_pose, num_attempts=8,
-             reference_joint_pos=None):
+             reference_joint_pos=None, return_debug=False):
     # reference_joint_pos: the null-space ANCHOR the redundant arm DOF resolves toward
     # (PinocchioIKSolver applies it at reference_joint_gain=0.5, so it genuinely shapes the
     # solution branch, not just the seed). Defaults to FRANKA_DEFAULT_JOINT_POS; planners pass
@@ -70,6 +70,10 @@ def solve_ik(robot_urdf_path, q, palm_pose, base_pose, robot_initial_pose, num_a
     # the cost of possibly jumping to a different IK branch. Pass num_attempts=1 inside continuity
     # -critical for-loops so a hard frame returns the best-effort NEAR the previous pose (smooth)
     # instead of jumping to a distant branch.
+    # return_debug surfaces what the solver actually did instead of only printing on failure.
+    # Defaults to False so every existing caller keeps getting the bare (1, 10) tensor back.
+    # A palm_pose of None never runs a solve at all, hence the vacuous-success defaults.
+    success, debug_info = True, {}
     robot_initial_pos, robot_initial_quat = robot_initial_pose[..., :3], robot_initial_pose[..., 3:]
     if base_pose is not None:
         base_joint_pos = compute_base_joint(robot_initial_pos, robot_initial_quat, base_pose).squeeze()
@@ -124,6 +128,8 @@ def solve_ik(robot_urdf_path, q, palm_pose, base_pose, robot_initial_pose, num_a
     # print("debug_info: ", debug_info)
     # print("joint_pos_des: ", joint_pos_des)
     # print("fk: ", ik_solver.compute_fk(q[0, :10]))
+    if return_debug:
+        return q, success, debug_info
     return q
 
 def get_board_pos(door_urdf_path, door_initial_pose, joint_angles):

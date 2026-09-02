@@ -147,15 +147,15 @@ transformer_cfg:
   decoder_dim_feedforward: 1024
 
 dagger:
-  learning_rate: 2.0e-4
+  learning_rate: 1.5e-4  # was 2.0e-4, temp update
   lr_schedule: cosine
-  min_learning_rate: 2.0e-5
+  min_learning_rate: 1.5e-5  # was 2.0e-5, temp update
   weight_decay: 1.0e-4
   grad_clip: 1.0
   num_iters: 250000
-  lr_decay_iters: 80000
-  teacher_forcing_warmup_iters: 2000
-  teacher_forcing_transition_iters: 18000
+  lr_decay_iters: 100000  # was 80000, temp update
+  teacher_forcing_warmup_iters: 5000  # was 2000, temp update
+  teacher_forcing_transition_iters: 20000  # was 18000, temp update
   teacher_forcing_min_beta: 0.0
   # Aux handle input mode:
   #   "recurrent"        -> policy input = previous step's aux prediction (fed back). The first step
@@ -310,7 +310,7 @@ dagger:
     # reading it from the cloud remains the dominant signal and tracking stays the backup.
     # Remove gap_range_m to fall back to a flat `episode_prob`.
     gap_range_m: [0.04, 0.065]
-    episode_prob_at_min_gap: 0.9
+    episode_prob_at_min_gap: 0.3  # was 0.9, temp update
     episode_prob_at_max_gap: 0.02  # "almost impossible" rather than exactly 0, so wide-gap doors still see a rare dropout.
     missing_gap_prob: 0.02  # Legacy asset families whose variant_meta.json has no gap; defaults to episode_prob_at_max_gap.
     # PER-FRAME flicker: redrawn every step, so the handle blinks in and out. OFF -- IID flicker lets the
