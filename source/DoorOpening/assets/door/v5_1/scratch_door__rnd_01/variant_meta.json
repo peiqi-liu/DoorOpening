@@ -1,0 +1,260 @@
+{
+  "generator": "generate_randomized_doors_scratch.py",
+  "variant_name": "scratch_door__rnd_01",
+  "source_asset": null,
+  "direction_pair_key": "scratch_door__rnd_01",
+  "target_properties": {
+    "panel_width_m": 0.9575405377146038,
+    "panel_height_m": 1.8658437145326705,
+    "handle_height_m": 0.8954000409156165,
+    "handle_to_edge_distance_m": 0.10666961627114209,
+    "flip_hinge_side": false,
+    "opening_direction": "pull",
+    "handle_side": "min"
+  },
+  "actual_properties": {
+    "panel_width_m": 0.9575405377146038,
+    "panel_height_m": 1.8658437145326705,
+    "frame_height_m": 1.9480302499839899,
+    "frame_panel_extra_height_m": 0.08218653545131938,
+    "handle_height_m": 0.8954000409156165,
+    "handle_to_edge_distance_m": 0.10666961627114213,
+    "handle_side": "min",
+    "opening_direction": "pull",
+    "handle_attachment_joint": "joint_2",
+    "board_min_x": -0.9575405377146038,
+    "board_max_x": 0.0,
+    "board_min_y": 0.0,
+    "board_max_y": 1.8658437145326705
+  },
+  "source_properties": {
+    "panel_width_m": 0.9575405377146038,
+    "panel_height_m": 1.8658437145326705,
+    "panel_thickness_m": 0.031894887250650816,
+    "frame_height_m": 1.9480302499839899,
+    "frame_panel_extra_height_m": 0.08218653545131938,
+    "handle_height_m": 0.8954000409156165,
+    "handle_to_edge_distance_m": 0.10666961627114213,
+    "handle_side": "min",
+    "opening_direction": "pull"
+  },
+  "initial_state": {
+    "robot_world_pose": {
+      "pos": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "rot": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    "door_world_pose": {
+      "pos": [
+        0.0,
+        0.0,
+        0.03
+      ],
+      "rot": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    "robot_joint_names": [
+      "base_x_joint",
+      "base_y_joint",
+      "base_rotation_joint",
+      "panda_joint1",
+      "panda_joint2",
+      "panda_joint3",
+      "panda_joint4",
+      "panda_joint5",
+      "panda_joint6",
+      "panda_joint7"
+    ],
+    "robot_joint_pos": [
+      -0.033821678751220205,
+      -0.12738974889733803,
+      0.12260413279201554,
+      -0.007240769433059714,
+      -0.8039834463597691,
+      0.00855618635076387,
+      -2.3608760525552674,
+      -0.020023300313631767,
+      1.6002342749471457,
+      0.019899443372957126
+    ],
+    "robot_base_joint_pos": [
+      -0.033821678751220205,
+      -0.12738974889733803,
+      0.12260413279201554
+    ],
+    "robot_franka_joint_names": [
+      "panda_joint1",
+      "panda_joint2",
+      "panda_joint3",
+      "panda_joint4",
+      "panda_joint5",
+      "panda_joint6",
+      "panda_joint7"
+    ],
+    "robot_franka_joint_pos": [
+      -0.007240769433059714,
+      -0.8039834463597691,
+      0.00855618635076387,
+      -2.3608760525552674,
+      -0.020023300313631767,
+      1.6002342749471457,
+      0.019899443372957126
+    ],
+    "door_joint_pos": [
+      0.0,
+      0.0
+    ],
+    "start_base_sampling": "paired",
+    "start_base_radius_m": 1.041640730568903,
+    "start_base_radius_range_m": [
+      1.0,
+      1.5
+    ],
+    "start_base_angle_range_deg": 8.0,
+    "start_base_pair_seed": 0,
+    "start_base_pair_key": "scratch_door__rnd_01",
+    "sampled_robot_world_pose": {
+      "pos": [
+        1.0338216787512202,
+        0.12738974889733803,
+        0.0
+      ],
+      "rot": [
+        0.06126367866092912,
+        0.0,
+        0.0,
+        -0.9981216166765102
+      ]
+    },
+    "sampled_approach_angle_rad": 0.12260413279201562
+  },
+  "topology": {
+    "links": [
+      "base",
+      "link_0",
+      "link_1",
+      "link_2"
+    ],
+    "joints": [
+      "joint_0",
+      "joint_1",
+      "joint_2"
+    ]
+  },
+  "panel": {
+    "width_m": 0.9575405377146038,
+    "height_m": 1.8658437145326705,
+    "thickness_m": 0.031894887250650816,
+    "bbox_link1": [
+      -0.9575405377146038,
+      0.0,
+      -0.015947443625325408,
+      0.0,
+      1.8658437145326705,
+      0.015947443625325408
+    ]
+  },
+  "frame": {
+    "post_width_m": 0.054135068569404206,
+    "head_height_m": 0.07701781889223212,
+    "depth_m": 0.07383653183313058,
+    "clearance_m": 0.00516871655908725
+  },
+  "door": {
+    "hinge_side": "max",
+    "handle_side": "min",
+    "opening_direction": "pull",
+    "joint_1_origin_link0": [
+      0.4787702688573019,
+      0.0,
+      0.0
+    ],
+    "joint_1_axis": [
+      0.0,
+      1.0,
+      0.0
+    ]
+  },
+  "handle": {
+    "type": "return",
+    "mesh": "texture_dae/handle_return.obj",
+    "joint_origin_link1": [
+      -0.8508709214434617,
+      0.8954000409156165,
+      0.015947443625325408
+    ],
+    "joint_axis_link1": [
+      0.0,
+      0.0,
+      -1.0
+    ],
+    "lever_direction_link2": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "return_direction_link2": [
+      0.0,
+      0.0,
+      -1.0
+    ],
+    "radius_m": 0.010468770512708774,
+    "stem_length_m": 0.0796485009569301,
+    "lever_length_m": 0.09313944874866616,
+    "return_length_m": 0.03768205264848047,
+    "return_tip_clearance_m": 0.030148967820483166,
+    "collision_primitives": [
+      {
+        "name": "handle_stem",
+        "origin_xyz": [
+          0.0,
+          0.0,
+          0.03982425047846505
+        ],
+        "size": [
+          0.020937541025417547,
+          0.020937541025417547,
+          0.0796485009569301
+        ]
+      },
+      {
+        "name": "handle_main_lever",
+        "origin_xyz": [
+          0.04656972437433308,
+          0.0,
+          0.0796485009569301
+        ],
+        "size": [
+          0.09313944874866616,
+          0.020937541025417547,
+          0.020937541025417547
+        ]
+      },
+      {
+        "name": "handle_return_hook",
+        "origin_xyz": [
+          0.09313944874866616,
+          0.0,
+          0.060807474632689866
+        ],
+        "size": [
+          0.020937541025417547,
+          0.020937541025417547,
+          0.03768205264848047
+        ]
+      }
+    ]
+  }
+}

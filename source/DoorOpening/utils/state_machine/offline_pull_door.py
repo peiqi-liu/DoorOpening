@@ -14,6 +14,26 @@ from DoorOpening.constants.robot_constants import (
 
 HandleSide = Literal["right", "left"]
 
+# Null-space posture anchor for the LEFT pull planner's IK (see api.solve_ik).
+#
+# The stock FRANKA_DEFAULT_JOINT_POS anchors panda_joint2 at -0.25*pi, which resolves the arm's
+# redundancy into a SHOULDER-DOWN branch: panda_link2's far end (the panda_link3 origin) sinks to
+# z = 0.70 m, straight into the arx camera arm's band (z 0.65..0.75, |xy| <= 0.282 off the base
+# axis). Measured over the first 8 PartNetv5_plusplus doors, the closest franka<->arx approach on
+# the reference trajectory was 1 mm -- i.e. the reference itself interpenetrates, on essentially
+# every door, and no reward penalty can fix a demo that is already inside the camera arm.
+#
+# Anchoring the shoulder at +0.15*pi instead lifts that branch. Only panda_joint2 moves; every
+# other joint keeps the stock anchor, and the spawn pose (DEFAULT_JOINT_POS) is a separate constant
+# and is untouched. This is ONE of three changes that had to land together -- see the retract and
+# pull_base_y_offset notes in the left planner; the anchor alone tops out at -0.028 m (still
+# interpenetrating), because it cannot move a waypoint that is itself sitting on the base.
+LEFT_PULL_IK_ANCHOR_JOINT_POS = {
+    **FRANKA_DEFAULT_JOINT_POS,
+    "panda_joint2": 0.15 * math.pi,
+}
+
+
 # The Franka gripper is ONE commanded DOF, at this index of FULL_JOINT_NAMES -- NOT the 16-joint
 # LEAP block the old code wrote. q_robot is laid out base(3) + panda(7) + finger(1) + x5 camera(6)
 # = 17, so the old `q_robot[10:26] = open_hand(...)` both mismatched shape (7 slots vs 2 values)
@@ -786,6 +806,7 @@ def state_machine_offline_left_pull_door(
         palm_pose=palm_target_pose,
         base_pose=base_target_pose,
         robot_initial_pose=robot_initial_pose,
+        reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
     )[0]
     
 
@@ -822,6 +843,7 @@ def state_machine_offline_left_pull_door(
         palm_pose=palm_target_pose,
         base_pose=base_target_pose,
         robot_initial_pose=robot_initial_pose,
+        reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
     )[0]
     _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
 
@@ -866,6 +888,7 @@ def state_machine_offline_left_pull_door(
         palm_pose=palm_target_pose,
         base_pose=base_target_pose,
         robot_initial_pose=robot_initial_pose,
+        reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
     )[0]
 
     _append_state(
@@ -887,6 +910,12 @@ def state_machine_offline_left_pull_door(
     # Base held 5 cm further back through the pull sweep too (0.6 -> 0.65), matching the
     # backed-off approach above so the arm does not have to re-close the gap mid-pull.
     pull_base_x_offset = 0.65
+    # Constant lateral shift of the base held through the pull, in WORLD y (+y = the robot's right,
+    # per this file's robot-faces--x convention). The base y was previously a pure function of theta
+    # with no standing offset, so the chassis -- and the arx bolted to it -- tracked straight up the
+    # line the arm was working along. Measured: this is what clears the END of the pull sweep, where
+    # panda_link3 was hitting arx link4.
+    pull_base_y_offset = 0.08
     pull_base_y_gain = -0.1 / 1.45
 
     # Keep the lever pressed against its stop for most of the pull, then let it spring back over the
@@ -937,7 +966,7 @@ def state_machine_offline_left_pull_door(
 
         base_target_pos = handle_pos.clone()
         base_target_pos[:, 0] += pull_base_x_offset
-        base_target_pos[:, 1] = theta.item() * pull_base_y_gain
+        base_target_pos[:, 1] = pull_base_y_offset + theta.item() * pull_base_y_gain
         pull_open_base_tilt_yaw = 0.2
         _, _, _base_yaw = euler_xyz_from_quat(base_target_rot)
         pull_open_tilt_base_rot = get_rotation_quat(0.0, 0.0, _base_yaw.item() + pull_open_base_tilt_yaw, device)
@@ -968,6 +997,7 @@ def state_machine_offline_left_pull_door(
             palm_pose=palm_target_pose,
             base_pose=base_target_pose,
             robot_initial_pose=robot_initial_pose,
+            reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
             num_attempts=1,  # loop body: single seed for continuity (no random-restart branch jumps)
         )[0]
 
@@ -1004,12 +1034,16 @@ def state_machine_offline_left_pull_door(
         device,
     )
     push_palm_rot = get_rotation_quat(0, 0, math.pi, device)
-    # Retract the arm further BACKWARD (away from the door): retreat_local_x is the base-local
-    # forward offset of the retracted palm, so a more-negative value pulls the palm behind the base.
-    # Was +0.10 (slightly forward of the base); now -0.10 to keep the arm clear of the panel.
-    retreat_local_x = -0.05
-    retreat_local_y = -0.3
-    retreat_z_lift = 0.15
+    # Retract target: anchored on the PALM in world axes with an ABSOLUTE height, not on the base
+    # with a base-yaw-rotated offset and a handle-relative lift. The old form aimed the hand 0.3 m
+    # from the base axis, which IS the arx camera arm's volume (its links sit within |xy| = 0.282 at
+    # z = 0.65..0.75), and the relative lift meant the height that separated them varied with handle
+    # height. 1.25 m is at the practical top of the arm's reach from the blocking base pose -- pushing
+    # it to 1.35 measured WORSE, because the target goes unreachable and the IK returns a stretched
+    # best-effort pose.
+    retreat_world_x = 0.30
+    retreat_world_y = -0.30
+    retreat_palm_z = 1.25
     # Larger x offset magnitude (was -0.3) so the arm reaches a bit further forward into the panel.
     # Contact point is now the panel CENTER (get_board_pos); only a small x offset so we push
     # near the center, not toward the hinge axis (short lever -> strong forces on the franka).
@@ -1032,6 +1066,7 @@ def state_machine_offline_left_pull_door(
         palm_pose=palm_target_pose,
         base_pose=base_target_pose,
         robot_initial_pose=robot_initial_pose,
+        reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
     )[0]
 
     _append_state(
@@ -1058,6 +1093,7 @@ def state_machine_offline_left_pull_door(
         palm_pose=palm_target_pose,
         base_pose=base_target_pose,
         robot_initial_pose=robot_initial_pose,
+        reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
     )[0]
 
     _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
@@ -1075,17 +1111,10 @@ def state_machine_offline_left_pull_door(
     # -------------------------
     # Step 6: Retract the arm to the right side of the tilted base
     # -------------------------
-    tilted_base_yaw_world = robot_initial_yaw + tilt_base_yaw
-    retreat_dx, retreat_dy = _rotate_xy_counterclockwise(
-        retreat_local_x,
-        retreat_local_y,
-        tilted_base_yaw_world,
-    )
-
-    retreat_palm_pos = base_target_pos.clone()
-    retreat_palm_pos[:, 0] += retreat_dx
-    retreat_palm_pos[:, 1] += retreat_dy
-    retreat_palm_pos[:, 2] = palm_target_pose[:, 2].clone() + retreat_z_lift
+    retreat_palm_pos = palm_target_pose[:, :3].clone()
+    retreat_palm_pos[:, 0] += retreat_world_x
+    retreat_palm_pos[:, 1] += retreat_world_y
+    retreat_palm_pos[:, 2] = retreat_palm_z
     retreat_palm_pose = _make_pose(retreat_palm_pos, default_palm_rot)
 
     q_robot[:10] = solve_ik(
@@ -1094,6 +1123,7 @@ def state_machine_offline_left_pull_door(
         palm_pose=retreat_palm_pose,
         base_pose=None,
         robot_initial_pose=robot_initial_pose,
+        reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
         num_attempts=1,  # retract must continue smoothly from the blocking pose; the random-
         # restart fallback would otherwise flip the arm ~180 deg to a different IK branch.
     )[0]
@@ -1130,6 +1160,7 @@ def state_machine_offline_left_pull_door(
         palm_pose=palm_target_pose,
         base_pose=None,
         robot_initial_pose=robot_initial_pose,
+        reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
     )[0]
     _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
 
@@ -1166,6 +1197,7 @@ def state_machine_offline_left_pull_door(
         palm_pose=palm_target_pose,
         base_pose=None,
         robot_initial_pose=robot_initial_pose,
+        reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
     )[0]
     _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
 
@@ -1209,6 +1241,7 @@ def state_machine_offline_left_pull_door(
             palm_pose=palm_target_pose,
             base_pose=base_target_pose,
             robot_initial_pose=robot_initial_pose,
+            reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
             num_attempts=1,  # loop body: single seed for continuity (no random-restart branch jumps)
         )[0]
         _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
@@ -1232,6 +1265,7 @@ def state_machine_offline_left_pull_door(
         palm_pose=None,
         base_pose=base_target_pose,
         robot_initial_pose=robot_initial_pose,
+        reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
     )[0]
     q_robot[3:10] = franka_default_q
     _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)

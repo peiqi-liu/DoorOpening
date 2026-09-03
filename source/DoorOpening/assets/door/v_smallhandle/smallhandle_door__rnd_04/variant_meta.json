@@ -1,0 +1,258 @@
+{
+  "generator": "generate_randomized_doors_scratch.py",
+  "variant_name": "smallhandle_door__rnd_04",
+  "source_asset": null,
+  "direction_pair_key": "smallhandle_door__rnd_04",
+  "target_properties": {
+    "panel_width_m": 0.901191053346504,
+    "panel_height_m": 2.1097890413515805,
+    "handle_height_m": 0.8993685980195517,
+    "handle_to_edge_distance_m": 0.14376080858015622,
+    "flip_hinge_side": false,
+    "opening_direction": "push",
+    "handle_side": "max"
+  },
+  "actual_properties": {
+    "panel_width_m": 0.901191053346504,
+    "panel_height_m": 2.1097890413515805,
+    "frame_height_m": 2.2700937069310925,
+    "frame_panel_extra_height_m": 0.16030466557951195,
+    "handle_height_m": 0.8993685980195517,
+    "handle_to_edge_distance_m": 0.14376080858015627,
+    "handle_side": "max",
+    "opening_direction": "push",
+    "handle_attachment_joint": "joint_2",
+    "board_min_x": 0.0,
+    "board_max_x": 0.901191053346504,
+    "board_min_y": 0.0,
+    "board_max_y": 2.1097890413515805
+  },
+  "source_properties": {
+    "panel_width_m": 0.901191053346504,
+    "panel_height_m": 2.1097890413515805,
+    "panel_thickness_m": 0.033433516785296324,
+    "frame_height_m": 2.2700937069310925,
+    "frame_panel_extra_height_m": 0.16030466557951195,
+    "handle_height_m": 0.8993685980195517,
+    "handle_to_edge_distance_m": 0.14376080858015627,
+    "handle_side": "max",
+    "opening_direction": "push"
+  },
+  "initial_state": {
+    "robot_world_pose": {
+      "pos": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "rot": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    "door_world_pose": {
+      "pos": [
+        0.0,
+        0.0,
+        0.03
+      ],
+      "rot": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    "robot_joint_names": [
+      "base_x_joint",
+      "base_y_joint",
+      "base_rotation_joint",
+      "panda_joint1",
+      "panda_joint2",
+      "panda_joint3",
+      "panda_joint4",
+      "panda_joint5",
+      "panda_joint6",
+      "panda_joint7"
+    ],
+    "robot_joint_pos": [
+      -0.2881713147189493,
+      -0.03705380154487797,
+      0.028756724115948984,
+      -0.03648088419073421,
+      -0.7651408977559595,
+      -0.035260622559998595,
+      -2.344200535982154,
+      0.011852433068093526,
+      1.5956950539403532,
+      0.029101107137671042
+    ],
+    "robot_base_joint_pos": [
+      -0.2881713147189493,
+      -0.03705380154487797,
+      0.028756724115948984
+    ],
+    "robot_franka_joint_names": [
+      "panda_joint1",
+      "panda_joint2",
+      "panda_joint3",
+      "panda_joint4",
+      "panda_joint5",
+      "panda_joint6",
+      "panda_joint7"
+    ],
+    "robot_franka_joint_pos": [
+      -0.03648088419073421,
+      -0.7651408977559595,
+      -0.035260622559998595,
+      -2.344200535982154,
+      0.011852433068093526,
+      1.5956950539403532,
+      0.029101107137671042
+    ],
+    "door_joint_pos": [
+      0.0,
+      0.0
+    ],
+    "start_base_sampling": "paired",
+    "start_base_radius_m": 1.2887041244109037,
+    "start_base_radius_range_m": [
+      1.0,
+      1.5
+    ],
+    "start_base_angle_range_deg": 8.0,
+    "start_base_pair_seed": 0,
+    "start_base_pair_key": "smallhandle_door__rnd_04",
+    "sampled_robot_world_pose": {
+      "pos": [
+        1.2881713147189493,
+        0.03705380154487794,
+        0.0
+      ],
+      "rot": [
+        0.014377866639148132,
+        0.0,
+        0.0,
+        -0.9998966331330988
+      ]
+    },
+    "sampled_approach_angle_rad": 0.028756724115949234
+  },
+  "topology": {
+    "links": [
+      "base",
+      "link_0",
+      "link_1",
+      "link_2"
+    ],
+    "joints": [
+      "joint_0",
+      "joint_1",
+      "joint_2"
+    ]
+  },
+  "panel": {
+    "width_m": 0.901191053346504,
+    "height_m": 2.1097890413515805,
+    "thickness_m": 0.033433516785296324,
+    "bbox_link1": [
+      0.0,
+      0.0,
+      -0.016716758392648162,
+      0.901191053346504,
+      2.1097890413515805,
+      0.016716758392648162
+    ]
+  },
+  "frame": {
+    "post_width_m": 0.09285736437195052,
+    "head_height_m": 0.14887880998947964,
+    "depth_m": 0.21477141664935645,
+    "clearance_m": 0.01142585559003223
+  },
+  "door": {
+    "hinge_side": "min",
+    "handle_side": "max",
+    "opening_direction": "push",
+    "joint_1_origin_link0": [
+      -0.450595526673252,
+      0.0,
+      0.0
+    ],
+    "joint_1_axis": [
+      0.0,
+      1.0,
+      0.0
+    ]
+  },
+  "handle": {
+    "type": "straight",
+    "mesh": "texture_dae/handle_straight.obj",
+    "joint_origin_link1": [
+      0.7574302447663477,
+      0.8993685980195517,
+      0.016716758392648162
+    ],
+    "joint_axis_link1": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "lever_direction_link2": [
+      -1.0,
+      0.0,
+      0.0
+    ],
+    "return_direction_link2": [
+      0.0,
+      0.0,
+      -1.0
+    ],
+    "radius_m": 0.005588524277200357,
+    "lever_thickness_m": 0.01122508214671369,
+    "stem_length_m": 0.03113671438210508,
+    "panel_underside_gap_m": 0.025524173308748233,
+    "plate_underside_gap_m": null,
+    "lever_length_m": 0.03344910707893819,
+    "return_length_m": 0.0,
+    "return_tip_clearance_m": 0.03113671438210508,
+    "has_bump": false,
+    "bump_shape": "none",
+    "bump_protrusion_m": 0.0,
+    "bump_height_m": 0.11283678179661027,
+    "bump_width_m": 0.029546633923833263,
+    "bump_radius_m": 0.024352610821365084,
+    "plate_min_link1": null,
+    "plate_max_link1": null,
+    "collision_primitives": [
+      {
+        "name": "handle_stem",
+        "origin_xyz": [
+          0.0,
+          0.0,
+          0.01556835719105254
+        ],
+        "size": [
+          0.011177048554400715,
+          0.011177048554400715,
+          0.03113671438210508
+        ]
+      },
+      {
+        "name": "handle_main_lever",
+        "origin_xyz": [
+          -0.016724553539469094,
+          0.0,
+          0.03113671438210508
+        ],
+        "size": [
+          0.03344910707893819,
+          0.01122508214671369,
+          0.01122508214671369
+        ]
+      }
+    ]
+  }
+}

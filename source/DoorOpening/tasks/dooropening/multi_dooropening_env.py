@@ -1407,33 +1407,11 @@ class DooropeningEnv(DirectRLEnv):
         #     dim=-1,
         # )
 
-        # Reference joint-angle error fed to the policy: base + arm only (the gripper opening is
-        # NOT differenced against the reference here). Must stay in sync with the critic term below
-        # and with the `+ len(base_joints) + len(arm_joints)` line in the cfg's observation_space.
-        policy_joint_ref_err = torch.cat(
-            (
-                policy_joint_pos[:, self._target_base_rot_slice.start : self._target_base_xy_slice.stop]
-                - self.ref_robot_base_joint_pos.to(policy_joint_pos),
-                policy_joint_pos[:, self._target_arm_slice] - self.ref_robot_arm_joint_pos.to(policy_joint_pos),
-            ),
-            dim=-1,
-        ).unsqueeze(dim=1)
-        # policy_joint_ref_err = torch.cat(
-        #     (
-        #         clean_joint_pos[:, self._target_base_rot_slice.start : self._target_base_xy_slice.stop]
-        #         - self.ref_robot_base_joint_pos.to(clean_joint_pos),
-        #         clean_joint_pos[:, self._target_arm_slice] - self.ref_robot_arm_joint_pos.to(clean_joint_pos),
-        #         clean_joint_pos[:, self._target_finger_slice] - self.ref_robot_finger_joint_pos.to(clean_joint_pos),
-        #     ),
-        #     dim=-1,
-        # ).unsqueeze(dim=1)
-
         policy_obs = torch.cat(
             (
                 policy_joint_pos.unsqueeze(dim=1),
                 policy_joint_vel.unsqueeze(dim=1),
                 self.robot_dof_targets.unsqueeze(dim = 1),
-                policy_joint_ref_err,
                 policy_key_pos_err,
                 policy_robot_key_body_pos_local.reshape(self.num_envs, 1, -1),
                 policy_robot_key_body_euler.reshape(self.num_envs, 1, -1),
@@ -1448,22 +1426,11 @@ class DooropeningEnv(DirectRLEnv):
             dim=-1,
         )
 
-        # Reference joint-angle error fed to the critic. Same layout as the policy term above.
-        clean_joint_ref_err = torch.cat(
-            (
-                clean_joint_pos[:, self._target_base_rot_slice.start : self._target_base_xy_slice.stop]
-                - self.ref_robot_base_joint_pos.to(clean_joint_pos),
-                clean_joint_pos[:, self._target_arm_slice] - self.ref_robot_arm_joint_pos.to(clean_joint_pos),
-            ),
-            dim=-1,
-        ).unsqueeze(dim=1)
-
         critic_obs = torch.cat(
             (
                 clean_joint_pos.unsqueeze(dim=1),
                 clean_joint_vel.unsqueeze(dim=1),
                 self.robot_dof_targets.unsqueeze(dim=1),
-                clean_joint_ref_err,
                 key_pos_err,
                 robot_key_body_pos.reshape(self.num_envs, 1, -1),
                 robot_key_body_euler.reshape(self.num_envs, 1, -1),

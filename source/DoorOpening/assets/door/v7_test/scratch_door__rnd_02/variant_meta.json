@@ -1,0 +1,258 @@
+{
+  "generator": "generate_randomized_doors_scratch.py",
+  "variant_name": "scratch_door__rnd_02",
+  "source_asset": null,
+  "direction_pair_key": "scratch_door__rnd_02",
+  "target_properties": {
+    "panel_width_m": 0.9,
+    "panel_height_m": 2.017286342613758,
+    "handle_height_m": 1.04,
+    "handle_to_edge_distance_m": 0.09958742451389906,
+    "flip_hinge_side": false,
+    "opening_direction": "push",
+    "handle_side": "max"
+  },
+  "actual_properties": {
+    "panel_width_m": 0.9,
+    "panel_height_m": 2.017286342613758,
+    "frame_height_m": 2.20372544937522,
+    "frame_panel_extra_height_m": 0.18643910676146191,
+    "handle_height_m": 1.04,
+    "handle_to_edge_distance_m": 0.09958742451389901,
+    "handle_side": "max",
+    "opening_direction": "push",
+    "handle_attachment_joint": "joint_2",
+    "board_min_x": 0.0,
+    "board_max_x": 0.9,
+    "board_min_y": 0.0,
+    "board_max_y": 2.017286342613758
+  },
+  "source_properties": {
+    "panel_width_m": 0.9,
+    "panel_height_m": 2.017286342613758,
+    "panel_thickness_m": 0.04864341338774596,
+    "frame_height_m": 2.20372544937522,
+    "frame_panel_extra_height_m": 0.18643910676146191,
+    "handle_height_m": 0.94,
+    "handle_to_edge_distance_m": 0.09958742451389901,
+    "handle_side": "max",
+    "opening_direction": "push"
+  },
+  "initial_state": {
+    "robot_world_pose": {
+      "pos": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "rot": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    "door_world_pose": {
+      "pos": [
+        0.0,
+        0.0,
+        0.03
+      ],
+      "rot": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    "robot_joint_names": [
+      "base_x_joint",
+      "base_y_joint",
+      "base_rotation_joint",
+      "panda_joint1",
+      "panda_joint2",
+      "panda_joint3",
+      "panda_joint4",
+      "panda_joint5",
+      "panda_joint6",
+      "panda_joint7"
+    ],
+    "robot_joint_pos": [
+      -0.05413554779778518,
+      0.0019099608336249738,
+      -0.0018118720572104507,
+      0.016865271588418815,
+      -0.8331418705918894,
+      -0.0038304713700234166,
+      -2.3893896523016904,
+      -0.03829042055182681,
+      1.5266917687280277,
+      0.026823298847252083
+    ],
+    "robot_base_joint_pos": [
+      -0.05413554779778518,
+      0.0019099608336249738,
+      -0.0018118720572104507
+    ],
+    "robot_franka_joint_names": [
+      "panda_joint1",
+      "panda_joint2",
+      "panda_joint3",
+      "panda_joint4",
+      "panda_joint5",
+      "panda_joint6",
+      "panda_joint7"
+    ],
+    "robot_franka_joint_pos": [
+      0.016865271588418815,
+      -0.8331418705918894,
+      -0.0038304713700234166,
+      -2.3893896523016904,
+      -0.03829042055182681,
+      1.5266917687280277,
+      0.026823298847252083
+    ],
+    "door_joint_pos": [
+      0.0,
+      0.0
+    ],
+    "start_base_sampling": "paired",
+    "start_base_radius_m": 1.0541372781005909,
+    "start_base_radius_range_m": [
+      1.0,
+      1.5
+    ],
+    "start_base_angle_range_deg": 8.0,
+    "start_base_pair_seed": 0,
+    "start_base_pair_key": "scratch_door__rnd_02",
+    "sampled_robot_world_pose": {
+      "pos": [
+        1.0541355477977852,
+        -0.0019099608336249805,
+        0.0
+      ],
+      "rot": [
+        0.0009059359046853088,
+        0.0,
+        0.0,
+        0.9999995896399841
+      ]
+    },
+    "sampled_approach_angle_rad": -0.001811872057210312
+  },
+  "topology": {
+    "links": [
+      "base",
+      "link_0",
+      "link_1",
+      "link_2"
+    ],
+    "joints": [
+      "joint_0",
+      "joint_1",
+      "joint_2"
+    ]
+  },
+  "panel": {
+    "width_m": 0.9,
+    "height_m": 2.017286342613758,
+    "thickness_m": 0.04864341338774596,
+    "bbox_link1": [
+      0.0,
+      0.0,
+      -0.02432170669387298,
+      0.9,
+      2.017286342613758,
+      0.02432170669387298
+    ]
+  },
+  "frame": {
+    "post_width_m": 0.143256485069346,
+    "head_height_m": 0.17509556236617765,
+    "depth_m": 0.09412425385442903,
+    "clearance_m": 0.01134354439528391
+  },
+  "door": {
+    "hinge_side": "min",
+    "handle_side": "max",
+    "opening_direction": "push",
+    "joint_1_origin_link0": [
+      -0.45,
+      0.0,
+      0.0
+    ],
+    "joint_1_axis": [
+      0.0,
+      1.0,
+      0.0
+    ]
+  },
+  "handle": {
+    "type": "straight",
+    "mesh": "texture_dae/handle_straight.obj",
+    "joint_origin_link1": [
+      0.800412575486101,
+      1.04,
+      0.02432170669387298
+    ],
+    "joint_axis_link1": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "lever_direction_link2": [
+      -1.0,
+      0.0,
+      0.0
+    ],
+    "return_direction_link2": [
+      0.0,
+      0.0,
+      -1.0
+    ],
+    "radius_m": 0.009737231987808478,
+    "lever_thickness_m": 0.024079613366150495,
+    "stem_length_m": 0.09621002310969431,
+    "panel_underside_gap_m": 0.08417021642661907,
+    "plate_underside_gap_m": null,
+    "lever_length_m": 0.11370491687098222,
+    "return_length_m": 0.06488684924636035,
+    "return_tip_clearance_m": 0.026516735689930494,
+    "has_bump": false,
+    "bump_shape": "none",
+    "bump_protrusion_m": 0.0,
+    "bump_height_m": 0.1391715127359961,
+    "bump_width_m": 0.0693154871965829,
+    "bump_radius_m": 0.02569974191722394,
+    "plate_min_link1": null,
+    "plate_max_link1": null,
+    "collision_primitives": [
+      {
+        "name": "handle_stem",
+        "origin_xyz": [
+          0.0,
+          0.0,
+          0.04810501155484716
+        ],
+        "size": [
+          0.019474463975616956,
+          0.019474463975616956,
+          0.09621002310969431
+        ]
+      },
+      {
+        "name": "handle_main_lever",
+        "origin_xyz": [
+          -0.05685245843549111,
+          0.0,
+          0.09621002310969431
+        ],
+        "size": [
+          0.11370491687098222,
+          0.024079613366150495,
+          0.024079613366150495
+        ]
+      }
+    ]
+  }
+}

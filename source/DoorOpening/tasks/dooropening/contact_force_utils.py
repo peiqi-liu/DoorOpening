@@ -77,9 +77,26 @@ FRANKA_BOX_DOOR_CONTACT_PRIM_PATH = "/World/envs/env_.*/Robot/franka_control_box
 # panda_link7 flange, and the whole hand (finger<->finger self-collision drove poses too
 # conservative). The fingers ARE separately checked against the panda_link7 flange -- see
 # SELF_COLLISION_HAND_* below.
-SELF_COLLISION_FRANKA_BODIES = ("panda_link2", "panda_link3", "panda_link4", "panda_link5", "panda_link6")
+# panda_link7 and panda_hand are INCLUDED: the wrist and hand are the end of the arm and therefore
+# the part that actually sweeps into the x5 camera arm during the retract/push swing. They used to be
+# excluded here (only link2..6 were checked), so the single most visible self-collision on this robot
+# -- franka wrist/hand against the camera arm -- was sensed by nothing and penalized zero. Excluded
+# still: panda_link0/link1 (base-adjacent mount, cannot reach the camera arm).
+SELF_COLLISION_FRANKA_BODIES = (
+    "panda_link2",
+    "panda_link3",
+    "panda_link4",
+    "panda_link5",
+    "panda_link6",
+    "panda_link7",
+    "panda_hand",
+)
 # The other two groups the franka arm is checked AGAINST (kept fixed relative to each other).
-SELF_COLLISION_X5_BODIES = ("link2", "link3", "link4", "link5", "x5_camera_link")
+# x5_base_link and link1 were missing relative to X5_BODY_NAMES (which the x5<->door sensors use), so
+# a franka body striking the camera arm's mount or first link went unpenalized. This tuple must stay
+# FIRST in _self_collision_filter_prims below: the env's franka<->arx force helper slices the filter
+# axis by range(len(SELF_COLLISION_X5_BODIES)).
+SELF_COLLISION_X5_BODIES = ("x5_base_link", "link1", "link2", "link3", "link4", "link5", "x5_camera_link")
 SELF_COLLISION_BASE_BODIES = ("tidybot2_base_link", "franka_control_box")
 
 # The fixed door frame (URDF link_0, merged to `base` at runtime): a franka body striking the
@@ -112,7 +129,12 @@ SELF_COLLISION_FRANKA_FILTER_PRIM_PATHS = _self_collision_filter_prims(SELF_COLL
 FRANKA_FLANGE_BODY = "panda_link7"
 HAND_DIGIT_BODIES = ("panda_leftfinger", "panda_rightfinger")
 SELF_COLLISION_HAND_PRIM_PATH = _self_collision_group_prim_path(HAND_DIGIT_BODIES)
-SELF_COLLISION_HAND_FILTER_PRIM_PATHS = (f"/World/envs/env_.*/Robot/{FRANKA_FLANGE_BODY}",)
+# Flange AND the x5 camera arm. The fingers stick out ~10 cm past panda_hand, so on the swing to the
+# panel-hold pose they lead the arm into the camera arm; filtering them only against the flange left
+# that unsensed. Still no intra-hand entry, so finger<->finger remains unpenalized by construction.
+SELF_COLLISION_HAND_FILTER_PRIM_PATHS = (
+    f"/World/envs/env_.*/Robot/{FRANKA_FLANGE_BODY}",
+) + tuple(f"/World/envs/env_.*/Robot/{name}" for name in SELF_COLLISION_X5_BODIES)
 
 
 def get_filtered_contact_force_w(sensor, expected_num_envs=None, filter_indices: tuple[int, ...] | None = None) -> torch.Tensor:

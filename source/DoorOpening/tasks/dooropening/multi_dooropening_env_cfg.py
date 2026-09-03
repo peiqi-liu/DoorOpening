@@ -661,10 +661,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # - proprioception: current actuated joint positions + joint velocities + PD targets
     #   => `actuated_joints_num * 3`
     #   Adding the 4 ARX joints increases this block by `4 * 3 = 12` dims.
-    # - current base and arm joint diffs to the reference motion (ENABLED in _build_observations)
-    #   => `len(base_joints) + len(arm_joints)`, counted at the bottom of observation_space.
-    #      NOT joint_reference_error_observation_space: that constant still includes the gripper
-    #      DOF, which the observation no longer carries.
     # - key-body position tracking error in the base frame
     #   => `len(robot_key_bodies) * 3`
     # - non-base key-body poses in the base frame:
@@ -681,11 +677,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # - future reference motion summary at twist indices
     #   => currently disabled in _build_observations(), so not counted in observation_space
     proprioception_observation_space = actuated_joints_num * 3
-    # Reference joint-angle error (sim reading - reference) for base + arm(franka) + gripper.
-    # UNUSED by observation_space: the live obs term covers base + arm only (the gripper's
-    # reference opening is not differenced), so it is counted as len(base_joints)+len(arm_joints)
-    # below. Kept for the day the gripper term is added back to _build_observations.
-    joint_reference_error_observation_space = len(base_joints) + len(arm_joints) + len(finger_joints)
     key_body_error_observation_space = len(robot_key_bodies) * 3
     robot_pose_observation_space = (len(robot_key_bodies) - 1) * (3 + 6)
     base_velocity_observation_space = 6
@@ -701,9 +692,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         + door_body_observation_space
         + door_joint_observation_space
         + arx_joint_reference_observation_space
-        # base + arm reference joint-angle error (policy_joint_ref_err / clean_joint_ref_err).
-        + len(base_joints)
-        + len(arm_joints)
     )
     state_space = observation_space
     num_observations = observation_space

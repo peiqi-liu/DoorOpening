@@ -1,0 +1,215 @@
+hidden_dim: 256
+type_dim: 8
+dropout: 0.0
+
+normalize_state: True
+normalize_action: True
+action_space: "absolute"
+action_dim: 11  # base(3) + franka arm(7) + gripper(1); must equal the env action_space
+aux_weight: 0.1
+mode_prediction:
+  enabled: true
+  num_modes: 2  # Push/pull discriminator only.
+  weight: 0.01
+  return_latent: true
+force_prediction:
+  enabled: false
+  output_dim: 3
+  weight: 0.01
+
+push_pull_condition:
+  enabled: true
+  source: predicted
+  obs_key: push_pull_cond
+  detach_predicted_condition: true
+  input_dim: 2
+  feed_format: one_hot
+  hidden_dims: [64, 256]
+  dropout: 0.0
+  use_layer_norm: true
+  perturb:
+    enabled: true
+    probability: 0.1
+    mode: random_one_hot
+    apply_to: input_only
+    random_prob_min: 0.0
+    random_prob_max: 1.0
+    step_gate:
+      enabled: true
+      start: 40
+      end: 100
+    wrong_class_confidence_range: [0.85, 0.95]
+
+door_pcd_num_points: 30000  # Dense scene-door sampling before local policy crops are taken.
+local_pcd_range: [1.2, 0.25, 0.25]
+x_direction_cutoff: -0.5
+
+temporal_obs:
+  history_s: 1.0
+  obs_delay_s: [0.0, 0.0]
+  command_delay_s: [0.0, 0.0]
+
+temporal_state_encoders:
+  enabled: true
+  timestamps_ms: [0, 300, 600, 900, 1200, 1500]
+  fields:
+    - q_arm
+    - q_hand
+    - target_err_arm
+    - target_err_hand
+    - base_vel
+  hidden_dims: [256, 256]
+  output_dim: 256
+  activation: elu
+  dropout: 0.0
+  use_layer_norm: true
+  add_field_type_embedding: true
+  add_time_embedding: true
+
+observation_lag:
+  enabled: true
+  max_jitter_ms: 100
+  mode: symmetric
+  apply_to_proprio: true
+  apply_to_pointcloud: false
+  per_env: true
+  per_timestamp: true
+  clamp_to_available_history: true
+
+pcd_encoders_cfg:
+  local_pcd_t:
+    type: "pointnet"
+    num_output_tokens: 128
+    num_points: [2500, 1000, 0]  # Policy door input = base crop + palm crop; robot points are configured below.
+    use_pcd: true
+
+state_encoders_cfg:
+  q_arm:
+    input_dim: 7
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  q_hand:
+    input_dim: 1  # gripper: ONE prismatic DOF (was 9 on the LEAP hand)
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  aux_handle_pos:
+    input_dim: 3
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  push_pull_cond:
+    input_dim: 2
+    hidden_dims: [64, 256]
+    dropout: 0.0
+    use_layer_norm: true
+    use_state: true
+  base_vel:
+    input_dim: 3
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  target_err_arm:
+    input_dim: 7
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  target_err_hand:
+    input_dim: 1  # gripper: ONE prismatic DOF (was 9 on the LEAP hand)
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+
+transformer_cfg:
+  type: "encoder_decoder"
+  encoder_layers: 6
+  decoder_layers: 6
+  encoder_heads: 8
+  decoder_heads: 8
+  encoder_dim_feedforward: 1024
+  decoder_dim_feedforward: 1024
+
+dagger:
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  num_iters: 250000
+  teacher_forcing_warmup_iters: 5000
+  teacher_forcing_transition_iters: 20000
+  teacher_forcing_min_beta: 0.0
+  aux_feedback_to_policy: true  # When false, aux input stays zero instead of feeding back predictions.
+  aux_pregrasp_dropout_prob: 0.05  # Conservative start: 0.5% per pregrasp step while predicted aux feedback is carried over.
+  prediction_training:
+    loss_window_start: 40
+    loss_window_end: 100
+    outside_window_weight: 0.25
+  force_training:
+    sensor_name: "contact_forces_door2"
+    target_frame: "base"  # Predict forces in robot-base coordinates so the target matches the policy's main reference frame.
+    loss_type: "direction_contrastive"
+    contrastive_temperature: 0.1
+  door_geometry_aug:
+    enabled: false
+    env_prob: 1.0
+    global_shift_std_m: [0.010, 0.010, 0.005]
+    global_shift_clip_m: [0.025, 0.025, 0.010]
+    handle_child_shift_std_m: [0.000, 0.012, 0.012]
+    handle_child_shift_clip_m: [0.000, 0.030, 0.030]
+    handle_scale_range: [0.97, 1.03]
+    panel_width_scale_range: [0.98, 1.02]
+    panel_width_axis: 1
+    panel_width_anchor: "origin"
+  log_interval: 100
+  save_interval: 5000
+  reset_progress_total: 50000
+  adr_reset_progress_total: 10000
+  pointcloud_source: "lidar"
+  robot_num_points: 30000
+  append_robot_gt_to_policy_cloud: true
+  robot_gt_policy_points: 2000  # Policy robot input appended after the two door crops above.
+  robot_pointcloud_filter:
+    enabled: true
+    sdf_cutoff: 0.02
+    max_points_per_process: 5000
+  sampler_render:
+    inflate_px: 2
+    jitter_std_m: 0.004
+    clip_mode: "post"
+    jitter_mode: "xyz"
+    use_compile: true
+    # RealSense-style edge-bleeding blur so the thin handle smears into a blurry bump. 0 disables.
+    blur_kernel_px: 7
+    blur_sigma_px: 3.0
+  lidar_render:
+    num_points: 10000
+    num_azimuth: 128
+    num_polar: 256
+    near_m: 0.1
+    far_m: 30.0
+    suppress_bins: 2
+    occlusion_eps_m: 0.02
+    occlusion_eps_rel: 0.01
+    jitter_std_m: 0.001
+    use_compile: true
+  wall_distractors:
+    enabled: true
+    num_points: 30000
+    resample_each_step: false  # Faster and more realistic than regenerating wall geometry every simulation step.
+    side_margin_m: [0.35, 0.80]  # In column mode, this is the sampled column width in meters.
+    bottom_margin_scale: [0.02, 0.08]
+    edge_gap_m: [0.015, 0.04]
+    depth_m: [0.1, 0.8]  # Extra thickness beyond the door slab; a larger range gives thicker jambs/walls.
+    center_offset_m: [-0.30, 0.30]  # Allow both recessed and protruding wall columns along the door-thickness axis.
+    side_margin_min_m: 0.10
+    face_jitter_m: 0.004
+  viser:
+    env_id: 0
+    raw:
+      enabled: false  # Save raw `.pt` replay chunks for offline debugging.
+      path: "viser_replay.pt"
+      save_interval: 6000  # Write one raw `.pt` file every N iterations.
+      max_points: 6000  # Raw replay is for debugging, not training; smaller clouds replay much better on laptops.
+      max_frames: 3000  # Keep at most this many frames in each raw `.pt` file; set 0 to disable the cap.
+  wandb:
+    enabled: false
