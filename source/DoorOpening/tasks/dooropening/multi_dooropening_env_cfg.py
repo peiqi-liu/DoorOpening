@@ -832,10 +832,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     success_far_push_ref_dist = 0.75
     # We are slowly increasing our tolerance on base position drift and slowly only resettting the env from the first key frame
     # This variable is used to indicate when we stop increasing the tolerance and reset the env from the first key frame for the greatest probability
-    reset_progress_total = 4e5
+    reset_progress_total = 2.5e5  # was 4e5, matched to the gripper branch
     use_motion_ref = True
     # ADR should ramp faster than the reference-motion reset curriculum so physics randomization is not lagging behind.
-    adr_reset_progress_total = 1.5e5
+    adr_reset_progress_total = 1e5  # was 1.5e5, matched to the gripper branch
 
     alive_base = 10.0
     alive_bonus = 20.0
