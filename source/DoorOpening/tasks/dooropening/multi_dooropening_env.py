@@ -1188,6 +1188,11 @@ class DooropeningEnv(DirectRLEnv):
         same q-relative delta.
         """
         base_stop = self._target_base_xy_slice.stop
+        # CLEAN base pose: robot.data.joint_pos is the raw physics state. Every noisy variant is a
+        # .clone() made for the observation only (_build_observations' policy_joint_pos,
+        # get_student_joint_pos_obs(use_noise=True)), so nothing writes noise back here. The command
+        # must integrate on truth -- feeding it the observation noise would inject an error the sim
+        # PD sees but hardware's never does, and it would random-walk the base target.
         q_base = self.robot.data.joint_pos[:, self._robot_base_dof_idx]
         targets = q_base + self.dt * scaled_base_actions
         return torch.clamp(
