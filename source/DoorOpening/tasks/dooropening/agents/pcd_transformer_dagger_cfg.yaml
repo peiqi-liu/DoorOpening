@@ -106,10 +106,11 @@ state_encoders_cfg:
   q_hand:
     # The gripper opening: ONE prismatic DOF (env cfg finger_joints), not the LEAP hand's 12.
     # Must equal len(env._robot_finger_dof_idx) -- the dagger feeds exactly those columns.
+    # OFF: fixed_open_gripper pins the fingers at GRIPPER_OPEN_WIDTH, so this channel is a constant.
     input_dim: 1
     hidden_dims: [128, 256]
     dropout: 0.0
-    use_state: true
+    use_state: false
   aux_handle_pos:
     input_dim: 3
     hidden_dims: [128, 256]
@@ -126,11 +127,13 @@ state_encoders_cfg:
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  # target_err_arm:
-  #   input_dim: 7
-  #   hidden_dims: [128, 256]
-  #   dropout: 0.0
-  #   use_state: true
+  target_err_arm:
+    # Current-step Franka tracking error (PD target - measured joint angle), 7 DOF. No temporal
+    # suffix, so it is sampled at this step only. Must equal len(env._robot_arm_dof_idx).
+    input_dim: 7
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
   # target_err_hand:
   #   input_dim: 1  # gripper opening error (one DOF)
   #   hidden_dims: [128, 256]

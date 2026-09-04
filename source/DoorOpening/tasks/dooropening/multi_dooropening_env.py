@@ -28,7 +28,7 @@ from DoorOpening.tasks.dooropening.dooropening_adr import DoorOpeningADR
 from DoorOpening.tasks.dooropening.multi_dooropening_env_cfg import DooropeningEnvCfg
 from DoorOpening.assets.glorbot.glorbot_cfg import glorbot_urdf_path, disable_collision_scope_instancing
 from isaaclab.sensors import Camera, ContactSensor
-from DoorOpening.constants.robot_constants import CAMERA_JOINT_DEFAULT_VALUES, CAMERA_JOINT_NAMES, FULL_JOINT_NAMES, ROBOT_KEY_BODY_NAMES
+from DoorOpening.constants.robot_constants import CAMERA_JOINT_DEFAULT_VALUES, CAMERA_JOINT_NAMES, FULL_JOINT_NAMES, GRIPPER_OPEN_WIDTH, ROBOT_KEY_BODY_NAMES
 from DoorOpening.constants.env_constants import DOOR_INITIAL_POS, ROBOT_INITIAL_POS
 from DoorOpening.tasks.dooropening.contact_force_utils import (
     BASE_DOOR_CONTACT_BODY_NAMES,
@@ -230,6 +230,9 @@ class DooropeningEnv(DirectRLEnv):
                 f"Expected base+arm+fingers = {expected_policy_actions}, got {self.num_policy_actions}."
             )
         self.fixed_arx_pose = bool(getattr(self.cfg, "fixed_arx_pose", True))
+        # Ignore the policy's gripper action and hold the fingers at the open width. The gripper DOF
+        # stays in the action vector (checkpoints keep loading); its command is simply overwritten.
+        self.fixed_open_gripper = bool(getattr(self.cfg, "fixed_open_gripper", False))
         self._policy_base_rot_slice = slice(0, 1)
         self._policy_base_xy_slice = slice(1, self.num_base_joints)
         self._policy_arm_slice = slice(self.num_base_joints, self.num_base_joints + self.num_arm_joints)
@@ -1176,6 +1179,31 @@ class DooropeningEnv(DirectRLEnv):
         )
         return scaled_actions
 
+    def base_target_from_scaled_actions(self, scaled_base_actions: torch.Tensor) -> torch.Tensor:
+        """Base PD targets these SCALED base actions produce: robot_dof_targets + dt * scaled.
+
+        Single source of truth: the distillation label is built by calling this and differencing the
+        result against the measured base pose, so the label can never drift from the physics.
+        """
+        base_stop = self._target_base_xy_slice.stop
+        targets = self.robot_dof_targets[:, :base_stop] + self.dt * scaled_base_actions
+        return torch.clamp(
+            targets,
+            self.robot_dof_lower_limits[:base_stop],
+            self.robot_dof_upper_limits[:base_stop],
+        )
+
+    def _pin_gripper_target_open(self, target_tensor: torch.Tensor) -> torch.Tensor:
+        if not self.fixed_open_gripper or self.num_finger_joints <= 0:
+            return target_tensor
+        pinned = target_tensor.clone()
+        pinned[:, self._target_finger_slice] = torch.clamp(
+            torch.as_tensor(GRIPPER_OPEN_WIDTH, device=target_tensor.device, dtype=target_tensor.dtype),
+            self.robot_dof_lower_limits[self._target_finger_slice],
+            self.robot_dof_upper_limits[self._target_finger_slice],
+        )
+        return pinned
+
     def _pin_arx_targets_to_fixed_pose(self, target_tensor: torch.Tensor) -> torch.Tensor:
         if not self.fixed_arx_pose or self.num_arx_joints <= 0:
             return target_tensor
@@ -1227,7 +1255,12 @@ class DooropeningEnv(DirectRLEnv):
         # delta actions
         self.scaled_actions = self._scale_actions(actions)
         targets = self.robot_dof_targets + self.dt * self.scaled_actions
+        # Base slice goes through the shared helper so the distillation label (which calls the same
+        # helper) describes exactly the target physics will store.
+        base_stop = self._target_base_xy_slice.stop
+        targets[:, :base_stop] = self.base_target_from_scaled_actions(self.scaled_actions[:, :base_stop])
         targets = self._pin_arx_targets_to_fixed_pose(targets)
+        targets = self._pin_gripper_target_open(targets)
         # NOTE: no explicit contact-sensor update() here. This runs BEFORE the physics step, so it
         # could only ever refresh last step's contacts, and scene.update() (called by
         # DirectRLEnv.step on every decimation substep) re-marks them outdated immediately after.
@@ -1274,6 +1307,7 @@ class DooropeningEnv(DirectRLEnv):
         applied_targets = self.applied_robot_dof_targets.clone()
         applied_targets += self._get_policy_target_noise()
         applied_targets = self._pin_arx_targets_to_fixed_pose(applied_targets)
+        applied_targets = self._pin_gripper_target_open(applied_targets)
         applied_targets = torch.clamp(applied_targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
         applied_targets = self._pin_arx_targets_to_fixed_pose(applied_targets)
         self._enforce_fixed_arx_joint_state()
@@ -1407,11 +1441,33 @@ class DooropeningEnv(DirectRLEnv):
         #     dim=-1,
         # )
 
+        # Reference joint-angle error fed to the policy: base + arm only (the gripper opening is
+        # NOT differenced against the reference here). Must stay in sync with the critic term below
+        # and with the `+ len(base_joints) + len(arm_joints)` line in the cfg's observation_space.
+        policy_joint_ref_err = torch.cat(
+            (
+                policy_joint_pos[:, self._target_base_rot_slice.start : self._target_base_xy_slice.stop]
+                - self.ref_robot_base_joint_pos.to(policy_joint_pos),
+                policy_joint_pos[:, self._target_arm_slice] - self.ref_robot_arm_joint_pos.to(policy_joint_pos),
+            ),
+            dim=-1,
+        ).unsqueeze(dim=1)
+        # policy_joint_ref_err = torch.cat(
+        #     (
+        #         clean_joint_pos[:, self._target_base_rot_slice.start : self._target_base_xy_slice.stop]
+        #         - self.ref_robot_base_joint_pos.to(clean_joint_pos),
+        #         clean_joint_pos[:, self._target_arm_slice] - self.ref_robot_arm_joint_pos.to(clean_joint_pos),
+        #         clean_joint_pos[:, self._target_finger_slice] - self.ref_robot_finger_joint_pos.to(clean_joint_pos),
+        #     ),
+        #     dim=-1,
+        # ).unsqueeze(dim=1)
+
         policy_obs = torch.cat(
             (
                 policy_joint_pos.unsqueeze(dim=1),
                 policy_joint_vel.unsqueeze(dim=1),
                 self.robot_dof_targets.unsqueeze(dim = 1),
+                policy_joint_ref_err,
                 policy_key_pos_err,
                 policy_robot_key_body_pos_local.reshape(self.num_envs, 1, -1),
                 policy_robot_key_body_euler.reshape(self.num_envs, 1, -1),
@@ -1426,11 +1482,22 @@ class DooropeningEnv(DirectRLEnv):
             dim=-1,
         )
 
+        # Reference joint-angle error fed to the critic. Same layout as the policy term above.
+        clean_joint_ref_err = torch.cat(
+            (
+                clean_joint_pos[:, self._target_base_rot_slice.start : self._target_base_xy_slice.stop]
+                - self.ref_robot_base_joint_pos.to(clean_joint_pos),
+                clean_joint_pos[:, self._target_arm_slice] - self.ref_robot_arm_joint_pos.to(clean_joint_pos),
+            ),
+            dim=-1,
+        ).unsqueeze(dim=1)
+
         critic_obs = torch.cat(
             (
                 clean_joint_pos.unsqueeze(dim=1),
                 clean_joint_vel.unsqueeze(dim=1),
                 self.robot_dof_targets.unsqueeze(dim=1),
+                clean_joint_ref_err,
                 key_pos_err,
                 robot_key_body_pos.reshape(self.num_envs, 1, -1),
                 robot_key_body_euler.reshape(self.num_envs, 1, -1),

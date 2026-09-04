@@ -388,6 +388,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     asymmetric_obs = True
 
     viewer: ViewerCfg = ViewerCfg(eye=(1.5, -2.0, 1.0), lookat=(0.4, 0.0, 0.7), origin_type="env")
+    # Hold the gripper at GRIPPER_OPEN_WIDTH and ignore the policy's finger action. The DOF stays in
+    # the action space, so checkpoints keep loading -- its command is just overwritten.
+    fixed_open_gripper = True
     door_handle_effort_limit_range_nm = (1.0, 5.0)
     door_handle_effort_limit_sim = door_handle_effort_limit_range_nm[0]
 
@@ -661,6 +664,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # - proprioception: current actuated joint positions + joint velocities + PD targets
     #   => `actuated_joints_num * 3`
     #   Adding the 4 ARX joints increases this block by `4 * 3 = 12` dims.
+    # - current base and arm joint diffs to the reference motion (ENABLED in _build_observations)
+    #   => `len(base_joints) + len(arm_joints)`, counted at the bottom of observation_space.
+    #      NOT joint_reference_error_observation_space: that constant still includes the gripper
+    #      DOF, which the observation no longer carries.
     # - key-body position tracking error in the base frame
     #   => `len(robot_key_bodies) * 3`
     # - non-base key-body poses in the base frame:
@@ -677,6 +684,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # - future reference motion summary at twist indices
     #   => currently disabled in _build_observations(), so not counted in observation_space
     proprioception_observation_space = actuated_joints_num * 3
+    joint_reference_error_observation_space = len(base_joints) + len(arm_joints) + len(finger_joints)
     key_body_error_observation_space = len(robot_key_bodies) * 3
     robot_pose_observation_space = (len(robot_key_bodies) - 1) * (3 + 6)
     base_velocity_observation_space = 6
@@ -692,6 +700,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         + door_body_observation_space
         + door_joint_observation_space
         + arx_joint_reference_observation_space
+        # base + arm reference joint-angle error (policy_joint_ref_err / clean_joint_ref_err).
+        + len(base_joints)
+        + len(arm_joints)
     )
     state_space = observation_space
     num_observations = observation_space

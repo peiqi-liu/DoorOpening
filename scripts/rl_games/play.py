@@ -841,6 +841,110 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             f"[AUDIT]   reached last ref frame: {n_ref}/{len(rows)}  (clock-driven, not achievement)"
         )
 
+    _bj = list(play_env.cfg.base_joints)
+    base_audit_state = {
+        "dof": play_env._robot_base_dof_idx.detach().clone(),
+        "rot_local": _bj.index("base_rotation_joint"),
+        "xy_local": [_bj.index("base_x_joint"), _bj.index("base_y_joint")],
+        "scale": float(play_env.cfg.base_action_scale),
+        "every": 30,  # one line per sim second at 30 Hz
+        "step": 0,
+        "peak_lag_xy": 0.0,
+        "peak_lag_yaw": 0.0,
+        "peak_windup_xy": 0.0,
+        "peak_windup_yaw": 0.0,
+        "finger_dof": play_env._robot_finger_dof_idx.detach().clone(),
+        "finger_slice": play_env._target_finger_slice,
+    }
+    _kp = play_env.robot.data.joint_stiffness[:, base_audit_state["dof"]]
+    _kd = play_env.robot.data.joint_damping[:, base_audit_state["dof"]]
+    _ix, _iy = base_audit_state["xy_local"]
+    _ir = base_audit_state["rot_local"]
+    print(
+        "[BASE-AUDIT] enabled. Base PD gains (env 0): "
+        f"xy kp={_kp[0, _ix].item():.0f} kd={_kd[0, _ix].item():.0f}  "
+        f"yaw kp={_kp[0, _ir].item():.0f} kd={_kd[0, _ir].item():.0f}. "
+        f"base_action_scale={base_audit_state['scale']:.3f}, dt={float(play_env.dt):.5f}s.\n"
+        "[BASE-AUDIT]   gain  = realized / commanded base speed (1.0 = the velocity command is honoured).\n"
+        "[BASE-AUDIT]   lag   = |PD target - measured base pose|; kd*v/kp of it is the offset needed to\n"
+        "[BASE-AUDIT]           sustain the current speed, so windup = lag - kd*v/kp is banked motion the\n"
+        "[BASE-AUDIT]           base will replay once the command relaxes. Real velocity-commanded bases\n"
+        "[BASE-AUDIT]           have no such memory, so sustained windup is the sim2real gap."
+    )
+
+    def _log_base_command_audit(step_actions):
+        st = base_audit_state
+        st["step"] += 1
+        dof, scale = st["dof"], st["scale"]
+        ix, iy, ir = st["xy_local"][0], st["xy_local"][1], st["rot_local"]
+
+        # Commanded: the same clamp+scale the env applies in _scale_actions.
+        cmd = step_actions[:, : dof.numel()].clamp(-1.0, 1.0) * scale
+        cmd_xy = cmd[:, [ix, iy]].norm(dim=-1)
+        cmd_yaw = cmd[:, ir].abs()
+
+        qd = play_env.robot.data.joint_vel[:, dof]
+        act_xy = qd[:, [ix, iy]].norm(dim=-1)
+        act_yaw = qd[:, ir].abs()
+
+        # applied_robot_dof_targets is what the PD actually sees (post action-latency).
+        lag = (play_env.applied_robot_dof_targets[:, : dof.numel()] - play_env.robot.data.joint_pos[:, dof]).abs()
+        kp = play_env.robot.data.joint_stiffness[:, dof]
+        kd = play_env.robot.data.joint_damping[:, dof]
+        # Offset the PD needs just to sustain the CURRENT speed; anything past it is banked motion.
+        need = kd * qd.abs() / kp.clamp_min(1e-6)
+        windup = (lag - need).clamp_min(0.0)
+        lag_xy = lag[:, [ix, iy]].norm(dim=-1)
+        lag_yaw = lag[:, ir]
+        wind_xy = windup[:, [ix, iy]].norm(dim=-1)
+        wind_yaw = windup[:, ir]
+
+        st["peak_lag_xy"] = max(st["peak_lag_xy"], float(lag_xy.max()))
+        st["peak_lag_yaw"] = max(st["peak_lag_yaw"], float(lag_yaw.max()))
+        st["peak_windup_xy"] = max(st["peak_windup_xy"], float(wind_xy.max()))
+        st["peak_windup_yaw"] = max(st["peak_windup_yaw"], float(wind_yaw.max()))
+
+        if st["step"] % st["every"] != 0:
+            return
+        # Ratio of MEANS, not mean of ratios: the per-env instantaneous ratio blows up whenever the
+        # command swings faster than the base can follow (small denominator), which reads as a >1
+        # "gain" that is really just momentum. This is still an instantaneous number, so treat it as
+        # meaningful only when averaged over a stretch of steady commanding.
+        def _gain(act, cmd):
+            mask = cmd > 0.05 * max(scale, 1e-6)
+            if not bool(mask.any()):
+                return float("nan")
+            return float(act[mask].mean() / cmd[mask].mean().clamp_min(1e-6))
+
+        gain_xy = _gain(act_xy, cmd_xy)
+        gain_yaw = _gain(act_yaw, cmd_yaw)
+        # Blocked = commanded to move but barely moving. This is the state that banks windup.
+        blocked = int(((cmd_xy > 0.1 * max(scale, 1e-6)) & (act_xy < 0.2 * cmd_xy)).sum())
+        # Per-step body rotation: the env rotates the base command once per step and holds that yaw for
+        # the whole step, so this is the arc-vs-chord heading error committed within a single step.
+        yaw_sweep_deg = math.degrees(float((act_yaw * float(play_env.dt)).max()))
+        # Is the gripper actually open, or is the handle holding the fingers off their pinned target?
+        fq = play_env.robot.data.joint_pos[:, st["finger_dof"]]
+        ftgt = play_env.applied_robot_dof_targets[:, st["finger_slice"]]
+        print(
+            f"[BASE-AUDIT step {st['step']:6d}] "
+            f"cmd xy={float(cmd_xy.mean()):.3f} yaw={float(cmd_yaw.mean()):.3f} | "
+            f"act xy={float(act_xy.mean()):.3f} yaw={float(act_yaw.mean()):.3f} | "
+            f"gain xy={gain_xy:.3f} yaw={gain_yaw:.3f}\n"
+            f"[BASE-AUDIT              ] "
+            f"lag xy={float(lag_xy.mean()):.4f}m (max {float(lag_xy.max()):.4f}) "
+            f"yaw={float(lag_yaw.mean()):.4f}rad (max {float(lag_yaw.max()):.4f}) | "
+            f"windup xy={float(wind_xy.mean()):.4f}m (max {float(wind_xy.max()):.4f}) "
+            f"yaw={float(wind_yaw.mean()):.4f}rad (max {float(wind_yaw.max()):.4f}) | "
+            f"blocked {blocked}/{cmd_xy.numel()} | "
+            f"envs winding up: {int((wind_xy > 0.02).sum())}/{wind_xy.numel()} | "
+            f"step yaw sweep {yaw_sweep_deg:.2f}deg\n"
+            f"[BASE-AUDIT              ] "
+            f"finger target={float(ftgt.mean()):.4f}m  actual={float(fq.mean()):.4f}m "
+            f"(min {float(fq.min()):.4f}, max {float(fq.max()):.4f})  "
+            f"max deflection={float((ftgt - fq).abs().max()):.4f}m"
+        )
+
     probe_state = None
 
     def _save_probe_payload():
@@ -981,6 +1085,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                             f"fingers<->panel force: mean={_fp.mean().item():.3f} max={_fp.max().item():.3f} N | "
                             f"fingers<->handle force: mean={_fh.mean().item():.3f} max={_fh.max().item():.3f} N"
                         )
+
+                _log_base_command_audit(actions)
 
                 if probe_state is not None and not probe_state["done"]:
                     probe_env_id = probe_state["env_id"]
@@ -1170,6 +1276,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # If we were interrupted before the frame target (so no save happened yet), save what we have.
         if probe_state is not None and probe_state["frames"] and not probe_state["saved"]:
             _save_probe_payload()
+
+        if base_audit_state["step"] > 0:
+            print(
+                "[BASE-AUDIT][SUMMARY] over "
+                f"{base_audit_state['step']} steps: peak lag xy={base_audit_state['peak_lag_xy']:.4f} m, "
+                f"yaw={base_audit_state['peak_lag_yaw']:.4f} rad | peak windup "
+                f"xy={base_audit_state['peak_windup_xy']:.4f} m, yaw={base_audit_state['peak_windup_yaw']:.4f} rad.\n"
+                "[BASE-AUDIT][SUMMARY] peak windup is how far the base lurches when a blocked command "
+                "releases -- it is zero on the real robot."
+            )
 
         if pointcloud_camera_state is not None and pointcloud_camera_state["viewer"] is not None:
             pointcloud_camera_state["viewer"].close()
