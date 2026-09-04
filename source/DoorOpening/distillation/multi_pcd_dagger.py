@@ -2293,19 +2293,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         # env [wz, vx_w, vy_w] frame. base_action_scale and dt are applied by the env in
         # _scale_actions/_pre_physics_step. Keep arm/hand untouched.
         env_actions[:, :3] = self._robot_base_vector_to_env_frame(student_actions[:, :3])
-        # The student predicts a delta on the MEASURED base pose (what deploy applies); the env
-        # integrates onto the PD target. Apply the student action to the base joint pos to get the
-        # target it means, then express that as the delta on robot_dof_targets the env expects:
-        #     desired_target = q_base + dt * scale * a_student
-        #     env_action     = (desired_target - robot_dof_targets) / (dt * scale)
-        # Clamp AFTER the conversion -- clamping the student's raw output would clip a base command
-        # that is legitimately large only because the PD target is running ahead of the base.
-        base_stop = int(self.ov_env.num_base_joints)
-        step = max(float(self.ov_env.dt) * self.base_action_scale, 1e-6)
-        q_base = self.ov_env.robot.data.joint_pos[:, self.ov_env._robot_base_dof_idx].to(env_actions)
-        prev_target = self.ov_env.robot_dof_targets[:, :base_stop].to(env_actions)
-        desired_target = q_base + step * env_actions[:, :base_stop]
-        env_actions[:, :base_stop] = (desired_target - prev_target) / step
         env_actions = env_actions.clamp(-1.0, 1.0)
 
         # Record the student's own commanded base velocity for base_vel_source == "commanded": the
@@ -3128,14 +3115,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 )
                 missing_family_names = [DOOR_FAMILY_NAMES[int(family_id)] for family_id in missing_family_ids]
                 raise RuntimeError(f"Missing teacher model for door families: {missing_family_names}.")
-            # "actions" DRIVES THE ENV and must stay in the env's own convention (a delta on the PD
-            # target). Feeding the converted value here re-integrates the lead onto the target every
-            # step, which compounds: measured lead ran 0 -> 40 (max 164, i.e. 5.5 m, past the +/-5 m
-            # joint limit) in 210 iterations with 39-47 of 48 base channels pinned at the clamp.
-            # Only the LABEL is re-expressed against the measured base pose.
-            student_teacher_actions = self._env_actions_to_student_actions(
-                self._teacher_base_actions_to_joint_pos_frame(teacher_actions)
-            )
+            student_teacher_actions = self._env_actions_to_student_actions(teacher_actions)
             return {
                 "mus": student_teacher_actions,
                 "actions": teacher_actions,
@@ -3149,96 +3129,11 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         with torch.no_grad():
             res_dict = self.teacher_model(batch_dict)
         teacher_actions = torch.clamp(res_dict["mus"], -1.0, 1.0)
-        # "actions" DRIVES THE ENV and must stay in the env's own convention (a delta on the PD
-        # target). Feeding the converted value here re-integrates the lead onto the target every
-        # step, which compounds: measured lead ran 0 -> 40 (max 164, i.e. 5.5 m, past the +/-5 m
-        # joint limit) in 210 iterations with 39-47 of 48 base channels pinned at the clamp.
-        # Only the LABEL is re-expressed against the measured base pose.
-        student_teacher_actions = self._env_actions_to_student_actions(
-            self._teacher_base_actions_to_joint_pos_frame(teacher_actions)
-        )
+        student_teacher_actions = self._env_actions_to_student_actions(teacher_actions)
         return {
             "mus": student_teacher_actions,
             "actions": teacher_actions,
         }
-
-    def _base_pd_target_lead(self, like):
-        """``(base PD target - measured base joint pos) / (dt * base_action_scale)``.
-
-        The env integrates the base delta onto the PD TARGET (target += dt * scale * a), so the
-        target runs ahead of the real base by the PD tracking lag. The student instead speaks in
-        deltas on the base pose it can actually measure, because that is what deploy applies: a
-        velocity command relative to the current base frame. This term is the difference between
-        the two languages, in normalized action units, and is what gets added on the teacher's
-        label and subtracted back off on the student's env action. Env physics is untouched --
-        both directions produce the same PD target the teacher always produced.
-        """
-        base_stop = int(self.ov_env.num_base_joints)
-        target_base = self.ov_env.robot_dof_targets[:, :base_stop].to(like)
-        q_base = self.ov_env.robot.data.joint_pos[:, self.ov_env._robot_base_dof_idx].to(like)
-        step = max(float(self.ov_env.dt) * self.base_action_scale, 1e-6)
-        return (target_base - q_base) / step
-
-    def _teacher_base_actions_to_joint_pos_frame(self, teacher_env_actions):
-        """Teacher base action (delta on the PD target) -> delta on the MEASURED base pose.
-
-        Apply the teacher's prediction to robot_dof_targets to get the new dof target -- via the
-        env's own helper, so this is exactly the target physics will store -- then subtract the
-        current base joint pos and re-normalize:
-
-            new_target = clamp(robot_dof_targets + dt * scale * a)
-            label      = (new_target - q_base) / (dt * scale)
-        """
-        base_stop = int(self.ov_env.num_base_joints)
-        scaled = teacher_env_actions[:, :base_stop].clamp(-1.0, 1.0) * self.base_action_scale
-        new_target = self.ov_env.base_target_from_scaled_actions(scaled).to(teacher_env_actions)
-        q_base = self.ov_env.robot.data.joint_pos[:, self.ov_env._robot_base_dof_idx].to(teacher_env_actions)
-        step = max(float(self.ov_env.dt) * self.base_action_scale, 1e-6)
-        converted = teacher_env_actions.clone()
-        converted[:, :base_stop] = (new_target - q_base) / step
-        return converted.clamp(-1.0, 1.0)
-
-    def _log_base_action_diag(self, teacher_actions, student_env_actions, step_actions):
-        """Base-action trace, printed every 30 iterations on rank 0.
-
-        Shows the three quantities that must agree for the base to move as the teacher intends:
-        what the teacher asked for, what the env is actually handed, and what the base then did.
-        `roundtrip` composes env->robot->env through the same rotation used on the label, so a
-        nonzero value means the rotation/scale pair is not self-inverse. `saturated` counts base
-        channels pinned at +/-1 after the conversion -- those are commands the env cannot execute.
-        """
-        if getattr(self, "rank", 0) != 0:
-            return
-        self._base_diag_step = getattr(self, "_base_diag_step", 0) + 1
-        if self._base_diag_step % 30 != 1:
-            return
-        nb = int(self.ov_env.num_base_joints)
-        lead = self._base_pd_target_lead(step_actions)
-        qd = self.ov_env.robot.data.joint_vel[:, self.ov_env._robot_base_dof_idx]
-        ix, iy = self.base_action_xy_local_idx
-        ir = self.base_action_rot_local_idx
-        # env -> robot -> env must be identity (pure rotation, no scale).
-        rt = self._robot_base_vector_to_env_frame(
-            self._env_base_vector_to_robot_frame(step_actions[:, :nb])
-        )
-        rt_err = float((rt - step_actions[:, :nb]).abs().max())
-        sat = int((step_actions[:, :nb].abs() >= 1.0 - 1e-6).sum())
-        t = teacher_actions[:, :nb] if teacher_actions is not None else step_actions[:, :nb]
-        print(
-            f"[BASE-DIAG it {self._base_diag_step:6d}] "
-            f"teacher xy={float(t[:, [ix, iy]].norm(dim=-1).mean()):.3f} yaw={float(t[:, ir].abs().mean()):.3f} | "
-            f"student xy={float(student_env_actions[:, [ix, iy]].norm(dim=-1).mean()):.3f} "
-            f"yaw={float(student_env_actions[:, ir].abs().mean()):.3f} | "
-            f"lead xy={float(lead[:, [ix, iy]].norm(dim=-1).mean()):.3f} (max {float(lead[:, [ix, iy]].norm(dim=-1).max()):.3f}) "
-            f"yaw={float(lead[:, ir].abs().mean()):.3f}\n"
-            f"[BASE-DIAG            ] "
-            f"to-env xy={float(step_actions[:, [ix, iy]].norm(dim=-1).mean()):.3f} "
-            f"yaw={float(step_actions[:, ir].abs().mean()):.3f} | "
-            f"realized xy={float(qd[:, [ix, iy]].norm(dim=-1).mean()):.3f} m/s "
-            f"yaw={float(qd[:, ir].abs().mean()):.3f} rad/s | "
-            f"saturated {sat}/{step_actions[:, :nb].numel()} | roundtrip err {rt_err:.2e}",
-            flush=True,
-        )
 
     def _sync_timing_device(self):
         if self.device.type == "cuda":
@@ -4503,7 +4398,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                     teacher_actions,
                     iteration,
                 )
-                self._log_base_action_diag(teacher_actions, student_env_actions, step_actions)
                 obs, rew, out_of_reach, timed_out, step_extras = self.env.step(step_actions)
                 self._update_logged_env_metrics(step_extras)
                 self.temporal_current_time_s = self._iteration_to_time_s(iteration + 1)

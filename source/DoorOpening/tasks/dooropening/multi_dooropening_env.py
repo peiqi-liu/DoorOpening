@@ -1180,13 +1180,16 @@ class DooropeningEnv(DirectRLEnv):
         return scaled_actions
 
     def base_target_from_scaled_actions(self, scaled_base_actions: torch.Tensor) -> torch.Tensor:
-        """Base PD targets these SCALED base actions produce: robot_dof_targets + dt * scaled.
+        """Base PD targets: MEASURED base pose + dt * scaled action.
 
-        Single source of truth: the distillation label is built by calling this and differencing the
-        result against the measured base pose, so the label can never drift from the physics.
+        Base only. The arm and finger keep integrating onto the previous target; the base command is
+        a velocity applied to where the base actually is, so the target cannot drift away from the
+        base and no distillation-side conversion is needed -- teacher and student both predict this
+        same q-relative delta.
         """
         base_stop = self._target_base_xy_slice.stop
-        targets = self.robot_dof_targets[:, :base_stop] + self.dt * scaled_base_actions
+        q_base = self.robot.data.joint_pos[:, self._robot_base_dof_idx]
+        targets = q_base + self.dt * scaled_base_actions
         return torch.clamp(
             targets,
             self.robot_dof_lower_limits[:base_stop],
