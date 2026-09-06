@@ -7,6 +7,7 @@ as timed out and frozen there.
 """
 
 import argparse
+import json
 import os
 import pathlib
 import sys
@@ -947,6 +948,194 @@ def _viser_env_label(base_env, env_id):
     return family_name, asset_name
 
 
+_VARIANT_META_CACHE = {}
+_DOOR_SHAPE_SLICES = {}
+
+
+def _load_variant_meta(asset_idx):
+    """variant_meta.json shipped next to each door URDF (geometry of that door). {} if absent."""
+    asset_idx = int(asset_idx)
+    if asset_idx not in _VARIANT_META_CACHE:
+        meta = {}
+        try:
+            meta_path = pathlib.Path(asset_paths[asset_idx]).resolve().parent / "variant_meta.json"
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text())
+        except Exception as exc:  # geometry is diagnostic only -- never fail the eval over it
+            print(f"[WARN] Could not read variant_meta.json for door asset {asset_idx}: {exc}")
+        _VARIANT_META_CACHE[asset_idx] = meta
+    return _VARIANT_META_CACHE[asset_idx]
+
+
+def _door_geometry(asset_idx):
+    """Handle/panel geometry for one door asset (all None for assets without variant_meta.json)."""
+    meta = _load_variant_meta(asset_idx)
+    props = meta.get("actual_properties") or meta.get("source_properties") or {}
+    panel = meta.get("panel", {})
+    door = meta.get("door", {})
+    handle = meta.get("handle", {})
+    return {
+        "panel_width_m": props.get("panel_width_m", panel.get("width_m")),
+        "panel_height_m": props.get("panel_height_m", panel.get("height_m")),
+        "handle_height_m": props.get("handle_height_m"),
+        "handle_to_edge_distance_m": props.get("handle_to_edge_distance_m"),
+        "handle_lever_length_m": handle.get("lever_length_m"),
+        "handle_type": handle.get("type"),
+        "handle_side": props.get("handle_side", door.get("handle_side")),
+        "hinge_side": door.get("hinge_side"),
+        "opening_direction": props.get("opening_direction", door.get("opening_direction")),
+    }
+
+
+def _door_material_shape_slices(base_env):
+    """Flat material-buffer shape slices for the panel (link_1) and handle (link_2).
+
+    Same per-link shape-count walk randomize_body_material_subset uses (the stock IsaacLab parse
+    asserts on these convex-decomposition doors), so the friction reported here is the friction the
+    event terms actually wrote.
+    """
+    if not _DOOR_SHAPE_SLICES:
+        _DOOR_SHAPE_SLICES["__ok__"] = False
+        try:
+            view = base_env.door.root_physx_view
+            link_paths = view.link_paths[0]
+            total = int(view.max_shapes)
+            counts = [
+                base_env.door._physics_sim_view.create_rigid_body_view(link_path).max_shapes
+                for link_path in link_paths
+            ]
+            for name in ("link_1", "link_2"):
+                body_ids, _ = base_env.door.find_bodies(name)
+                body_id = int(body_ids[0])
+                start = sum(counts[:body_id])
+                end = total if body_id == len(link_paths) - 1 else start + counts[body_id]
+                _DOOR_SHAPE_SLICES[name] = (max(0, min(start, total)), max(0, min(end, total)))
+            _DOOR_SHAPE_SLICES["__ok__"] = True
+        except Exception as exc:
+            print(f"[WARN] Could not resolve door material shape slices (friction not reported): {exc}")
+    return _DOOR_SHAPE_SLICES
+
+
+def _door_param_snapshot(base_env, env_id):
+    """Per-env door physics AS SAMPLED AT THIS RESET, plus the asset's static geometry.
+
+    Gains come from the _door_nominal_* buffers rather than door.data, because edit_door_articulation
+    rewrites the live joint effort limit every step (1e6 while latched), so the live values are not
+    the sampled ones.
+    """
+    env_id = int(env_id)
+    board_idx = base_env._door_board_joint_idx
+    hinge_idx = base_env._door_hinge_joint_idx
+    asset_idx = int(base_env.env_asset_indices[env_id].item())
+    family_name, asset_name = _viser_env_label(base_env, env_id)
+
+    snap = {
+        "env_id": env_id,
+        "family": family_name,
+        "asset": asset_name,
+        "panel_stiffness_nm_per_rad": float(base_env._door_nominal_joint_stiffness[env_id, board_idx]),
+        "panel_damping_nms_per_rad": float(base_env._door_nominal_joint_damping[env_id, board_idx]),
+        "panel_joint_friction_coeff": float(base_env.door.data.joint_friction_coeff[env_id, board_idx]),
+        "panel_effort_limit_nm": float(base_env._door_panel_effort_limits[env_id, 0]),
+        "handle_stiffness_nm_per_rad": float(base_env._door_nominal_joint_stiffness[env_id, hinge_idx]),
+        "handle_damping_nms_per_rad": float(base_env._door_nominal_joint_damping[env_id, hinge_idx]),
+        "handle_effort_limit_nm": float(base_env._door_handle_effort_limits[env_id, 0]),
+        "latch_threshold_rad": float(base_env._door_latch_thresholds[env_id]),
+        "panel_mass_kg": None,
+        "panel_friction_static": None,
+        "handle_friction_static": None,
+        "handle_friction_dynamic": None,
+    }
+
+    try:
+        body_ids, _ = base_env.door.find_bodies("link_1")
+        snap["panel_mass_kg"] = float(base_env.door.root_physx_view.get_masses()[env_id, int(body_ids[0])])
+    except Exception as exc:
+        print(f"[WARN] Could not read door panel mass for env {env_id}: {exc}")
+
+    slices = _door_material_shape_slices(base_env)
+    if slices.get("__ok__"):
+        try:
+            materials = base_env.door.root_physx_view.get_material_properties()
+            panel_start, panel_end = slices["link_1"]
+            handle_start, handle_end = slices["link_2"]
+            if panel_end > panel_start:
+                snap["panel_friction_static"] = float(materials[env_id, panel_start:panel_end, 0].mean())
+            if handle_end > handle_start:
+                snap["handle_friction_static"] = float(materials[env_id, handle_start:handle_end, 0].mean())
+                snap["handle_friction_dynamic"] = float(materials[env_id, handle_start:handle_end, 1].mean())
+        except Exception as exc:
+            print(f"[WARN] Could not read door material properties for env {env_id}: {exc}")
+
+    snap.update(_door_geometry(asset_idx))
+    return snap
+
+
+# (filename key, snapshot key, format) for the compact tag appended to each viser .pt name.
+DOOR_PARAM_FILENAME_FIELDS = (
+    ("pk", "panel_stiffness_nm_per_rad", ".4g"),
+    ("pd", "panel_damping_nms_per_rad", ".3g"),
+    ("pfr", "panel_joint_friction_coeff", ".2f"),
+    ("pcap", "panel_effort_limit_nm", ".3g"),
+    ("pm", "panel_mass_kg", ".4g"),
+    ("hk", "handle_stiffness_nm_per_rad", ".3g"),
+    ("hd", "handle_damping_nms_per_rad", ".2g"),
+    ("hcap", "handle_effort_limit_nm", ".3g"),
+    ("hfr", "handle_friction_static", ".2f"),
+    ("lat", "latch_threshold_rad", ".2f"),
+    ("w", "panel_width_m", ".3f"),
+    ("hh", "handle_height_m", ".3f"),
+    ("he", "handle_to_edge_distance_m", ".3f"),
+)
+
+DOOR_PARAM_FILENAME_LEGEND = (
+    "pk/pd=panel(joint_1) stiffness[Nm/rad]/damping[Nms/rad], pfr=panel Coulomb friction coeff, "
+    "pcap=panel effort-limit cap[Nm], pm=panel mass[kg], hk/hd=handle(joint_2) stiffness/damping, "
+    "hcap=handle effort limit[Nm], hfr=handle surface static friction, lat=unlatch threshold[rad], "
+    "w=panel width[m], hh=handle height[m], he=handle-to-edge distance[m]"
+)
+
+
+def _fmt_param(value, spec):
+    return "na" if value is None else format(float(value), spec)
+
+
+def _door_param_filename_tag(snap):
+    return "_".join(f"{key}{_fmt_param(snap.get(field), spec)}" for key, field, spec in DOOR_PARAM_FILENAME_FIELDS)
+
+
+def _print_door_param_table(snapshots, tag):
+    """One line per recorded env so the log carries the same numbers as the .pt filenames."""
+    if not snapshots:
+        return
+    print(f"[INFO] {tag} -- per-env door physics + geometry ({DOOR_PARAM_FILENAME_LEGEND})")
+    header = (
+        f"{'env':>4} {'panel_k':>8} {'panel_d':>8} {'p_fric':>7} {'p_cap':>7} {'p_mass':>7} "
+        f"{'hnd_k':>6} {'hnd_d':>6} {'h_cap':>6} {'h_fric':>7} {'latch':>6} "
+        f"{'width':>6} {'h_hgt':>6} {'h_edge':>6}  asset"
+    )
+    print("[INFO] " + header)
+    for snap in snapshots:
+        print(
+            "[INFO] "
+            f"{snap['env_id']:>4} "
+            f"{_fmt_param(snap['panel_stiffness_nm_per_rad'], '8.2f')} "
+            f"{_fmt_param(snap['panel_damping_nms_per_rad'], '8.2f')} "
+            f"{_fmt_param(snap['panel_joint_friction_coeff'], '7.3f')} "
+            f"{_fmt_param(snap['panel_effort_limit_nm'], '7.2f')} "
+            f"{_fmt_param(snap['panel_mass_kg'], '7.2f')} "
+            f"{_fmt_param(snap['handle_stiffness_nm_per_rad'], '6.2f')} "
+            f"{_fmt_param(snap['handle_damping_nms_per_rad'], '6.3f')} "
+            f"{_fmt_param(snap['handle_effort_limit_nm'], '6.2f')} "
+            f"{_fmt_param(snap['handle_friction_static'], '7.3f')} "
+            f"{_fmt_param(snap['latch_threshold_rad'], '6.3f')} "
+            f"{_fmt_param(snap['panel_width_m'], '6.3f')} "
+            f"{_fmt_param(snap['handle_height_m'], '6.3f')} "
+            f"{_fmt_param(snap['handle_to_edge_distance_m'], '6.3f')}  "
+            f"{snap['family']}/{snap['asset']} ({snap['opening_direction']}, hinge={snap['hinge_side']})"
+        )
+
+
 def _build_viser_recorder(base_env, env_id):
     """Per-env recorder: the static door pose/URDF + an empty frame list.
 
@@ -962,6 +1151,9 @@ def _build_viser_recorder(base_env, env_id):
     return {
         "env_id": int(env_id),
         "env_origin": env_origin,
+        # Per-env door physics (sampled at the reset that just ran) + this asset's geometry, so the
+        # rollout can be matched back to the exact door it was rolled out on.
+        "door_params": _door_param_snapshot(base_env, env_id),
         "door_urdf_path": door_urdf,
         "door_joint_names": list(base_env.door.data.joint_names),
         "door_root_pos": (door_root[:3] - env_origin).detach().cpu().clone(),  # env-relative
@@ -977,6 +1169,7 @@ def _select_viser_recorders(base_env, num_envs=NUM_VISER_ENVS):
     recorders = [_build_viser_recorder(base_env, int(env_id)) for env_id in env_ids]
     labels = [f"env{r['env_id']}:{_viser_env_label(base_env, r['env_id'])[1]}" for r in recorders]
     print("[INFO] Viser envs (URDF replay, one .pt each):", ", ".join(labels))
+    _print_door_param_table([r["door_params"] for r in recorders], "Viser envs")
     return recorders
 
 
@@ -1060,10 +1253,17 @@ def _save_viser_recorders(recorders, viser_meta, base_env, out_dir, run_index):
             continue
         env_id = recorder["env_id"]
         family_name, asset_name = _viser_env_label(base_env, env_id)
-        path = os.path.join(out_dir, f"run{int(run_index):02d}_{family_name}_env{env_id:03d}_{asset_name}.pt")
+        # Physics/geometry tag in the name so several rollouts can be told apart at a glance; the
+        # same numbers (plus the ones that do not fit) live under "door_params" inside the file.
+        param_tag = _door_param_filename_tag(recorder["door_params"])
+        path = os.path.join(
+            out_dir,
+            f"run{int(run_index):02d}_{family_name}_env{env_id:03d}_{asset_name}_{param_tag}.pt",
+        )
         torch.save(
             {
                 "frames": recorder["frames"],
+                "door_params": recorder["door_params"],
                 "compact_target_joint_names": viser_meta["compact_names"],
                 "frame_dt": viser_meta["frame_dt"],
                 "door_urdf_path": recorder["door_urdf_path"],
@@ -1077,6 +1277,8 @@ def _save_viser_recorders(recorders, viser_meta, base_env, out_dir, run_index):
         saved += 1
     if saved == 0:
         print("[INFO] Viser: no active frames captured this run; nothing saved.")
+    else:
+        print(f"[INFO] Viser filename params: {DOOR_PARAM_FILENAME_LEGEND}")
 
 
 def _build_teacher_actions(dagger, obs):

@@ -181,45 +181,50 @@ GLORBOT_CONFIG = ArticulationCfg(
         # quantity (prismatic N/m vs revolute N-m/rad), and both land overdamped where the dominant
         # pole is -k/d, so a shared group gave translation (56.5 kg) and yaw (~3 kg-m^2) an identical
         # 0.3 s lag. Rotation damping is 10x lower so yaw responds ~10x faster, as on the real base.
+        # Base gains taken from the gripper branch, which runs the same q_base + dt*scale*action
+        # command form. The target is re-anchored to the measured pose every step, so the PD error is
+        # pinned at dt*scale*action and the realized speed is (kp*dt/kd) * commanded.
         "base_translation": ImplicitActuatorCfg(
             joint_names_expr=["base_x_joint", "base_y_joint"],
             effort_limit_sim=1000.0,
-            stiffness=10000,
-            damping=3000,
+            stiffness=80000,  # was 10000
+            damping=4000,  # was 3000
         ),
         "base_rotation": ImplicitActuatorCfg(
             joint_names_expr=["base_rotation_joint"],
             effort_limit_sim=1000.0,
-            stiffness=10000,
-            damping=300,
+            stiffness=11000,  # was 10000
+            damping=400,  # was 300
         ),
         # Per-joint Franka PD gains matched to the REAL-WORLD deploy controller (kp/kd used on
         # hardware), set per joint because the real values vary within each group. effort_limit_sim
         # is deliberately unset: when None on an IMPLICIT actuator, IsaacLab keeps the URDF-authored
         # limit (87 N-m on joint1-4, 12 N-m on joint5-7) instead of a hand-picked cap.
+        # kp and kd both scaled 0.8x, so kp/kd (the pole) is unchanged and only the force
+        # authority drops -- same response shape, softer arm.
         "panda_shoulder": ImplicitActuatorCfg(
             joint_names_expr=["panda_joint[1-4]"],
             velocity_limit_sim=2.175,
-            stiffness=1600.0,
+            stiffness=1280.0,  # was 1600.0
             damping={
-                "panda_joint1": 24.0,
-                "panda_joint2": 20.0,
-                "panda_joint3": 24.0,
-                "panda_joint4": 24.0,
+                "panda_joint1": 19.2,  # was 24.0
+                "panda_joint2": 16.0,  # was 20.0
+                "panda_joint3": 19.2,  # was 24.0
+                "panda_joint4": 19.2,  # was 24.0
             },
         ),
         "panda_forearm": ImplicitActuatorCfg(
             joint_names_expr=["panda_joint[5-7]"],
             velocity_limit_sim=2.61,
             stiffness={
-                "panda_joint5": 410.0,
-                "panda_joint6": 410.0,
-                "panda_joint7": 130.0,
+                "panda_joint5": 328.0,  # was 410.0
+                "panda_joint6": 328.0,  # was 410.0
+                "panda_joint7": 104.0,  # was 130.0
             },
             damping={
-                "panda_joint5": 6.0,
-                "panda_joint6": 6.0,
-                "panda_joint7": 4.0,
+                "panda_joint5": 4.8,  # was 6.0
+                "panda_joint6": 4.8,  # was 6.0
+                "panda_joint7": 3.2,  # was 4.0
             },
         ),
         "x5_arm": ImplicitActuatorCfg(
