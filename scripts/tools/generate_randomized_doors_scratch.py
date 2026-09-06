@@ -106,11 +106,29 @@ DEFAULT_HANDLE_LEVER_THICKNESS_RANGE_M = (0.007, 0.010)
 # under 20 mm of total clearance to spare; 0.045 gives 2.1x the finger width. Raise it further (0.055
 # is 2.6x) if hooking still misses on the tightest doors.
 DEFAULT_HANDLE_STEM_LENGTH_RANGE_M = (0.045, 0.085)
-DEFAULT_HANDLE_LENGTH_RANGE_M = (0.09, 0.14)
-DEFAULT_HANDLE_RETURN_LENGTH_RANGE_M = (0.035, 0.08)
-DEFAULT_HANDLE_RETURN_TIP_CLEARANCE_RANGE_M = (0.025, 0.050)
+# Lever bar length -- also the LENGTH OF THE SLOT the fingers hook through. Floor dropped 0.09 ->
+# 0.06 so the set includes stubs barely longer than the gripper's own jaw: with a short bar the hand
+# has almost no margin along the lever, and a grasp seated near the free end slides straight off
+# under pull load. That slip is the failure mode the policy has to learn to avoid, so it has to be
+# in the training distribution.
+DEFAULT_HANDLE_LENGTH_RANGE_M = (0.06, 0.14)  # was (0.09, 0.14), temp update
+# Return-hook length. This is a REQUEST, not the final value: build_handle_spec clamps it to
+# stem_length - return_tip_clearance, so what actually decides how far the hook returns is the tip
+# clearance below. Raised past the largest possible stem so the clamp always binds -- i.e. a return
+# lever now always returns as far as its own standoff allows, instead of stopping short.
+DEFAULT_HANDLE_RETURN_LENGTH_RANGE_M = (0.06, 0.12)  # was (0.035, 0.08), temp update
+# Gap left between the return tip and the panel face -- the knob that actually sets return length.
+# At the old 25-50 mm the hook stopped short of the panel on every door and, since stem_length is
+# only 52-95 mm, the clamp above left returns as short as 2 mm: a decorative stub the hand could
+# still slide off sideways. At 10-20 mm the hook closes nearly the whole standoff, so the slot is a
+# real closed loop and sliding off the free end means clearing the hook first.
+DEFAULT_HANDLE_RETURN_TIP_CLEARANCE_RANGE_M = (0.010, 0.020)  # was (0.025, 0.050), temp update
 DEFAULT_HANDLE_NUM_SEGMENTS = 16
-DEFAULT_RETURN_HANDLE_PROB = 0.7
+# Fraction of doors whose lever gets a return hook; the rest are straight bars with a bare free end.
+# Inverted (0.7 -> 0.3) to match the eval set, which is 4 non-lever doors to 1 lever door (0.2).
+# Training stays a little richer than eval at 0.3 so the return case is not near-absent from a batch.
+# The straight-bar majority is deliberate: a bare free end is where the grasp slips.
+DEFAULT_RETURN_HANDLE_PROB = 0.3  # was 0.7, temp update
 
 # "Bump" = a raised mount (like a hotel rose/escutcheon) at the handle base that the lever sits on.
 # Two shapes are supported:

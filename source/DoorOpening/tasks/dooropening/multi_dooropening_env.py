@@ -1201,6 +1201,33 @@ class DooropeningEnv(DirectRLEnv):
             self.robot_dof_upper_limits[:base_stop],
         )
 
+    def arm_target_windup_envelope(self) -> torch.Tensor:
+        """Max |target - measured| the arm PD targets are allowed to hold, per env and joint.
+
+        An implicit position drive applies clamp(kp*(target - q) - kd*qd, +-effort_limit), so once
+        |target - q| reaches effort_limit / kp the joint is ALREADY at its torque ceiling and any
+        further integration adds no force -- it is dead travel that has to be unwound before the
+        joint can reverse. Read from the live sim gains so it tracks the per-env stiffness
+        randomization rather than the nominal cfg values.
+        """
+        stiffness = self.robot.data.joint_stiffness[:, self._robot_arm_dof_idx]
+        effort_limit = self.robot.data.joint_effort_limits[:, self._robot_arm_dof_idx]
+        return self.cfg.arm_target_effort_envelope_scale * effort_limit / stiffness.clamp_min(1e-6)
+
+    def clamp_arm_target_to_effort_envelope(self, arm_targets: torch.Tensor) -> torch.Tensor:
+        """Hold the integrated arm target within a saturating-torque envelope of the MEASURED pose.
+
+        Same idea the base already gets from base_target_from_scaled_actions (which re-anchors on
+        the measured pose every step): the command may lead the state, but only by as much as the
+        drive can actually act on.
+        """
+        envelope = self.arm_target_windup_envelope()
+        # CLEAN arm pose, for the same reason the base command uses it: robot.data.joint_pos is the
+        # raw physics state, and anchoring the command on the noisy observation would random-walk
+        # the target.
+        arm_q = self.robot.data.joint_pos[:, self._robot_arm_dof_idx]
+        return torch.clamp(arm_targets, arm_q - envelope, arm_q + envelope)
+
     def _pin_gripper_target_open(self, target_tensor: torch.Tensor) -> torch.Tensor:
         if not self.fixed_open_gripper or self.num_finger_joints <= 0:
             return target_tensor
@@ -1267,6 +1294,12 @@ class DooropeningEnv(DirectRLEnv):
         # helper) describes exactly the target physics will store.
         base_stop = self._target_base_xy_slice.stop
         targets[:, :base_stop] = self.base_target_from_scaled_actions(self.scaled_actions[:, :base_stop])
+        # The arm keeps integrating, but never further from the measured pose than the drive can
+        # push: past effort_limit / stiffness the torque is already clipped, so the surplus is
+        # wind-up the policy would have to unwind before it could reverse.
+        targets[:, self._target_arm_slice] = self.clamp_arm_target_to_effort_envelope(
+            targets[:, self._target_arm_slice]
+        )
         targets = self._pin_arx_targets_to_fixed_pose(targets)
         targets = self._pin_gripper_target_open(targets)
         # NOTE: no explicit contact-sensor update() here. This runs BEFORE the physics step, so it

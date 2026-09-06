@@ -234,6 +234,30 @@ class EventCfg:
         },
     )
 
+    # Gripper-finger-only friction. PhysX combines two materials with friction_combine_mode, which is
+    # "average" by default and is not overridden anywhere here -- so the contact coefficient at the
+    # grasp is the MEAN of the finger and handle materials, not the handle's. With the fingers on the
+    # robot-wide 0.8..1.25 the effective coefficient could never drop below ~0.4 no matter how low
+    # door_handle_physics_material went; the slippery end of that range was simply unreachable, and
+    # dropping its floor 0.05 -> 0.02 moved the real coefficient by 0.015.
+    #
+    # Scoped to the two finger bodies and defined AFTER robot_physics_material so it overwrites only
+    # their shapes (event terms run in definition order). Everything else -- the palm pushing the
+    # panel in Step 7, any arm-vs-door contact -- keeps the robot-wide grip. Paired against the
+    # handle's 0.02..0.6 this puts the effective grasp coefficient at 0.06..0.50, so a pull has to be
+    # form-closed through the lever slot rather than held on by friction.
+    robot_finger_physics_material = EventTerm(
+        func=randomize_body_material_subset,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=["panda_.*finger"]),
+            "static_friction_range": (0.10, 0.40),
+            "dynamic_friction_range": (0.10, 0.35),
+            "restitution_range": (0.0, 0.0),
+            "num_buckets": 250,
+        },
+    )
+
     # Door-wide friction/restitution for the frame + PANEL (link_1). The panel keeps a broad range
     # so it still trains across slip<->jam. The handle (link_2) is deliberately re-materialized to a
     # much slipperier range by door_handle_physics_material BELOW (it runs after this term, so it
@@ -263,14 +287,13 @@ class EventCfg:
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("door", body_names="link_2"),
-            # Widened (was (0.2, 1.0)) after real-world observation that a metal lever can be very
-            # slippery: floor dropped to 0.05 so the policy trains on fingers that barely grip, ceiling
-            # raised to 1.2 so grippy handles are still covered. Real handle grip should be a subset.
-            # Widened (was (0.2, 1.0)) after real-world observation that a metal lever can be very
-            # slippery: floor 0.05 (fingers barely grip), ceiling 1.2 (grippy handles covered).
-            # Widened (was (0.2, 1.0)): floor 0.05 (fingers barely grip), ceiling 1.2 (grippy handles).
-            "static_friction_range": (0.05, 1.2),
-            "dynamic_friction_range": (0.05, 1.2),
+            # Floor 0.05 = fingers that barely grip. Ceiling cut 1.2 -> 0.6 after a pull failure where
+            # the grasp simply slid off a straight (non-return) lever: the grippy half of the band let
+            # a friction-closed pinch carry the whole panel load, so the policy was never forced to
+            # seat the fingers THROUGH the slot. Every draw is now at or below the old midpoint, which
+            # is what a real metal lever is; a pull has to be form-closed, not stuck on.
+            "static_friction_range": (0.02, 0.6),  # was (0.05, 1.2), temp update
+            "dynamic_friction_range": (0.02, 0.6),  # was (0.05, 1.2), temp update
             "restitution_range": (0.0, 0.0),
             "num_buckets": 250,
         },
@@ -320,15 +343,17 @@ class EventCfg:
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("door", joint_names="joint_1"),
-            # Start band 5..100 Nm/rad; ADR endpoint widens to 5..600. The FLOOR is now the same at
-            # both ends, so genuinely free-swinging doors are in the mix from step 0 and ADR only
-            # widens the stiff side. Lowered again for the 2-finger gripper (was 15..150).
-            "stiffness_distribution_params": (5.0, 100.0),
-            # Damping floor lowered 7 -> 3 alongside the stiffness floor. zeta = c/(2*sqrt(k*I)) with
-            # I ~= 24 kg*m^2, so at k = 5 the old floor of 7 was already zeta ~= 0.32 and the top of
-            # the range (30) was zeta ~= 1.4, i.e. the softest doors came out overdamped and sluggish
-            # rather than freely swinging. 3 keeps the soft end light.
-            "damping_distribution_params": (3.0, 30.0),
+            # Start band 8..140 Nm/rad; ADR endpoint widens to 8..800. The FLOOR is the same at both
+            # ends, so genuinely free-swinging doors are in the mix from step 0 and ADR only widens
+            # the stiff side. Raised across the board (5..100 -> 8..140) because the policy was
+            # failing on the stiff doors: log-uniform, so lifting the floor moves the geometric mean
+            # more than lifting the ceiling does.
+            "stiffness_distribution_params": (8.0, 140.0),  # was (5.0, 100.0), temp update
+            # Raised with the stiffness (3..30 -> 4..45). zeta = c/(2*sqrt(k*I)) with I ~= 24 kg*m^2,
+            # so at the new k floor of 8 a damping of 4 is zeta ~= 0.14 -- the soft end stays light
+            # and free-swinging, which is the whole point of the floor. The ceiling adds real drag on
+            # the stiff doors instead of letting them swing freely once broken away.
+            "damping_distribution_params": (4.0, 45.0),  # was (3.0, 30.0), temp update
             # Absolute physical gains, not multipliers of the board actuator defaults.
             "operation": "abs",
             "distribution": "log_uniform",
@@ -358,8 +383,19 @@ class EventCfg:
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("door", joint_names="joint_2"),
-            "stiffness_distribution_params": (35.0, 35.0),
-            "damping_distribution_params": (0.6, 0.6),
+            # Tuned for a lever that SPRINGS BACK FAST on release. The two gains pull opposite ways
+            # here, so they move opposite ways:
+            #  - stiffness UP (35 -> 45). The effort limit caps return torque at 1..5 Nm, so k only
+            #    matters where k*theta is still below the cap -- i.e. the last stretch back to zero.
+            #    45 keeps the spring saturated down to theta = 0.11 rad instead of 0.14, so the lever
+            #    drives itself fully home instead of creeping the final few degrees.
+            #  - damping DOWN (0.6 -> 0.35). Return speed is roughly torque/damping, so damping is
+            #    what throttles the snap-back: at the 2.5 Nm mid-band this takes terminal lever speed
+            #    from ~4 rad/s to ~7 rad/s, halving the time to travel the 0.95 rad back to closed.
+            #    Not lower than this -- the floor is what keeps the lever from slamming its hard stop
+            #    at zero and chattering.
+            "stiffness_distribution_params": (45.0, 45.0),  # was (35.0, 35.0), temp update
+            "damping_distribution_params": (0.35, 0.35),  # was (0.6, 0.6), temp update
             "operation": "abs",
         },
     )
@@ -411,16 +447,31 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # 6..19 N and the ADR ceiling from 75 N to 50 N. A pinch grasp can only pass 2*mu*F_grip
     # (~50 N of clamp on a 20 mm bar), so this moves the slip threshold from mu >= 0.31 down to
     # mu >= 0.19 -- i.e. from ~23% of the handle-friction draws slipping to ~12%.
-    door_panel_effort_limit_start_range_nm = (5.0, 15.0)
-    door_panel_effort_limit_range_nm = (3.0, 60.0)
+    # Floors raised: start 5 -> 10 Nm, full-ADR 3 -> 8 Nm. This is the knob that sets how heavy the
+    # door actually is (restoring torque plateaus here), so lifting the floor removes the nearly
+    # weightless doors the policy could open without ever loading the grasp. With the handle ~0.8 m
+    # from the hinge the required pull rises from 6..19 N to 12..19 N at the start band, and the
+    # lightest full-ADR door goes from 3.8 N to 10 N. The start floor sits ABOVE the full-ADR floor
+    # on purpose: ADR then re-introduces lighter doors as it widens, rather than only ever adding
+    # harder ones.
+    door_panel_effort_limit_start_range_nm = (10.0, 15.0)  # was (5.0, 15.0), temp update
+    door_panel_effort_limit_range_nm = (8.0, 60.0)  # was (3.0, 60.0), temp update
 
     # Handle (joint_2) unlatch angle threshold (radians): the door stays latched until the handle is
     # rotated past this. Per-env, ADR-ramped from the fixed 0.8 start out to (0.65, 0.95) so the policy
     # must learn to fully turn handles that unlatch late. Read every step by edit_door_articulation.
-    # Handle (joint_2) unlatch angle threshold (radians): per-env, ADR-ramped from the fixed 0.8 start
-    # out to (0.75, 0.9) -- tightened from (0.65, 0.95). Read every step by edit_door_articulation.
+    # Handle (joint_2) unlatch angle threshold (radians): per-env, ADR-ramped from the fixed 0.8
+    # start out to (0.65, 0.95). Read every step by edit_door_articulation.
+    #
+    # WARNING: the top of this band now EQUALS the lever's mechanical hard stop
+    # (HANDLE_OPEN_LIMIT_RAD = 0.95 in generate_randomized_doors_scratch.py), so a door drawn near
+    # 0.95 must have its lever pressed fully home, with zero margin, before the latch releases. The
+    # relock test is `|joint_2| < threshold`, and a loaded PD settles slightly SHORT of the stop, so
+    # those doors may never unlatch at all. Two ways out if that shows up as a late-curriculum
+    # failure floor: drop this ceiling to 0.90, or raise HANDLE_OPEN_LIMIT_RAD (which means
+    # regenerating the door assets).
     door_latch_threshold_start_range_rad = (0.8, 0.8)
-    door_latch_threshold_range_rad = (0.75, 0.85)
+    door_latch_threshold_range_rad = (0.65, 0.95)  # was (0.75, 0.85), temp update
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
@@ -741,6 +792,28 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     finger_action_scale = gripper_action_speed_headroom * GRIPPER_VELOCITY_LIMIT
     arx_action_scale = 0.6
 
+    # Cap on how far the ARM's integrated PD target may lead the measured joint position, expressed
+    # as a multiple of the error that already saturates the joint's torque.
+    #
+    # The arm target integrates (target += dt * scale * action) and is only clamped to the joint
+    # POSITION limits, so whenever the hand is blocked -- fingers on a handle, panel not moving --
+    # the target keeps marching away from the state for the rest of the episode. Past the saturating
+    # error the extra travel buys no torque at all (the implicit drive clips at effort_limit); it is
+    # pure wind-up that has to be unwound before the joint can reverse, and it makes the sim target
+    # meaningless as a hardware command.
+    #
+    # The saturating error per joint is effort_limit / stiffness. With the gains in glorbot_cfg and
+    # the URDF effort limits that is:
+    #     panda_joint1-4:  87 Nm / 1280      = 0.068 rad
+    #     panda_joint5/6:  12 Nm / 328       = 0.037 rad
+    #     panda_joint7:    12 Nm / 104       = 0.115 rad
+    # 1.5x leaves margin for the damping term (kd*qd subtracts from the available torque while the
+    # joint is still moving) while keeping the lead to a few control steps: at arm_action_scale
+    # 0.6 rad/s and dt 1/30 s one step moves the target 0.02 rad, so joint1-4 may lead by ~5 steps.
+    # The envelope is recomputed from the LIVE sim gains, so it follows the per-env stiffness
+    # randomization instead of assuming the nominal values above.
+    arm_target_effort_envelope_scale = 1.5
+
     # Deep Mimic Reward Parameters
     robot_body_quat_w = 1.0
     robot_key_body_pos_w = 2.0
@@ -870,11 +943,11 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             # after 0.067 rad (3.8 deg) -- an almost instantaneous wall -- while k = 400 gives 0.1 rad
             # (5.7 deg) and k = 5 stays soft over the whole swing. Keeps a sharp breakaway in the
             # distribution without the very hardest hit, which is what tears a pinch grasp loose.
-            "stiffness_distribution_params": (5.0, 600.0),
+            "stiffness_distribution_params": (8.0, 800.0),  # was (5.0, 600.0), temp update
             # Nm*s/rad. zeta = c/(2*sqrt(k*I)), I ~= 24 kg*m^2. Floor lowered 4 -> 2 to match the start
             # band's 3 (otherwise ADR would RAISE the damping floor as it progressed) and to keep the
             # k = 5 doors genuinely free-swinging rather than overdamped.
-            "damping_distribution_params": (2.0, 60.0),
+            "damping_distribution_params": (3.0, 90.0),  # was (2.0, 60.0), temp update
         },
         "door_board_joint_friction": {
             # Coulomb breakaway friction on the panel swing. Ramps from the (0, 0) EventTerm base out to
@@ -883,8 +956,16 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "friction_distribution_params": (0.0, 0.7),
         },
         "door_hinge_joint_stiffness_and_damping": {
-            "stiffness_distribution_params": (10.0, 60.0),
-            "damping_distribution_params": (0.03, 1.0),
+            # Floor raised and ceiling trimmed (15..90 -> 25..70): the weak end was the problem, not
+            # the strong end. Below ~25 Nm/rad the spring stays UNDER the 1..5 Nm effort cap for most
+            # of the lever's travel, so those handles crept home instead of snapping; 25 keeps every
+            # door saturated down to theta = 0.2 rad. The ceiling buys nothing above that -- past
+            # saturation more stiffness only moves the onset -- so it comes back to 70.
+            "stiffness_distribution_params": (25.0, 70.0),  # was (10.0, 60.0), temp update
+            # Ceiling CUT 1.0 -> 0.5, same reasoning as the start band: the old ceiling let ADR draw
+            # handles that took ~1 s to return, which is a sluggish lever, not a hard one. Floor left
+            # near zero so nearly free-returning handles stay in the mix.
+            "damping_distribution_params": (0.02, 0.5),  # was (0.03, 1.0), temp update
         },
         "door_hinge_joint_effort_limit": {
             "effort_limit_distribution_params": door_handle_effort_limit_range_nm,

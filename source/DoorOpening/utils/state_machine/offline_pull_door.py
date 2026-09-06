@@ -337,9 +337,11 @@ def state_machine_offline_right_pull_door(
     pull_hinge_hold_until_theta = 0.5
     pull_hinge_release_by_theta = pull_theta_stop
 
-    # Base held 5 cm further back through the pull sweep too (0.55 -> 0.60), matching the
-    # backed-off approach above so the arm does not have to re-close the gap mid-pull.
-    pull_base_x_offset = 0.60
+    # Base held a further 10 cm back through the pull sweep. This offset is measured from the
+    # handle, which travels TOWARD the robot as the panel swings, so the whole sweep is where the
+    # chassis is most crowded by the opening leaf. The palm offsets are handle-relative and
+    # unchanged, so the arm simply reaches 10 cm further forward.
+    pull_base_x_offset = 0.70  # was 0.60, temp update
     pull_base_y_gain = -0.25 / 1.45
 
     pull_palm_x_offset_closed = 0.05
@@ -427,7 +429,9 @@ def state_machine_offline_right_pull_door(
     # -------------------------
     _, _, robot_initial_yaw = euler_xyz_from_quat(base_target_rot)
 
-    release_base_x_delta_1 = -0.12
+    # Absorbs the 10 cm the pull sweep just backed off (this delta is measured from the LAST pull
+    # base pose), so the blocking pose below lands exactly where it did before.
+    release_base_x_delta_1 = -0.22  # was -0.12, temp update
     # Blocking pose Y: -y approaches the open leaf (left), +y backs away (right). Moved a bit LEFT
     # (0.20 -> 0.10), toward the leaf, for better blocking -- the arm now retracts to the right, so
     # the base no longer needs to stay clear of it on that side.
@@ -784,12 +788,9 @@ def state_machine_offline_left_pull_door(
     base_target_pos = handle_pos.clone()
     base_target_pos[:, 0] += pregrasp_base_x_offset
     base_target_pos[:, 1] += pregrasp_base_y_offset
-    # Left-door camera FOV: tilt the base a little toward the handle for pregrasp -> unlatch, so the
-    # ARX/x5 camera arm keeps the handle in good view. A positive yaw delta turns the base toward the
-    # handle here; flip the sign if the camera looks the wrong way. base_target_rot (untilted) is
-    # restored from Step 4 onward, so only pregrasp/grasp/unlatch (which reuse this base_target_pose)
-    # are tilted.
-    pregrasp_base_tilt_yaw = 0.3
+    # The base only turns where the turn does mechanical work -- i.e. the Step 5 blocking pose. The
+    # approach is driven square-on, so the arm, not the chassis, does the reaching.
+    pregrasp_base_tilt_yaw = 0.0  # was 0.3, temp update
     _, _, _base_yaw = euler_xyz_from_quat(base_target_rot)
     pregrasp_tilt_base_rot = get_rotation_quat(0.0, 0.0, _base_yaw.item() + pregrasp_base_tilt_yaw, device)
     base_target_pose = _make_pose(base_target_pos, pregrasp_tilt_base_rot)
@@ -907,9 +908,11 @@ def state_machine_offline_left_pull_door(
     pull_theta_stop = 1.25
     pull_theta_step = 0.10
 
-    # Base held 5 cm further back through the pull sweep too (0.6 -> 0.65), matching the
-    # backed-off approach above so the arm does not have to re-close the gap mid-pull.
-    pull_base_x_offset = 0.65
+    # Base held a further 10 cm back through the pull sweep. This offset is measured from the
+    # handle, which travels TOWARD the robot as the panel swings, so the whole sweep is where the
+    # chassis is most crowded by the opening leaf. The palm offsets are handle-relative and
+    # unchanged, so the arm simply reaches 10 cm further forward.
+    pull_base_x_offset = 0.75  # was 0.65, temp update
     # Constant lateral shift of the base held through the pull, in WORLD y (+y = the robot's right,
     # per this file's robot-faces--x convention). The base y was previously a pure function of theta
     # with no standing offset, so the chassis -- and the arx bolted to it -- tracked straight up the
@@ -967,7 +970,7 @@ def state_machine_offline_left_pull_door(
         base_target_pos = handle_pos.clone()
         base_target_pos[:, 0] += pull_base_x_offset
         base_target_pos[:, 1] = pull_base_y_offset + theta.item() * pull_base_y_gain
-        pull_open_base_tilt_yaw = 0.2
+        pull_open_base_tilt_yaw = 0.0  # was 0.2, temp update
         _, _, _base_yaw = euler_xyz_from_quat(base_target_rot)
         pull_open_tilt_base_rot = get_rotation_quat(0.0, 0.0, _base_yaw.item() + pull_open_base_tilt_yaw, device)
         base_target_pose = _make_pose(base_target_pos, pull_open_tilt_base_rot)
@@ -1017,7 +1020,9 @@ def state_machine_offline_left_pull_door(
     # -------------------------
     _, _, robot_initial_yaw = euler_xyz_from_quat(base_target_rot)
 
-    release_base_x_delta_1 = -0.12
+    # Absorbs the 10 cm the pull sweep just backed off (this delta is measured from the LAST pull
+    # base pose), so the blocking pose below lands exactly where it did before.
+    release_base_x_delta_1 = -0.22  # was -0.12, temp update
     # Blocking pose Y: +y approaches the open leaf, -y backs away. Kept a margin off the leaf.
     release_base_y = -0.20
     release_palm_x_delta = 0.25
