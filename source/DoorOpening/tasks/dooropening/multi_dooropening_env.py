@@ -229,6 +229,12 @@ class DooropeningEnv(DirectRLEnv):
                 "Unexpected policy action dim for multi-door env. "
                 f"Expected base+arm+fingers = {expected_policy_actions}, got {self.num_policy_actions}."
             )
+        # Last TWO steps' CLAMPED policy actions (the actual bounded command, not the raw network
+        # output), used only by the jerk penalty below -- a jerk term needs the second difference,
+        # so one tap of history is not enough. Both zeroed at reset so the two steps right after a
+        # reset are not charged for the jump away from an arbitrary zero.
+        self._prev_action = torch.zeros((self.num_envs, self.num_policy_actions), device=self.device)
+        self._prev_prev_action = torch.zeros((self.num_envs, self.num_policy_actions), device=self.device)
         self.fixed_arx_pose = bool(getattr(self.cfg, "fixed_arx_pose", True))
         # Ignore the policy's gripper action and hold the fingers at the open width. The gripper DOF
         # stays in the action vector (checkpoints keep loading); its command is simply overwritten.
@@ -1287,6 +1293,20 @@ class DooropeningEnv(DirectRLEnv):
         return applied
 
     def _pre_physics_step(self, actions: torch.Tensor):
+        # Jerk penalty: the SECOND difference of the CLAMPED action, a_t - 2*a_(t-1) + a_(t-2), in
+        # the same bounded [-1, 1] units the policy actually commands in. Zero for a constant action
+        # OR a constant rate of change (a steady ramp is NOT penalized, unlike a first-difference
+        # action-rate term); only an actual change in rate -- an accel/decel kink, and especially a
+        # sign-flipping oscillation -- costs anything. Computed here (not in _compute_penalties)
+        # because this is the one place that sees actions from consecutive steps -- self.scaled_actions
+        # below is already physical units and integrated into a target, so it no longer isolates the
+        # policy's own output shape from the PD dynamics it's driving.
+        clamped_actions = actions.clamp(-1.0, 1.0)
+        jerk = clamped_actions - 2.0 * self._prev_action + self._prev_prev_action
+        self._action_jerk_penalty = jerk.pow(2).sum(dim=-1)
+        self._prev_prev_action = self._prev_action
+        self._prev_action = clamped_actions.detach().clone()
+
         # delta actions
         self.scaled_actions = self._scale_actions(actions)
         targets = self.robot_dof_targets + self.dt * self.scaled_actions
@@ -2055,12 +2075,18 @@ class DooropeningEnv(DirectRLEnv):
             joint_limit_active_fraction.reshape(self.num_envs, -1).mean().item()
         )
 
+        # Jerk penalty, computed in _pre_physics_step (see there for why it has to be measured on
+        # the raw clamped action rather than anything derived from it).
+        weighted_action_jerk_penalty = self.action_jerk_penalty_w * self._action_jerk_penalty
+        self.extras["error/action_jerk_penalty"] = weighted_action_jerk_penalty.mean().item()
+
         return (
             weighted_joint_limit_penalty
             + weighted_self_collision_penalty
             + weighted_base_door_contact_penalty
             + weighted_x5_door_contact_penalty
             + weighted_franka_box_contact_penalty
+            + weighted_action_jerk_penalty
         )
 
     def _get_rewards(self) -> torch.Tensor:
@@ -2414,6 +2440,8 @@ class DooropeningEnv(DirectRLEnv):
             self.robot_dof_targets[env_ids, :] = self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]]
             self.applied_robot_dof_targets[env_ids, :] = self.robot_dof_targets[env_ids, :]
             self._action_target_history[env_ids] = self.robot_dof_targets[env_ids].unsqueeze(1)
+            self._prev_action[env_ids] = 0.0
+            self._prev_prev_action[env_ids] = 0.0
             self.episode_reached_last_frame[env_ids] = False
             self.episode_x5_collided[env_ids] = False
             self.episode_franka_box_collided[env_ids] = False
@@ -2471,7 +2499,8 @@ class DooropeningEnv(DirectRLEnv):
         self.door.write_joint_state_to_sim(door_joint_pos, door_joint_vel, None, env_ids)
         # self.door.set_joint_position_target(door_joint_pos, None, env_ids)
 
-        # self.last_actions[env_ids] = 0.0
+        self._prev_action[env_ids] = 0.0
+        self._prev_prev_action[env_ids] = 0.0
         self.robot_dof_targets[env_ids, :] = self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]]
         self.applied_robot_dof_targets[env_ids, :] = self.robot_dof_targets[env_ids, :]
         self._action_target_history[env_ids] = self.robot_dof_targets[env_ids].unsqueeze(1)

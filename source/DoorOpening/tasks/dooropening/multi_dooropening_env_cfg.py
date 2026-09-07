@@ -427,7 +427,13 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # Hold the gripper at GRIPPER_OPEN_WIDTH and ignore the policy's finger action. The DOF stays in
     # the action space, so checkpoints keep loading -- its command is just overwritten.
     fixed_open_gripper = True
-    door_handle_effort_limit_range_nm = (1.0, 5.0)
+    # Lever (joint_2) return-spring torque cap: the torque the robot has to overcome to press the
+    # handle. Ceiling cut 5 -> 3 Nm. It converts straight into press force at the grip, torque /
+    # moment arm, and the arm is only 0.06..0.14 m long: 5 Nm needed 50 N on a mean lever and 100 N
+    # on the shortest, against a Franka that sustains ~30 N at the end effector. For reference a real
+    # lever spring is 1..2 Nm, and the ADA 22 N hardware limit at a 0.10 m grip IS 2.2 Nm -- so 5 Nm
+    # was 2-3x a code-compliant door and unpressable on the short levers.
+    door_handle_effort_limit_range_nm = (1.0, 3.0)  # was (1.0, 5.0), temp update
     door_handle_effort_limit_sim = door_handle_effort_limit_range_nm[0]
 
     # Panel-swing (joint_1) effort-limit CAP applied while unlatched (edit_door_articulation switches it
@@ -865,6 +871,21 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     franka_box_contact_penalty_w = 10.0
     franka_box_contact_penalty_min_force = 25.0
     franka_box_contact_penalty_max_force = 75.0
+
+    # Jerk penalty: sum((a_t - 2*a_t-1 + a_t-2)^2) over the whole policy action vector (base rot +
+    # base xy + arm + finger), each component in [-1, 1]. Targets the SHAPE of the policy's own
+    # output, not just its raw step-to-step size: a first-difference action-rate term also charges a
+    # smooth, deliberate ramp (e.g. a steady acceleration into the pull), while jerk is zero for any
+    # constant rate of change and only costs an actual kink or a sign-flipping oscillation -- the
+    # thing that reads as "shaky" on hardware. Nothing else in this reward discourages it (the
+    # *_joint_vel_w terms track the REFERENCE velocity, which says nothing about how smoothly the
+    # policy's own commands change).
+    #
+    # Starting guess -- tune it. Different scale from a first-difference term: a single-step sign
+    # flip (e.g. rate -1 -> +1) produces a jerk of up to 4 per dim (16 squared) instead of 2, so at
+    # ~11 action dims a policy that is merely noisy sits under ~0.1 total per step, while one that is
+    # actually oscillating near full-scale costs several units/step.
+    action_jerk_penalty_w = 1.0
 
     robot_body_quat_scale = 1.0
     robot_key_body_pos_scale = 3.0
