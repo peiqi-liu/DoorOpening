@@ -278,6 +278,7 @@ class DooropeningEnv(DirectRLEnv):
         self.joint_limit_penalty_margin_ratio = self.cfg.joint_limit_penalty_margin_ratio
         self.self_collision_penalty_w = self.cfg.self_collision_penalty_w
         self.franka_box_contact_penalty_w = self.cfg.franka_box_contact_penalty_w
+        self.action_jerk_penalty_w = self.cfg.action_jerk_penalty_w
 
         self.reset_key_body_pos_delta_min = self.cfg.reset_key_body_pos_delta_min
         self.reset_key_body_quat_delta_min = self.cfg.reset_key_body_quat_delta_min

@@ -3,6 +3,8 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+import inspect
+
 from DoorOpening.assets.door.multi_door_cfg import ALL_DOOR_CONFIGS
 from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, GRIPPER_VELOCITY_LIMIT
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
@@ -53,6 +55,29 @@ from isaaclab.sensors import CameraCfg, ContactSensorCfg
 from isaaclab.utils.math import quat_from_euler_xyz
 
 import isaaclab.sim as sim_utils
+
+
+def _physx_kwargs():
+    """PhysxCfg kwargs, adding solve_articulation_contact_last only if this IsaacLab build has it.
+
+    Older IsaacLab (2.2.x, the Isaac Sim 4.5-compatible line) doesn't expose this PhysxCfg field --
+    PhysxCfg(solve_articulation_contact_last=...) raises TypeError there. Everything else is
+    identical either way, so this keeps the tuned solver settings on newer IsaacLab (2.3.2.post1,
+    Isaac Sim 5.x) while degrading gracefully instead of crashing on the older one.
+    """
+    kwargs = dict(
+        min_position_iteration_count=4,
+        max_position_iteration_count=64,
+        min_velocity_iteration_count=2,
+        max_velocity_iteration_count=16,
+        enable_ccd=True,
+        bounce_threshold_velocity=0.2,
+        gpu_max_rigid_patch_count=4 * 5 * 2**15,
+    )
+    if "solve_articulation_contact_last" in inspect.signature(PhysxCfg.__init__).parameters:
+        kwargs["solve_articulation_contact_last"] = True
+    return kwargs
+
 
 # Camera mount orientation on x5_camera_link as (roll, pitch, yaw).
 #   roll  = -45deg  -> compensates for the 45deg-tilted RealSense bracket on the ARX x5 wrist
@@ -487,16 +512,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             static_friction=1.0,
             dynamic_friction=1.0,
         ),
-        physx=PhysxCfg(
-            solve_articulation_contact_last=True,
-            min_position_iteration_count=4,
-            max_position_iteration_count=64,
-            min_velocity_iteration_count=2,
-            max_velocity_iteration_count=16,
-            enable_ccd=True,
-            bounce_threshold_velocity=0.2,
-            gpu_max_rigid_patch_count=4 * 5 * 2**15
-        ),
+        physx=PhysxCfg(**_physx_kwargs()),
     )
 
     # Useful constants
