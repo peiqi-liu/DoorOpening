@@ -797,7 +797,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=False)
 
-    base_action_scale = 1.25
+    base_action_scale = 1.0
     arm_action_scale = 0.6
     # Actions are integrated into the PD target (target += dt * scale * action, dt = 1/30 s), so a
     # scale is a commanded RATE. The gripper DOF is PRISMATIC, so unlike every other scale here this
