@@ -73,6 +73,11 @@ tests/
 
 */assets/*/PartNet/*
 
+# All generated door assets (every family/test-set folder under assets/door), keep only the
+# config .py files at that top level (door_cfg.py, multi_door_cfg.py). Supersedes the narrower
+# **/PartNet*/* rule below, which missed non-PartNet-named sets like v5_test/v_smallhandle.
+source/DoorOpening/assets/door/*/
+
 **/*.ply
 
 materials/

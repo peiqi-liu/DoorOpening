@@ -1209,17 +1209,15 @@ class DooropeningEnv(DirectRLEnv):
         )
 
     def arm_target_windup_envelope(self) -> torch.Tensor:
-        """Max |target - measured| the arm PD targets are allowed to hold, per env and joint.
+        """Max |target - measured| the arm PD targets are allowed to hold, per joint.
 
-        An implicit position drive applies clamp(kp*(target - q) - kd*qd, +-effort_limit), so once
-        |target - q| reaches effort_limit / kp the joint is ALREADY at its torque ceiling and any
-        further integration adds no force -- it is dead travel that has to be unwound before the
-        joint can reverse. Read from the live sim gains so it tracks the per-env stiffness
-        randomization rather than the nominal cfg values.
+        Fixed vector (panda_joint1-7), matching FRANKA_POLICY_MAX_JOINT_POS_ERROR_RAD in deploy's
+        door_policy_node.py.
         """
-        stiffness = self.robot.data.joint_stiffness[:, self._robot_arm_dof_idx]
-        effort_limit = self.robot.data.joint_effort_limits[:, self._robot_arm_dof_idx]
-        return self.cfg.arm_target_effort_envelope_scale * effort_limit / stiffness.clamp_min(1e-6)
+        return torch.tensor(
+            [0.152930, 0.152930, 0.152930, 0.152930, 0.082317, 0.082317, 0.259616],
+            device=self.device,
+        )
 
     def clamp_arm_target_to_effort_envelope(self, arm_targets: torch.Tensor) -> torch.Tensor:
         """Hold the integrated arm target within a saturating-torque envelope of the MEASURED pose.

@@ -266,18 +266,24 @@ class EventCfg:
     # door_handle_physics_material went; the slippery end of that range was simply unreachable, and
     # dropping its floor 0.05 -> 0.02 moved the real coefficient by 0.015.
     #
-    # Scoped to the two finger bodies and defined AFTER robot_physics_material so it overwrites only
-    # their shapes (event terms run in definition order). Everything else -- the palm pushing the
-    # panel in Step 7, any arm-vs-door contact -- keeps the robot-wide grip. Paired against the
-    # handle's 0.02..0.6 this puts the effective grasp coefficient at 0.06..0.50, so a pull has to be
-    # form-closed through the lever slot rather than held on by friction.
+    # Scoped to the end-effector bodies (palm + both fingers, i.e. everything that can touch the
+    # handle) and defined AFTER robot_physics_material so it overwrites only their shapes (event terms
+    # run in definition order). Everything else -- the arm links, any arm-vs-door contact -- keeps the
+    # robot-wide grip. Floor dropped 0.10 -> 0.0 to match the handle's floor: since the combine mode is
+    # "average", a nonzero floor on either side alone set a hard lower bound on the effective grasp
+    # coefficient no matter how low the other side went -- the frictionless-handle case is only
+    # reachable if BOTH sides can draw 0. panda_hand added (was fingers-only) so a palm-heel push on
+    # the handle/panel is covered by the same low-friction range instead of the robot-wide 0.8..1.25.
+    # Ceiling crushed 0.40/0.35 -> 0.05 to match the handle's ceiling crush below: a metal handle
+    # AND a hard end-effector surface both near-zero is the common real case, not a rare tail of a
+    # wide range, so most draws should sit there rather than the range merely reaching down to it.
     robot_finger_physics_material = EventTerm(
         func=randomize_body_material_subset,
         mode="reset",
         params={
-            "asset_cfg": SceneEntityCfg("robot", body_names=["panda_.*finger"]),
-            "static_friction_range": (0.10, 0.40),
-            "dynamic_friction_range": (0.10, 0.35),
+            "asset_cfg": SceneEntityCfg("robot", body_names=["panda_hand", "panda_.*finger"]),
+            "static_friction_range": (0.0, 0.05),  # was (0.0, 0.40), temp update
+            "dynamic_friction_range": (0.0, 0.05),  # was (0.0, 0.35), temp update
             "restitution_range": (0.0, 0.0),
             "num_buckets": 250,
         },
@@ -312,13 +318,13 @@ class EventCfg:
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("door", body_names="link_2"),
-            # Floor 0.05 = fingers that barely grip. Ceiling cut 1.2 -> 0.6 after a pull failure where
-            # the grasp simply slid off a straight (non-return) lever: the grippy half of the band let
-            # a friction-closed pinch carry the whole panel load, so the policy was never forced to
-            # seat the fingers THROUGH the slot. Every draw is now at or below the old midpoint, which
-            # is what a real metal lever is; a pull has to be form-closed, not stuck on.
-            "static_friction_range": (0.02, 0.6),  # was (0.05, 1.2), temp update
-            "dynamic_friction_range": (0.02, 0.6),  # was (0.05, 1.2), temp update
+            # Floor 0.0 -- many real handles (polished/oiled metal) are ~frictionless, so that belongs
+            # inside the sampled range, not just an eval-only extreme. Ceiling crushed 0.6 -> 0.05:
+            # near-zero-on-both-sides is the common real case (see robot_finger_physics_material above),
+            # not a rare tail worth only reaching down to, so most draws should sit near it. A pull
+            # still has to be form-closed through the lever slot rather than held on by friction.
+            "static_friction_range": (0.0, 0.05),  # was (0.0, 0.6), temp update
+            "dynamic_friction_range": (0.0, 0.05),  # was (0.0, 0.6), temp update
             "restitution_range": (0.0, 0.0),
             "num_buckets": 250,
         },
@@ -381,7 +387,11 @@ class EventCfg:
             "damping_distribution_params": (4.0, 45.0),  # was (3.0, 30.0), temp update
             # Absolute physical gains, not multipliers of the board actuator defaults.
             "operation": "abs",
-            "distribution": "log_uniform",
+            # "uniform" (was "log_uniform"): log-uniform spreads density evenly across decades, which
+            # keeps most draws well below the ceiling on a wide range like 8..800 (half the draws land
+            # below sqrt(8*800)=~80). Plain uniform puts most of the numeric span -- and therefore most
+            # draws -- in the upper part of the range, so stiff/heavy doors get sampled far more often.
+            "distribution": "uniform",  # was "log_uniform", temp update
         },
     )
 
@@ -486,7 +496,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # on purpose: ADR then re-introduces lighter doors as it widens, rather than only ever adding
     # harder ones.
     door_panel_effort_limit_start_range_nm = (10.0, 15.0)  # was (5.0, 15.0), temp update
-    door_panel_effort_limit_range_nm = (8.0, 60.0)  # was (3.0, 60.0), temp update
+    # Floor 8 -> 3 Nm: below the start band's 10 Nm floor again, so ADR re-introduces lighter doors
+    # as it widens (not just adds heavier ones -- see the start-band note above). Ceiling 60 -> 75 Nm
+    # for heavier doors.
+    door_panel_effort_limit_range_nm = (3.0, 75.0)  # was (8.0, 60.0), temp update
 
     # Handle (joint_2) unlatch angle threshold (radians): the door stays latched until the handle is
     # rotated past this. Per-env, ADR-ramped from the fixed 0.8 start out to (0.65, 0.95) so the policy
@@ -784,7 +797,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=False)
 
-    base_action_scale = 1.0
+    base_action_scale = 1.25
     arm_action_scale = 0.6
     # Actions are integrated into the PD target (target += dt * scale * action, dt = 1/30 s), so a
     # scale is a commanded RATE. The gripper DOF is PRISMATIC, so unlike every other scale here this
@@ -813,28 +826,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     gripper_action_speed_headroom = 2.0
     finger_action_scale = gripper_action_speed_headroom * GRIPPER_VELOCITY_LIMIT
     arx_action_scale = 0.6
-
-    # Cap on how far the ARM's integrated PD target may lead the measured joint position, expressed
-    # as a multiple of the error that already saturates the joint's torque.
-    #
-    # The arm target integrates (target += dt * scale * action) and is only clamped to the joint
-    # POSITION limits, so whenever the hand is blocked -- fingers on a handle, panel not moving --
-    # the target keeps marching away from the state for the rest of the episode. Past the saturating
-    # error the extra travel buys no torque at all (the implicit drive clips at effort_limit); it is
-    # pure wind-up that has to be unwound before the joint can reverse, and it makes the sim target
-    # meaningless as a hardware command.
-    #
-    # The saturating error per joint is effort_limit / stiffness. With the gains in glorbot_cfg and
-    # the URDF effort limits that is:
-    #     panda_joint1-4:  87 Nm / 1280      = 0.068 rad
-    #     panda_joint5/6:  12 Nm / 328       = 0.037 rad
-    #     panda_joint7:    12 Nm / 104       = 0.115 rad
-    # 1.5x leaves margin for the damping term (kd*qd subtracts from the available torque while the
-    # joint is still moving) while keeping the lead to a few control steps: at arm_action_scale
-    # 0.6 rad/s and dt 1/30 s one step moves the target 0.02 rad, so joint1-4 may lead by ~5 steps.
-    # The envelope is recomputed from the LIVE sim gains, so it follows the per-env stiffness
-    # randomization instead of assuming the nominal values above.
-    arm_target_effort_envelope_scale = 1.5
 
     # Deep Mimic Reward Parameters
     robot_body_quat_w = 1.0

@@ -139,26 +139,37 @@ DEFAULT_RETURN_HANDLE_PROB = 0.3  # was 0.7, temp update
 #                  it stays put under the joint_2 sweep. Sized by radius and protrusion (length).
 # In both cases the handle stem starts at the OUTER face of the mount, so handle_stem_length is the
 # clear gap the fingers get above the mount.
-# DEFAULT OFF (was 0.7). A 512-door audit put the plate at a ~17-point success penalty at every handle
-# height (85.8% -> 69.6% below 0.95 m world, 61.3% -> 43.5% above), while the finger clearance the
-# plate eats into showed no independent effect of its own (-0.082 on grasp failures, -0.001 on the
-# rest). So whatever the plate costs is not explained by the gap it consumes, and the same gap can be
-# dialled directly with DEFAULT_HANDLE_STEM_LENGTH_RANGE_M instead. Pass --handle-bump-prob to put the
-# plates back (the size ranges below still apply when it is non-zero).
-DEFAULT_HANDLE_BUMP_PROB = 0.0
-DEFAULT_HANDLE_BUMP_SHAPE = "box"
+# REVERTED TO ON, weighted toward near-universal (was 0.0): a bare lever with literally zero mounting
+# plate/rose is rare in reality -- almost every real handle has SOME backplate, even a thin flush one.
+# A 512-door audit previously found the plate cost a ~17-point success penalty at every handle height
+# (85.8% -> 69.6% below 0.95 m world, 61.3% -> 43.5% above), and that cost was NOT explained by the
+# finger-clearance the plate eats into (-0.082 on grasp failures, -0.001 on the rest) -- so the
+# regression is a training/reward gap to go fix, not evidence the plate itself is unrealistic. Pass
+# --handle-bump-prob 0.0 to go back to the old disabled behavior if that regression needs isolating.
+DEFAULT_HANDLE_BUMP_PROB = 0.9
+# "random" (was "box") so choose_mode() actually rolls box vs cylinder per variant instead of always
+# returning the fixed value verbatim -- with a literal "box"/"cylinder" every door got the same shape
+# and handle_bump_radius (the cylinder-only size) was sampled every time but never used. A round rose
+# (cylinder boss) around a plain lever/knob is at least as common in reality as a rectangular
+# escutcheon, so both need nonzero chance of appearing.
+DEFAULT_HANDLE_BUMP_SHAPE = "random"  # was "box", temp update
 # Outward protrusion (z) of the mount out of the door face. Range starts near ZERO so a small draw is
-# effectively "no bump" (nearly flush), up to a chunky escutcheon (30 mm). This lets a single always-on
-# sample cover the whole no-bump..bump spectrum via SIZE instead of a hard prob. The protrusion is
-# always clamped so at least MIN_HANDLE_PLATE_GRASP_GAP_M of clear finger space stays above the plate.
-DEFAULT_HANDLE_BUMP_LENGTH_RANGE_M = (0.001, 0.030)
-# Box plate only: vertical extent (y) and horizontal extent (x) of the escutcheon plate. Start small
-# (~2 cm ≈ no visible plate) up to a MODEST escutcheon -- deliberately capped so we never suddenly
-# show a huge plate the (not-yet-trained) policy has never seen.
-DEFAULT_HANDLE_BUMP_HEIGHT_RANGE_M = (0.02, 0.14)
+# effectively "no bump" (nearly flush), up to a modest escutcheon (20 mm). Ceiling trimmed 30 -> 20 mm:
+# most real passage/privacy hardware protrudes only ~3-15 mm, and 30 mm over-represented the chunky
+# mortise-plate tail rather than the common case. This lets a single always-on sample cover the whole
+# no-bump..bump spectrum via SIZE instead of a hard prob. The protrusion is always clamped so at least
+# MIN_HANDLE_PLATE_GRASP_GAP_M of clear finger space stays above the plate.
+DEFAULT_HANDLE_BUMP_LENGTH_RANGE_M = (0.001, 0.020)  # was (0.001, 0.030), temp update
+# Box plate only: vertical extent (y) and horizontal extent (x) of the escutcheon plate. Height ceiling
+# raised 0.14 -> 0.24: real full-length lever backplates commonly run 15-24 cm tall (narrow style, no
+# separate deadbolt cutout), a whole common real shape the old 14 cm cap excluded entirely, not just a
+# rare tail. Width stays modest (~4-6 cm typical).
+DEFAULT_HANDLE_BUMP_HEIGHT_RANGE_M = (0.02, 0.24)  # was (0.02, 0.14), temp update
 DEFAULT_HANDLE_BUMP_WIDTH_RANGE_M = (0.02, 0.08)
-# Cylinder boss only: radius of the round mount.
-DEFAULT_HANDLE_BUMP_RADIUS_RANGE_M = (0.022, 0.035)
+# Cylinder boss only: radius of the round mount. Floor lowered 22 -> 18 mm (36 mm diameter) to reach
+# slimline/contemporary rosettes (some run as small as ~32-38 mm diameter), not just the standard
+# 55-60 mm residential rose the old floor assumed as the smallest case.
+DEFAULT_HANDLE_BUMP_RADIUS_RANGE_M = (0.018, 0.035)  # was (0.022, 0.035), temp update
 
 DEFAULT_NUM_VARIANTS = 512
 DEFAULT_DEBUG_FIRST_N = 0
@@ -386,15 +397,16 @@ def parse_args():
         type=float,
         default=DEFAULT_HANDLE_BUMP_PROB,
         help="Probability a variant gets a raised mount (bump) at the handle base that the lever "
-        "sits on (default 0.7). When on, the plate SIZE still varies down to nearly-flush, so the "
-        "smallest plate is ~no plate. 0.0 disables it entirely; 1.0 forces a (possibly tiny) plate on all.",
+        "sits on (default 0.9 -- see DEFAULT_HANDLE_BUMP_PROB). When on, the plate SIZE still varies "
+        "down to nearly-flush, so the smallest plate is ~no plate. 0.0 disables it entirely; 1.0 "
+        "forces a (possibly tiny) plate on all.",
     )
     parser.add_argument(
         "--handle-bump-shape",
         choices=("box", "cylinder", "random"),
         default=DEFAULT_HANDLE_BUMP_SHAPE,
-        help="Mount shape: 'box' = rectangular escutcheon plate on the panel (default); 'cylinder' = "
-        "round boss on the handle; 'random' picks per variant.",
+        help="Mount shape: 'box' = rectangular escutcheon plate on the panel; 'cylinder' = round boss "
+        "on the handle; 'random' (default) picks per variant.",
     )
     parser.add_argument(
         "--handle-bump-length-range",

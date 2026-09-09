@@ -168,10 +168,11 @@ def create_door_cfg(
 
 root_path = os.path.dirname(os.path.dirname(__file__))
 # Which single-door test set the debug/reference-motion scripts (scripts/state_machine.py,
-# scripts/hard_code_traj.py) operate on, selected by --door_number into DOOR_CONFIGS below.
-# Override without editing this file:
+# scripts/hard_code_traj.py, scripts/test_door.py) operate on, selected by --door_number into
+# DOOR_CONFIGS below. Points at PartNetv5 (was v5_test) so these debug scripts show the doors
+# generated with the current friction+bump standard by default. Override without editing this file:
 #     DOOROPENING_DOOR_SET=v6_test python scripts/state_machine.py --door_number 0 ...
-DOOR_SET_NAME = os.environ.get("DOOROPENING_DOOR_SET", "v5_test").strip() or "v5_test"
+DOOR_SET_NAME = os.environ.get("DOOROPENING_DOOR_SET", "PartNetv5").strip() or "PartNetv5"
 asset_base_folder = os.path.join(root_path, "door", DOOR_SET_NAME)
 if not os.path.isdir(asset_base_folder):
     raise FileNotFoundError(
