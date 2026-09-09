@@ -41,6 +41,19 @@ parser.add_argument(
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument(
+    "--adr-increments",
+    "--adr_increments",
+    dest="adr_increments",
+    type=int,
+    default=None,
+    help=(
+        "Force a specific ADR curriculum stage for eval (0=easiest/start-band .. num_adr_increments="
+        "hardest/full-ADR), overriding env_cfg.starting_adr_increments. play.py never restores the "
+        "training-time curriculum progress the way train.py does, so without this every eval episode "
+        "runs at the easiest (start-band) domain-randomization ranges regardless of checkpoint."
+    ),
+)
+parser.add_argument(
     "--use_pretrained_checkpoint",
     action="store_true",
     help="Use the pre-trained checkpoint from Nucleus.",
@@ -491,6 +504,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     _configure_policy_arx_mode(env_cfg)
+    if args_cli.adr_increments is not None:
+        env_cfg.starting_adr_increments = args_cli.adr_increments
+        print(
+            f"[INFO] Forcing ADR curriculum stage: starting_adr_increments={args_cli.adr_increments} "
+            f"(of {env_cfg.num_adr_increments} total)."
+        )
 
     # randomly sample a seed if seed = -1
     if args_cli.seed == -1:

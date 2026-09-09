@@ -82,7 +82,7 @@ DEFAULT_FRAME_CLEARANCE_RANGE_M = (0.003, 0.015)
 # hardware occupies well inside the distribution (36 in / 0.91 m sits at the 21st percentile, not the
 # edge), matches European DIN lever height (~1.05 m) with margin, and leaves ~25% of doors above the
 # current failure wall as reachable stretch -- the reference trajectories solve every one of them.
-DEFAULT_HANDLE_HEIGHT_RANGE_M = (0.82, 1.07)
+DEFAULT_HANDLE_HEIGHT_RANGE_M = (0.87, 1.07)  # was (0.82, 1.07), temp update
 DEFAULT_HANDLE_EDGE_DISTANCE_RANGE_M = (0.03, 0.15)
 DEFAULT_HANDLE_RADIUS_RANGE_M = (0.007, 0.013)
 # Lever grip bar RADIUS (half cross-section), decoupled from the stem radius -- same convention as
@@ -99,19 +99,20 @@ DEFAULT_HANDLE_LEVER_THICKNESS_RANGE_M = (0.007, 0.010)
 # of the lever grip bar. This already ACCOUNTS FOR the lever bar half-thickness -- the stem cylinder is
 # extended by that half-thickness so the lever's near surface sits exactly this far above the panel (see
 # build_handle_spec). So this range IS the finger clearance under the lever, not the lever-center offset.
-# Floor RAISED 0.040 -> 0.045 for the 2-finger gripper. This slot is what makes a pull form-closed
-# instead of friction-closed: the finger goes THROUGH it and hooks the bar, so the door load is carried
-# by finger geometry rather than by 2*mu*F_grip (which at the mu=0.05 end of the handle friction range
-# transmits only ~5 N against the 12-31 N a panel needs). At the old 0.040 floor a 21 mm finger had
-# under 20 mm of total clearance to spare; 0.045 gives 2.1x the finger width. Raise it further (0.055
-# is 2.6x) if hooking still misses on the tightest doors.
-DEFAULT_HANDLE_STEM_LENGTH_RANGE_M = (0.045, 0.085)
-# Lever bar length -- also the LENGTH OF THE SLOT the fingers hook through. Floor dropped 0.09 ->
-# 0.06 so the set includes stubs barely longer than the gripper's own jaw: with a short bar the hand
-# has almost no margin along the lever, and a grasp seated near the free end slides straight off
-# under pull load. That slip is the failure mode the policy has to learn to avoid, so it has to be
-# in the training distribution.
-DEFAULT_HANDLE_LENGTH_RANGE_M = (0.06, 0.14)  # was (0.09, 0.14), temp update
+# Floor RAISED again 0.045 -> 0.050, now matching MIN_HANDLE_PLATE_GRASP_GAP_M below: this slot is
+# what makes a pull form-closed instead of friction-closed, the finger goes THROUGH it and hooks the
+# bar, so the door load is carried by finger geometry rather than by 2*mu*F_grip (which at the
+# mu=0.05 end of the handle friction range transmits only ~5 N against the 12-31 N a panel needs). At
+# the old 0.045 floor a 21 mm finger had 2.1x its own width to spare; 0.050 keeps raising that margin
+# and, since it now equals MIN_HANDLE_PLATE_GRASP_GAP_M, every non-bump door's clear_finger_gap floor
+# matches what bumped doors were already guaranteed.
+DEFAULT_HANDLE_STEM_LENGTH_RANGE_M = (0.050, 0.085)  # was (0.045, 0.085), temp update
+# Lever bar length -- also the LENGTH OF THE SLOT the fingers hook through. Floor RAISED 0.06 -> 0.08:
+# the 0.06 stubs (barely longer than the gripper's own jaw) left almost no margin along the lever, and
+# combined with the return-hook/plate clearance fix above, the shortest bars were the ones most prone
+# to a collapsed grasp slot. 0.08 keeps meaningfully short bars (still well under the old 0.09 floor)
+# in the distribution without the near-zero-margin extreme.
+DEFAULT_HANDLE_LENGTH_RANGE_M = (0.08, 0.14)  # was (0.06, 0.14), temp update
 # Return-hook length. This is a REQUEST, not the final value: build_handle_spec clamps it to
 # stem_length - return_tip_clearance, so what actually decides how far the hook returns is the tip
 # clearance below. Raised past the largest possible stem so the clamp always binds -- i.e. a return
@@ -214,11 +215,13 @@ DOOR_OPEN_LIMIT_RAD = 1.57
 # door the stop is what lets you transfer the pull through the handle rather than through grip
 # friction alone.
 #
-# The floor on this value is the unlatch threshold: door_latch_threshold_range_rad randomizes it up
-# to 0.85 rad, so the stop MUST stay above 0.85 or some doors could never unlatch at all. 0.95 leaves
-# 0.10 rad (5.7 deg) of margin, which also gives the useful invariant that pressing the lever to its
-# stop unlatches EVERY door regardless of the sampled threshold.
-HANDLE_OPEN_LIMIT_RAD = 0.95
+# The floor on this value is the unlatch threshold: door_latch_threshold_range_rad (env cfg) now
+# randomizes it up to 0.95 rad, so the stop MUST stay above 0.95 or some doors could never unlatch --
+# a loaded PD settles slightly short of the stop, so equaling the threshold left zero margin. 1.05
+# restores the original 0.10 rad (5.7 deg) margin (same ratio as the old 0.95-stop/0.85-threshold
+# pair), keeping the invariant that pressing the lever to its stop unlatches EVERY door regardless
+# of the sampled threshold.
+HANDLE_OPEN_LIMIT_RAD = 1.05  # was 0.95, temp update
 ROOT_JOINT_RPY = [math.pi / 2.0, 0.0, -math.pi / 2.0]
 # With the fixed root rotation above, link_1 local -z points toward the
 # default front view used by scripts/test_door.py, while +z points to the back.
@@ -979,6 +982,14 @@ def build_handle_spec(spec, board_min, board_max):
     # plate outer face and the lever's near surface. Measured from the panel-referenced underside gap, so
     # the resulting plate-referenced underside gap = underside_gap_panel - bump_protrusion >= the minimum.
     bump_protrusion = min(bump_protrusion, max(0.0, underside_gap_panel - MIN_HANDLE_PLATE_GRASP_GAP_M))
+    # RETURN-hook levers curl the tip back toward the panel to close a graspable loop -- the finger has
+    # to thread THROUGH that loop (gap = tip_clearance) to hook the bar. The mount sits behind the lever
+    # in the SAME underside gap the tip clearance is measured against, so nothing above stopped
+    # bump_protrusion from eating into tip_clearance too -- a large mount could collapse or invert the
+    # loop opening even though the lever-side clearance check above still passed. Re-clamp so the loop
+    # keeps at least its own MIN_RETURN_TIP_CLEARANCE_M once the plate is in the way.
+    if spec["handle_has_return"]:
+        bump_protrusion = min(bump_protrusion, max(0.0, tip_clearance - MIN_RETURN_TIP_CLEARANCE_M))
     plate_underside_gap = (underside_gap_panel - bump_protrusion) if has_bump else None
     bump_radius = max(float(spec.get("handle_bump_radius_m", 0.0)), radius * 1.5)
     mount_out = outward_sign * bump_protrusion  # signed z of the mount's outer face
@@ -1215,6 +1226,26 @@ def build_urdf_tree(handle_mesh_filename, handle_spec, collisions, door_axis, jo
     link_1 = ET.SubElement(robot, "link", {"name": "link_1"})
     add_mesh_body(link_1, "visual", "board", "texture_dae/board.obj")
     add_mesh_body(link_1, "collision", None, "texture_dae/board.obj")
+    # Box escutcheon plate: baked into board.obj's mesh, so the mesh collision above ALSO has to
+    # represent it. That collision is built at spawn time by VHACD convex-decomposing board.obj
+    # (see multi_door_cfg.py collider_type="convex_decomposition") -- a >1m-wide, <5cm-thick panel
+    # with one small (1-20mm) local bump baked in is exactly the geometry VHACD handles worst: the
+    # panel dominates the decomposition and the plate is a tiny embedded detail, so it can come out
+    # merged into an oversized hull, dropped, or badly conditioned. The round boss on link_2 never has
+    # this problem because it gets its own explicit box primitive (build_handle_collision_primitives)
+    # instead of relying on mesh decomposition. Give the box plate the same treatment: an exact,
+    # hand-specified box collision at its true bounds, layered on top of the mesh collision so the
+    # panel's general (possibly irregular) shape still comes from VHACD but this one small, easy-to-
+    # get-wrong feature does not depend on it.
+    if handle_spec.get("plate_min_link1") is not None and handle_spec.get("plate_max_link1") is not None:
+        plate_min = handle_spec["plate_min_link1"]
+        plate_max = handle_spec["plate_max_link1"]
+        add_box_collision(
+            link_1,
+            "handle_plate",
+            midpoint(plate_min, plate_max),
+            [hi - lo for lo, hi in zip(plate_min, plate_max)],
+        )
 
     joint_1 = ET.SubElement(robot, "joint", {"name": "joint_1", "type": "revolute"})
     ET.SubElement(joint_1, "origin", {"xyz": format_vector(joint_1_origin), "rpy": "0 0 0"})

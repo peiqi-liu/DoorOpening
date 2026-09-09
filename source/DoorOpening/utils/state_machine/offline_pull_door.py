@@ -329,13 +329,12 @@ def state_machine_offline_right_pull_door(
     pull_theta_stop = 1.25
     pull_theta_step = 0.10
 
-    # Keep the lever pressed against its stop for most of the pull, then let it spring back over the
-    # last stretch so it is fully restored by the time Step 5 releases the handle. See
-    # _pull_hinge_angle for why holding beats releasing on the first frame.
-    # Start restoring once the panel is ~29 deg open (0.5 rad). By then the latch bolt is long
-    # clear of the strike, so holding the lever down further only fights the return spring.
-    pull_hinge_hold_until_theta = 0.5
-    pull_hinge_release_by_theta = pull_theta_stop
+    # Held flat while the panel is not yet confidently open (0.3 rad -- matches pull_theta_start, well
+    # past the door_closed_range=0.05 rad relock boundary), then released QUICKLY rather than dragged
+    # out across the rest of the sweep: the never-closing gripper has no reason to keep pressing once
+    # the panel is swinging on its own, and doing so was the main slip-risk driver.
+    pull_hinge_hold_until_theta = 0.3  # was 0.15, temp update
+    pull_hinge_release_by_theta = 0.5  # was pull_theta_stop (1.25), temp update
 
     # Base held a further 10 cm back through the pull sweep. This offset is measured from the
     # handle, which travels TOWARD the robot as the panel swings, so the whole sweep is where the
@@ -921,13 +920,13 @@ def state_machine_offline_left_pull_door(
     pull_base_y_offset = 0.08
     pull_base_y_gain = -0.1 / 1.45
 
-    # Keep the lever pressed against its stop for most of the pull, then let it spring back over the
-    # last stretch so it is fully restored by the time Step 5 releases the handle. Same values as the
-    # right-door planner; see _pull_hinge_angle for why holding beats releasing on the first frame.
-    # Start restoring once the panel is ~29 deg open (0.5 rad). By then the latch bolt is long
-    # clear of the strike, so holding the lever down further only fights the return spring.
-    pull_hinge_hold_until_theta = 0.5
-    pull_hinge_release_by_theta = pull_theta_stop
+    # Held flat while the panel is not yet confidently open (0.3 rad -- matches pull_theta_start, well
+    # past the door_closed_range=0.05 rad relock boundary), then released QUICKLY rather than dragged
+    # out across the rest of the sweep. Same values as the right-door planner: the never-closing
+    # gripper has no reason to keep pressing once the panel is swinging on its own, and doing so was
+    # the main slip-risk driver.
+    pull_hinge_hold_until_theta = 0.3  # was 0.15, temp update
+    pull_hinge_release_by_theta = 0.5  # was pull_theta_stop (1.25), temp update
 
     pull_palm_x_offset_closed = 0.055
     pull_palm_y_offset_closed = 0.03

@@ -497,9 +497,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # harder ones.
     door_panel_effort_limit_start_range_nm = (10.0, 15.0)  # was (5.0, 15.0), temp update
     # Floor 8 -> 3 Nm: below the start band's 10 Nm floor again, so ADR re-introduces lighter doors
-    # as it widens (not just adds heavier ones -- see the start-band note above). Ceiling 60 -> 75 Nm
-    # for heavier doors.
-    door_panel_effort_limit_range_nm = (3.0, 75.0)  # was (8.0, 60.0), temp update
+    # as it widens (not just adds heavier ones -- see the start-band note above). Ceiling trimmed
+    # back down 75 -> 70 Nm.
+    door_panel_effort_limit_range_nm = (3.0, 70.0)  # was (3.0, 75.0), temp update
 
     # Handle (joint_2) unlatch angle threshold (radians): the door stays latched until the handle is
     # rotated past this. Per-env, ADR-ramped from the fixed 0.8 start out to (0.65, 0.95) so the policy
@@ -964,18 +964,13 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "damping_distribution_params": (0.7, 1.3),
         },
         "door_board_joint_stiffness_and_damping": {
-            # FINAL (full-ADR) stiffness band, log-uniform over 5..400 Nm/rad. Ceiling cut 600 -> 400
-            # alongside the effort-cap reduction: the cap is what the door's steady heaviness actually
-            # is, and stiffness only decides how ABRUPTLY the restoring torque reaches it. The panel
-            # saturates the cap at theta = cap/k, so with the ADR cap now 40 Nm, k = 600 saturated
-            # after 0.067 rad (3.8 deg) -- an almost instantaneous wall -- while k = 400 gives 0.1 rad
-            # (5.7 deg) and k = 5 stays soft over the whole swing. Keeps a sharp breakaway in the
-            # distribution without the very hardest hit, which is what tears a pinch grasp loose.
-            "stiffness_distribution_params": (8.0, 800.0),  # was (5.0, 600.0), temp update
-            # Nm*s/rad. zeta = c/(2*sqrt(k*I)), I ~= 24 kg*m^2. Floor lowered 4 -> 2 to match the start
-            # band's 3 (otherwise ADR would RAISE the damping floor as it progressed) and to keep the
-            # k = 5 doors genuinely free-swinging rather than overdamped.
-            "damping_distribution_params": (3.0, 90.0),  # was (2.0, 60.0), temp update
+            # FINAL (full-ADR) stiffness band, UNIFORM (not log-uniform -- see the "distribution"
+            # field on the EventCfg term itself, which ADR never touches) over 5..500 Nm/rad.
+            "stiffness_distribution_params": (5.0, 500.0),  # was (8.0, 800.0), temp update
+            # Nm*s/rad. zeta = c/(2*sqrt(k*I)), I ~= 24 kg*m^2. Rescaled with the stiffness band to
+            # hold the same damping ratios as before: zeta ~= 0.11 at the floor (free-swinging soft
+            # doors), ~= 0.32 at the ceiling (real drag on stiff doors).
+            "damping_distribution_params": (2.5, 70.0),  # was (3.0, 90.0), temp update
         },
         "door_board_joint_friction": {
             # Coulomb breakaway friction on the panel swing. Ramps from the (0, 0) EventTerm base out to
