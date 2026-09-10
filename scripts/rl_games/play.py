@@ -49,8 +49,9 @@ parser.add_argument(
     help=(
         "Force a specific ADR curriculum stage for eval (0=easiest/start-band .. num_adr_increments="
         "hardest/full-ADR), overriding env_cfg.starting_adr_increments. play.py never restores the "
-        "training-time curriculum progress the way train.py does, so without this every eval episode "
-        "runs at the easiest (start-band) domain-randomization ranges regardless of checkpoint."
+        "training-time curriculum progress the way train.py does, so by DEFAULT (this flag omitted) "
+        "it evaluates at full ADR (num_adr_increments) regardless of checkpoint; pass this to pin a "
+        "specific stage instead, e.g. 0 for the easiest start-band ranges."
     ),
 )
 parser.add_argument(
@@ -509,6 +510,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(
             f"[INFO] Forcing ADR curriculum stage: starting_adr_increments={args_cli.adr_increments} "
             f"(of {env_cfg.num_adr_increments} total)."
+        )
+    else:
+        # play.py never restores the training-time curriculum progress the way train.py does (see
+        # --adr-increments help), so default eval to the HARDEST/full-ADR ranges rather than silently
+        # inheriting the cfg's training-time start-band default (0) that stage-by-stage curriculum
+        # learning needs but eval should not.
+        env_cfg.starting_adr_increments = env_cfg.num_adr_increments
+        print(
+            f"[INFO] No --adr-increments given; defaulting eval to full ADR: "
+            f"starting_adr_increments={env_cfg.num_adr_increments} (of {env_cfg.num_adr_increments} total)."
         )
 
     # randomly sample a seed if seed = -1
