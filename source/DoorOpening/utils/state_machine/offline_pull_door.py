@@ -969,7 +969,7 @@ def state_machine_offline_left_pull_door(
         base_target_pos = handle_pos.clone()
         base_target_pos[:, 0] += pull_base_x_offset
         base_target_pos[:, 1] = pull_base_y_offset + theta.item() * pull_base_y_gain
-        pull_open_base_tilt_yaw = 0.0  # was 0.2, temp update
+        pull_open_base_tilt_yaw = 0.2
         _, _, _base_yaw = euler_xyz_from_quat(base_target_rot)
         pull_open_tilt_base_rot = get_rotation_quat(0.0, 0.0, _base_yaw.item() + pull_open_base_tilt_yaw, device)
         base_target_pose = _make_pose(base_target_pos, pull_open_tilt_base_rot)
