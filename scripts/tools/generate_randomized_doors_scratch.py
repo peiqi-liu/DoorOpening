@@ -1225,7 +1225,10 @@ def build_urdf_tree(handle_mesh_filename, handle_spec, collisions, door_axis, jo
 
     link_1 = ET.SubElement(robot, "link", {"name": "link_1"})
     add_mesh_body(link_1, "visual", "board", "texture_dae/board.obj")
-    add_mesh_body(link_1, "collision", None, "texture_dae/board.obj")
+    # Collision uses the PLATE-FREE mesh (board_collision.obj), not the visual one -- see the
+    # write_board_mesh call site for why. The plate's own collision is the explicit "handle_plate"
+    # box primitive added below, not VHACD decomposition of a combined mesh.
+    add_mesh_body(link_1, "collision", None, "texture_dae/board_collision.obj")
     # Box escutcheon plate: baked into board.obj's mesh, so the mesh collision above ALSO has to
     # represent it. That collision is built at spawn time by VHACD convex-decomposing board.obj
     # (see multi_door_cfg.py collider_type="convex_decomposition") -- a >1m-wide, <5cm-thick panel
@@ -1432,6 +1435,16 @@ def generate_variants(args):
         if handle_spec.get("plate_min_link1") is not None and handle_spec.get("plate_max_link1") is not None:
             plate_box = (handle_spec["plate_min_link1"], handle_spec["plate_max_link1"])
         write_board_mesh(texture_dir / "board.obj", board_min, board_max, plate_box=plate_box)
+        # Plate-FREE collision mesh: board.obj (visual) bakes the escutcheon plate in for rendering,
+        # but handing that same combined mesh to VHACD (multi_door_cfg.py collider_type=
+        # "convex_decomposition") is exactly the geometry it decomposes worst -- a >1m panel with one
+        # tiny (1-20mm) local bump -- and empirically an explicit "handle_plate" collision primitive
+        # added alongside it (build_urdf_tree) did NOT fix box-shape door success (66.4% vs 67.3%
+        # baseline, no improvement), meaning the oversized/misshapen VHACD hull is what the hand
+        # actually contacts, not the correct primitive sitting redundantly inside/near it. Giving VHACD
+        # only the plain panel bounds here removes that hull entirely; the plate's own collision comes
+        # exclusively from the explicit box primitive from now on.
+        write_board_mesh(texture_dir / "board_collision.obj", board_min, board_max, plate_box=None)
         write_frame_mesh(texture_dir / "frame.obj", frame_boxes)
         handle_mesh_name = f"handle_{handle_spec['type']}.obj"
         write_handle_mesh(texture_dir / handle_mesh_name, handle_spec, args.handle_num_segments)
