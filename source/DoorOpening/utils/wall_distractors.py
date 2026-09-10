@@ -55,6 +55,16 @@ class WallDistractorParams:
     flush_extent_max_m: float
     flush_height_min_m: Optional[float]
     flush_height_max_m: Optional[float]
+    # When the flush wall is present, the box side wall is a SEPARATE, DETACHED wall that interrupts
+    # the flush drywall SOMEWHERE WITHIN its own span -- i.e. it stands up while the flush wall hasn't
+    # visually finished yet (a pillar / return wall / furniture edge poking out of the drywall), not only
+    # after the flush wall's full run. Its inner face sits at ``flush_extent * frac`` from the panel edge,
+    # with ``frac`` drawn per env from [``detached_within_flush_frac_min``, ``..._max``] (both in [0, 1],
+    # 0 = right at the panel edge, 1 = right at the flush wall's own far edge). Only applied on envs where
+    # flush is present; absent-flush envs keep the box hugging the door edge by ``edge_gap_m`` (open/
+    # glass-frame case).
+    detached_within_flush_frac_min: float
+    detached_within_flush_frac_max: float
 
     @classmethod
     def from_cfg(cls, cfg: dict, scene_door_num_points: int) -> "WallDistractorParams":
@@ -113,6 +123,11 @@ class WallDistractorParams:
         else:
             flush_height_min_m, flush_height_max_m = map(float, flush_height_range)
             flush_height_max_m = max(flush_height_min_m, flush_height_max_m)
+        detached_within_flush_frac_min, detached_within_flush_frac_max = map(
+            float, cfg.get("detached_within_flush_frac", [0.0, 1.0])
+        )
+        detached_within_flush_frac_min = min(1.0, max(0.0, detached_within_flush_frac_min))
+        detached_within_flush_frac_max = min(1.0, max(detached_within_flush_frac_min, detached_within_flush_frac_max))
         return cls(
             enabled=enabled,
             num_points=num_points,
@@ -139,6 +154,8 @@ class WallDistractorParams:
             flush_extent_max_m=flush_extent_max_m,
             flush_height_min_m=flush_height_min_m,
             flush_height_max_m=flush_height_max_m,
+            detached_within_flush_frac_min=detached_within_flush_frac_min,
+            detached_within_flush_frac_max=detached_within_flush_frac_max,
         )
 
 
@@ -283,10 +300,16 @@ def sample_wall_points_local(
 ) -> torch.Tensor:
     """Sample wall-distractor surface points in the door-base local frame.
 
-    Two independent components share the point budget:
+    Two components share the point budget:
       * **Box side walls** -- thick left/right columns (front+back per side), ALWAYS sampled. Their
         height range (``height_range_m``) is deliberately low so they often fall below the policy's
-        z-crop and vanish from the policy input, while still often poking into it.
+        z-crop and vanish from the policy input, while still often poking into it. On envs where the
+        flush wall (below) is present, these columns are placed at ``detached_within_flush_frac`` of
+        the flush wall's OWN extent from the panel edge -- modeling a wall that interrupts the flush
+        drywall somewhere within its span (the flush wall hasn't visually finished when the box shows
+        up) rather than only appearing after its full run, since a real robot uses that DETACHED wall
+        as its rotation reference. Envs without a flush wall keep hugging the door edge via
+        ``edge_gap_m`` (open/glass-frame case), same as always.
       * **Flush mounting wall** -- a thin slab coplanar with the panel, flanking it left+right, present
         per env with ``flush_prob`` (else absent = glass/open). Gets ``flush_point_fraction`` of the
         budget; absent envs leave those slots NaN.
@@ -334,6 +357,34 @@ def sample_wall_points_local(
     flush_np = min(num_points, int(round(num_points * params.flush_point_fraction))) if flush_active else 0
     box_np = num_points - flush_np
 
+    # Flush existence/extent are drawn HERE (before the box columns) because the box's own offset below
+    # depends on them: when flush is present, the box models a DETACHED wall standing beyond the flush
+    # drywall rather than a jamb wall hugging the door. Reused by the flush slab block further down.
+    if flush_active:
+        flush_present = torch.rand((env_count,), device=device) < params.flush_prob
+        flush_extent = rand_range(params.flush_extent_min_m, params.flush_extent_max_m, (env_count,)).clamp_min(1e-3)
+    else:
+        flush_present = torch.zeros((env_count,), dtype=torch.bool, device=device)
+        flush_extent = torch.zeros((env_count,), device=device, dtype=torch.float32)
+    # Offset from the panel edge to the detached box wall, when flush is present: a FRACTION of the
+    # flush wall's OWN extent, so the box interrupts the flush drywall somewhere WITHIN its span (the
+    # flush wall hasn't visually finished yet when the box shows up) rather than only standing beyond
+    # its full run. frac=0 -> box right at the panel edge (start of the flush run); frac=1 -> box right
+    # at the flush wall's own far edge. Zero on envs without a flush wall, where the box keeps hugging
+    # the door edge via edge_gap_m as before.
+    within_flush_frac = rand_range(
+        params.detached_within_flush_frac_min, params.detached_within_flush_frac_max, (env_count,)
+    )
+    detached_offset = torch.where(
+        flush_present, flush_extent * within_flush_frac, torch.zeros((env_count,), device=device, dtype=torch.float32)
+    )
+    # The box's reference edge when a flush wall is present: the flush wall's OWN edge, anchored to the
+    # panel bbox (f_width_max/f_width_min), not the box/frame bbox (width_max/width_min -- the frame is
+    # wider than the link_1 panel). Using width_max/width_min here would silently add that frame-to-panel
+    # gap on top of the fraction above. Absent-flush envs fall back to the frame edge, unchanged.
+    detached_ref_max = torch.where(flush_present, f_width_max, width_max)
+    detached_ref_min = torch.where(flush_present, f_width_min, width_min)
+
     parts = []
 
     # ---- Box side walls: {left, right} x {front, back}, each side's pair butted at a shared seam. ----
@@ -367,13 +418,13 @@ def sample_wall_points_local(
                 cmin_s, cmax_s = seam, seam + depth
             else:
                 cmin_s, cmax_s = seam - depth, seam
-            edge_gap = rand_range(params.gap_min_m, params.gap_max_m, (env_count,))
+            edge_gap = rand_range(params.gap_min_m, params.gap_max_m, (env_count,)) + detached_offset
             column_width = sample_column_width()
             if attach_on_right:
-                inner = width_max + edge_gap
+                inner = detached_ref_max + edge_gap
                 outer = inner + column_width
             else:
-                inner = width_min - edge_gap
+                inner = detached_ref_min - edge_gap
                 outer = inner - column_width
             wlo = torch.minimum(inner, outer)
             whi = torch.maximum(inner, outer)
@@ -412,7 +463,7 @@ def sample_wall_points_local(
         half_t = 0.5 * flush_t
         f_tmin = f_thick_center - half_t
         f_tmax = f_thick_center + half_t
-        extent = rand_range(params.flush_extent_min_m, params.flush_extent_max_m, (env_count,)).clamp_min(1e-3)
+        extent = flush_extent
         if params.flush_height_min_m is not None:
             f_hlo = torch.full((env_count,), params.flush_height_min_m, device=device, dtype=torch.float32)
             f_hhi = torch.full((env_count,), params.flush_height_max_m, device=device, dtype=torch.float32)
@@ -437,7 +488,6 @@ def sample_wall_points_local(
             device=device,
         )
         # Existence gate: absent (glass/open) envs get all-NaN flush points this episode.
-        flush_present = torch.rand((env_count,), device=device) < params.flush_prob
         flush_pts = torch.where(
             flush_present.view(env_count, 1, 1), flush_pts, torch.full_like(flush_pts, float("nan"))
         )

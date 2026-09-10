@@ -156,7 +156,7 @@ dagger:
   weight_decay: 1.0e-4
   grad_clip: 1.0
   num_iters: 250000
-  lr_decay_iters: 100000
+  lr_decay_iters: 70000
   teacher_forcing_warmup_iters: 5000
   teacher_forcing_transition_iters: 20000
   teacher_forcing_min_beta: 0.0
@@ -202,8 +202,8 @@ dagger:
     panel_width_anchor: "origin"
   log_interval: 100
   save_interval: 5000
-  reset_progress_total: 50000
-  adr_reset_progress_total: 10000
+  reset_progress_total: 20000
+  adr_reset_progress_total: 5000
   pointcloud_source: "depth"
   # "measured" (default): base_vel obs is the sensed base joint velocity (matches deploy's fused
   # odometry). "commanded": base_vel obs is the student's own last commanded base action instead,
@@ -330,7 +330,8 @@ dagger:
     # - thickness axis: through the panel, normal to the door slab
     # Each sampled point comes from either the left or right column.
     side_margin_m: [0.2, 1.2]  # Column width along the door width axis, i.e. how far each column extends outward from the left/right panel edge. Upper bound raised from 0.8 -> 1.2 because the reworked x5 camera pose (mount pitch 0 deg, tilt now carried by x5_joint2/3) sees a wider band beside the door: at 0.8 m the column often ended inside the frame, leaving an unrealistic floating wall edge.
-    edge_gap_m: [0.0, 0.04]  # Empty gap (m) between the door side edge and the inner face of the wall column. Non-zero so the wall never sits flush against / overlapping the door (a zero gap is unrealistic). Clamped to >= 0 in code.
+    edge_gap_m: [0.0, 0.04]  # Empty gap (m) between the door side edge and the inner face of the wall column, used ONLY on envs with no flush wall (see detached_within_flush_frac below for the flush case). Non-zero so the wall never sits flush against / overlapping the door (a zero gap is unrealistic). Clamped to >= 0 in code.
+    detached_within_flush_frac: [0.0, 1.0]  # On envs with a flush wall, the box column sits at (flush's own sampled extent * this fraction) from the panel edge instead of edge_gap_m -- a DETACHED wall that interrupts the flush drywall somewhere WITHIN its own span (flush hasn't visually finished when the box shows up), which is what a robot actually sights to judge its base rotation, rather than a jamb wall hugging the door OR a wall that only appears after flush's full run. 0 = right at the panel edge (start of the flush run); 1 = right at the flush wall's own far edge.
     depth_m: [0.1, 1.5]  # Extra thickness added beyond the door slab thickness along the door-thickness axis, independently per front/back segment.
     # Position of the seam where the front and back segments on one side butt together (see
     # sample_seam), relative to the door's mid-thickness plane. Pinned to 0 so all 4 walls start
@@ -348,11 +349,12 @@ dagger:
     # legacy fixed-count behavior.
     point_density_per_m2: 3000
     face_jitter_m: 0.1  # Small noise added only on the snapped outer faces so the walls do not look perfectly planar.
-    # --- Flush mounting wall (SEPARATE, existence-gated component; coexists with the box walls above) ---
+    # --- Flush mounting wall (coexists with the box walls above) ---
     # A thin slab coplanar with the door panel, flanking it left+right and running floor-to-above-door --
-    # the flat drywall surface a door sits flush in (very common). Present per-env with flush_prob; when
-    # absent that's the glass / open-frame case.
-    flush_prob: 0.7
+    # the flat drywall surface a door sits flush in (the common case, but not the only one -- keep this
+    # below 1.0 so the fully-open/glass-frame envs, with no wall context at all, still occur). The box
+    # columns above are what vary the FAR-wall placement (see detached_within_flush_frac) on top of this.
+    flush_prob: 0.9
     flush_point_fraction: 0.5   # Share of the wall point budget reserved for the flush wall (when present).
     # Flush slab thickness range (m). null -> match the door panel's own thickness exactly (both faces coplanar).
     flush_thickness_m: null
@@ -364,7 +366,7 @@ dagger:
   # casings). Disabled by default -- set enabled: true to activate.
   door_frame_aug:
     enabled: true  # Real doors mostly DO have a visible casing/jamb, so the frame must appear in the input.
-    env_prob: 0.5  # Per-env probability the frame IS rendered this episode. The other half covers frameless / flush-mounted doors.
+    env_prob: 0.65  # Per-env probability the frame IS rendered this episode. The remainder covers frameless / flush-mounted doors.
   door_hole_aug:
     # Per-rollout door appearance is drawn once at reset from these two probabilities. With
     # env_prob = P(hole) and glass_reflection.prob = P(reflection | hole), the three MUTUALLY

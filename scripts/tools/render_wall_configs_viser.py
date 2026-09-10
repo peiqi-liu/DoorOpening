@@ -101,6 +101,70 @@ def _sample_scene_surface(robot, num_points, device):
     return torch.as_tensor(np.asarray(pts), dtype=torch.float32, device=device)
 
 
+def _door_link_scene_node_groups(robot):
+    """Classify the door URDF's trimesh scene-graph geometry nodes into 'frame' (link_0, the
+    casing/jamb) and 'body' (link_1 panel + link_2 handle), so the frame can be dropped like
+    `door_frame_aug` does in training instead of always being part of one merged mesh sample.
+
+    yourdfpy names each scene node after its owning VISUAL's `.name` (with a numeric suffix per
+    extra sub-mesh when one mesh file contains several groups, e.g. visual "board" -> scene nodes
+    "board", "board_1", "board_2", ...) -- there is no direct node->link_name mapping otherwise.
+    Nodes that match neither link's visual names (rare extra fixtures, e.g. a lock on a handful of
+    assets with a link_3) are dropped, matching training, which also only ever composes link_0/1/2.
+    """
+    def visual_name_prefixes(link_name):
+        link = robot.link_map.get(link_name)
+        return [v.name for v in link.visuals if v.name] if link is not None else []
+
+    frame_prefixes = visual_name_prefixes("link_0")
+    body_prefixes = visual_name_prefixes("link_1") + visual_name_prefixes("link_2")
+    groups = {"frame": [], "body": []}
+    for node in robot.scene.graph.nodes_geometry:
+        if any(node == p or node.startswith(p + "_") for p in frame_prefixes):
+            groups["frame"].append(node)
+        elif any(node == p or node.startswith(p + "_") for p in body_prefixes):
+            groups["body"].append(node)
+    return groups
+
+
+def sample_door_points_base(robot, num_points, device):
+    """Area-weighted door surface sample split into 'body' (link_1 + link_2, ALWAYS present) and
+    'frame' (link_0, gated per-config by door_frame_aug.env_prob in the caller) -- unlike a single
+    merged-mesh sample, this lets the frame be dropped the way training does. The point budget is
+    split between the two groups by total surface area first, then within each group by node area
+    (the same two-level area-weighted allocation FrankaGripperSampler uses for the real door
+    sampler), so the two stay in the same relative proportion training would show. Both returned
+    (1, Ni, 3) in the door's base_link frame.
+    """
+    import trimesh
+
+    scene = robot.scene
+    groups = _door_link_scene_node_groups(robot)
+    group_areas = {
+        name: sum(float(scene.geometry[scene.graph.get(n)[1]].area) for n in nodes)
+        for name, nodes in groups.items()
+    }
+    total_area = sum(group_areas.values()) or 1.0
+    out = {}
+    for name, nodes in groups.items():
+        group_budget = int(round(num_points * group_areas[name] / total_area)) if nodes else 0
+        if not nodes or group_budget <= 0:
+            out[name] = torch.zeros((1, 0, 3), dtype=torch.float32, device=device)
+            continue
+        node_areas = {n: float(scene.geometry[scene.graph.get(n)[1]].area) for n in nodes}
+        node_total = sum(node_areas.values()) or 1.0
+        parts = []
+        for n in nodes:
+            k = max(1, int(round(group_budget * node_areas[n] / node_total)))
+            geom = scene.geometry[scene.graph.get(n)[1]]
+            pts, _ = trimesh.sample.sample_surface(geom, k)
+            T = scene.graph.get(n)[0]  # geometry -> scene root (== base_link)
+            parts.append(np.asarray(pts) @ T[:3, :3].T + T[:3, 3])
+        pts_base = np.concatenate(parts, axis=0)
+        out[name] = torch.as_tensor(pts_base, dtype=torch.float32, device=device).unsqueeze(0)
+    return out["body"], out["frame"]
+
+
 def build_robot_link_cache(robot, num_points):
     """Sample each robot link's surface ONCE in its own frame (area-weighted to total num_points).
 
@@ -138,14 +202,15 @@ def sample_robot_points_cached(robot, cache, device):
 
 
 def load_door_asset(urdf_path, num_points, device):
-    """Real door: mesh surface points + the FULL door outer bbox (frame + panel + handle), base frame.
+    """Real door: mesh surface points (split body/frame) + the FULL door outer bbox (frame + panel +
+    handle), base frame.
 
     The door is loaded at its default (closed) joints. Walls are placed against the full door bbox --
     the exact same `door_full_bbox_base` training now uses (via door_full_bboxes) -- so walls sit
     outside the whole door, not just the link_1 panel.
     """
     robot = _load_urdf(urdf_path)
-    door_pts = _sample_scene_surface(robot, num_points, device).unsqueeze(0)  # (1, N, 3)
+    body_pts, frame_pts = sample_door_points_base(robot, num_points, device)  # (1, N, 3) each
     kp = compute_exact_door_keypoints(str(urdf_path))
     full_bbox = kp.get("door_full_bbox_base", kp["link_1_bbox_base"])
     bbox = torch.as_tensor(full_bbox, dtype=torch.float32, device=device).unsqueeze(0)  # (1, 2, 3)
@@ -158,7 +223,7 @@ def load_door_asset(urdf_path, num_points, device):
         kp.get("link_1_pose_base", [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]), dtype=torch.float32, device=device
     )  # (7,) [pos, quat_wxyz]
     handle_center = np.asarray(kp.get("link_2_center_base", [0.0, 0.0, 0.0]), dtype=np.float64)  # base frame
-    return bbox, panel_bbox_link1, link1_pose_base, door_pts, handle_center
+    return bbox, panel_bbox_link1, link1_pose_base, body_pts, frame_pts, handle_center
 
 
 def load_robot_asset(num_points, device):
@@ -446,12 +511,13 @@ def main():
     panel_bbox_link1 = None
     link1_pose_base = None
     if args.cube:
-        board_bbox, board_gt = build_board(args.panel_width, args.panel_height, args.panel_thickness)
+        board_bbox, body_gt = build_board(args.panel_width, args.panel_height, args.panel_thickness)
+        frame_gt = torch.zeros((1, 0, 3), dtype=torch.float32, device=device)  # cube has no separate frame
         door_desc = f"cube {args.panel_width}x{args.panel_height}x{args.panel_thickness} m"
     else:
         # board_bbox is the FULL door outer bbox (frame + panel + handle) -- the same door_full_bboxes
         # training now uses for wall placement, so walls sit outside the whole door with a real gap.
-        board_bbox, panel_bbox_link1, link1_pose_base, board_gt, handle_center = load_door_asset(
+        board_bbox, panel_bbox_link1, link1_pose_base, body_gt, frame_gt, handle_center = load_door_asset(
             args.door, board_num_points, device
         )
         door_desc = f"door urdf {args.door.parent.name}"
@@ -479,7 +545,24 @@ def main():
     def door_to_world(pts):  # (1, N, 3) door-base frame -> world
         return pts @ R_door.T
 
-    board_gt = door_to_world(board_gt)
+    body_gt = door_to_world(body_gt)
+    frame_gt = door_to_world(frame_gt)
+
+    # --- Door-frame (link_0 casing/jamb) aug: same knob multi_pcd_dagger reads. The frame is dropped
+    # from the ENTIRE mesh sample (not just hidden), gated per-config by env_prob, exactly like the
+    # per-env episode coin flip -- see door_frame_aug_enabled / env_door_frame_visible in Dagger. ---
+    frame_cfg = dict(dagger_cfg.get("door_frame_aug", {}))
+    frame_aug_enabled = bool(frame_cfg.get("enabled", False)) and frame_gt.shape[1] > 0
+    frame_env_prob = float(frame_cfg.get("env_prob", 0.5))
+
+    def sample_board():
+        """This config's door cloud: body always, frame gated by frame_env_prob (fixed per config,
+        matching training's per-EPISODE frame-visibility draw, not a per-step flicker)."""
+        if not frame_aug_enabled:
+            return body_gt
+        if random.random() < frame_env_prob:
+            return torch.cat([body_gt, frame_gt], dim=1)
+        return body_gt
 
     # --- Window-hole aug: same knobs multi_pcd_dagger reads. One hole is drawn PER CONFIG (= per
     # rollout) and baked into that config's door cloud as NaN, matching the per-rollout training
@@ -574,11 +657,21 @@ def main():
             lo = float(lim.lower) if lim is not None and lim.lower is not None else -2.9
             hi = float(lim.upper) if lim is not None and lim.upper is not None else 2.9
             panda_limits.append((lo, hi))
+        # yourdfpy drops MIMIC joints from actuated_joint_names (panda_finger_joint2 mimics
+        # panda_finger_joint1 in glorbot.urdf's <mimic> tag), but GlorbotCollisionChecker's own URDF
+        # loader (TorchURDF) counts both fingers as independently actuated -- insert the mimic joint
+        # back into the name list (its config value always mirrors finger1's, multiplier=1 offset=0)
+        # so the joint-angle vector this script builds lines up with the checker's expected order.
+        collision_joint_names = list(robot_joint_names)
+        finger1_pos = None
+        if "panda_finger_joint1" in collision_joint_names and "panda_finger_joint2" not in collision_joint_names:
+            finger1_pos = collision_joint_names.index("panda_finger_joint1")
+            collision_joint_names.insert(finger1_pos + 1, "panda_finger_joint2")
         if robot_filter_enabled:
             from DoorOpening.utils.glorbot_collision_checker import GlorbotCollisionChecker
 
             robot_collision_checker = GlorbotCollisionChecker(
-                str(GLORBOT_URDF), device, input_joint_names=robot_joint_names
+                str(GLORBOT_URDF), device, input_joint_names=collision_joint_names
             )
         cam_desc = "x5_camera_link (per-config base+arm pose, mount -45deg roll)"
     else:
@@ -605,7 +698,8 @@ def main():
 
     print(f"[INFO] student cfg     : {args.student_cfg}")
     print(f"[INFO] wall num_points : {wall_params.num_points}  (enabled={wall_params.enabled}, density={wall_params.point_density_per_m2})")
-    print(f"[INFO] door            : {door_desc}  ({board_gt.shape[1]} pts)")
+    print(f"[INFO] door            : {door_desc}  (body={body_gt.shape[1]} pts, frame={frame_gt.shape[1]} pts)")
+    print(f"[INFO] door frame      : {'on (env_prob=' + str(frame_env_prob) + ')' if frame_aug_enabled else 'off'}")
     print(f"[INFO] window hole     : {'on (env_prob=' + str(hole_env_prob) + ', per-config w' + str(hole_width_range) + ' h' + str(hole_height_range) + ')' if hole_aug_enabled else 'off'}")
     print(f"[INFO] robot           : {'on (%d pts, +%d to policy; arm+base RE-SAMPLED per config)' % (scene_robot_num_points, robot_model_policy_points) if args.robot else 'off'}")
     print(f"[INFO] base crop       : {base_crop_points} pts, range {local_pcd_range[0]} m, x_cutoff {x_direction_cutoff}")
@@ -618,7 +712,7 @@ def main():
             w = float(torch.empty(1).uniform_(*board_width_range).item())
             h = float(torch.empty(1).uniform_(*board_height_range).item())
             t = float(torch.empty(1).uniform_(*board_thickness_range).item())
-            board_bbox, board_gt = build_board(w, h, t)
+            board_bbox, body_gt = build_board(w, h, t)
             wall_bbox = board_bbox
 
         if args.robot:
@@ -646,9 +740,15 @@ def main():
             camera_pose = torch.from_numpy(
                 robot_camera_pose_world(cam_T, base_pos[0].detach().cpu().numpy(), base_R)
             ).to(device).unsqueeze(0)
-            robot_filter_joint_angles = torch.as_tensor(cfg, dtype=torch.float32, device=device).unsqueeze(0)
+            # Re-insert the mimic finger value (== finger1's, always 0 here) to match collision_joint_names.
+            filter_cfg = cfg if finger1_pos is None else np.insert(cfg, finger1_pos + 1, cfg[finger1_pos])
+            robot_filter_joint_angles = torch.as_tensor(filter_cfg, dtype=torch.float32, device=device).unsqueeze(0)
 
         wall_world = door_to_world(sample_walls(wall_bbox))  # (1, Nw, 3) sampled in door frame, rotated to world
+        # Frame visibility is a per-config coin flip (matching training's per-episode draw), drawn
+        # BEFORE the window hole so a frame-carrying cloud can also have its hole cut, same order
+        # multi_pcd_dagger composes them in (frame merge -> ... -> hole aug).
+        board_gt = sample_board()
         # One window hole per config (per rollout), baked into the door cloud as NaN before it feeds
         # BOTH the rendered scene and the occluder pass (so the hole shows up as missing depth).
         board_gt_holed = apply_hole(board_gt)
