@@ -726,12 +726,19 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.door_joint_prediction_enabled = bool(getattr(self.student_model, "door_joint_prediction_enabled", False))
         self.door_joint_prediction_weight = float(getattr(self.student_model, "door_joint_prediction_weight", 0.0))
         self.door_joint_output_dim = int(getattr(self.student_model, "door_joint_output_dim", 0))
+        self.rollout_progress_prediction_enabled = bool(
+            getattr(self.student_model, "rollout_progress_prediction_enabled", False)
+        )
+        self.rollout_progress_prediction_weight = float(
+            getattr(self.student_model, "rollout_progress_prediction_weight", 0.0)
+        )
         if self.student_model.action_head.out_features != self.num_actions:
             raise ValueError(
                 f"Student action_dim ({self.student_model.action_head.out_features}) "
                 f"does not match env action dim ({self.num_actions})."
         )
         self._init_door_joint_prediction_training_state()
+        self._init_rollout_progress_prediction_training_state()
         self._init_prediction_training_state()
         self._init_mode_prediction_training_state()
         self._init_push_pull_condition_runtime_state(student_yaml_runtime_cfg)
@@ -1007,6 +1014,13 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         # Per-joint mean absolute error (rad), one entry per predicted joint; None until first update.
         self.latest_door_joint_abs_err = None
         self.latest_door_joint_target_mean = None
+
+    def _init_rollout_progress_prediction_training_state(self):
+        # The target is the completed fraction of each environment's own fixed rollout budget.
+        # It is intentionally not an observation or recurrent aux input: this branch is trained as
+        # a visual/proprioceptive phase readout, just like the independent door-joint readout.
+        self.latest_rollout_progress_abs_err = None
+        self.latest_rollout_progress_target_mean = None
 
     def _init_observation_lag_state(self):
         cfg = dict(self.observation_lag_cfg or {})
@@ -1607,6 +1621,66 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             abs_err = (door_joint_pred - target).abs()[valid_mask]
             self.latest_door_joint_abs_err = abs_err.mean(dim=0).detach().cpu().tolist()
 
+        return loss
+
+    def _get_rollout_progress_prediction_target(self, env_mask=None, update_metrics=True):
+        """Return completed rollout fraction, normalized by each env's fixed trial length."""
+        rollout_step_ids = self._get_rollout_step_ids().to(device=self.device, dtype=torch.float32)
+        max_trial_steps = getattr(self.ov_env, "max_trial_steps", None)
+        if max_trial_steps is None:
+            max_trial_steps = getattr(self.ov_env, "max_episode_length", None)
+        if max_trial_steps is None:
+            raise RuntimeError(
+                "Rollout-progress prediction requires ov_env.max_trial_steps or ov_env.max_episode_length."
+            )
+        rollout_lengths = torch.as_tensor(
+            max_trial_steps, device=self.device, dtype=rollout_step_ids.dtype
+        ).expand_as(rollout_step_ids).clamp_min(1.0)
+        target = (rollout_step_ids / rollout_lengths).clamp_(0.0, 1.0).unsqueeze(-1)
+        if env_mask is not None:
+            target = target[env_mask.to(device=self.device, dtype=torch.bool)]
+        if update_metrics:
+            self.latest_rollout_progress_target_mean = float(target.mean().detach().cpu().item())
+        return target
+
+    def _compute_rollout_progress_prediction_loss(self, rollout_progress_pred, env_mask=None, update_metrics=True):
+        if not self.rollout_progress_prediction_enabled:
+            return None
+        if rollout_progress_pred.ndim == 3:
+            rollout_progress_pred = rollout_progress_pred[:, 0, :]
+        if rollout_progress_pred.ndim != 2 or rollout_progress_pred.shape[-1] != 1:
+            raise RuntimeError(
+                "Rollout-progress prediction head must have shape [N, 1], got "
+                f"{tuple(rollout_progress_pred.shape)}."
+            )
+
+        # As for the door-joint loss, construct activity from full-env tensors before selecting
+        # the train/validation split; per-env trial lengths otherwise no longer broadcast correctly.
+        rollout_step_ids = self._get_rollout_step_ids()
+        valid_mask = self._get_active_rollout_mask(rollout_step_ids)
+        if env_mask is not None:
+            env_mask = env_mask.to(device=self.device, dtype=torch.bool)
+            if rollout_progress_pred.shape[0] == self.num_envs:
+                rollout_progress_pred = rollout_progress_pred[env_mask]
+            valid_mask = valid_mask[env_mask]
+        target = self._get_rollout_progress_prediction_target(env_mask=env_mask, update_metrics=update_metrics)
+        if rollout_progress_pred.shape != target.shape:
+            raise RuntimeError(
+                "Rollout-progress prediction and target shapes must match, got "
+                f"{tuple(rollout_progress_pred.shape)} and {tuple(target.shape)}."
+            )
+        if not torch.any(valid_mask):
+            if update_metrics:
+                self.latest_rollout_progress_abs_err = None
+            return rollout_progress_pred.mean() * 0.0
+
+        loss = torch.nn.functional.mse_loss(
+            rollout_progress_pred[valid_mask], target[valid_mask]
+        )
+        if update_metrics:
+            self.latest_rollout_progress_abs_err = float(
+                (rollout_progress_pred[valid_mask] - target[valid_mask]).abs().mean().detach().cpu().item()
+            )
         return loss
 
     def _build_action_component_history_indices(self):
@@ -4174,7 +4248,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         if env_mask is not None:
             env_mask = env_mask.to(device=self.device, dtype=torch.bool)
             if not torch.any(env_mask):
-                return None, None, None, None, None
+                return None, None, None, None, None, None
             student_output = self._slice_batch_dict(student_output, env_mask)
             teacher_actions = teacher_actions[env_mask]
             if aux_target is not None:
@@ -4188,6 +4262,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         aux_loss = loss.get("aux")
         mode_loss = None
         door_joint_loss = None
+        rollout_progress_loss = None
         if self.mode_prediction_enabled:
             if "mode_logits" not in student_output:
                 raise RuntimeError("Mode prediction is enabled, but student output does not contain 'mode_logits'.")
@@ -4206,7 +4281,18 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 update_metrics=update_metrics,
             )
             total_loss = total_loss + self.door_joint_prediction_weight * door_joint_loss
-        return total_loss, action_loss, aux_loss, mode_loss, door_joint_loss
+        if self.rollout_progress_prediction_enabled:
+            if "rollout_progress" not in student_output:
+                raise RuntimeError(
+                    "Rollout-progress prediction is enabled, but student output does not contain 'rollout_progress'."
+                )
+            rollout_progress_loss = self._compute_rollout_progress_prediction_loss(
+                student_output["rollout_progress"],
+                env_mask=env_mask,
+                update_metrics=update_metrics,
+            )
+            total_loss = total_loss + self.rollout_progress_prediction_weight * rollout_progress_loss
+        return total_loss, action_loss, aux_loss, mode_loss, door_joint_loss, rollout_progress_loss
 
     def _get_teacher_forcing_beta(self, iteration):
         if self.play_policy or not self._has_teacher():
@@ -4354,6 +4440,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 train_aux_loss = None
                 train_mode_loss = None
                 train_door_joint_loss = None
+                train_rollout_progress_loss = None
                 validation_total_loss = None
                 validation_action_loss = None
 
@@ -4365,7 +4452,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                         if self.latest_aux_target_vector is None:
                             raise RuntimeError("Expected the latest auxiliary target vector while aux prediction is enabled.")
                         aux_target = self._get_aux_target(self.latest_aux_target_vector)
-                    train_total_loss, train_action_loss, train_aux_loss, train_mode_loss, train_door_joint_loss = self._compute_student_loss(
+                    train_total_loss, train_action_loss, train_aux_loss, train_mode_loss, train_door_joint_loss, train_rollout_progress_loss = self._compute_student_loss(
                         student_output,
                         teacher_output["mus"],
                         aux_target=aux_target,
@@ -4374,7 +4461,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                     )
                     if train_total_loss is None:
                         raise RuntimeError("Training loss could not be computed because the training split is empty.")
-                    validation_total_loss, validation_action_loss, _, _, _ = self._compute_student_loss(
+                    validation_total_loss, validation_action_loss, _, _, _, _ = self._compute_student_loss(
                         student_output,
                         teacher_output["mus"],
                         aux_target=aux_target,
@@ -4441,6 +4528,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                         train_aux_loss,
                         train_mode_loss,
                         train_door_joint_loss,
+                        train_rollout_progress_loss,
                         validation_total_loss,
                         validation_action_loss,
                         teacher_forcing_beta,

@@ -16,6 +16,11 @@ door_joint_prediction:
   enabled: true
   output_dim: 2  # Must equal the number of dagger.door_joint_training.joints below.
   weight: 0.01
+rollout_progress_prediction:
+  # Predict completed_frames / this_environment's_fixed_rollout_length in [0, 1]. This is a
+  # readout-only head and is not fed back into the policy observation.
+  enabled: true
+  weight: 0.01
 
 push_pull_condition:
   # TEMPORARILY OFF: single-family distillation (PartNetv5_plusplus is 100% pull), so this one-hot

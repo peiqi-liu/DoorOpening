@@ -289,12 +289,10 @@ class EventCfg:
         },
     )
 
-    # Door-wide friction/restitution for the frame + PANEL (link_1). The panel keeps a broad range
-    # so it still trains across slip<->jam. The handle (link_2) is deliberately re-materialized to a
-    # much slipperier range by door_handle_physics_material BELOW (it runs after this term, so it
-    # overrides link_2's material). Both use the stock num_buckets material mechanism (bounded by
-    # num_buckets, not num_envs), so neither reintroduces the host-RAM OOM the old custom per-body
-    # panel term caused at num_envs=4096.
+    # Door-wide friction/restitution for the frame + panel (link_1). The panel is subsequently
+    # overridden by door_panel_physics_material so it can use its higher 1.4..5.0 range; the handle
+    # is likewise overridden below with its slippery material. This stock event still defines the
+    # frame's material without introducing the old per-body host-RAM OOM at num_envs=4096.
     door_physics_material = EventTerm(
         func=randomize_rigid_body_material,
         mode="reset",
@@ -306,6 +304,21 @@ class EventCfg:
             "num_buckets": 250,
         },
     )
+
+    # Panel-only (link_1) material. This follows door_physics_material, so only the panel gets the
+    # requested high-friction range while the frame retains the door-wide range and link_2 remains
+    # available for the separate handle override below.
+    # door_panel_physics_material = EventTerm(
+    #     func=randomize_body_material_subset,
+    #     mode="reset",
+    #     params={
+    #         "asset_cfg": SceneEntityCfg("door", body_names="link_1"),
+    #         "static_friction_range": (1.4, 5.0),
+    #         "dynamic_friction_range": (1.4, 5.0),
+    #         "restitution_range": (0.0, 0.0),
+    #         "num_buckets": 250,
+    #     },
+    # )
 
     # Handle-only (link_2) friction. A real door handle is slippery metal, NOT like the panel: it
     # gets a much smaller friction range so the fingers cannot simply stick to it. Scoped to link_2
@@ -799,30 +812,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     base_action_scale = 1.0
     arm_action_scale = 0.6
-    # Actions are integrated into the PD target (target += dt * scale * action, dt = 1/30 s), so a
-    # scale is a commanded RATE. The gripper DOF is PRISMATIC, so unlike every other scale here this
-    # one is a linear speed in METRES PER SECOND, not rad/s. Same convention as IsaacLab's own
-    # franka_cabinet direct env, whose finger target rate is dof_speed_scale * action_scale =
-    # 0.1 * 7.5 = 0.75 m/s (franka_cabinet_env.py:199/285).
-    #
-    # It is expressed as a multiple of GRIPPER_VELOCITY_LIMIT (0.05 m/s = the Franka Hand manual's
-    # "Travel Speed (per finger) 50 mm/s", also the URDF <limit velocity>) because THAT is the real
-    # ceiling: IsaacLab writes an implicit actuator's velocity_limit_sim into PhysX as the DOF max
-    # velocity (articulation.py: _process_actuators_cfg -> write_joint_velocity_limit_to_sim ->
-    # set_dof_max_velocities), so the joint physically cannot travel faster no matter what is
-    # commanded. Raising the multiplier does not speed the finger up; it only lets the target lead
-    # the state.
-    #
-    # 2x is deliberate headroom rather than an exact match:
-    #  - the drive lags the target, so a 1.0x command settles slightly BELOW the velocity cap;
-    #  - once the fingers are blocked by the handle, grasp force is stiffness * (target - actual),
-    #    so the target has to keep travelling past the contact point -- at 2x that force builds in
-    #    half the time (full stroke of target travel: 0.4 s instead of 0.8 s);
-    #  - it leaves room if GRIPPER_VELOCITY_LIMIT is ever raised toward the 0.2 m/s the official
-    #    franka_description URDF and IsaacLab's stock Franka asset use.
-    # The cost is that |action| > 0.5 all produces the same (velocity-capped) motion, so push this
-    # much higher only if you want a bang-bang gripper. For a faster gripper, raise
-    # GRIPPER_VELOCITY_LIMIT in glorbot_cfg -- this scale follows it automatically.
     gripper_action_speed_headroom = 2.0
     finger_action_scale = gripper_action_speed_headroom * GRIPPER_VELOCITY_LIMIT
     arx_action_scale = 0.6

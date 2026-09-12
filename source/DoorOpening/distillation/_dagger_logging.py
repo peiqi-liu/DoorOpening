@@ -194,6 +194,7 @@ class LoggingMixin:
         train_aux_loss,
         train_mode_loss,
         train_door_joint_loss,
+        train_rollout_progress_loss,
         validation_total_loss,
         validation_action_loss,
         teacher_forcing_beta,
@@ -234,6 +235,10 @@ class LoggingMixin:
                 print("Train Door Joint Loss:", float(train_door_joint_loss.detach().cpu()))
                 if self.latest_door_joint_abs_err is not None:
                     print("Door Joint Abs Err (rad):", self.latest_door_joint_abs_err)
+            if train_rollout_progress_loss is not None:
+                print("Train Rollout Progress Loss:", float(train_rollout_progress_loss.detach().cpu()))
+                if self.latest_rollout_progress_abs_err is not None:
+                    print("Rollout Progress Abs Err:", self.latest_rollout_progress_abs_err)
             if validation_total_loss is not None:
                 print("Validation Total Loss:", float(validation_total_loss.detach().cpu()))
             if validation_action_loss is not None:
@@ -251,6 +256,8 @@ class LoggingMixin:
                 print("Direction Window Num Pull Preds:", self.latest_dir_window_num_pull_preds)
             if self.door_joint_prediction_enabled:
                 print("Door Joint Target Mean (rad):", self.latest_door_joint_target_mean)
+            if self.rollout_progress_prediction_enabled:
+                print("Rollout Progress Target Mean:", self.latest_rollout_progress_target_mean)
             if self.observation_lag_enabled:
                 print("Obs Lag Enabled:", bool(self.latest_obs_lag_enabled))
                 print("Obs Lag Mean (ms):", self.latest_obs_lag_mean_ms)
@@ -326,6 +333,10 @@ class LoggingMixin:
             if self.latest_door_joint_abs_err is not None:
                 for name, err in zip(self.door_joint_prediction_joint_names, self.latest_door_joint_abs_err):
                     metrics[f"stats/door_joint_abs_err_{name}"] = err
+        if train_rollout_progress_loss is not None:
+            metrics["loss/rollout_progress"] = float(train_rollout_progress_loss.detach().cpu())
+            if self.latest_rollout_progress_abs_err is not None:
+                metrics["stats/rollout_progress_abs_err"] = self.latest_rollout_progress_abs_err
         if validation_total_loss is not None:
             metrics["loss/val_total"] = float(validation_total_loss.detach().cpu())
         if validation_action_loss is not None:
@@ -345,6 +356,8 @@ class LoggingMixin:
             if self.latest_door_joint_target_mean is not None:
                 for name, val in zip(self.door_joint_prediction_joint_names, self.latest_door_joint_target_mean):
                     metrics[f"stats/door_joint_target_mean_{name}"] = val
+        if self.rollout_progress_prediction_enabled and self.latest_rollout_progress_target_mean is not None:
+            metrics["stats/rollout_progress_target_mean"] = self.latest_rollout_progress_target_mean
         if self.observation_lag_enabled:
             metrics["timestamp/obs_lag_enabled"] = self.latest_obs_lag_enabled
             metrics["timestamp/obs_lag_mean_ms"] = self.latest_obs_lag_mean_ms

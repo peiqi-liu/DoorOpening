@@ -423,6 +423,7 @@ class PCDTransformer(BaseModel):
         aux_delta_scale=0.01,
         mode_prediction=None,
         door_joint_prediction=None,
+        rollout_progress_prediction=None,
         temporal_state_encoders=None,
         proprio_temporal_encoder=None,
         push_pull_condition=None,
@@ -516,6 +517,15 @@ class PCDTransformer(BaseModel):
         self.door_joint_prediction_weight = float(self.door_joint_prediction_cfg.get("weight", 0.0))
         if self.door_joint_prediction_enabled and self.door_joint_output_dim <= 0:
             raise ValueError("door_joint_prediction.output_dim must be positive when door joint prediction is enabled.")
+        self.rollout_progress_prediction_cfg = rollout_progress_prediction or {}
+        self.rollout_progress_prediction_enabled = bool(
+            self.rollout_progress_prediction_cfg.get("enabled", False)
+        )
+        self.rollout_progress_prediction_weight = float(
+            self.rollout_progress_prediction_cfg.get("weight", 0.0)
+        )
+        if self.rollout_progress_prediction_enabled and self.rollout_progress_prediction_weight < 0.0:
+            raise ValueError("rollout_progress_prediction.weight must be non-negative.")
 
         # update config for auxiliary object state prediction
         self.aux_prediction = (aux_weight > 0)
@@ -596,6 +606,19 @@ class PCDTransformer(BaseModel):
         self.door_joint_query_idx = next_query_idx if self.door_joint_prediction_enabled else None
         if self.door_joint_prediction_enabled:
             next_query_idx += 1
+        # Progress and door joints describe the same task phase, so when the door-joint readout is
+        # enabled they share its isolated decoder query and use independent linear heads. Besides
+        # being a useful shared representation, this avoids changing query-token shape when adding
+        # progress supervision to an existing door-joint checkpoint.
+        self.rollout_progress_query_idx = None
+        self.rollout_progress_uses_door_joint_query = (
+            self.rollout_progress_prediction_enabled and self.door_joint_prediction_enabled
+        )
+        if self.rollout_progress_uses_door_joint_query:
+            self.rollout_progress_query_idx = self.door_joint_query_idx
+        elif self.rollout_progress_prediction_enabled:
+            self.rollout_progress_query_idx = next_query_idx
+            next_query_idx += 1
         num_query_tokens = next_query_idx
         self.query_tokens = nn.Parameter(nn.init.xavier_uniform_(torch.zeros(num_query_tokens, hidden_dim)))
 
@@ -631,6 +654,8 @@ class PCDTransformer(BaseModel):
             nn.init.zeros_(self.mode_head.bias)
         if self.door_joint_prediction_enabled:
             self.door_joint_head = nn.Linear(hidden_dim, self.door_joint_output_dim)
+        if self.rollout_progress_prediction_enabled:
+            self.rollout_progress_head = nn.Linear(hidden_dim, 1)
 
         # Attention-visualization bookkeeping (populated during forward; see model/attention_capture.py).
         self.last_token_ranges = None
@@ -988,6 +1013,12 @@ class PCDTransformer(BaseModel):
             tgt_mask[self.door_joint_query_idx, :] = True
             tgt_mask[self.door_joint_query_idx, self.door_joint_query_idx] = False
 
+        if self.rollout_progress_prediction_enabled and not self.rollout_progress_uses_door_joint_query:
+            # Rollout progress is a readout-only branch for the current episode phase.
+            tgt_mask[self.action_query_start:self.action_query_end, self.rollout_progress_query_idx] = True
+            tgt_mask[self.rollout_progress_query_idx, :] = True
+            tgt_mask[self.rollout_progress_query_idx, self.rollout_progress_query_idx] = False
+
         return tgt_mask, memory_mask
 
     def _infer_batch_size(self, obs_dict):
@@ -1063,7 +1094,12 @@ class PCDTransformer(BaseModel):
 
         memory = self.encoder(obs_tokens)  # (B, N, H)
         query_tokens = self.query_tokens.expand(B, -1, -1)  # (B, chunk_size/C+1, H)
-        if self.aux_prediction or self.mode_prediction_enabled or self.door_joint_prediction_enabled:
+        if (
+            self.aux_prediction
+            or self.mode_prediction_enabled
+            or self.door_joint_prediction_enabled
+            or self.rollout_progress_prediction_enabled
+        ):
             tgt_mask, memory_mask = self._build_decoder_masks(query_tokens, token_ranges)
             output = self.decoder(
                 query_tokens,
@@ -1084,6 +1120,9 @@ class PCDTransformer(BaseModel):
         if self.door_joint_prediction_enabled:
             output_door_joint = output[:, self.door_joint_query_idx, :]  # (B, H)
             pred["door_joint"] = self.door_joint_head(output_door_joint)
+        if self.rollout_progress_prediction_enabled:
+            output_rollout_progress = output[:, self.rollout_progress_query_idx, :]  # (B, H)
+            pred["rollout_progress"] = torch.sigmoid(self.rollout_progress_head(output_rollout_progress))
         if self.aux_prediction:
             output_action = output[:, self.action_query_start:self.action_query_end, :]  # (B, chunk_size, H)
             output_aux = output[:, self.aux_query_idx:self.aux_query_idx+1, :]  # (B, 1, H)
