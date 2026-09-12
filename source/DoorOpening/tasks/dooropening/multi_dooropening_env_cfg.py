@@ -298,34 +298,17 @@ class EventCfg:
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("door"),
-            "static_friction_range": (0.7, 2.5),
-            "dynamic_friction_range": (0.7, 2.5),
+            "static_friction_range": (0.7, 4.5),
+            "dynamic_friction_range": (0.7, 4.5),
             "restitution_range": (0.0, 0.0),
             "num_buckets": 250,
         },
     )
 
-    # Panel-only (link_1) material. This follows door_physics_material, so only the panel gets the
-    # requested high-friction range while the frame retains the door-wide range and link_2 remains
-    # available for the separate handle override below.
-    # door_panel_physics_material = EventTerm(
-    #     func=randomize_body_material_subset,
-    #     mode="reset",
-    #     params={
-    #         "asset_cfg": SceneEntityCfg("door", body_names="link_1"),
-    #         "static_friction_range": (1.4, 5.0),
-    #         "dynamic_friction_range": (1.4, 5.0),
-    #         "restitution_range": (0.0, 0.0),
-    #         "num_buckets": 250,
-    #     },
-    # )
-
     # Handle-only (link_2) friction. A real door handle is slippery metal, NOT like the panel: it
     # gets a much smaller friction range so the fingers cannot simply stick to it. Scoped to link_2
     # and defined AFTER door_physics_material so it overwrites the handle's material (event terms run
-    # in definition order). Uses randomize_body_material_subset (not the stock term) because the
-    # stock per-body shape-count parse crashes on this convex-decomposition door. Tune the range if
-    # grasping the handle becomes too hard.
+    # in definition order)
     door_handle_physics_material = EventTerm(
         func=randomize_body_material_subset,
         mode="reset",
@@ -514,21 +497,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # back down 75 -> 70 Nm.
     door_panel_effort_limit_range_nm = (3.0, 70.0)  # was (3.0, 75.0), temp update
 
-    # Handle (joint_2) unlatch angle threshold (radians): the door stays latched until the handle is
-    # rotated past this. Per-env, ADR-ramped from the fixed 0.8 start out to (0.65, 0.95) so the policy
-    # must learn to fully turn handles that unlatch late. Read every step by edit_door_articulation.
-    # Handle (joint_2) unlatch angle threshold (radians): per-env, ADR-ramped from the fixed 0.8
-    # start out to (0.65, 0.95). Read every step by edit_door_articulation.
-    #
-    # WARNING: the top of this band now EQUALS the lever's mechanical hard stop
-    # (HANDLE_OPEN_LIMIT_RAD = 0.95 in generate_randomized_doors_scratch.py), so a door drawn near
-    # 0.95 must have its lever pressed fully home, with zero margin, before the latch releases. The
-    # relock test is `|joint_2| < threshold`, and a loaded PD settles slightly SHORT of the stop, so
-    # those doors may never unlatch at all. Two ways out if that shows up as a late-curriculum
-    # failure floor: drop this ceiling to 0.90, or raise HANDLE_OPEN_LIMIT_RAD (which means
-    # regenerating the door assets).
-    door_latch_threshold_start_range_rad = (0.8, 0.8)
-    door_latch_threshold_range_rad = (0.65, 0.95)  # was (0.75, 0.85), temp update
+    # Handle (joint_2) unlatch angle threshold is no longer sampled per-env/ADR-ramped here -- every
+    # door now requires the same fixed near-complete press (DOOR_LATCH_HINGE_THRESHOLD_RAD in
+    # multi_dooropening_env.py) before the panel unlocks, read every step by edit_door_articulation.
 
     # simulation
     sim: SimulationCfg = SimulationCfg(

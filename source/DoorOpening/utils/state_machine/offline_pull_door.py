@@ -787,12 +787,14 @@ def state_machine_offline_left_pull_door(
     base_target_pos = handle_pos.clone()
     base_target_pos[:, 0] += pregrasp_base_x_offset
     base_target_pos[:, 1] += pregrasp_base_y_offset
-    # The base only turns where the turn does mechanical work -- i.e. the Step 5 blocking pose. The
-    # approach is driven square-on, so the arm, not the chassis, does the reaching.
-    pregrasp_base_tilt_yaw = 0.0  # was 0.3, temp update
+    # Tilt the base toward the handle so the arx/x5 camera keeps it in view -- unified with the
+    # pull-open sweep's tilt below (was 0.3 pregrasp-only / 0.2 during the sweep; now one shared
+    # constant used both places) so the base rotates ONCE, at pregrasp, and simply stays tilted
+    # through grasp, unlatch, and the whole pull-open sweep instead of re-tilting mid-trajectory.
+    handle_view_tilt_yaw = 0.3  # was 0.25, temp update
     _, _, _base_yaw = euler_xyz_from_quat(base_target_rot)
-    pregrasp_tilt_base_rot = get_rotation_quat(0.0, 0.0, _base_yaw.item() + pregrasp_base_tilt_yaw, device)
-    base_target_pose = _make_pose(base_target_pos, pregrasp_tilt_base_rot)
+    handle_view_tilt_base_rot = get_rotation_quat(0.0, 0.0, _base_yaw.item() + handle_view_tilt_yaw, device)
+    base_target_pose = _make_pose(base_target_pos, handle_view_tilt_base_rot)
 
     palm_target_pos = handle_pos.clone()
     palm_target_pos[:, 0] += pregrasp_palm_x_offset
@@ -800,15 +802,33 @@ def state_machine_offline_left_pull_door(
     palm_target_pos[:, 2] += pregrasp_palm_z_offset
     palm_target_pose = _make_pose(palm_target_pos, default_palm_rot)
 
+    # Base first (arm frozen), then arm (base held) -- never both at once.
     q_robot[:10] = solve_ik(
         robot_urdf_path,
         q_robot[:10],
-        palm_pose=palm_target_pose,
+        palm_pose=None,
         base_pose=base_target_pose,
         robot_initial_pose=robot_initial_pose,
         reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
     )[0]
-    
+
+    _append_state(
+        robot_traj,
+        door_traj,
+        key_idx_in_key_indices,
+        q_robot,
+        q_door,
+        mark_keyframe=False,
+    )
+
+    q_robot[:10] = solve_ik(
+        robot_urdf_path,
+        q_robot[:10],
+        palm_pose=palm_target_pose,
+        base_pose=None,
+        robot_initial_pose=robot_initial_pose,
+        reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
+    )[0]
 
     _append_state(
         robot_traj,
@@ -864,41 +884,77 @@ def state_machine_offline_left_pull_door(
     # what a person does and what gives the pull a rigid reaction point. Must stay above the
     # highest randomized unlatch threshold (0.85 rad) so every door actually unlatches.
     unlatch_hinge_angle = 0.95
-    unlatch_palm_y_delta = 0.015
-    unlatch_palm_z_delta = -0.10
+    # Shift the grasp LEFT (-y, per this file's robot-faces--x convention) as the press proceeds, so
+    # the gripper tracks the handle bar's own arc instead of staying at a fixed XY while the lever
+    # sweeps under it -- that mismatch was letting the gripper slide off the handle mid-press.
+    unlatch_palm_y_delta = -0.02  # was 0.015, temp update
+    unlatch_palm_z_delta = -0.06  # was -0.10, temp update
+    # Grasp-pose Euler angles (same literals as default_palm_rot below) -- the SWEEP's t=0 endpoint.
+    grasp_rot_roll = math.pi / 2
+    grasp_rot_pitch = 0.0
+    grasp_rot_yaw = -math.pi / 2 - math.pi / 4
     unlatch_rot_roll = math.pi / 2
-    unlatch_rot_pitch = 0.85
     unlatch_rot_yaw = -math.pi / 2 - math.pi / 3
+    # Additive anti-slip margin on TOP of the physical 1:1 lever-angle tracking below (both here and
+    # in the Step 4 pull loop): over-rotating a bit past the exact angle needed to follow the lever
+    # keeps the fingers biting into the bar instead of riding up and off it.
+    pitch_slip_margin = 0.05  # was 0.20, temp update -- 0.20 over-pressed the reference for DeepMimic
 
-    q_door = torch.tensor([0.0, unlatch_hinge_angle], device=device)
+    # Press the handle down as a SWEEP over its own joint angle (0 -> unlatch_hinge_angle), not one
+    # jump straight to the fully-pressed pose: the palm's position/orientation at each sub-step is
+    # driven by the handle's ACTUAL current rotation (get_hinge_pos re-sampled at that q_door, plus
+    # linear interpolation of the palm offsets/orientation by press fraction t), matching how the
+    # pull sweep below tracks the panel's own angle instead of a single hand-picked end pose.
+    unlatch_theta_step = 0.10
+    unlatch_theta_values = torch.cat([
+        torch.arange(unlatch_theta_step, unlatch_hinge_angle, unlatch_theta_step, device=device),
+        torch.tensor([unlatch_hinge_angle], device=device),
+    ])
 
-    palm_target_pose = palm_target_pose.clone()
-    palm_target_pose[:, 1] += unlatch_palm_y_delta
-    palm_target_pose[:, 2] += unlatch_palm_z_delta
-    palm_target_pose[:, 3:] = get_rotation_quat(
-        unlatch_rot_roll,
-        unlatch_rot_pitch,
-        unlatch_rot_yaw,
-        device,
-    )
+    for unlatch_idx, hinge_theta in enumerate(unlatch_theta_values):
+        t = (hinge_theta / unlatch_hinge_angle).item()
+        q_door = torch.tensor([0.0, hinge_theta.item()], device=device)
 
-    q_robot[:10] = solve_ik(
-        robot_urdf_path,
-        q_robot[:10],
-        palm_pose=palm_target_pose,
-        base_pose=base_target_pose,
-        robot_initial_pose=robot_initial_pose,
-        reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
-    )[0]
+        handle_pos = get_hinge_pos(
+            door_urdf_path,
+            door_initial_pose,
+            q_door.unsqueeze(0),
+        ).to(device)
 
-    _append_state(
-        robot_traj,
-        door_traj,
-        key_idx_in_key_indices,
-        q_robot,
-        q_door,
-        mark_keyframe=True,
-    )
+        palm_target_pos = handle_pos.clone()
+        palm_target_pos[:, 0] += grasp_palm_x_offset
+        palm_target_pos[:, 1] += grasp_palm_y_offset + t * unlatch_palm_y_delta
+        palm_target_pos[:, 2] += grasp_palm_z_offset + t * unlatch_palm_z_delta
+        # Pitch tracks the ACTUAL lever joint angle 1:1 (not an independently tuned endpoint) plus
+        # pitch_slip_margin: the gripper is rigidly holding the bar, so as the lever rotates by
+        # hinge_theta radians the wrist must tip by that same amount to stay attached, with a little
+        # extra over-rotation on top so it doesn't slide off.
+        palm_target_rot = get_rotation_quat(
+            grasp_rot_roll + t * (unlatch_rot_roll - grasp_rot_roll),
+            grasp_rot_pitch + hinge_theta.item() + pitch_slip_margin,
+            grasp_rot_yaw + t * (unlatch_rot_yaw - grasp_rot_yaw),
+            device,
+        )
+        palm_target_pose = _make_pose(palm_target_pos, palm_target_rot)
+
+        q_robot[:10] = solve_ik(
+            robot_urdf_path,
+            q_robot[:10],
+            palm_pose=palm_target_pose,
+            base_pose=base_target_pose,
+            robot_initial_pose=robot_initial_pose,
+            reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
+            num_attempts=1,  # loop body: single seed for continuity (no random-restart branch jumps)
+        )[0]
+
+        _append_state(
+            robot_traj,
+            door_traj,
+            key_idx_in_key_indices,
+            q_robot,
+            q_door,
+            mark_keyframe=(unlatch_idx == len(unlatch_theta_values) - 1),
+        )
 
     # -------------------------
     # Step 4: Pull door open
@@ -913,12 +969,9 @@ def state_machine_offline_left_pull_door(
     # unchanged, so the arm simply reaches 10 cm further forward.
     pull_base_x_offset = 0.75  # was 0.65, temp update
     # Constant lateral shift of the base held through the pull, in WORLD y (+y = the robot's right,
-    # per this file's robot-faces--x convention). The base y was previously a pure function of theta
-    # with no standing offset, so the chassis -- and the arx bolted to it -- tracked straight up the
-    # line the arm was working along. Measured: this is what clears the END of the pull sweep, where
-    # panda_link3 was hitting arx link4.
+    # per this file's robot-faces--x convention). Held FIXED through the whole sweep now -- no more
+    # theta-dependent term -- so the base only tracks the handle back and forth in x.
     pull_base_y_offset = 0.08
-    pull_base_y_gain = -0.1 / 1.45
 
     # Held flat while the panel is not yet confidently open (0.3 rad -- matches pull_theta_start, well
     # past the door_closed_range=0.05 rad relock boundary), then released QUICKLY rather than dragged
@@ -934,7 +987,9 @@ def state_machine_offline_left_pull_door(
 
     pull_rot_roll_base = math.pi / 2
     pull_rot_roll_per_theta = 0.9
-    pull_rot_pitch = 0
+    # No separate pull_rot_pitch: pitch continues tracking the lever's OWN current angle (same
+    # convention as the Step 3 sweep above), so it stays continuous across the Step3/Step4 boundary
+    # and un-tips smoothly in sync as the lever springs back to level, instead of snapping.
     pull_rot_yaw = - 3 * math.pi / 4
 
     theta_values = torch.arange(
@@ -943,22 +998,21 @@ def state_machine_offline_left_pull_door(
         pull_theta_step,
         device=device,
     )
-    
+
     # Retract active perception arms to safe range
 
+    # No separate "rotate to pull-open tilt" step needed: handle_view_tilt_yaw (set at pregrasp) is
+    # now the SAME 0.25 rad used here, so the base is already at this tilt from Step 1 onward and
+    # the sweep below only ever translates it (in x), never rotates it again.
+
     for theta in theta_values:
-        q_door = torch.tensor(
-            [
-                theta.item(),
-                _pull_hinge_angle(
-                    theta.item(),
-                    unlatch_hinge_angle,
-                    pull_hinge_hold_until_theta,
-                    pull_hinge_release_by_theta,
-                ),
-            ],
-            device=device,
+        lever_angle = _pull_hinge_angle(
+            theta.item(),
+            unlatch_hinge_angle,
+            pull_hinge_hold_until_theta,
+            pull_hinge_release_by_theta,
         )
+        q_door = torch.tensor([theta.item(), lever_angle], device=device)
 
         handle_pos = get_hinge_pos(
             door_urdf_path,
@@ -968,11 +1022,8 @@ def state_machine_offline_left_pull_door(
 
         base_target_pos = handle_pos.clone()
         base_target_pos[:, 0] += pull_base_x_offset
-        base_target_pos[:, 1] = pull_base_y_offset + theta.item() * pull_base_y_gain
-        pull_open_base_tilt_yaw = 0.2
-        _, _, _base_yaw = euler_xyz_from_quat(base_target_rot)
-        pull_open_tilt_base_rot = get_rotation_quat(0.0, 0.0, _base_yaw.item() + pull_open_base_tilt_yaw, device)
-        base_target_pose = _make_pose(base_target_pos, pull_open_tilt_base_rot)
+        base_target_pos[:, 1] = pull_base_y_offset
+        base_target_pose = _make_pose(base_target_pos, handle_view_tilt_base_rot)
 
         palm_dx, palm_dy = _rotate_xy_counterclockwise(
             pull_palm_x_offset_closed,
@@ -987,7 +1038,7 @@ def state_machine_offline_left_pull_door(
 
         palm_target_rot = get_rotation_quat(
             pull_rot_roll_base + pull_rot_roll_per_theta * theta.item(),
-            pull_rot_pitch,
+            grasp_rot_pitch + lever_angle + pitch_slip_margin,
             pull_rot_yaw,
             device,
         )
@@ -1082,11 +1133,10 @@ def state_machine_offline_left_pull_door(
         mark_keyframe=False,
     )
 
-    palm_target_pose = palm_target_pose.clone()
-    palm_target_pose[:, 0] += release_palm_x_delta
-    palm_target_pose[:, 1] += release_palm_y_delta
-    palm_target_pose[:, 3:] = default_palm_rot
-
+    # Base moves again while the gripper is STILL holding the handle -- pin palm_pose to the same
+    # unchanged world target (not None/joint-frozen) so the arm re-solves to keep the hand AT the
+    # handle as the base repositions, instead of dragging it along for the ride. The arm only gets a
+    # genuinely NEW target (the release pose below) once the base is done moving.
     base_target_pos[:, 0] += release_base_x_delta_2
     base_target_pos[:, 1] = release_base_y
     base_target_pose = _make_pose(base_target_pos, tilted_base_rot)
@@ -1096,6 +1146,29 @@ def state_machine_offline_left_pull_door(
         q_robot[:10],
         palm_pose=palm_target_pose,
         base_pose=base_target_pose,
+        robot_initial_pose=robot_initial_pose,
+        reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
+    )[0]
+
+    _append_state(
+        robot_traj,
+        door_traj,
+        key_idx_in_key_indices,
+        q_robot,
+        q_door,
+        mark_keyframe=False,
+    )
+
+    palm_target_pose = palm_target_pose.clone()
+    palm_target_pose[:, 0] += release_palm_x_delta
+    palm_target_pose[:, 1] += release_palm_y_delta
+    palm_target_pose[:, 3:] = default_palm_rot
+
+    q_robot[:10] = solve_ik(
+        robot_urdf_path,
+        q_robot[:10],
+        palm_pose=palm_target_pose,
+        base_pose=None,
         robot_initial_pose=robot_initial_pose,
         reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
     )[0]

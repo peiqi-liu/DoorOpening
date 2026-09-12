@@ -111,7 +111,6 @@ class ReferenceMotionManager:
         robot_joint_vel_trajs = []
         key_indices_list = []
         hinge_contact_masks_list = []
-        panel_contact_masks_list = []
         grasp_stage_masks_list = []
         robot_body_pos_vel_list = []
         door_body_pos_trajs = []
@@ -132,9 +131,6 @@ class ReferenceMotionManager:
             hinge_contact_mask = loaded_motion["hinge_contact_mask"]
             if hinge_contact_mask is None:
                 hinge_contact_mask = torch.zeros(motion_num_frames, device=self.device)
-            panel_contact_mask = loaded_motion["panel_contact_mask"]
-            if panel_contact_mask is None:
-                panel_contact_mask = torch.zeros(motion_num_frames, device=self.device)
             grasp_stage_mask = loaded_motion["grasp_stage_mask"]
             if grasp_stage_mask is None:
                 grasp_stage_mask = torch.zeros(motion_num_frames, device=self.device)
@@ -156,7 +152,6 @@ class ReferenceMotionManager:
                 key_indices = torch.tensor(key_indices, device=self.device)
             key_indices_list.append(key_indices)
             hinge_contact_masks_list.append(hinge_contact_mask)
-            panel_contact_masks_list.append(panel_contact_mask)
             grasp_stage_masks_list.append(grasp_stage_mask)
             robot_body_pos_vel_list.append(robot_body_pos_vel)
             door_body_pos_trajs.append(door_body_pos_traj)
@@ -170,7 +165,6 @@ class ReferenceMotionManager:
         robot_body_quat_trajs = [self._pad_traj_to_frames(t, num_frames) for t in robot_body_quat_trajs]
         door_trajs = [self._pad_traj_to_frames(t, num_frames) for t in door_trajs]
         hinge_contact_masks_list = [self._pad_traj_to_frames(t, num_frames) for t in hinge_contact_masks_list]
-        panel_contact_masks_list = [self._pad_traj_to_frames(t, num_frames) for t in panel_contact_masks_list]
         grasp_stage_masks_list = [self._pad_traj_to_frames(t, num_frames) for t in grasp_stage_masks_list]
         robot_body_pos_vel_list = [self._pad_traj_to_frames(t, num_frames) for t in robot_body_pos_vel_list]
         door_body_pos_trajs = [self._pad_traj_to_frames(t, num_frames) for t in door_body_pos_trajs]
@@ -188,7 +182,6 @@ class ReferenceMotionManager:
             "phase_key_indices": phase_key_indices,
             "phase_key_counts": phase_key_counts,
             "hinge_contact_mask": torch.stack(hinge_contact_masks_list, dim=0).to(self.device),
-            "panel_contact_mask": torch.stack(panel_contact_masks_list, dim=0).to(self.device),
             "grasp_stage_mask": torch.stack(grasp_stage_masks_list, dim=0).to(self.device),
             "robot_body_pos_vel": torch.stack(robot_body_pos_vel_list, dim=0).to(self.device),
             "door_body_pos_traj": torch.stack(door_body_pos_trajs, dim=0).to(self.device),
@@ -214,7 +207,6 @@ class ReferenceMotionManager:
         self.phase_key_indices = motion_bundle["phase_key_indices"]
         self.phase_key_counts = motion_bundle["phase_key_counts"]
         self.hinge_contact_mask = motion_bundle["hinge_contact_mask"]
-        self.panel_contact_mask = motion_bundle["panel_contact_mask"]
         self.grasp_stage_mask = motion_bundle["grasp_stage_mask"]
         self.num_motions = self.robot_joint_pos_traj.shape[0]
         self.num_frames = motion_bundle["num_frames"]
@@ -270,10 +262,6 @@ class ReferenceMotionManager:
             hinge_contact_mask = motions["hinge_contact_mask"]
         else:
             hinge_contact_mask = None
-        if "panel_contact_mask" in motions:
-            panel_contact_mask = motions["panel_contact_mask"]
-        else:
-            panel_contact_mask = None
         if "grasp_stage_mask" in motions:
             grasp_stage_mask = motions["grasp_stage_mask"]
         else:
@@ -302,8 +290,6 @@ class ReferenceMotionManager:
         robot_joint_vel_traj = self._finite_difference(robot_joint_pos_traj, motion_dt)
         if hinge_contact_mask is not None:
             hinge_contact_mask = hinge_contact_mask.to(self.device).squeeze()
-        if panel_contact_mask is not None:
-            panel_contact_mask = panel_contact_mask.to(self.device).squeeze()
         if grasp_stage_mask is not None:
             grasp_stage_mask = grasp_stage_mask.to(self.device).squeeze()
         robot_body_pos_vel = robot_body_pos_vel.to(self.device).squeeze()
@@ -319,7 +305,6 @@ class ReferenceMotionManager:
             "key_indices": key_indices,
             "num_frames": num_frames,
             "hinge_contact_mask": hinge_contact_mask,
-            "panel_contact_mask": panel_contact_mask,
             "grasp_stage_mask": grasp_stage_mask,
             "robot_body_pos_vel": robot_body_pos_vel,
             "door_body_pos_traj": door_body_pos_traj,
@@ -641,7 +626,6 @@ class ReferenceMotionManager:
         self.ref_robot_body_pos = self._sample_env_traj(self.robot_body_pos_traj, idx)
         self.ref_robot_body_quat = self._sample_env_quat_traj(self.robot_body_quat_traj, idx)
         self.ref_hinge_contact_mask = self._gather_env_traj(self.hinge_contact_mask, floor_idx)
-        self.ref_panel_contact_mask = self._gather_env_traj(self.panel_contact_mask, floor_idx)
         self.ref_grasp_stage_mask = self._gather_env_traj(self.grasp_stage_mask, floor_idx)
         self.ref_robot_body_pos_vel = self._sample_env_traj(self.robot_body_pos_vel, idx)
         self.ref_door_body_pos = self._sample_env_traj(self.door_body_pos_traj, idx)
@@ -765,15 +749,6 @@ class ReferenceMotionManager:
         if env_ids is None:
             return self.ref_hinge_contact_mask
         return self.ref_hinge_contact_mask[env_ids]
-
-    def get_panel_contact_mask(self, env_ids: Optional[Sequence[int]] = None, motion_indices: Optional[torch.Tensor] = None):
-        if motion_indices is not None:
-            frame_idx = self.frame_idx if env_ids is None else self.frame_idx[env_ids]
-            floor_idx = torch.floor(frame_idx).long().clamp(min=0, max=self.num_frames - 1)
-            return self._gather_reference_traj("panel_contact_mask", floor_idx, env_ids=env_ids, motion_indices=motion_indices)
-        if env_ids is None:
-            return self.ref_panel_contact_mask
-        return self.ref_panel_contact_mask[env_ids]
 
     def get_grasp_stage_mask(self, env_ids: Optional[Sequence[int]] = None, motion_indices: Optional[torch.Tensor] = None):
         if motion_indices is not None:

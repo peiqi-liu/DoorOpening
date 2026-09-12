@@ -289,7 +289,7 @@ from DoorOpening.assets.cache_utils import preconvert_shared_urdf_assets
 from DoorOpening.assets.door.multi_door_cfg import ALL_DOOR_CONFIGS as MULTI_DOOR_CONFIGS
 from DoorOpening.assets.door.multi_door_cfg import DOOR_FAMILY_NAMES, asset_family_ids, asset_paths
 from DoorOpening.distillation.multi_pcd_dagger import Dagger
-from DoorOpening.tasks.dooropening.multi_dooropening_env import compute_tracking_error
+from DoorOpening.tasks.dooropening.multi_dooropening_env import DOOR_LATCH_HINGE_THRESHOLD_RAD, compute_tracking_error
 
 
 DIRECTION_NAME_TO_ID = {"pull": 0, "push": 1}
@@ -1040,7 +1040,9 @@ def _door_param_snapshot(base_env, env_id):
         "handle_stiffness_nm_per_rad": float(base_env._door_nominal_joint_stiffness[env_id, hinge_idx]),
         "handle_damping_nms_per_rad": float(base_env._door_nominal_joint_damping[env_id, hinge_idx]),
         "handle_effort_limit_nm": float(base_env._door_handle_effort_limits[env_id, 0]),
-        "latch_threshold_rad": float(base_env._door_latch_thresholds[env_id]),
+        # Fixed across all envs now (DOOR_LATCH_HINGE_THRESHOLD_RAD in multi_dooropening_env.py),
+        # not sampled per-env, so there is no per-env value to read here anymore.
+        "latch_threshold_rad": float(DOOR_LATCH_HINGE_THRESHOLD_RAD),
         "panel_mass_kg": None,
         "panel_friction_static": None,
         "handle_friction_static": None,

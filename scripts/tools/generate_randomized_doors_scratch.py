@@ -99,14 +99,10 @@ DEFAULT_HANDLE_LEVER_THICKNESS_RANGE_M = (0.007, 0.010)
 # of the lever grip bar. This already ACCOUNTS FOR the lever bar half-thickness -- the stem cylinder is
 # extended by that half-thickness so the lever's near surface sits exactly this far above the panel (see
 # build_handle_spec). So this range IS the finger clearance under the lever, not the lever-center offset.
-# Floor RAISED again 0.045 -> 0.050, now matching MIN_HANDLE_PLATE_GRASP_GAP_M below: this slot is
-# what makes a pull form-closed instead of friction-closed, the finger goes THROUGH it and hooks the
-# bar, so the door load is carried by finger geometry rather than by 2*mu*F_grip (which at the
-# mu=0.05 end of the handle friction range transmits only ~5 N against the 12-31 N a panel needs). At
-# the old 0.045 floor a 21 mm finger had 2.1x its own width to spare; 0.050 keeps raising that margin
-# and, since it now equals MIN_HANDLE_PLATE_GRASP_GAP_M, every non-bump door's clear_finger_gap floor
-# matches what bumped doors were already guaranteed.
-DEFAULT_HANDLE_STEM_LENGTH_RANGE_M = (0.050, 0.085)  # was (0.045, 0.085), temp update
+# Floor kept at 0.050 (this slot is what makes a pull form-closed instead of friction-closed: the
+# finger goes THROUGH it and hooks the bar, so the door load is carried by finger geometry rather
+# than by 2*mu*F_grip). Ceiling trimmed 0.085 -> 0.075.
+DEFAULT_HANDLE_STEM_LENGTH_RANGE_M = (0.050, 0.075)  # was (0.050, 0.085), temp update
 # Lever bar length -- also the LENGTH OF THE SLOT the fingers hook through. Floor RAISED 0.06 -> 0.08:
 # the 0.06 stubs (barely longer than the gripper's own jaw) left almost no margin along the lever, and
 # combined with the return-hook/plate clearance fix above, the shortest bars were the ones most prone
@@ -160,13 +156,13 @@ DEFAULT_HANDLE_BUMP_SHAPE = "random"  # was "box", temp update
 # mortise-plate tail rather than the common case. This lets a single always-on sample cover the whole
 # no-bump..bump spectrum via SIZE instead of a hard prob. The protrusion is always clamped so at least
 # MIN_HANDLE_PLATE_GRASP_GAP_M of clear finger space stays above the plate.
-DEFAULT_HANDLE_BUMP_LENGTH_RANGE_M = (0.001, 0.020)  # was (0.001, 0.030), temp update
-# Box plate only: vertical extent (y) and horizontal extent (x) of the escutcheon plate. Height ceiling
-# raised 0.14 -> 0.24: real full-length lever backplates commonly run 15-24 cm tall (narrow style, no
-# separate deadbolt cutout), a whole common real shape the old 14 cm cap excluded entirely, not just a
-# rare tail. Width stays modest (~4-6 cm typical).
-DEFAULT_HANDLE_BUMP_HEIGHT_RANGE_M = (0.02, 0.24)  # was (0.02, 0.14), temp update
-DEFAULT_HANDLE_BUMP_WIDTH_RANGE_M = (0.02, 0.08)
+DEFAULT_HANDLE_BUMP_LENGTH_RANGE_M = (0.001, 0.035)  # was (0.001, 0.020), temp update
+# Box plate only: vertical extent (y) and horizontal extent (x) of the escutcheon plate. Both
+# ceilings raised again (height 0.24 -> 0.30, width 0.08 -> 0.12) for bigger backplates; the plate
+# box is clamped to the panel's own bounds in build_handle_spec regardless of how big it samples, so
+# it still can't reach past the panel edge into the frame.
+DEFAULT_HANDLE_BUMP_HEIGHT_RANGE_M = (0.02, 0.30)  # was (0.02, 0.24), temp update
+DEFAULT_HANDLE_BUMP_WIDTH_RANGE_M = (0.02, 0.15)  # was (0.02, 0.12), temp update
 # Cylinder boss only: radius of the round mount. Floor lowered 22 -> 18 mm (36 mm diameter) to reach
 # slimline/contemporary rosettes (some run as small as ~32-38 mm diameter), not just the standard
 # 55-60 mm residential rose the old floor assumed as the smallest case.
@@ -237,7 +233,7 @@ MIN_RETURN_TIP_CLEARANCE_M = 0.010
 # surface -- i.e. the finger clearance under the lever when a plate is present. The mount protrusion is
 # clamped so it can never eat into this, so the plate-referenced underside gap never drops below it (the
 # panel-referenced underside gap is the larger DEFAULT_HANDLE_STEM_LENGTH_RANGE_M value).
-MIN_HANDLE_PLATE_GRASP_GAP_M = 0.050
+MIN_HANDLE_PLATE_GRASP_GAP_M = 0.045  # was 0.050, temp update -- no longer matches the stem-length floor (0.050)
 
 REQUIRED_LINK_NAMES = {"base", "link_0", "link_1", "link_2"}
 REQUIRED_JOINT_NAMES = {"joint_0", "joint_1", "joint_2"}
