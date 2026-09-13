@@ -895,12 +895,10 @@
       </geometry>
       <material name="panda_white" />
     </visual>
-    <!-- Collision uses the VISUAL mesh, not meshes/franka/collision/finger.obj: that dedicated
-         collision mesh is a 32-face convex hull that bridges the finger's L-shaped recess, causing
-         phantom collisions in the jaw. -->
+    <!-- Reverted to the dedicated collision mesh (was visual/finger.obj). -->
     <collision>
       <geometry>
-        <mesh filename="package://glorbot/meshes/franka/visual/finger.obj" />
+        <mesh filename="package://glorbot/meshes/franka/collision/finger.obj" />
       </geometry>
     </collision>
   </link>
@@ -919,11 +917,11 @@
       </geometry>
       <material name="panda_white" />
     </visual>
-    <!-- Visual mesh as the collider, same reason as panda_leftfinger above. -->
+    <!-- Reverted to the dedicated collision mesh, same as panda_leftfinger above. -->
     <collision>
       <origin rpy="0 0 3.141592653589793" xyz="0 0 0" />
       <geometry>
-        <mesh filename="package://glorbot/meshes/franka/visual/finger.obj" />
+        <mesh filename="package://glorbot/meshes/franka/collision/finger.obj" />
       </geometry>
     </collision>
   </link>

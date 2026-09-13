@@ -747,7 +747,7 @@ def state_machine_offline_left_pull_door(
     )
 
     base_target_rot = robot_initial_pose[:, 3:].to(device).clone()
-    default_palm_rot = get_rotation_quat(math.pi / 2, 0, -math.pi / 2 - math.pi / 4, device)
+    default_palm_rot = get_rotation_quat(math.pi / 2, 0, -math.pi / 2 - math.pi / 2, device)  # was -pi/2 - pi/4, temp update
 
     _append_state(
         robot_traj,
@@ -778,8 +778,7 @@ def state_machine_offline_left_pull_door(
     pregrasp_base_x_offset = 0.72
     # Pulled 5cm back off the +y side so the left door pregrasp doesn't reach so far right.
     pregrasp_base_y_offset = 0.25
-    # Moved back (0.35 -> 0.40): larger palm<->door x gap to compensate for removing the
-    # finger<->panel penalty.
+    # Brought closer to the panel (0.25 -> 0.15) to match the new pregrasp/grasp yaw.
     pregrasp_palm_x_offset = 0.25
     pregrasp_palm_y_offset = 0.15
     pregrasp_palm_z_offset = 0.25
@@ -787,9 +786,8 @@ def state_machine_offline_left_pull_door(
     base_target_pos = handle_pos.clone()
     base_target_pos[:, 0] += pregrasp_base_x_offset
     base_target_pos[:, 1] += pregrasp_base_y_offset
-    # The base only turns where the turn does mechanical work -- i.e. the Step 5 blocking pose. The
-    # approach is driven square-on, so the arm, not the chassis, does the reaching.
-    pregrasp_base_tilt_yaw = 0.0  # was 0.3, temp update
+    # Tilt the base toward the handle during pregrasp so the arx/x5 camera keeps it in view.
+    pregrasp_base_tilt_yaw = 0.3
     _, _, _base_yaw = euler_xyz_from_quat(base_target_rot)
     pregrasp_tilt_base_rot = get_rotation_quat(0.0, 0.0, _base_yaw.item() + pregrasp_base_tilt_yaw, device)
     base_target_pose = _make_pose(base_target_pos, pregrasp_tilt_base_rot)
@@ -868,7 +866,7 @@ def state_machine_offline_left_pull_door(
     unlatch_palm_z_delta = -0.10
     unlatch_rot_roll = math.pi / 2
     unlatch_rot_pitch = 0.85
-    unlatch_rot_yaw = -math.pi / 2 - math.pi / 3
+    unlatch_rot_yaw = -0.85 * math.pi  # was -0.9*pi, temp update
 
     q_door = torch.tensor([0.0, unlatch_hinge_angle], device=device)
 
@@ -932,10 +930,11 @@ def state_machine_offline_left_pull_door(
     pull_palm_y_offset_closed = 0.03
     pull_palm_z_offset = 0.05
 
-    pull_rot_roll_base = math.pi / 2
-    pull_rot_roll_per_theta = 0.9
-    pull_rot_pitch = 0
-    pull_rot_yaw = - 3 * math.pi / 4
+    # Top-down while pulling: fixed orientation with the approach axis pointing straight down at
+    # the handle (world (0,0,-1)) and the finger-open axis aligned with the lever's own rotation
+    # axis (world +X) -- solved from the actual URDF joint geometry (see the earlier top-down
+    # derivation), not a theta-tracked approximation like pull_rot_roll_base/per_theta used to be.
+    pull_top_down_rot = get_rotation_quat(math.pi, 0.0, math.pi / 2, device)
 
     theta_values = torch.arange(
         pull_theta_start,
@@ -969,7 +968,7 @@ def state_machine_offline_left_pull_door(
         base_target_pos = handle_pos.clone()
         base_target_pos[:, 0] += pull_base_x_offset
         base_target_pos[:, 1] = pull_base_y_offset + theta.item() * pull_base_y_gain
-        pull_open_base_tilt_yaw = 0.2
+        pull_open_base_tilt_yaw = 0.3  # unified with pregrasp_base_tilt_yaw above
         _, _, _base_yaw = euler_xyz_from_quat(base_target_rot)
         pull_open_tilt_base_rot = get_rotation_quat(0.0, 0.0, _base_yaw.item() + pull_open_base_tilt_yaw, device)
         base_target_pose = _make_pose(base_target_pos, pull_open_tilt_base_rot)
@@ -985,12 +984,7 @@ def state_machine_offline_left_pull_door(
         palm_target_pos[:, 1] += palm_dy
         palm_target_pos[:, 2] += pull_palm_z_offset
 
-        palm_target_rot = get_rotation_quat(
-            pull_rot_roll_base + pull_rot_roll_per_theta * theta.item(),
-            pull_rot_pitch,
-            pull_rot_yaw,
-            device,
-        )
+        palm_target_rot = pull_top_down_rot
         palm_target_pose = _make_pose(palm_target_pos, palm_target_rot)
 
         q_robot[:10] = solve_ik(
