@@ -933,10 +933,15 @@ def state_machine_offline_left_pull_door(
     pull_palm_y_offset_closed = 0.03
     pull_palm_z_offset = 0.05
 
-    # Same fixed approach orientation as pregrasp/grasp/unlatch (approach_yaw), held constant
-    # through the whole pull sweep -- replaces the earlier top-down special case and the
-    # theta-tracked pull_rot_roll_base/per_theta approximation before that.
-    pull_unified_rot = default_palm_rot
+    # Top-down while pulling: fixed orientation with the approach axis pointing straight down at
+    # the handle (world (0,0,-1)) and the finger-open axis aligned with the lever's own rotation
+    # axis (world +X) -- solved from the actual URDF joint geometry. This is NOT just another yaw
+    # of the pregrasp/grasp/unlatch approach_yaw family (those are roll=pi/2 horizontal approaches);
+    # it's what lets the lever rotate freely between the fingers as it springs back during the pull,
+    # so the gripper keeps following/holding the handle instead of losing alignment with its axis.
+    # (Briefly unified with default_palm_rot when approach_yaw was introduced -- that broke exactly
+    # this handle-following behavior, so it's restored as its own fixed rotation here.)
+    pull_unified_rot = get_rotation_quat(math.pi, 0.0, math.pi / 2, device)
 
     theta_values = torch.arange(
         pull_theta_start,
