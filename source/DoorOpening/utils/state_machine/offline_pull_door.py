@@ -747,10 +747,10 @@ def state_machine_offline_left_pull_door(
     )
 
     base_target_rot = robot_initial_pose[:, 3:].to(device).clone()
-    # Pregrasp/grasp yaw kept at the tuned -0.65*pi; unlatch and the pull sweep are restored to
+    # Pregrasp/grasp yaw kept at the tuned -0.8*pi; unlatch and the pull sweep are restored to
     # their own original, independent pre-session values below (the "unify to one yaw" experiment
     # is reverted for everything except this one).
-    default_palm_rot = get_rotation_quat(math.pi / 2, 0, -0.65 * math.pi, device)
+    default_palm_rot = get_rotation_quat(math.pi / 2, 0, -0.8 * math.pi, device)
 
     _append_state(
         robot_traj,
