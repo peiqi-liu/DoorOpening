@@ -747,6 +747,8 @@ def state_machine_offline_left_pull_door(
     )
 
     base_target_rot = robot_initial_pose[:, 3:].to(device).clone()
+    # Pitch nudged up from 0 toward top-down (pi/2 = 90 deg = straight down) for pregrasp/grasp --
+    # keep grasp_rot_pitch below in sync, since Step 3's sweep interpolates FROM this same pitch.
     default_palm_rot = get_rotation_quat(math.pi / 2, 0, -math.pi / 2 - math.pi / 4, device)
 
     _append_state(
@@ -846,9 +848,17 @@ def state_machine_offline_left_pull_door(
     # (-x, toward the handle/door). Robot faces -x, so right=+y / left=-y / forward=-x.
     # Palm<->door x gap kept at 0.035, matching the right-door planner so left/right grasp the
     # same distance out from the panel.
-    grasp_palm_x_offset = 0.06
+    # +x is AWAY from the panel here (robot faces -x, so -x is forward/toward the door). Nudged out
+    # a bit for panel clearance.
+    grasp_palm_x_offset = 0.07  # was 0.06, temp update
     grasp_palm_y_offset = 0.015
-    grasp_palm_z_offset = 0.04
+    # Lowered (0.04 -> 0.025): the finger collision now uses the real (visual) mesh, which only has
+    # true pad contact in the LAST ~18mm near the tip -- the old dedicated collision mesh was a hull
+    # that bridged the recess, so it could catch a bar anywhere along the shank ("hook"-like). With
+    # the accurate geometry the shank itself can't grip ("chopstick"-like), so the bar must sit
+    # deeper in the jaw, near the tip, hence the wrist approaches lower to place it there. Shared
+    # with the unlatch sweep below (Step 3 reuses this same offset).
+    grasp_palm_z_offset = 0.025  # was 0.04, temp update
     grasp_open_ratio = 0.7
 
     palm_target_pos = handle_pos.clone()
@@ -889,7 +899,7 @@ def state_machine_offline_left_pull_door(
     # sweeps under it -- that mismatch was letting the gripper slide off the handle mid-press.
     unlatch_palm_y_delta = -0.02  # was 0.015, temp update
     unlatch_palm_z_delta = -0.06  # was -0.10, temp update
-    # Grasp-pose Euler angles (same literals as default_palm_rot below) -- the SWEEP's t=0 endpoint.
+    # Grasp-pose Euler angles (same literals as default_palm_rot above) -- the SWEEP's t=0 endpoint.
     grasp_rot_roll = math.pi / 2
     grasp_rot_pitch = 0.0
     grasp_rot_yaw = -math.pi / 2 - math.pi / 4
@@ -981,9 +991,12 @@ def state_machine_offline_left_pull_door(
     pull_hinge_hold_until_theta = 0.3  # was 0.15, temp update
     pull_hinge_release_by_theta = 0.5  # was pull_theta_stop (1.25), temp update
 
-    pull_palm_x_offset_closed = 0.055
+    # Same direction as grasp_palm_x_offset above: nudged out a bit for panel clearance.
+    pull_palm_x_offset_closed = 0.073  # was 0.065, temp update -- still penetrating panel at 0.065
     pull_palm_y_offset_closed = 0.03
-    pull_palm_z_offset = 0.05
+    # Lowered (0.05 -> 0.035), same reason as grasp_palm_z_offset above: the accurate finger mesh
+    # only grips near the tip, so the bar needs to stay lower in the jaw through the whole pull too.
+    pull_palm_z_offset = 0.035  # was 0.05, temp update
 
     pull_rot_roll_base = math.pi / 2
     pull_rot_roll_per_theta = 0.9
