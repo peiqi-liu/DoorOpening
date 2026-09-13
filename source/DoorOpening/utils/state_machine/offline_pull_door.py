@@ -868,14 +868,18 @@ def state_machine_offline_left_pull_door(
     unlatch_palm_y_delta = 0.015
     unlatch_palm_z_delta = -0.10
 
-    # Orientation shared with the pull sweep below: yaw fixed, roll held at the pull sweep's own
-    # starting value (so this step ends exactly where Step 4 begins), and pitch tracks the HANDLE
-    # joint angle itself (0 at neutral -> 0.85 rad at the press hard-stop) instead of jumping
-    # straight to one fixed final orientation. The pull loop reuses this same
-    # handle_pitch_gain * handle_angle formula during its hinge-release stage, so the press and
-    # the release are two continuous halves of the same motion instead of independently-tuned
-    # endpoints with a pop between them.
-    unlatch_pull_yaw = -0.8 * math.pi
+    # Orientation shared with the pull sweep below: roll held at the pull sweep's own starting
+    # value (so this step ends exactly where Step 4 begins), and pitch tracks the HANDLE joint
+    # angle itself (0 at neutral -> 0.85 rad at the press hard-stop) instead of jumping straight to
+    # one fixed final orientation. The pull loop reuses this same handle_pitch_gain * handle_angle
+    # formula during its hinge-release stage, so the press and the release are two continuous
+    # halves of the same motion instead of independently-tuned endpoints with a pop between them.
+    #
+    # Yaw is staged: -0.65*pi through unlatch and the first part of the pull sweep (matching
+    # grasp), then switched to -0.8*pi once the handle has fully released (pull_yaw_switch_theta,
+    # tied to pull_hinge_release_by_theta below) to complete the rest -- the bulk -- of the sweep.
+    unlatch_pull_yaw = -0.65 * math.pi
+    pull_yaw_stage2 = -0.8 * math.pi
     pull_rot_roll_base = math.pi / 2
     pull_rot_roll_per_theta = 0.9
     pull_theta_start = 0.30
@@ -1000,10 +1004,13 @@ def state_machine_offline_left_pull_door(
         palm_target_pos[:, 1] += palm_dy
         palm_target_pos[:, 2] += pull_palm_z_offset
 
+        current_pull_yaw = (
+            unlatch_pull_yaw if theta.item() <= pull_hinge_release_by_theta else pull_yaw_stage2
+        )
         palm_target_rot = get_rotation_quat(
             pull_rot_roll_base + pull_rot_roll_per_theta * theta.item(),
             handle_pitch_gain * handle_angle,
-            unlatch_pull_yaw,
+            current_pull_yaw,
             device,
         )
         palm_target_pose = _make_pose(palm_target_pos, palm_target_rot)
