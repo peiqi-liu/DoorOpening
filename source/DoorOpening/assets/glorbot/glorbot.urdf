@@ -895,10 +895,10 @@
       </geometry>
       <material name="panda_white" />
     </visual>
-    <!-- Reverted to the dedicated collision mesh (was visual/finger.obj). -->
+    <!-- Collision uses the visual (accurate) mesh, not the dedicated collision/finger.obj hull. -->
     <collision>
       <geometry>
-        <mesh filename="package://glorbot/meshes/franka/collision/finger.obj" />
+        <mesh filename="package://glorbot/meshes/franka/visual/finger.obj" />
       </geometry>
     </collision>
   </link>
@@ -917,11 +917,11 @@
       </geometry>
       <material name="panda_white" />
     </visual>
-    <!-- Reverted to the dedicated collision mesh, same as panda_leftfinger above. -->
+    <!-- Collision uses the visual (accurate) mesh, same as panda_leftfinger above. -->
     <collision>
       <origin rpy="0 0 3.141592653589793" xyz="0 0 0" />
       <geometry>
-        <mesh filename="package://glorbot/meshes/franka/collision/finger.obj" />
+        <mesh filename="package://glorbot/meshes/franka/visual/finger.obj" />
       </geometry>
     </collision>
   </link>
