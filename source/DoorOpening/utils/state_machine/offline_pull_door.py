@@ -860,12 +860,12 @@ def state_machine_offline_left_pull_door(
     # -------------------------
     # Step 3: Rotate hinge (unlatch)
     # -------------------------
-    # Presses the handle close to its HARD STOP (HANDLE_OPEN_LIMIT_RAD = 1.0 rad in the door
-    # generator) without sitting exactly on the DOOR_LATCH_HINGE_THRESHOLD_RAD = 0.9 unlatch
-    # threshold: pressing to precisely the threshold leaves no margin for IK/interpolation
-    # numerical slop to land the achieved angle a hair under it. 0.93 keeps 0.03 rad clear of the
-    # threshold and 0.07 rad short of the hard stop.
-    unlatch_hinge_angle = 0.93
+    # Presses the handle to its HARD STOP (HANDLE_OPEN_LIMIT_RAD = 0.98 rad in the door generator)
+    # -- the reference presses firmly against the mechanical stop, which is both what a person does
+    # and what gives the pull a rigid reaction point. DOOR_LATCH_HINGE_THRESHOLD_RAD = 0.95 sits
+    # 0.03 rad below this, so the unlatch check has margin against IK/interpolation numerical slop
+    # instead of the earlier design where target == threshold exactly.
+    unlatch_hinge_angle = 0.98
     unlatch_palm_y_delta = 0.015
     unlatch_palm_z_delta = -0.10
 

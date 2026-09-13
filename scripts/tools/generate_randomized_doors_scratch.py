@@ -217,7 +217,7 @@ DOOR_OPEN_LIMIT_RAD = 1.57
 # restores the original 0.10 rad (5.7 deg) margin (same ratio as the old 0.95-stop/0.85-threshold
 # pair), keeping the invariant that pressing the lever to its stop unlatches EVERY door regardless
 # of the sampled threshold.
-HANDLE_OPEN_LIMIT_RAD = 1.0  # was 1.05; lowered to keep a fixed 0.1 margin above the new 0.9 unlatch threshold
+HANDLE_OPEN_LIMIT_RAD = 0.98  # was 1.0; tight 0.03 margin above the 0.95 unlatch threshold, and the planner presses exactly to this value
 ROOT_JOINT_RPY = [math.pi / 2.0, 0.0, -math.pi / 2.0]
 # With the fixed root rotation above, link_1 local -z points toward the
 # default front view used by scripts/test_door.py, while +z points to the back.
