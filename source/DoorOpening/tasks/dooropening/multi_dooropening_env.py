@@ -63,7 +63,7 @@ SELF_COLLISION_SENSOR_NAMES = (
 # planners' own unlatch_hinge_angle press target (0.95 rad), which is itself already backed off
 # from the mechanical hard stop (HANDLE_OPEN_LIMIT_RAD = 1.05 rad in
 # generate_randomized_doors_scratch.py).
-DOOR_LATCH_HINGE_THRESHOLD_RAD = 0.95  # was 1.0, temp update
+DOOR_LATCH_HINGE_THRESHOLD_RAD = 0.9  # was 0.95; lowered with more margin below the 1.0 hard stop
 
 
 class DooropeningEnv(DirectRLEnv):
