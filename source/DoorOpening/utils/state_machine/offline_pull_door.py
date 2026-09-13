@@ -827,7 +827,7 @@ def state_machine_offline_left_pull_door(
     # (-x, toward the handle/door). Robot faces -x, so right=+y / left=-y / forward=-x.
     # Palm<->door x gap kept at 0.035, matching the right-door planner so left/right grasp the
     # same distance out from the panel.
-    grasp_palm_x_offset = 0.08  # was 0.06, bumped to fix panel penetration during grasp
+    grasp_palm_x_offset = 0.07  # was 0.06, bumped to fix panel penetration during grasp
     grasp_palm_y_offset = 0.015
     grasp_palm_z_offset = 0.04
     grasp_open_ratio = 0.7
