@@ -747,10 +747,10 @@ def state_machine_offline_left_pull_door(
     )
 
     base_target_rot = robot_initial_pose[:, 3:].to(device).clone()
-    # Unified approach yaw shared by pregrasp/grasp, unlatch, and the pull sweep -- was three
-    # separate values (-pi, -0.85*pi, and a top-down roll=pi/yaw=pi/2 special case).
-    approach_yaw = -0.8 * math.pi
-    default_palm_rot = get_rotation_quat(math.pi / 2, 0, approach_yaw, device)
+    # Pregrasp/grasp yaw kept at the tuned -0.65*pi; unlatch and the pull sweep are restored to
+    # their own original, independent pre-session values below (the "unify to one yaw" experiment
+    # is reverted for everything except this one).
+    default_palm_rot = get_rotation_quat(math.pi / 2, 0, -0.65 * math.pi, device)
 
     _append_state(
         robot_traj,
@@ -869,7 +869,7 @@ def state_machine_offline_left_pull_door(
     unlatch_palm_z_delta = -0.10
     unlatch_rot_roll = math.pi / 2
     unlatch_rot_pitch = 0.85
-    unlatch_rot_yaw = approach_yaw  # unified with default_palm_rot / pull sweep, was -0.85*pi
+    unlatch_rot_yaw = -math.pi / 2 - math.pi / 3  # restored to original (was briefly unified)
 
     q_door = torch.tensor([0.0, unlatch_hinge_angle], device=device)
 
