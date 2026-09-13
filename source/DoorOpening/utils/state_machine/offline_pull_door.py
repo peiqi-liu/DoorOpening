@@ -747,7 +747,10 @@ def state_machine_offline_left_pull_door(
     )
 
     base_target_rot = robot_initial_pose[:, 3:].to(device).clone()
-    default_palm_rot = get_rotation_quat(math.pi / 2, 0, -math.pi / 2 - math.pi / 2, device)  # was -pi/2 - pi/4, temp update
+    # Unified approach yaw shared by pregrasp/grasp, unlatch, and the pull sweep -- was three
+    # separate values (-pi, -0.85*pi, and a top-down roll=pi/yaw=pi/2 special case).
+    approach_yaw = -0.8 * math.pi
+    default_palm_rot = get_rotation_quat(math.pi / 2, 0, approach_yaw, device)
 
     _append_state(
         robot_traj,
@@ -866,7 +869,7 @@ def state_machine_offline_left_pull_door(
     unlatch_palm_z_delta = -0.10
     unlatch_rot_roll = math.pi / 2
     unlatch_rot_pitch = 0.85
-    unlatch_rot_yaw = -0.85 * math.pi  # was -0.9*pi, temp update
+    unlatch_rot_yaw = approach_yaw  # unified with default_palm_rot / pull sweep, was -0.85*pi
 
     q_door = torch.tensor([0.0, unlatch_hinge_angle], device=device)
 
@@ -930,11 +933,10 @@ def state_machine_offline_left_pull_door(
     pull_palm_y_offset_closed = 0.03
     pull_palm_z_offset = 0.05
 
-    # Top-down while pulling: fixed orientation with the approach axis pointing straight down at
-    # the handle (world (0,0,-1)) and the finger-open axis aligned with the lever's own rotation
-    # axis (world +X) -- solved from the actual URDF joint geometry (see the earlier top-down
-    # derivation), not a theta-tracked approximation like pull_rot_roll_base/per_theta used to be.
-    pull_top_down_rot = get_rotation_quat(math.pi, 0.0, math.pi / 2, device)
+    # Same fixed approach orientation as pregrasp/grasp/unlatch (approach_yaw), held constant
+    # through the whole pull sweep -- replaces the earlier top-down special case and the
+    # theta-tracked pull_rot_roll_base/per_theta approximation before that.
+    pull_unified_rot = default_palm_rot
 
     theta_values = torch.arange(
         pull_theta_start,
@@ -984,7 +986,7 @@ def state_machine_offline_left_pull_door(
         palm_target_pos[:, 1] += palm_dy
         palm_target_pos[:, 2] += pull_palm_z_offset
 
-        palm_target_rot = pull_top_down_rot
+        palm_target_rot = pull_unified_rot
         palm_target_pose = _make_pose(palm_target_pos, palm_target_rot)
 
         q_robot[:10] = solve_ik(
