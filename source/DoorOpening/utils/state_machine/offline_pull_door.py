@@ -867,44 +867,60 @@ def state_machine_offline_left_pull_door(
     unlatch_hinge_angle = 0.95
     unlatch_palm_y_delta = 0.015
     unlatch_palm_z_delta = -0.10
-    unlatch_rot_roll = math.pi / 2
-    unlatch_rot_pitch = 0.85
-    unlatch_rot_yaw = -math.pi / 2 - math.pi / 3  # restored to original (was briefly unified)
 
-    q_door = torch.tensor([0.0, unlatch_hinge_angle], device=device)
+    # Orientation shared with the pull sweep below: yaw fixed, roll held at the pull sweep's own
+    # starting value (so this step ends exactly where Step 4 begins), and pitch tracks the HANDLE
+    # joint angle itself (0 at neutral -> 0.85 rad at the press hard-stop) instead of jumping
+    # straight to one fixed final orientation. The pull loop reuses this same
+    # handle_pitch_gain * handle_angle formula during its hinge-release stage, so the press and
+    # the release are two continuous halves of the same motion instead of independently-tuned
+    # endpoints with a pop between them.
+    unlatch_pull_yaw = -0.8 * math.pi
+    pull_rot_roll_base = math.pi / 2
+    pull_rot_roll_per_theta = 0.9
+    pull_theta_start = 0.30
+    handle_pitch_gain = 0.85 / unlatch_hinge_angle
+    unlatch_roll = pull_rot_roll_base + pull_rot_roll_per_theta * pull_theta_start
 
-    palm_target_pose = palm_target_pose.clone()
-    palm_target_pose[:, 1] += unlatch_palm_y_delta
-    palm_target_pose[:, 2] += unlatch_palm_z_delta
-    palm_target_pose[:, 3:] = get_rotation_quat(
-        unlatch_rot_roll,
-        unlatch_rot_pitch,
-        unlatch_rot_yaw,
-        device,
-    )
+    unlatch_base_pose = palm_target_pose.clone()
+    unlatch_steps = 6
+    for unlatch_step in range(1, unlatch_steps + 1):
+        frac = unlatch_step / unlatch_steps
+        handle_angle = frac * unlatch_hinge_angle
+        q_door = torch.tensor([0.0, handle_angle], device=device)
 
-    q_robot[:10] = solve_ik(
-        robot_urdf_path,
-        q_robot[:10],
-        palm_pose=palm_target_pose,
-        base_pose=base_target_pose,
-        robot_initial_pose=robot_initial_pose,
-        reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
-    )[0]
+        palm_target_pose = unlatch_base_pose.clone()
+        palm_target_pose[:, 1] += frac * unlatch_palm_y_delta
+        palm_target_pose[:, 2] += frac * unlatch_palm_z_delta
+        palm_target_pose[:, 3:] = get_rotation_quat(
+            unlatch_roll,
+            handle_pitch_gain * handle_angle,
+            unlatch_pull_yaw,
+            device,
+        )
 
-    _append_state(
-        robot_traj,
-        door_traj,
-        key_idx_in_key_indices,
-        q_robot,
-        q_door,
-        mark_keyframe=True,
-    )
+        q_robot[:10] = solve_ik(
+            robot_urdf_path,
+            q_robot[:10],
+            palm_pose=palm_target_pose,
+            base_pose=base_target_pose,
+            robot_initial_pose=robot_initial_pose,
+            reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
+            num_attempts=1,  # loop body: continuity, no random-restart branch jumps
+        )[0]
+
+        _append_state(
+            robot_traj,
+            door_traj,
+            key_idx_in_key_indices,
+            q_robot,
+            q_door,
+            mark_keyframe=(unlatch_step == unlatch_steps),
+        )
 
     # -------------------------
     # Step 4: Pull door open
     # -------------------------
-    pull_theta_start = 0.30
     pull_theta_stop = 1.25
     pull_theta_step = 0.10
 
@@ -933,14 +949,13 @@ def state_machine_offline_left_pull_door(
     pull_palm_y_offset_closed = 0.03
     pull_palm_z_offset = 0.05
 
-    # Original pull-sweep rotation (restored from pre-session baseline): roll tracks theta so the
-    # wrist keeps rotating WITH the handle/panel as the sweep progresses (including as the handle
-    # springs back), instead of holding a fixed orientation that stops following it. Both the
-    # top-down fixed rotation and the briefly-unified default_palm_rot attempts lost this tracking.
-    pull_rot_roll_base = math.pi / 2
-    pull_rot_roll_per_theta = 0.9
-    pull_rot_pitch = 0
-    pull_rot_yaw = -3 * math.pi / 4
+    # Roll tracks theta (restored from pre-session baseline, pull_rot_roll_base/per_theta defined
+    # above near Step 3) so the wrist keeps rotating WITH the handle/panel as the sweep progresses.
+    # Pitch tracks the handle joint angle via the same handle_pitch_gain used in Step 3 -- held at
+    # 0.85 while the hinge hold keeps the handle pressed, then ramping back to 0 exactly as the
+    # handle springs back (pull_hinge_hold_until_theta -> pull_hinge_release_by_theta below),
+    # continuous with Step 3's ramp-up instead of holding pitch=0 through the whole sweep. Yaw
+    # fixed at unlatch_pull_yaw, shared with Step 3.
 
     theta_values = torch.arange(
         pull_theta_start,
@@ -952,18 +967,13 @@ def state_machine_offline_left_pull_door(
     # Retract active perception arms to safe range
 
     for theta in theta_values:
-        q_door = torch.tensor(
-            [
-                theta.item(),
-                _pull_hinge_angle(
-                    theta.item(),
-                    unlatch_hinge_angle,
-                    pull_hinge_hold_until_theta,
-                    pull_hinge_release_by_theta,
-                ),
-            ],
-            device=device,
+        handle_angle = _pull_hinge_angle(
+            theta.item(),
+            unlatch_hinge_angle,
+            pull_hinge_hold_until_theta,
+            pull_hinge_release_by_theta,
         )
+        q_door = torch.tensor([theta.item(), handle_angle], device=device)
 
         handle_pos = get_hinge_pos(
             door_urdf_path,
@@ -992,8 +1002,8 @@ def state_machine_offline_left_pull_door(
 
         palm_target_rot = get_rotation_quat(
             pull_rot_roll_base + pull_rot_roll_per_theta * theta.item(),
-            pull_rot_pitch,
-            pull_rot_yaw,
+            handle_pitch_gain * handle_angle,
+            unlatch_pull_yaw,
             device,
         )
         palm_target_pose = _make_pose(palm_target_pos, palm_target_rot)
