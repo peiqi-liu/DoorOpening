@@ -747,10 +747,10 @@ def state_machine_offline_left_pull_door(
     )
 
     base_target_rot = robot_initial_pose[:, 3:].to(device).clone()
-    # Pregrasp/grasp yaw kept at the tuned -0.8*pi; unlatch and the pull sweep are restored to
+    # Pregrasp/grasp yaw kept at the tuned -0.65*pi; unlatch and the pull sweep are restored to
     # their own original, independent pre-session values below (the "unify to one yaw" experiment
     # is reverted for everything except this one).
-    default_palm_rot = get_rotation_quat(math.pi / 2, 0, -0.8 * math.pi, device)
+    default_palm_rot = get_rotation_quat(math.pi / 2, 0, -0.65 * math.pi, device)
 
     _append_state(
         robot_traj,
@@ -827,7 +827,7 @@ def state_machine_offline_left_pull_door(
     # (-x, toward the handle/door). Robot faces -x, so right=+y / left=-y / forward=-x.
     # Palm<->door x gap kept at 0.035, matching the right-door planner so left/right grasp the
     # same distance out from the panel.
-    grasp_palm_x_offset = 0.07  # was 0.06, bumped to fix panel penetration during grasp
+    grasp_palm_x_offset = 0.06
     grasp_palm_y_offset = 0.015
     grasp_palm_z_offset = 0.04
     grasp_open_ratio = 0.7
