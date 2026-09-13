@@ -752,19 +752,6 @@ def state_machine_offline_left_pull_door(
     # is reverted for everything except this one).
     default_palm_rot = get_rotation_quat(math.pi / 2, 0, -0.65 * math.pi, device)
 
-    # solve_ik targets panda_hand, not the actual fingertip contact point -- palm_center hangs
-    # 103.4mm further along panda_hand's local +Z (glorbot.urdf palm_center_joint). A FIXED
-    # panda_hand-frame x-offset therefore puts the fingertips at a DIFFERENT distance from the
-    # panel every time default_palm_rot's yaw is retuned, since that changes which way local +Z
-    # projects onto world x. This silently grew as yaw moved from the original -0.75*pi (where
-    # grasp_palm_x_offset=0.06 was tuned) to -0.65*pi, and is what let the gripper overshoot into
-    # the panel during grasping. GRASP_PALM_CENTER_OFFSET_M compensates for it below so the
-    # fingertip standoff from the handle stays fixed regardless of yaw.
-    GRASP_PALM_CENTER_OFFSET_M = 0.1034
-    _grasp_approach_axis_x = quat_apply(
-        default_palm_rot, torch.tensor([[0.0, 0.0, 1.0]], device=device)
-    )[:, 0].item()
-
     _append_state(
         robot_traj,
         door_traj,
@@ -840,13 +827,7 @@ def state_machine_offline_left_pull_door(
     # (-x, toward the handle/door). Robot faces -x, so right=+y / left=-y / forward=-x.
     # Palm<->door x gap kept at 0.035, matching the right-door planner so left/right grasp the
     # same distance out from the panel.
-    # grasp_palm_x_offset is now DERIVED (yaw-compensated) rather than a fixed 0.06: that fixed
-    # value put the fingertips 1.3cm past the handle toward the panel at the original yaw=-0.75*pi,
-    # but the SAME wrist offset overshoots much further into the panel at other yaws (see
-    # GRASP_PALM_CENTER_OFFSET_M above) -- e.g. ~3.2cm past the handle at -0.65*pi, which is what
-    # caused the reported grasp-panel penetration. -0.0131 preserves the original, working standoff.
-    grasp_fingertip_x_standoff = -0.0131
-    grasp_palm_x_offset = grasp_fingertip_x_standoff - GRASP_PALM_CENTER_OFFSET_M * _grasp_approach_axis_x
+    grasp_palm_x_offset = 0.08  # was 0.06, bumped to fix panel penetration during grasp
     grasp_palm_y_offset = 0.015
     grasp_palm_z_offset = 0.04
     grasp_open_ratio = 0.7
