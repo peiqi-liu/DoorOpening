@@ -933,15 +933,14 @@ def state_machine_offline_left_pull_door(
     pull_palm_y_offset_closed = 0.03
     pull_palm_z_offset = 0.05
 
-    # Top-down while pulling: fixed orientation with the approach axis pointing straight down at
-    # the handle (world (0,0,-1)) and the finger-open axis aligned with the lever's own rotation
-    # axis (world +X) -- solved from the actual URDF joint geometry. This is NOT just another yaw
-    # of the pregrasp/grasp/unlatch approach_yaw family (those are roll=pi/2 horizontal approaches);
-    # it's what lets the lever rotate freely between the fingers as it springs back during the pull,
-    # so the gripper keeps following/holding the handle instead of losing alignment with its axis.
-    # (Briefly unified with default_palm_rot when approach_yaw was introduced -- that broke exactly
-    # this handle-following behavior, so it's restored as its own fixed rotation here.)
-    pull_unified_rot = get_rotation_quat(math.pi, 0.0, math.pi / 2, device)
+    # Original pull-sweep rotation (restored from pre-session baseline): roll tracks theta so the
+    # wrist keeps rotating WITH the handle/panel as the sweep progresses (including as the handle
+    # springs back), instead of holding a fixed orientation that stops following it. Both the
+    # top-down fixed rotation and the briefly-unified default_palm_rot attempts lost this tracking.
+    pull_rot_roll_base = math.pi / 2
+    pull_rot_roll_per_theta = 0.9
+    pull_rot_pitch = 0
+    pull_rot_yaw = -3 * math.pi / 4
 
     theta_values = torch.arange(
         pull_theta_start,
@@ -991,7 +990,12 @@ def state_machine_offline_left_pull_door(
         palm_target_pos[:, 1] += palm_dy
         palm_target_pos[:, 2] += pull_palm_z_offset
 
-        palm_target_rot = pull_unified_rot
+        palm_target_rot = get_rotation_quat(
+            pull_rot_roll_base + pull_rot_roll_per_theta * theta.item(),
+            pull_rot_pitch,
+            pull_rot_yaw,
+            device,
+        )
         palm_target_pose = _make_pose(palm_target_pos, palm_target_rot)
 
         q_robot[:10] = solve_ik(
