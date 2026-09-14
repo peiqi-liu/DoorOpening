@@ -156,13 +156,13 @@ DEFAULT_HANDLE_BUMP_SHAPE = "random"  # was "box", temp update
 # mortise-plate tail rather than the common case. This lets a single always-on sample cover the whole
 # no-bump..bump spectrum via SIZE instead of a hard prob. The protrusion is always clamped so at least
 # MIN_HANDLE_PLATE_GRASP_GAP_M of clear finger space stays above the plate.
-DEFAULT_HANDLE_BUMP_LENGTH_RANGE_M = (0.001, 0.035)  # was (0.001, 0.020), temp update
+DEFAULT_HANDLE_BUMP_LENGTH_RANGE_M = (0.0, 0.025)  # matched to real backplates (~20mm typical), slightly harder for sim2real margin
 # Box plate only: vertical extent (y) and horizontal extent (x) of the escutcheon plate. Both
 # ceilings raised again (height 0.24 -> 0.30, width 0.08 -> 0.12) for bigger backplates; the plate
 # box is clamped to the panel's own bounds in build_handle_spec regardless of how big it samples, so
 # it still can't reach past the panel edge into the frame.
-DEFAULT_HANDLE_BUMP_HEIGHT_RANGE_M = (0.02, 0.30)  # was (0.02, 0.24), temp update
-DEFAULT_HANDLE_BUMP_WIDTH_RANGE_M = (0.02, 0.15)  # was (0.02, 0.12), temp update
+DEFAULT_HANDLE_BUMP_HEIGHT_RANGE_M = (0.055, 0.280)  # matched to real backplate range (round rosette to full entry plate)
+DEFAULT_HANDLE_BUMP_WIDTH_RANGE_M = (0.050, 0.075)  # matched to real backplate width range
 # Cylinder boss only: radius of the round mount. Floor lowered 22 -> 18 mm (36 mm diameter) to reach
 # slimline/contemporary rosettes (some run as small as ~32-38 mm diameter), not just the standard
 # 55-60 mm residential rose the old floor assumed as the smallest case.
