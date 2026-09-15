@@ -455,9 +455,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     asymmetric_obs = True
 
     viewer: ViewerCfg = ViewerCfg(eye=(1.5, -2.0, 1.0), lookat=(0.4, 0.0, 0.7), origin_type="env")
-    # Hold the gripper at GRIPPER_OPEN_WIDTH and ignore the policy's finger action. The DOF stays in
-    # the action space, so checkpoints keep loading -- its command is just overwritten.
-    fixed_open_gripper = True
+    # Was True (hold the gripper at GRIPPER_OPEN_WIDTH, ignoring the policy's finger action) while
+    # the reference trajectory never closed the gripper. Now that the left-pull planner stages a
+    # real grasp/unlatch/pull close, the policy needs to actually track the finger DOF.
+    fixed_open_gripper = False
     # Lever (joint_2) return-spring torque cap: the torque the robot has to overcome to press the
     # handle. Ceiling cut 5 -> 3 Nm. It converts straight into press force at the grip, torque /
     # moment arm, and the arm is only 0.06..0.14 m long: 5 Nm needed 50 N on a mean lever and 100 N
