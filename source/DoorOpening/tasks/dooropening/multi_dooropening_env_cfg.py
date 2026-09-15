@@ -648,13 +648,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         filter_prim_paths_expr=list(SELF_COLLISION_HAND_FILTER_PRIM_PATHS),
     )
     handle_contact_force_threshold = 1.0
-    # Penalize the gripper being significantly closed while NOT in contact with the handle -- the
-    # DeepMimic gripper tracking reward alone would reward closing on schedule even if the policy's
-    # actual grasp timing has drifted from the reference (domain-randomized reach distance, IK
-    # slop, etc.), which could teach a bare-air close. Gated on the same contact force/threshold
-    # used by hinge_gripper_contact_reward_w above.
-    gripper_closed_frac_threshold = 0.5  # fraction of GRIPPER_OPEN_WIDTH counted as "closed"
-    gripper_closed_without_contact_penalty_w = 2.0
     # Contact between a non-front base face and any door body above this (N) is penalized.
     base_door_contact_force_threshold = 5.0
     x5_body_contact_force_threshold = 1.5
@@ -803,8 +796,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # Gripper-opening tracking (the single driven finger DOF). There is deliberately no matching
     # VELOCITY term: the gripper is a 1-DOF open/close command whose speed is already capped at the
     # hardware limit, so tracking the reference's finger velocity added a term that was numerically
-    # constant and shaped nothing.
-    robot_gripper_joint_pos_w = 1.5
+    # constant and shaped nothing. Raised 1.5 -> 2.0 now that the reference stages a real
+    # grasp/unlatch/pull close instead of holding open the whole time -- this term is the only
+    # thing that needs to encourage closing.
+    robot_gripper_joint_pos_w = 2.0
     robot_arx_joint_pos_w = 5.0
     robot_arx_tuck_joint_pos_w = 2.0
     robot_base_joint_vel_w = 1.0
