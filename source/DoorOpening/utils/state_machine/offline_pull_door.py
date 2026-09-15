@@ -752,6 +752,11 @@ def state_machine_offline_left_pull_door(
     # is reverted for everything except this one).
     default_palm_rot = get_rotation_quat(math.pi / 2, 0, -0.65 * math.pi, device)
 
+    # Guarantee the very first keyframe starts from a fully open gripper, regardless of whatever
+    # gripper value the caller's robot_initial_q happened to carry -- staged closing below should
+    # never put the reference into an already-grasping start state.
+    _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
+
     _append_state(
         robot_traj,
         door_traj,
@@ -846,7 +851,9 @@ def state_machine_offline_left_pull_door(
         robot_initial_pose=robot_initial_pose,
         reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
     )[0]
-    _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
+    # Close to grip the handle here -- nothing resets the gripper again until Step 5 releases it
+    # after the pull sweep, so this same closed width carries through unlatch and the pull.
+    _set_gripper(q_robot, grasp_open_ratio * GRIPPER_OPEN_WIDTH)
 
     _append_state(
         robot_traj,
