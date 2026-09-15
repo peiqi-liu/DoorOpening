@@ -851,10 +851,9 @@ def state_machine_offline_left_pull_door(
         robot_initial_pose=robot_initial_pose,
         reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
     )[0]
-    # Close fully to grip the handle here -- nothing resets the gripper again until Step 5
-    # releases it after the pull sweep, so this same closed width carries through unlatch and
-    # the pull.
-    _set_gripper(q_robot, GRIPPER_CLOSED_WIDTH)
+    # Stay open here -- closing happens gradually through Step 3, synced with the press, not as
+    # an instant snap at the grasp pose (see the unlatch loop below).
+    _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
 
     _append_state(
         robot_traj,
@@ -877,17 +876,13 @@ def state_machine_offline_left_pull_door(
     unlatch_palm_z_delta = -0.10
 
     # Orientation shared with the pull sweep below: yaw fixed, roll held at the pull sweep's own
-    # starting value (so this step ends exactly where Step 4 begins), and pitch tracks the HANDLE
-    # joint angle itself (0 at neutral -> 0.85 rad at the press hard-stop) instead of jumping
-    # straight to one fixed final orientation. The pull loop reuses this same
-    # handle_pitch_gain * handle_angle formula during its hinge-release stage, so the press and
-    # the release are two continuous halves of the same motion instead of independently-tuned
-    # endpoints with a pop between them.
+    # starting value (so this step ends exactly where Step 4 begins), pitch held at 0 -- straight
+    # down, not tracking the handle joint angle -- so the wrist doesn't rotate as the lever is
+    # pressed.
     unlatch_pull_yaw = -0.8 * math.pi
     pull_rot_roll_base = math.pi / 2
     pull_rot_roll_per_theta = 0.9
     pull_theta_start = 0.30
-    handle_pitch_gain = 0.85 / unlatch_hinge_angle
     unlatch_roll = pull_rot_roll_base + pull_rot_roll_per_theta * pull_theta_start
 
     unlatch_base_pose = palm_target_pose.clone()
@@ -902,7 +897,7 @@ def state_machine_offline_left_pull_door(
         palm_target_pose[:, 2] += frac * unlatch_palm_z_delta
         palm_target_pose[:, 3:] = get_rotation_quat(
             unlatch_roll,
-            handle_pitch_gain * handle_angle,
+            0.0,
             unlatch_pull_yaw,
             device,
         )
@@ -916,6 +911,12 @@ def state_machine_offline_left_pull_door(
             reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
             num_attempts=1,  # loop body: continuity, no random-restart branch jumps
         )[0]
+        # Close gradually, synced with the press: fully open at frac=0 (grasp pose, handle not
+        # yet loaded), fully closed by frac=1 (handle fully pressed) -- not an instant snap.
+        _set_gripper(
+            q_robot,
+            GRIPPER_OPEN_WIDTH + frac * (GRIPPER_CLOSED_WIDTH - GRIPPER_OPEN_WIDTH),
+        )
 
         _append_state(
             robot_traj,
@@ -959,11 +960,8 @@ def state_machine_offline_left_pull_door(
 
     # Roll tracks theta (restored from pre-session baseline, pull_rot_roll_base/per_theta defined
     # above near Step 3) so the wrist keeps rotating WITH the handle/panel as the sweep progresses.
-    # Pitch tracks the handle joint angle via the same handle_pitch_gain used in Step 3 -- held at
-    # 0.85 while the hinge hold keeps the handle pressed, then ramping back to 0 exactly as the
-    # handle springs back (pull_hinge_hold_until_theta -> pull_hinge_release_by_theta below),
-    # continuous with Step 3's ramp-up instead of holding pitch=0 through the whole sweep. Yaw
-    # fixed at unlatch_pull_yaw, shared with Step 3.
+    # Pitch held at 0 -- straight down, matching Step 3 -- instead of tracking handle_angle.
+    # Yaw fixed at unlatch_pull_yaw, shared with Step 3.
 
     theta_values = torch.arange(
         pull_theta_start,
@@ -1010,7 +1008,7 @@ def state_machine_offline_left_pull_door(
 
         palm_target_rot = get_rotation_quat(
             pull_rot_roll_base + pull_rot_roll_per_theta * theta.item(),
-            handle_pitch_gain * handle_angle,
+            0.0,
             unlatch_pull_yaw,
             device,
         )
