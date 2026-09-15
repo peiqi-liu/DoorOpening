@@ -436,6 +436,10 @@ class DooropeningEnv(DirectRLEnv):
         self._action_target_history = torch.zeros(
             (self.num_envs, self._max_action_latency, self.num_robot_actions), device=self.device
         )
+        self.gripper_command_arrival_tol_m = self.cfg.gripper_command_arrival_tol_m
+        self._gripper_latched_target = torch.full(
+            (self.num_envs, self.num_finger_joints), GRIPPER_OPEN_WIDTH, device=self.device
+        )
         self._door_nominal_joint_stiffness = self.door.data.joint_stiffness.clone()
         self._door_nominal_joint_damping = self.door.data.joint_damping.clone()
         self._door_handle_effort_limits = torch.full(
@@ -1215,6 +1219,23 @@ class DooropeningEnv(DirectRLEnv):
         )
         return pinned
 
+    def _apply_gripper_command_latch(self, target_tensor: torch.Tensor) -> torch.Tensor:
+        """Real Franka gripper hardware quirk: the gripper is a goal-based action-server
+        interface (franka_gripper move/grasp), not a continuously-retargetable PD joint like the
+        arm -- once a move is dispatched it is NOT preemptible by a new target until the current
+        one completes. Latch the commanded finger target and keep driving toward it, ignoring
+        whatever the policy proposes, until the measured position arrives within
+        gripper_command_arrival_tol_m -- only then does a newly-proposed target get accepted."""
+        if self.fixed_open_gripper or self.num_finger_joints <= 0:
+            return target_tensor
+        proposed = target_tensor[:, self._target_finger_slice]
+        measured = self.robot.data.joint_pos[:, self._robot_finger_dof_idx]
+        arrived = (measured - self._gripper_latched_target).abs() <= self.gripper_command_arrival_tol_m
+        self._gripper_latched_target = torch.where(arrived, proposed, self._gripper_latched_target)
+        target_tensor = target_tensor.clone()
+        target_tensor[:, self._target_finger_slice] = self._gripper_latched_target
+        return target_tensor
+
     def _pin_arx_targets_to_fixed_pose(self, target_tensor: torch.Tensor) -> torch.Tensor:
         if not self.fixed_arx_pose or self.num_arx_joints <= 0:
             return target_tensor
@@ -1292,6 +1313,7 @@ class DooropeningEnv(DirectRLEnv):
         )
         targets = self._pin_arx_targets_to_fixed_pose(targets)
         targets = self._pin_gripper_target_open(targets)
+        targets = self._apply_gripper_command_latch(targets)
         # NOTE: no explicit contact-sensor update() here. This runs BEFORE the physics step, so it
         # could only ever refresh last step's contacts, and scene.update() (called by
         # DirectRLEnv.step on every decimation substep) re-marks them outdated immediately after.
@@ -2409,6 +2431,7 @@ class DooropeningEnv(DirectRLEnv):
             self.robot_dof_targets[env_ids, :] = self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]]
             self.applied_robot_dof_targets[env_ids, :] = self.robot_dof_targets[env_ids, :]
             self._action_target_history[env_ids] = self.robot_dof_targets[env_ids].unsqueeze(1)
+            self._gripper_latched_target[env_ids] = GRIPPER_OPEN_WIDTH
             self._prev_action[env_ids] = 0.0
             self._prev_prev_action[env_ids] = 0.0
             self.episode_reached_last_frame[env_ids] = False
@@ -2472,6 +2495,7 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_dof_targets[env_ids, :] = self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]]
         self.applied_robot_dof_targets[env_ids, :] = self.robot_dof_targets[env_ids, :]
         self._action_target_history[env_ids] = self.robot_dof_targets[env_ids].unsqueeze(1)
+        self._gripper_latched_target[env_ids] = GRIPPER_OPEN_WIDTH
         self.episode_reached_last_frame[env_ids] = False
         self.episode_x5_collided[env_ids] = False
         self.episode_franka_box_collided[env_ids] = False

@@ -787,6 +787,13 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     gripper_action_speed_headroom = 2.0
     finger_action_scale = gripper_action_speed_headroom * GRIPPER_VELOCITY_LIMIT
     arx_action_scale = 0.6
+    # Real Franka gripper hardware quirk: the gripper is a goal-based action-server interface
+    # (franka_gripper move/grasp), not a continuously-retargetable PD joint like the arm -- once a
+    # move is dispatched it is NOT preemptible by a new target until the current one completes.
+    # Latch the commanded finger target and ignore new policy targets until the measured position
+    # arrives within this tolerance (m) of the latched target. Only active when
+    # fixed_open_gripper=False (see _apply_gripper_command_latch).
+    gripper_command_arrival_tol_m = 0.002
 
     # Deep Mimic Reward Parameters
     robot_body_quat_w = 1.0
