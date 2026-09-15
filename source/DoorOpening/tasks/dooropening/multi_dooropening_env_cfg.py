@@ -648,6 +648,13 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         filter_prim_paths_expr=list(SELF_COLLISION_HAND_FILTER_PRIM_PATHS),
     )
     handle_contact_force_threshold = 1.0
+    # Penalize the gripper being significantly closed while NOT in contact with the handle -- the
+    # DeepMimic gripper tracking reward alone would reward closing on schedule even if the policy's
+    # actual grasp timing has drifted from the reference (domain-randomized reach distance, IK
+    # slop, etc.), which could teach a bare-air close. Gated on the same contact force/threshold
+    # used by hinge_gripper_contact_reward_w above.
+    gripper_closed_frac_threshold = 0.5  # fraction of GRIPPER_OPEN_WIDTH counted as "closed"
+    gripper_closed_without_contact_penalty_w = 2.0
     # Contact between a non-front base face and any door body above this (N) is penalized.
     base_door_contact_force_threshold = 5.0
     x5_body_contact_force_threshold = 1.5

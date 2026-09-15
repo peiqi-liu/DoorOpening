@@ -278,6 +278,8 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_arm_joint_vel_w = self.cfg.robot_arm_joint_vel_w
         self.hinge_gripper_contact_reward_w = self.cfg.hinge_gripper_contact_reward_w
         self.palm_handle_reward_w = self.cfg.palm_handle_reward_w
+        self.gripper_closed_frac_threshold = self.cfg.gripper_closed_frac_threshold
+        self.gripper_closed_without_contact_penalty_w = self.cfg.gripper_closed_without_contact_penalty_w
         self.base_door_contact_penalty_w = self.cfg.base_door_contact_penalty_w
         self.x5_door_contact_penalty_w = self.cfg.x5_door_contact_penalty_w
         self.robot_body_lin_vel_w = self.cfg.robot_body_lin_vel_w
@@ -2162,6 +2164,23 @@ class DooropeningEnv(DirectRLEnv):
             weighted_hinge_gripper_contact_reward.mean().item()
         )
 
+        # --- Gripper-closed-without-contact penalty ---------------------------------------------------
+        # The DeepMimic gripper tracking reward above rewards closing ON SCHEDULE regardless of whether
+        # the gripper is actually near the handle -- if the policy's reach timing drifts from the
+        # reference, that term alone could teach a bare-air close. Penalize closing (below
+        # gripper_closed_frac_threshold of the open width) whenever there is no handle contact force,
+        # reusing the same contact signal/threshold as hinge_gripper_contact_reward_w above.
+        gripper_closed = (
+            self.robot_finger_joint_pos.squeeze(-1) < self.gripper_closed_frac_threshold * GRIPPER_OPEN_WIDTH
+        ).to(dtype=handle_force_norm.dtype)
+        no_handle_contact = 1.0 - hinge_gripper_contact
+        weighted_gripper_closed_without_contact_penalty = (
+            self.gripper_closed_without_contact_penalty_w * gripper_closed * no_handle_contact
+        )
+        self.extras["reward/gripper_closed_without_contact_penalty"] = (
+            weighted_gripper_closed_without_contact_penalty.mean().item()
+        )
+
         # finger<->panel force (gripper fingers vs door panel Door/link_1). DIAGNOSTIC ONLY -- it
         # drives no reward term; the old finger<->door contact penalty went away with the LEAP hand.
         contact_forces_door_panel = self._get_filtered_contact_force_w(
@@ -2271,6 +2290,7 @@ class DooropeningEnv(DirectRLEnv):
             + total_alive_reward
             + weighted_palm_handle_reward             # PUSH-only palm-handle contact reward
             + weighted_hinge_gripper_contact_reward   # PULL-only gripper<->handle contact reward
+            - weighted_gripper_closed_without_contact_penalty
             - total_penalty
         )
         final_reward = torch.where(is_killed, final_reward + termination_penalty, final_reward)
