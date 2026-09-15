@@ -1025,6 +1025,13 @@ def state_machine_offline_left_pull_door(
             reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
             num_attempts=1,  # loop body: single seed for continuity (no random-restart branch jumps)
         )[0]
+        # Keep the grip only while the handle is actually loaded (still pressed / not yet sprung
+        # back to 0) -- that's what stops the gripper slipping on the lever. Once handle_angle
+        # reaches 0 (theta >= pull_hinge_release_by_theta) the panel is swinging freely on its own
+        # and this top-down grasp pose likely can't stay closed here anyway (too little clearance
+        # between the handle and the panel for the gripper body), so open it back up and leave it
+        # to the policy whether closing for the rest of the sweep is worth attempting.
+        _set_gripper(q_robot, GRIPPER_CLOSED_WIDTH if handle_angle > 0.0 else GRIPPER_OPEN_WIDTH)
 
         _append_state(
             robot_traj,

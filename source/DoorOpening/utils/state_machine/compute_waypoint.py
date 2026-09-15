@@ -5,7 +5,7 @@ import math
 from DoorOpening.utils.state_machine.api import compute_base_joint, solve_ik, get_hinge_pos, open_hand
 import torch
 from isaaclab.utils.math import quat_from_euler_xyz, quat_from_matrix, combine_frame_transforms, quat_mul, quat_inv
-from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES, DEFAULT_JOINT_POS, OPEN_FINGER_JOINT_VALUES, ROBOT_KEY_BODY_NAMES, DM_JOINT_NAMES, FRANKA_JOINT_NAMES
+from DoorOpening.constants.robot_constants import FULL_JOINT_NAMES, DEFAULT_JOINT_POS, OPEN_FINGER_JOINT_VALUES, ROBOT_KEY_BODY_NAMES, DM_JOINT_NAMES, FRANKA_JOINT_NAMES, DRIVEN_FINGER_JOINT_NAME
 import numpy as np
 import time
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT, DOOR_INITIAL_POS, DOOR_INITIAL_ROT
@@ -522,10 +522,21 @@ def state_machine_offline(
 
     return robot_traj, door_traj, key_idx_in_key_indices
 
+_GRIPPER_COL_IDX = FULL_JOINT_NAMES.index(DRIVEN_FINGER_JOINT_NAME)
+
+
 def collocate_and_playback(robot_traj, door_traj, key_idx_in_key_indices, length=1000):
     """
     Interpolate trajectory between keyframes using cubic splines
     with segment-wise time allocation proportional to geometric length.
+
+    The gripper/finger column is the exception: it is resampled as a zero-order-hold step
+    function off the RAW per-frame trajectory instead of splined, since the real gripper is a
+    discrete open/close command (see offline_pull_door._apply_gripper_command_latch), not a
+    continuously-interpolatable joint like the arm. Smoothly interpolating it would gradually
+    close/open the gripper mid-transit between whatever raw frames happen to bound a segment,
+    instead of switching exactly where the raw trajectory itself switches (e.g. the grasp
+    keyframe, or the mid-pull-sweep point where the handle finishes springing back).
     """
 
     # ---- Convert to numpy ----
@@ -616,6 +627,14 @@ def collocate_and_playback(robot_traj, door_traj, key_idx_in_key_indices, length
             )
 
             seg_traj = cs(t_samples)
+
+            # Zero-order-hold override for the gripper column (see docstring): each output sample
+            # takes the raw frame's value at or immediately before its chord-length position, so
+            # the transition lands exactly where it happens in the raw trajectory instead of being
+            # smeared across the whole segment.
+            hold_idx = np.searchsorted(t_local, t_samples, side="right") - 1
+            hold_idx = np.clip(hold_idx, 0, len(ps) - 1)
+            seg_traj[:, _GRIPPER_COL_IDX] = ps[hold_idx, _GRIPPER_COL_IDX]
 
         traj_out.append(seg_traj)
 
