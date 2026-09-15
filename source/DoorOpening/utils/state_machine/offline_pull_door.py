@@ -9,6 +9,7 @@ from DoorOpening.utils.state_machine.api import get_board_pos, get_hinge_pos, so
 from DoorOpening.constants.robot_constants import (
     DRIVEN_FINGER_JOINT_NAME,
     FULL_JOINT_NAMES,
+    GRIPPER_CLOSED_WIDTH,
     GRIPPER_OPEN_WIDTH,
 )
 
@@ -835,7 +836,6 @@ def state_machine_offline_left_pull_door(
     grasp_palm_x_offset = 0.06
     grasp_palm_y_offset = 0.015
     grasp_palm_z_offset = 0.04
-    grasp_open_ratio = 0.7
 
     palm_target_pos = handle_pos.clone()
     palm_target_pos[:, 0] += grasp_palm_x_offset
@@ -851,9 +851,10 @@ def state_machine_offline_left_pull_door(
         robot_initial_pose=robot_initial_pose,
         reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
     )[0]
-    # Close to grip the handle here -- nothing resets the gripper again until Step 5 releases it
-    # after the pull sweep, so this same closed width carries through unlatch and the pull.
-    _set_gripper(q_robot, grasp_open_ratio * GRIPPER_OPEN_WIDTH)
+    # Close fully to grip the handle here -- nothing resets the gripper again until Step 5
+    # releases it after the pull sweep, so this same closed width carries through unlatch and
+    # the pull.
+    _set_gripper(q_robot, GRIPPER_CLOSED_WIDTH)
 
     _append_state(
         robot_traj,
