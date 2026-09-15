@@ -64,11 +64,11 @@ temporal_state_encoders:
   # timestamps_ms: [0, 400, 800, 1200, 1600, 2000, 2400, 2800]
   fields:
     - q_arm
+    - base_vel
     # - q_hand
     # - target_err_arm
     # - push_pull_belief
     # - target_err_hand
-    # - base_vel
     # - aux_handle_pos
     # aux_handle_pos is intentionally NOT in the temporal stack: it is a standalone, recurrent
     # handle-pose input seeded from ground truth on reset (see dagger.aux_handle_input_mode).
