@@ -28,7 +28,7 @@ from DoorOpening.tasks.dooropening.dooropening_adr import DoorOpeningADR
 from DoorOpening.tasks.dooropening.multi_dooropening_env_cfg import DooropeningEnvCfg
 from DoorOpening.assets.glorbot.glorbot_cfg import glorbot_urdf_path, disable_collision_scope_instancing
 from isaaclab.sensors import Camera, ContactSensor
-from DoorOpening.constants.robot_constants import CAMERA_JOINT_DEFAULT_VALUES, CAMERA_JOINT_NAMES, FULL_JOINT_NAMES, GRIPPER_OPEN_WIDTH, ROBOT_KEY_BODY_NAMES
+from DoorOpening.constants.robot_constants import CAMERA_JOINT_DEFAULT_VALUES, CAMERA_JOINT_NAMES, FULL_JOINT_NAMES, GRIPPER_CLOSED_WIDTH, GRIPPER_OPEN_WIDTH, ROBOT_KEY_BODY_NAMES
 from DoorOpening.constants.env_constants import DOOR_INITIAL_POS, ROBOT_INITIAL_POS
 from DoorOpening.tasks.dooropening.contact_force_utils import (
     BASE_DOOR_CONTACT_BODY_NAMES,
@@ -1313,6 +1313,20 @@ class DooropeningEnv(DirectRLEnv):
         )
         targets = self._pin_arx_targets_to_fixed_pose(targets)
         targets = self._pin_gripper_target_open(targets)
+        # Discrete gripper control: the real Franka gripper interface is goal-based (open/close),
+        # not a continuously-retargetable position stream, and door opening only ever needs two
+        # states. Threshold the RAW policy action's sign into an absolute open/closed target --
+        # replacing the integrated/scaled delta this slice got above -- then hand it to the
+        # existing non-preemptible latch below. Combined with the joint's own velocity_limit_sim,
+        # the physical transition between the two states is still a realistic, speed-capped ramp;
+        # only the policy's DECISION is now binary, not the physical motion.
+        if self.num_finger_joints > 0:
+            finger_action = actions[:, self._policy_finger_slice]
+            targets[:, self._target_finger_slice] = torch.where(
+                finger_action > 0.0,
+                torch.full_like(targets[:, self._target_finger_slice], GRIPPER_CLOSED_WIDTH),
+                torch.full_like(targets[:, self._target_finger_slice], GRIPPER_OPEN_WIDTH),
+            )
         targets = self._apply_gripper_command_latch(targets)
         # NOTE: no explicit contact-sensor update() here. This runs BEFORE the physics step, so it
         # could only ever refresh last step's contacts, and scene.update() (called by
