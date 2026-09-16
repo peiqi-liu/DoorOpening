@@ -2467,6 +2467,18 @@ class DooropeningEnv(DirectRLEnv):
         self.joint_vel[env_ids] = self.robot.data.default_joint_vel[env_ids]
         self.joint_vel[env_ids[:, None], self._robot_dof_idx[None, :]] = deep_mimic_initial_joint_vel.to(self.joint_vel)[..., self.ref_robot_dof_idx]
         self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]] = deep_mimic_initial_joint_pos.to(self.joint_pos)[..., self.ref_robot_dof_idx]
+        # Gripper reset safety, NOT committed pending validation: kinematically writing the
+        # reference's raw gripper width at an arbitrary RSI reset frame can interpenetrate the
+        # ACTUAL sampled door's handle geometry if that frame's reference gripper is closed (the
+        # reference's GRIPPER_CLOSED_WIDTH=0 assumes an idealized zero-radius pinch, not this
+        # door's real handle bar). A hard kinematic teleport into solid geometry is unstable; a
+        # PD-driven approach into the same obstacle is normal, stable contact. So always
+        # kinematically spawn the gripper OPEN (safe against any realistic handle) and let the PD
+        # target (set below) carry whatever the reference actually wants -- the gripper then
+        # closes over the next few real physics steps via ordinary PD dynamics, exactly like it
+        # would mid-rollout, instead of either exploding on interpenetration or being forced to
+        # snap shut instantly to avoid a tracking penalty.
+        self.joint_pos[env_ids[:, None], self._robot_finger_dof_idx[None, :]] = GRIPPER_OPEN_WIDTH
         self._apply_spawn_noise(env_ids)
         if self.fixed_arx_pose and self.num_arx_joints > 0:
             self.joint_pos[env_ids[:, None], self._robot_arx_dof_idx[None, :]] = (
@@ -2493,6 +2505,12 @@ class DooropeningEnv(DirectRLEnv):
         self._prev_action[env_ids] = 0.0
         self._prev_prev_action[env_ids] = 0.0
         self.robot_dof_targets[env_ids, :] = self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]]
+        # Gripper reset safety (see note above): the PD TARGET keeps the reference's actual
+        # intended gripper width at this reset frame, even though the kinematic state just above
+        # was forced open -- this mismatch is what drives the natural PD closing transient.
+        self.robot_dof_targets[env_ids, self._target_finger_slice] = deep_mimic_initial_joint_pos.to(
+            self.robot_dof_targets
+        )[:, self.ref_finger_joint_idx]
         self.applied_robot_dof_targets[env_ids, :] = self.robot_dof_targets[env_ids, :]
         self._action_target_history[env_ids] = self.robot_dof_targets[env_ids].unsqueeze(1)
         self._gripper_latched_target[env_ids] = GRIPPER_OPEN_WIDTH
