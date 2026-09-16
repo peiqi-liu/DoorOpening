@@ -586,6 +586,13 @@ def collocate_and_playback(robot_traj, door_traj, key_idx_in_key_indices, length
 
         # allocate samples proportionally
         seg_len = int(np.round(seg_ratios[i] * length))
+        # Geometric-length allocation is blind to segments where the ARM barely moves (e.g. an
+        # explicit pause-and-close-the-gripper dwell): their Cartesian path length is near zero,
+        # so proportional allocation would squeeze them down to 1-2 frames -- nowhere near enough
+        # to represent a realistic pause duration, and too few frames for RSI reset sampling
+        # (uniform over frame INDEX, not phase) to ever land inside it. Floor every segment to at
+        # least ~1.5% of the total length.
+        seg_len = max(seg_len, max(1, int(0.015 * length)))
 
         # ensure final segment fills remainder
         if i == N - 2:

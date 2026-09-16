@@ -851,8 +851,8 @@ def state_machine_offline_left_pull_door(
         robot_initial_pose=robot_initial_pose,
         reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
     )[0]
-    # Stay open here -- closing happens gradually through Step 3, synced with the press, not as
-    # an instant snap at the grasp pose (see the unlatch loop below).
+    # Stay open through the grasp pose itself -- closing happens in the explicit pause below, not
+    # here and not smeared across the press-down motion.
     _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
 
     _append_state(
@@ -863,6 +863,42 @@ def state_machine_offline_left_pull_door(
         q_door,
         mark_keyframe=True,
     )
+
+    # -------------------------
+    # Step 2.5: Pause at the grasp pose, close the gripper gradually
+    # -------------------------
+    # A person closes their grip FIRST, while holding still, THEN presses the lever -- not both at
+    # once. Explicit dwell: the arm holds this exact pose (repeated solve_ik on the same target)
+    # while the gripper ramps open -> closed, so the grasp is fully formed before any press-down
+    # motion begins. Step 3 below no longer touches the gripper at all -- it's already closed.
+    grasp_pause_steps = 6
+    grasp_pause_pose = palm_target_pose.clone()
+    for pause_step in range(1, grasp_pause_steps + 1):
+        frac = pause_step / grasp_pause_steps
+        palm_target_pose = grasp_pause_pose.clone()
+
+        q_robot[:10] = solve_ik(
+            robot_urdf_path,
+            q_robot[:10],
+            palm_pose=palm_target_pose,
+            base_pose=base_target_pose,
+            robot_initial_pose=robot_initial_pose,
+            reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
+            num_attempts=1,  # holding still: no random-restart branch jumps
+        )[0]
+        _set_gripper(
+            q_robot,
+            GRIPPER_OPEN_WIDTH + frac * (GRIPPER_CLOSED_WIDTH - GRIPPER_OPEN_WIDTH),
+        )
+
+        _append_state(
+            robot_traj,
+            door_traj,
+            key_idx_in_key_indices,
+            q_robot,
+            q_door,
+            mark_keyframe=(pause_step == grasp_pause_steps),
+        )
 
     # -------------------------
     # Step 3: Rotate hinge (unlatch)
@@ -911,12 +947,8 @@ def state_machine_offline_left_pull_door(
             reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
             num_attempts=1,  # loop body: continuity, no random-restart branch jumps
         )[0]
-        # Close gradually, synced with the press: fully open at frac=0 (grasp pose, handle not
-        # yet loaded), fully closed by frac=1 (handle fully pressed) -- not an instant snap.
-        _set_gripper(
-            q_robot,
-            GRIPPER_OPEN_WIDTH + frac * (GRIPPER_CLOSED_WIDTH - GRIPPER_OPEN_WIDTH),
-        )
+        # Gripper is already fully closed from the Step 2.5 pause above -- no need to touch it
+        # here, the press-down motion happens with the grasp already formed.
 
         _append_state(
             robot_traj,
