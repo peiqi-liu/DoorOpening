@@ -282,8 +282,8 @@ class EventCfg:
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=["panda_hand", "panda_.*finger"]),
-            "static_friction_range": (0.0, 0.05),  # was (0.0, 0.40), temp update
-            "dynamic_friction_range": (0.0, 0.05),  # was (0.0, 0.35), temp update
+            "static_friction_range": (0.3, 0.6),  # grip-tape-on-metal range, NOT committed
+            "dynamic_friction_range": (0.25, 0.5),  # grip-tape-on-metal range, NOT committed
             "restitution_range": (0.0, 0.0),
             "num_buckets": 250,
         },
@@ -774,6 +774,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         # base + arm reference joint-angle error (policy_joint_ref_err / clean_joint_ref_err).
         + len(base_joints)
         + len(arm_joints)
+        # Reference gripper opening, RAW value (not an error term, unlike base/arm above) --
+        # matches how the reference door/arx joints are exposed. The policy had no way to see
+        # what the reference wants the gripper to do at the current point in the trajectory.
+        + len(finger_joints)
     )
     state_space = observation_space
     num_observations = observation_space

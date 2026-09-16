@@ -1531,6 +1531,10 @@ class DooropeningEnv(DirectRLEnv):
                 policy_door_joint_pos,
                 self.ref_door_joint_pos[:, self._door_joint_idx].to(self.door_joint_pos).unsqueeze(dim = 1),
                 self.ref_robot_arx_joint_pos.to(self.robot_arx_joint_pos).unsqueeze(dim=1),
+                # Reference gripper opening, RAW value (not an error term) -- the policy needs to
+                # know what the reference wants the gripper doing right now (open/closing/closed),
+                # not just its own current width.
+                self.ref_robot_finger_joint_pos.to(self.robot_finger_joint_pos).unsqueeze(dim=1),
                 # twist_obs,
             ),
             dim=-1,
@@ -1561,6 +1565,7 @@ class DooropeningEnv(DirectRLEnv):
                 self.door_joint_pos[:, self._door_joint_idx].unsqueeze(dim = 1),
                 self.ref_door_joint_pos[:, self._door_joint_idx].to(self.door_joint_pos).unsqueeze(dim = 1),
                 self.ref_robot_arx_joint_pos.to(self.robot_arx_joint_pos).unsqueeze(dim=1),
+                self.ref_robot_finger_joint_pos.to(self.robot_finger_joint_pos).unsqueeze(dim=1),
                 # twist_obs,
             ),
             dim=-1,
