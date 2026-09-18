@@ -895,7 +895,7 @@
       </geometry>
       <material name="panda_white" />
     </visual>
-    <!-- Collision uses the visual (accurate) mesh, not the dedicated collision/finger.obj hull. -->
+    <!-- Collision uses the visual (accurate) mesh (hook); vision9 switched back from chopstick, NOT committed. -->
     <collision>
       <geometry>
         <mesh filename="package://glorbot/meshes/franka/visual/finger.obj" />
@@ -917,7 +917,7 @@
       </geometry>
       <material name="panda_white" />
     </visual>
-    <!-- Collision uses the visual (accurate) mesh, same as panda_leftfinger above. -->
+    <!-- Collision uses the visual (accurate) mesh (hook), same as panda_leftfinger above; NOT committed. -->
     <collision>
       <origin rpy="0 0 3.141592653589793" xyz="0 0 0" />
       <geometry>

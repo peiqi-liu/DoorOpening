@@ -751,7 +751,7 @@ def state_machine_offline_left_pull_door(
     # Pregrasp/grasp yaw kept at the tuned -0.65*pi; unlatch and the pull sweep are restored to
     # their own original, independent pre-session values below (the "unify to one yaw" experiment
     # is reverted for everything except this one).
-    default_palm_rot = get_rotation_quat(math.pi / 2, 0, -0.65 * math.pi, device)
+    default_palm_rot = get_rotation_quat(math.pi / 2, 0, -0.7 * math.pi, device)  # vision9 approach-yaw trial, NOT committed
 
     # Guarantee the very first keyframe starts from a fully open gripper, regardless of whatever
     # gripper value the caller's robot_initial_q happened to carry -- staged closing below should

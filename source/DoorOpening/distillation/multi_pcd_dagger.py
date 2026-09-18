@@ -18,7 +18,7 @@ try:
 except ImportError:
     wandb = None
 
-from isaaclab.utils.math import quat_apply, quat_mul
+from isaaclab.utils.math import quat_apply, quat_conjugate, quat_mul
 from rl_games.algos_torch import torch_ext
 from rl_games.algos_torch.model_builder import ModelBuilder
 
@@ -732,6 +732,19 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.rollout_progress_prediction_weight = float(
             getattr(self.student_model, "rollout_progress_prediction_weight", 0.0)
         )
+        self.eef_pose_prediction_enabled = bool(
+            getattr(self.student_model, "eef_pose_prediction_enabled", False)
+        )
+        self.eef_pose_prediction_weight = float(
+            getattr(self.student_model, "eef_pose_prediction_weight", 0.0)
+        )
+        self.eef_pose_output_dim = int(getattr(self.student_model, "eef_pose_output_dim", 0))
+        self.eef_pose_position_weight = float(
+            getattr(self.student_model, "eef_pose_position_weight", 1.0)
+        )
+        self.eef_pose_rotation_weight = float(
+            getattr(self.student_model, "eef_pose_rotation_weight", 1.0)
+        )
         if self.student_model.action_head.out_features != self.num_actions:
             raise ValueError(
                 f"Student action_dim ({self.student_model.action_head.out_features}) "
@@ -739,6 +752,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         )
         self._init_door_joint_prediction_training_state()
         self._init_rollout_progress_prediction_training_state()
+        self._init_eef_pose_prediction_training_state()
         self._init_prediction_training_state()
         self._init_mode_prediction_training_state()
         self._init_push_pull_condition_runtime_state(student_yaml_runtime_cfg)
@@ -1021,6 +1035,16 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         # a visual/proprioceptive phase readout, just like the independent door-joint readout.
         self.latest_rollout_progress_abs_err = None
         self.latest_rollout_progress_target_mean = None
+
+    def _init_eef_pose_prediction_training_state(self):
+        if self.eef_pose_prediction_enabled and self.eef_pose_output_dim != 7:
+            raise ValueError(
+                "EEF pose prediction requires output_dim=7 (base-frame xyz + wxyz quaternion)."
+            )
+        if self.eef_pose_position_weight + self.eef_pose_rotation_weight <= 0.0:
+            raise ValueError("At least one EEF pose loss component must have a positive weight.")
+        self.latest_eef_pose_position_error_m = None
+        self.latest_eef_pose_rotation_error_deg = None
 
     def _init_observation_lag_state(self):
         cfg = dict(self.observation_lag_cfg or {})
@@ -1680,6 +1704,82 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         if update_metrics:
             self.latest_rollout_progress_abs_err = float(
                 (rollout_progress_pred[valid_mask] - target[valid_mask]).abs().mean().detach().cpu().item()
+            )
+        return loss
+
+    def _get_eef_pose_prediction_target(self, env_mask=None):
+        """Reference panda_hand pose in the current measured robot-base frame (xyz + wxyz)."""
+        palm_idx = int(self.ov_env._robot_palm_id_in_key_body_idx)
+        ref_palm_pos_w = self.ov_env.ref_robot_key_body_pos[:, palm_idx].to(
+            device=self.device, dtype=torch.float32
+        )
+        ref_palm_quat_w = self.ov_env.ref_robot_key_body_quat[:, palm_idx].to(
+            device=self.device, dtype=torch.float32
+        )
+        # These environment positions have already had the per-environment origin removed, so both
+        # the current base and reference hand are expressed in the same local world frame.
+        base_pos_w = self.ov_env.robot_base_body_pos.to(device=self.device, dtype=torch.float32)
+        base_quat_w = self.ov_env.robot_base_body_quat.to(device=self.device, dtype=torch.float32)
+        target_pos_b = world_to_local(
+            ref_palm_pos_w.unsqueeze(1), base_pos_w, base_quat_w
+        ).squeeze(1)
+        target_quat_b = quat_mul(quat_conjugate(base_quat_w), ref_palm_quat_w)
+        target_quat_b = torch.nn.functional.normalize(target_quat_b, p=2, dim=-1, eps=1.0e-6)
+        target = torch.cat((target_pos_b, target_quat_b), dim=-1)
+        if env_mask is not None:
+            target = target[env_mask.to(device=self.device, dtype=torch.bool)]
+        return target
+
+    def _compute_eef_pose_prediction_loss(self, eef_pose_pred, env_mask=None, update_metrics=True):
+        if not self.eef_pose_prediction_enabled:
+            return None
+        if eef_pose_pred.ndim == 3:
+            eef_pose_pred = eef_pose_pred[:, 0, :]
+        if env_mask is not None and eef_pose_pred.shape[0] == self.num_envs:
+            eef_pose_pred = eef_pose_pred[env_mask.to(device=self.device, dtype=torch.bool)]
+        target = self._get_eef_pose_prediction_target(env_mask=env_mask)
+        if eef_pose_pred.shape != target.shape or eef_pose_pred.shape[-1] != 7:
+            raise RuntimeError(
+                "EEF pose prediction and target must both have shape [N, 7], got "
+                f"{tuple(eef_pose_pred.shape)} and {tuple(target.shape)}."
+            )
+
+        rollout_step_ids = self._get_rollout_step_ids()
+        valid_mask = self._get_active_rollout_mask(rollout_step_ids)
+        if env_mask is not None:
+            env_mask = env_mask.to(device=self.device, dtype=torch.bool)
+            rollout_step_ids = rollout_step_ids[env_mask]
+            valid_mask = valid_mask[env_mask]
+        if not torch.any(valid_mask):
+            if update_metrics:
+                self.latest_eef_pose_position_error_m = None
+                self.latest_eef_pose_rotation_error_deg = None
+            return eef_pose_pred.mean() * 0.0
+
+        pred_pos = eef_pose_pred[:, :3]
+        pred_quat = torch.nn.functional.normalize(eef_pose_pred[:, 3:7], p=2, dim=-1, eps=1.0e-6)
+        target_pos = target[:, :3]
+        target_quat = target[:, 3:7]
+        position_loss = torch.nn.functional.mse_loss(pred_pos, target_pos, reduction="none").mean(dim=-1)
+        quat_dot = torch.sum(pred_quat * target_quat, dim=-1).abs().clamp(max=1.0)
+        # q and -q represent the same rotation. 1-|dot| is smooth away from the sign boundary and
+        # avoids forcing an arbitrary quaternion sign convention into the reference trajectories.
+        rotation_loss = 1.0 - quat_dot
+        per_env_loss = (
+            self.eef_pose_position_weight * position_loss
+            + self.eef_pose_rotation_weight * rotation_loss
+        )
+        step_weights = self._get_direction_step_weights(rollout_step_ids[valid_mask])
+        loss = (per_env_loss[valid_mask] * step_weights).sum() / step_weights.sum().clamp_min(1.0e-6)
+
+        if update_metrics:
+            self.latest_eef_pose_position_error_m = float(
+                torch.linalg.vector_norm(pred_pos[valid_mask] - target_pos[valid_mask], dim=-1)
+                .mean().detach().cpu().item()
+            )
+            rotation_error_rad = 2.0 * torch.acos(quat_dot[valid_mask])
+            self.latest_eef_pose_rotation_error_deg = float(
+                torch.rad2deg(rotation_error_rad).mean().detach().cpu().item()
             )
         return loss
 
@@ -4248,7 +4348,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         if env_mask is not None:
             env_mask = env_mask.to(device=self.device, dtype=torch.bool)
             if not torch.any(env_mask):
-                return None, None, None, None, None, None
+                return None, None, None, None, None, None, None
             student_output = self._slice_batch_dict(student_output, env_mask)
             teacher_actions = teacher_actions[env_mask]
             if aux_target is not None:
@@ -4263,6 +4363,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         mode_loss = None
         door_joint_loss = None
         rollout_progress_loss = None
+        eef_pose_loss = None
         if self.mode_prediction_enabled:
             if "mode_logits" not in student_output:
                 raise RuntimeError("Mode prediction is enabled, but student output does not contain 'mode_logits'.")
@@ -4292,7 +4393,16 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 update_metrics=update_metrics,
             )
             total_loss = total_loss + self.rollout_progress_prediction_weight * rollout_progress_loss
-        return total_loss, action_loss, aux_loss, mode_loss, door_joint_loss, rollout_progress_loss
+        if self.eef_pose_prediction_enabled:
+            if "eef_pose" not in student_output:
+                raise RuntimeError("EEF pose prediction is enabled, but student output does not contain 'eef_pose'.")
+            eef_pose_loss = self._compute_eef_pose_prediction_loss(
+                student_output["eef_pose"],
+                env_mask=env_mask,
+                update_metrics=update_metrics,
+            )
+            total_loss = total_loss + self.eef_pose_prediction_weight * eef_pose_loss
+        return total_loss, action_loss, aux_loss, mode_loss, door_joint_loss, rollout_progress_loss, eef_pose_loss
 
     def _get_teacher_forcing_beta(self, iteration):
         if self.play_policy or not self._has_teacher():
@@ -4441,6 +4551,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 train_mode_loss = None
                 train_door_joint_loss = None
                 train_rollout_progress_loss = None
+                train_eef_pose_loss = None
                 validation_total_loss = None
                 validation_action_loss = None
 
@@ -4452,7 +4563,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                         if self.latest_aux_target_vector is None:
                             raise RuntimeError("Expected the latest auxiliary target vector while aux prediction is enabled.")
                         aux_target = self._get_aux_target(self.latest_aux_target_vector)
-                    train_total_loss, train_action_loss, train_aux_loss, train_mode_loss, train_door_joint_loss, train_rollout_progress_loss = self._compute_student_loss(
+                    train_total_loss, train_action_loss, train_aux_loss, train_mode_loss, train_door_joint_loss, train_rollout_progress_loss, train_eef_pose_loss = self._compute_student_loss(
                         student_output,
                         teacher_output["mus"],
                         aux_target=aux_target,
@@ -4461,7 +4572,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                     )
                     if train_total_loss is None:
                         raise RuntimeError("Training loss could not be computed because the training split is empty.")
-                    validation_total_loss, validation_action_loss, _, _, _, _ = self._compute_student_loss(
+                    validation_total_loss, validation_action_loss, _, _, _, _, _ = self._compute_student_loss(
                         student_output,
                         teacher_output["mus"],
                         aux_target=aux_target,
@@ -4529,6 +4640,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                         train_mode_loss,
                         train_door_joint_loss,
                         train_rollout_progress_loss,
+                        train_eef_pose_loss,
                         validation_total_loss,
                         validation_action_loss,
                         teacher_forcing_beta,

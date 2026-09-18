@@ -424,6 +424,7 @@ class PCDTransformer(BaseModel):
         mode_prediction=None,
         door_joint_prediction=None,
         rollout_progress_prediction=None,
+        eef_pose_prediction=None,
         temporal_state_encoders=None,
         proprio_temporal_encoder=None,
         push_pull_condition=None,
@@ -526,6 +527,20 @@ class PCDTransformer(BaseModel):
         )
         if self.rollout_progress_prediction_enabled and self.rollout_progress_prediction_weight < 0.0:
             raise ValueError("rollout_progress_prediction.weight must be non-negative.")
+        self.eef_pose_prediction_cfg = eef_pose_prediction or {}
+        self.eef_pose_prediction_enabled = bool(self.eef_pose_prediction_cfg.get("enabled", False))
+        self.eef_pose_output_dim = int(self.eef_pose_prediction_cfg.get("output_dim", 7))
+        self.eef_pose_prediction_weight = float(self.eef_pose_prediction_cfg.get("weight", 0.0))
+        self.eef_pose_position_weight = float(self.eef_pose_prediction_cfg.get("position_weight", 1.0))
+        self.eef_pose_rotation_weight = float(self.eef_pose_prediction_cfg.get("rotation_weight", 1.0))
+        if self.eef_pose_prediction_enabled and self.eef_pose_output_dim != 7:
+            raise ValueError(
+                "eef_pose_prediction.output_dim must be 7: position xyz followed by quaternion wxyz."
+            )
+        if self.eef_pose_prediction_weight < 0.0:
+            raise ValueError("eef_pose_prediction.weight must be non-negative.")
+        if self.eef_pose_position_weight < 0.0 or self.eef_pose_rotation_weight < 0.0:
+            raise ValueError("eef_pose_prediction position/rotation weights must be non-negative.")
 
         # update config for auxiliary object state prediction
         self.aux_prediction = (aux_weight > 0)
@@ -619,6 +634,9 @@ class PCDTransformer(BaseModel):
         elif self.rollout_progress_prediction_enabled:
             self.rollout_progress_query_idx = next_query_idx
             next_query_idx += 1
+        self.eef_pose_query_idx = next_query_idx if self.eef_pose_prediction_enabled else None
+        if self.eef_pose_prediction_enabled:
+            next_query_idx += 1
         num_query_tokens = next_query_idx
         self.query_tokens = nn.Parameter(nn.init.xavier_uniform_(torch.zeros(num_query_tokens, hidden_dim)))
 
@@ -656,6 +674,8 @@ class PCDTransformer(BaseModel):
             self.door_joint_head = nn.Linear(hidden_dim, self.door_joint_output_dim)
         if self.rollout_progress_prediction_enabled:
             self.rollout_progress_head = nn.Linear(hidden_dim, 1)
+        if self.eef_pose_prediction_enabled:
+            self.eef_pose_head = nn.Linear(hidden_dim, self.eef_pose_output_dim)
 
         # Attention-visualization bookkeeping (populated during forward; see model/attention_capture.py).
         self.last_token_ranges = None
@@ -1019,6 +1039,13 @@ class PCDTransformer(BaseModel):
             tgt_mask[self.rollout_progress_query_idx, :] = True
             tgt_mask[self.rollout_progress_query_idx, self.rollout_progress_query_idx] = False
 
+        if self.eef_pose_prediction_enabled:
+            # The desired hand pose is supervision for a downstream IK controller. Keep this query
+            # readout-only so its prediction cannot become a hidden input to the action policy.
+            tgt_mask[self.action_query_start:self.action_query_end, self.eef_pose_query_idx] = True
+            tgt_mask[self.eef_pose_query_idx, :] = True
+            tgt_mask[self.eef_pose_query_idx, self.eef_pose_query_idx] = False
+
         return tgt_mask, memory_mask
 
     def _infer_batch_size(self, obs_dict):
@@ -1099,6 +1126,7 @@ class PCDTransformer(BaseModel):
             or self.mode_prediction_enabled
             or self.door_joint_prediction_enabled
             or self.rollout_progress_prediction_enabled
+            or self.eef_pose_prediction_enabled
         ):
             tgt_mask, memory_mask = self._build_decoder_masks(query_tokens, token_ranges)
             output = self.decoder(
@@ -1123,6 +1151,12 @@ class PCDTransformer(BaseModel):
         if self.rollout_progress_prediction_enabled:
             output_rollout_progress = output[:, self.rollout_progress_query_idx, :]  # (B, H)
             pred["rollout_progress"] = torch.sigmoid(self.rollout_progress_head(output_rollout_progress))
+        if self.eef_pose_prediction_enabled:
+            output_eef_pose = output[:, self.eef_pose_query_idx, :]  # (B, H)
+            eef_pose = self.eef_pose_head(output_eef_pose)
+            # Pose convention: xyz in the current robot-base frame, followed by a unit wxyz quaternion.
+            eef_quat = torch.nn.functional.normalize(eef_pose[:, 3:7], p=2, dim=-1, eps=1.0e-6)
+            pred["eef_pose"] = torch.cat((eef_pose[:, :3], eef_quat), dim=-1)
         if self.aux_prediction:
             output_action = output[:, self.action_query_start:self.action_query_end, :]  # (B, chunk_size, H)
             output_aux = output[:, self.aux_query_idx:self.aux_query_idx+1, :]  # (B, 1, H)

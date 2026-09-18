@@ -421,6 +421,18 @@ def _has_door_joint_prediction(frames: list[dict]) -> bool:
     return any(_door_joint_prediction(frame) is not None for frame in frames)
 
 
+def _rollout_progress_prediction(frame: dict) -> float | None:
+    value = _to_numpy_vector(frame.get("rollout_progress_prediction"))
+    if value is None or value.size == 0:
+        return None
+    progress = float(value[0])
+    return progress if np.isfinite(progress) else None
+
+
+def _has_rollout_progress_prediction(frames: list[dict]) -> bool:
+    return any(_rollout_progress_prediction(frame) is not None for frame in frames)
+
+
 def _positive_float(value: object) -> float | None:
     try:
         value = float(value)
@@ -484,6 +496,7 @@ def main() -> None:
     has_aux_prediction = _has_aux_prediction(frames)
     has_aux_input = _has_aux_input(frames)
     has_door_joint_prediction = _has_door_joint_prediction(frames)
+    has_rollout_progress_prediction = _has_rollout_progress_prediction(frames)
     has_compact_joint_state = any(
         _to_numpy_vector(frame.get("compact_q")) is not None
         or _to_numpy_vector(frame.get("compact_target")) is not None
@@ -604,6 +617,13 @@ def main() -> None:
         loop = server.gui.add_checkbox("Loop", initial_value=True)
         fps = server.gui.add_slider("FPS", min=0.25, max=fps_slider_max, step=0.25, initial_value=initial_fps)
         frame_slider = server.gui.add_slider("Frame", min=0, max=len(frames) - 1, step=1, initial_value=0)
+        rollout_progress_display = None
+        if has_rollout_progress_prediction:
+            rollout_progress_display = server.gui.add_text(
+                "Predicted Rollout Progress",
+                initial_value="n/a",
+                disabled=True,
+            )
         prev_button = server.gui.add_button("Prev")
         next_button = server.gui.add_button("Next")
 
@@ -698,6 +718,15 @@ def main() -> None:
                         np.array2string(door_joint_pred, precision=4, suppress_small=True),
                     )
                 )
+        if rollout_progress_display is not None:
+            rollout_progress_pred = _rollout_progress_prediction(frame)
+            rollout_progress_display.value = (
+                "n/a"
+                if rollout_progress_pred is None
+                else f"{rollout_progress_pred:.4f} ({100.0 * rollout_progress_pred:.1f}%)"
+            )
+            if rollout_progress_pred is not None:
+                print(f"[frame {frame_idx}] rollout_progress_prediction: {rollout_progress_pred:.4f}")
         if has_compact_joint_state:
             # Print saved joint angles + PD targets per frame (in the payload's saved order, i.e.
             # [base_x, base_y, base_rotation, panda_1..7, finger_0..N]), like door_joint_prediction.
@@ -772,6 +801,8 @@ def main() -> None:
         dj0 = _door_joint_prediction(frames[0])
         dj_dim = 0 if dj0 is None else int(dj0.size)
         print(f"Door joint prediction present ({dj_dim} dims) — printing per frame to this console.")
+    if has_rollout_progress_prediction:
+        print("Rollout-progress prediction present — showing it in Playback and printing it per frame.")
     if has_compact_joint_state:
         _cnames = payload.get("compact_target_joint_names")
         _order = (

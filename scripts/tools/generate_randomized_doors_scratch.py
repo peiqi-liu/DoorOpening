@@ -108,7 +108,7 @@ DEFAULT_HANDLE_STEM_LENGTH_RANGE_M = (0.050, 0.075)  # was (0.050, 0.085), temp 
 # combined with the return-hook/plate clearance fix above, the shortest bars were the ones most prone
 # to a collapsed grasp slot. 0.08 keeps meaningfully short bars (still well under the old 0.09 floor)
 # in the distribution without the near-zero-margin extreme.
-DEFAULT_HANDLE_LENGTH_RANGE_M = (0.08, 0.14)  # was (0.06, 0.14), temp update
+DEFAULT_HANDLE_LENGTH_RANGE_M = (0.08, 0.12)  # vision9 sliding-fix trial: 8-12cm lever, NOT committed
 # Return-hook length. This is a REQUEST, not the final value: build_handle_spec clamps it to
 # stem_length - return_tip_clearance, so what actually decides how far the hook returns is the tip
 # clearance below. Raised past the largest possible stem so the clamp always binds -- i.e. a return
@@ -125,7 +125,7 @@ DEFAULT_HANDLE_NUM_SEGMENTS = 16
 # Inverted (0.7 -> 0.3) to match the eval set, which is 4 non-lever doors to 1 lever door (0.2).
 # Training stays a little richer than eval at 0.3 so the return case is not near-absent from a batch.
 # The straight-bar majority is deliberate: a bare free end is where the grasp slips.
-DEFAULT_RETURN_HANDLE_PROB = 0.3  # was 0.7, temp update
+DEFAULT_RETURN_HANDLE_PROB = 0.3  # 30% return-lever experiment, NOT committed
 
 # "Bump" = a raised mount (like a hotel rose/escutcheon) at the handle base that the lever sits on.
 # Two shapes are supported:
@@ -217,7 +217,7 @@ DOOR_OPEN_LIMIT_RAD = 1.57
 # restores the original 0.10 rad (5.7 deg) margin (same ratio as the old 0.95-stop/0.85-threshold
 # pair), keeping the invariant that pressing the lever to its stop unlatches EVERY door regardless
 # of the sampled threshold.
-HANDLE_OPEN_LIMIT_RAD = 0.98  # was 1.0; tight 0.03 margin above the 0.95 unlatch threshold, and the planner presses exactly to this value
+HANDLE_OPEN_LIMIT_RAD = 0.98  # synced with vision5's hard-stop, NOT committed
 ROOT_JOINT_RPY = [math.pi / 2.0, 0.0, -math.pi / 2.0]
 # With the fixed root rotation above, link_1 local -z points toward the
 # default front view used by scripts/test_door.py, while +z points to the back.

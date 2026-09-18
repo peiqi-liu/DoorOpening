@@ -195,6 +195,7 @@ class LoggingMixin:
         train_mode_loss,
         train_door_joint_loss,
         train_rollout_progress_loss,
+        train_eef_pose_loss,
         validation_total_loss,
         validation_action_loss,
         teacher_forcing_beta,
@@ -239,6 +240,10 @@ class LoggingMixin:
                 print("Train Rollout Progress Loss:", float(train_rollout_progress_loss.detach().cpu()))
                 if self.latest_rollout_progress_abs_err is not None:
                     print("Rollout Progress Abs Err:", self.latest_rollout_progress_abs_err)
+            if train_eef_pose_loss is not None:
+                print("Train EEF Pose Loss:", float(train_eef_pose_loss.detach().cpu()))
+                print("EEF Position Error (m):", self.latest_eef_pose_position_error_m)
+                print("EEF Rotation Error (deg):", self.latest_eef_pose_rotation_error_deg)
             if validation_total_loss is not None:
                 print("Validation Total Loss:", float(validation_total_loss.detach().cpu()))
             if validation_action_loss is not None:
@@ -337,6 +342,12 @@ class LoggingMixin:
             metrics["loss/rollout_progress"] = float(train_rollout_progress_loss.detach().cpu())
             if self.latest_rollout_progress_abs_err is not None:
                 metrics["stats/rollout_progress_abs_err"] = self.latest_rollout_progress_abs_err
+        if train_eef_pose_loss is not None:
+            metrics["loss/eef_pose"] = float(train_eef_pose_loss.detach().cpu())
+            if self.latest_eef_pose_position_error_m is not None:
+                metrics["stats/eef_pose_position_error_m"] = self.latest_eef_pose_position_error_m
+            if self.latest_eef_pose_rotation_error_deg is not None:
+                metrics["stats/eef_pose_rotation_error_deg"] = self.latest_eef_pose_rotation_error_deg
         if validation_total_loss is not None:
             metrics["loss/val_total"] = float(validation_total_loss.detach().cpu())
         if validation_action_loss is not None:
