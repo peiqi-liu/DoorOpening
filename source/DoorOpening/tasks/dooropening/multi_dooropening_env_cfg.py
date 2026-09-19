@@ -261,29 +261,34 @@ class EventCfg:
 
     # Gripper-finger-only friction. PhysX combines two materials with friction_combine_mode, which is
     # "average" by default and is not overridden anywhere here -- so the contact coefficient at the
-    # grasp is the MEAN of the finger and handle materials, not the handle's. With the fingers on the
-    # robot-wide 0.8..1.25 the effective coefficient could never drop below ~0.4 no matter how low
-    # door_handle_physics_material went; the slippery end of that range was simply unreachable, and
-    # dropping its floor 0.05 -> 0.02 moved the real coefficient by 0.015.
+    # grasp is the MEAN of the finger and handle materials, not the handle's. Only the two finger
+    # bodies receive the moderate/high-friction tape-like range (static 0.4..0.9,
+    # dynamic 0.3..0.6). The palm remains on the robot-wide/slippery material.
     #
-    # Scoped to the end-effector bodies (palm + both fingers, i.e. everything that can touch the
-    # handle) and defined AFTER robot_physics_material so it overwrites only their shapes (event terms
-    # run in definition order). Everything else -- the arm links, any arm-vs-door contact -- keeps the
-    # robot-wide grip. Floor dropped 0.10 -> 0.0 to match the handle's floor: since the combine mode is
-    # "average", a nonzero floor on either side alone set a hard lower bound on the effective grasp
-    # coefficient no matter how low the other side went -- the frictionless-handle case is only
-    # reachable if BOTH sides can draw 0. panda_hand added (was fingers-only) so a palm-heel push on
-    # the handle/panel is covered by the same low-friction range instead of the robot-wide 0.8..1.25.
-    # Ceiling crushed 0.40/0.35 -> 0.05 to match the handle's ceiling crush below: a metal handle
-    # AND a hard end-effector surface both near-zero is the common real case, not a rare tail of a
-    # wide range, so most draws should sit there rather than the range merely reaching down to it.
+    # Scoped only to the two finger bodies and defined AFTER robot_physics_material so it overwrites
+    # only their shapes (event terms run in definition order). The palm and arm links keep the
+    # robot-wide material.
     robot_finger_physics_material = EventTerm(
         func=randomize_body_material_subset,
         mode="reset",
         params={
-            "asset_cfg": SceneEntityCfg("robot", body_names=["panda_hand", "panda_.*finger"]),
-            "static_friction_range": (0.0, 0.05),  # was (0.0, 0.40), temp update
-            "dynamic_friction_range": (0.0, 0.05),  # was (0.0, 0.35), temp update
+            "asset_cfg": SceneEntityCfg("robot", body_names="panda_.*finger"),
+            "static_friction_range": (0.4, 0.9),
+            "dynamic_friction_range": (0.3, 0.6),
+            "restitution_range": (0.0, 0.0),
+            "num_buckets": 250,
+        },
+    )
+
+    # Keep the palm slick so it does not become an unintended second grasping surface. The tape-like
+    # friction above applies only to the two finger links; this term deliberately targets panda_hand.
+    robot_palm_physics_material = EventTerm(
+        func=randomize_body_material_subset,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names="panda_hand"),
+            "static_friction_range": (0.0, 0.05),
+            "dynamic_friction_range": (0.0, 0.05),
             "restitution_range": (0.0, 0.0),
             "num_buckets": 250,
         },
@@ -464,7 +469,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # on the shortest, against a Franka that sustains ~30 N at the end effector. For reference a real
     # lever spring is 1..2 Nm, and the ADA 22 N hardware limit at a 0.10 m grip IS 2.2 Nm -- so 5 Nm
     # was 2-3x a code-compliant door and unpressable on the short levers.
-    door_handle_effort_limit_range_nm = (1.0, 3.0)  # was (1.0, 5.0), temp update
+    door_handle_effort_limit_range_nm = (1.0, 2.0)  # Vision 5 teacher run: cap handle ADR at 2 Nm
     door_handle_effort_limit_sim = door_handle_effort_limit_range_nm[0]
 
     # Panel-swing (joint_1) effort-limit CAP applied while unlatched (edit_door_articulation switches it
