@@ -17,10 +17,9 @@ door_joint_prediction:
   output_dim: 2  # Must equal the number of dagger.door_joint_training.joints below.
   weight: 0.01
 rollout_progress_prediction:
-  # Predict completed_frames / this_environment's_fixed_rollout_length in [0, 1]. This is a
-  # readout-only head and is not fed back into the policy observation.
-  enabled: true
-  weight: 0.01
+  # Removed for proprioception-only distillation; rollout progress is not a policy signal.
+  enabled: false
+  weight: 0.0
 
 push_pull_condition:
   # TEMPORARILY OFF: single-family distillation (PartNetv5_plusplus is 100% pull), so this one-hot
@@ -32,7 +31,7 @@ push_pull_condition:
   obs_key: push_pull_cond
   detach_predicted_condition: true
   input_dim: 2
-  hidden_dims: [64, 256]
+  hidden_dims: [64, 128]
   dropout: 0.0
   use_layer_norm: true
 
@@ -45,7 +44,7 @@ left_right_condition:
   enabled: false
   obs_key: left_right_cond
   input_dim: 2
-  hidden_dims: [64, 256]
+  hidden_dims: [64, 128]
   dropout: 0.0
   use_layer_norm: true
 
@@ -64,8 +63,7 @@ temporal_state_encoders:
   # timestamps_ms: [0, 400, 800, 1200, 1600, 2000, 2400, 2800]
   fields:
     - q_arm
-    # - q_hand
-    # - target_err_arm
+    - base_vel
     # - push_pull_belief
     # - target_err_hand
     # - base_vel
@@ -95,12 +93,7 @@ observation_lag:
   per_timestamp: true
   clamp_to_available_history: true
 
-pcd_encoders_cfg:
-  local_pcd_t:
-    type: "pointnet"
-    num_output_tokens: 128
-    num_points: [2500, 0, 0]  # Policy crop counts [base_crop, palm_crop, (robot slot)]. For pointcloud_source="both" each crop is split evenly across realsense+lidar (e.g. 2500 -> 1250 realsense + 1250 lidar). Robot model points are configured below.
-    use_pcd: true
+pcd_encoders_cfg: {}
 
 state_encoders_cfg:
   q_arm:
@@ -118,6 +111,19 @@ state_encoders_cfg:
     use_state: false
   aux_handle_pos:
     input_dim: 3
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  initial_handle_pos:
+    # Initial handle measurement captured at reset and re-expressed in the current base frame.
+    input_dim: 3
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  keyframe_pose_base:
+    # panda_link4: position 3 + 6D orientation.
+    body_names: [panda_link4]
+    input_dim: 9
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
@@ -147,8 +153,8 @@ state_encoders_cfg:
 
 transformer_cfg:
   type: "encoder_decoder"
-  encoder_layers: 6
-  decoder_layers: 6
+  encoder_layers: 4
+  decoder_layers: 4
   encoder_heads: 8
   decoder_heads: 8
   encoder_dim_feedforward: 1024
