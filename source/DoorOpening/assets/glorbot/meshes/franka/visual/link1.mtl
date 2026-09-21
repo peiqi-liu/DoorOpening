@@ -1,3 +1,13 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:8c6e1b7fe3a382b872c986cfb3601e79b701afb7b4bfc72dcd6abd4b31f9d0f5
-size 262
+# Blender MTL File: 'link2.blend'
+# Material Count: 1
+
+newmtl Part__Feature_001
+Ns -1.960784
+Ka 1.000000 1.000000 1.000000
+Kd 1.000000 1.000000 1.000000
+Ks 0.062500 0.062500 0.062500
+Ke 0.000000 0.000000 0.000000
+Ni 1.000000
+d 1.000000
+illum 2
+map_Kd colors.png

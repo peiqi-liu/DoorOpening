@@ -1229,7 +1229,15 @@ class DooropeningEnv(DirectRLEnv):
     def _pre_physics_step(self, actions: torch.Tensor):
         # delta actions
         self.scaled_actions = self._scale_actions(actions)
+        # Use joint-position-plus-delta control for the mobile base. The arm and fingers retain
+        # the existing PD-target-plus-delta behavior; only the base starts each action from its
+        # measured joint position, which avoids accumulating base drift in stale targets.
         targets = self.robot_dof_targets + self.dt * self.scaled_actions
+        base_target_slice = slice(self._target_base_rot_slice.start, self._target_base_xy_slice.stop)
+        targets[:, base_target_slice] = (
+            self.joint_pos[:, self._robot_base_dof_idx]
+            + self.dt * self.scaled_actions[:, base_target_slice]
+        )
         targets = self._pin_arx_targets_to_fixed_pose(targets)
         # NOTE: no explicit contact-sensor update() here. This runs BEFORE the physics step, so it
         # could only ever refresh last step's contacts, and scene.update() (called by
@@ -2526,8 +2534,19 @@ def compute_deep_mimic_rewards(
     # Robot body orientation error
     # ----------------------------------
     # [B, N]
-    key_body_quat_diff = quat_diff_angle(robot_key_body_quat, ref_robot_key_body_quat)
-    key_body_quat_err = torch.sum(key_body_quat_diff * key_body_quat_diff, dim=-1)  # [B]
+    # Compare corners of a large virtual marker cube around every tracked body.
+    # This converts orientation error into point displacement and strongly exposes palm/wrist rotation.
+    marker = torch.tensor([
+        [-1.0, -1.0, -1.0], [-1.0, -1.0, 1.0], [-1.0, 1.0, -1.0], [-1.0, 1.0, 1.0],
+        [1.0, -1.0, -1.0], [1.0, -1.0, 1.0], [1.0, 1.0, -1.0], [1.0, 1.0, 1.0],
+    ], device=robot_key_body_quat.device, dtype=robot_key_body_quat.dtype) * 0.25
+    marker = marker.view(1, 1, 8, 3)
+    marker_shape = (robot_key_body_quat.shape[0], robot_key_body_quat.shape[1], 8, 3)
+    cur_marker = quat_apply(robot_key_body_quat.unsqueeze(2).expand(-1, -1, 8, -1), marker.expand(marker_shape))
+    ref_marker = quat_apply(ref_robot_key_body_quat.unsqueeze(2).expand(-1, -1, 8, -1), marker.expand(marker_shape))
+    marker_diff = cur_marker - ref_marker
+    key_body_quat_err = torch.sum(marker_diff * marker_diff, dim=(-1, -2))
+    key_body_quat_err = torch.sum(key_body_quat_err, dim=-1)  # [B]
     # ----------------------------------
     # Door joint error
     # ----------------------------------
@@ -2625,9 +2644,17 @@ def compute_tracking_error(
     # Robot body orientation error
     # ----------------------------------
     # [B, N]
-    key_body_quat_diff = quat_diff_angle(robot_key_body_quat, ref_robot_key_body_quat)
-    # key_body_quat_err = torch.sum(key_body_quat_diff * key_body_quat_diff, dim=-1)  # [B]
-    key_body_quat_err = torch.max(key_body_quat_diff * key_body_quat_diff, dim=-1).values
+    marker = torch.tensor([
+        [-1.0, -1.0, -1.0], [-1.0, -1.0, 1.0], [-1.0, 1.0, -1.0], [-1.0, 1.0, 1.0],
+        [1.0, -1.0, -1.0], [1.0, -1.0, 1.0], [1.0, 1.0, -1.0], [1.0, 1.0, 1.0],
+    ], device=robot_key_body_quat.device, dtype=robot_key_body_quat.dtype) * 0.25
+    marker = marker.view(1, 1, 8, 3)
+    marker_shape = (robot_key_body_quat.shape[0], robot_key_body_quat.shape[1], 8, 3)
+    cur_marker = quat_apply(robot_key_body_quat.unsqueeze(2).expand(-1, -1, 8, -1), marker.expand(marker_shape))
+    ref_marker = quat_apply(ref_robot_key_body_quat.unsqueeze(2).expand(-1, -1, 8, -1), marker.expand(marker_shape))
+    marker_diff = cur_marker - ref_marker
+    key_body_quat_err = torch.sum(marker_diff * marker_diff, dim=(-1, -2))
+    key_body_quat_err = torch.max(key_body_quat_err, dim=-1).values
     # ----------------------------------
     # Door joint error
     # ----------------------------------

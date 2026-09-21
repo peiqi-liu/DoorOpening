@@ -65,7 +65,7 @@ ABDUCTION_GAIN_SCALE = 0.75
 # margin is gone, so watch for the thumb being shoved off target during grasp. The fix if it happens
 # is to move the thumb's REST TARGET out of the fingers' path (or re-enable it as a controlled DOF) --
 # not to raise this back up, since the real thumb has no such reserve either.
-LEAP_MOTOR_EFFORT_LIMIT = 0.35
+LEAP_MOTOR_EFFORT_LIMIT = 0.30
 
 
 def disable_collision_scope_instancing(robot_prim_path_expr: str = "/World/envs/env_.*/Robot") -> int:
