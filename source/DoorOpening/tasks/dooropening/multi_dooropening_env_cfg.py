@@ -3,16 +3,13 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-import inspect
-
 from DoorOpening.assets.door.multi_door_cfg import ALL_DOOR_CONFIGS
-from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, GRIPPER_VELOCITY_LIMIT
+from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
 from DoorOpening.constants.door_constants import DOOR_BODY_NAMES, DOOR_JOINT_NAMES
 from DoorOpening.constants.robot_constants import (
     CAMERA_JOINT_NAMES,
     DEFAULT_JOINT_POS,
-    DRIVEN_FINGER_JOINT_NAME,
     ROBOT_KEY_BODY_NAMES,
     ROBOT_RESET_KEY_BODY_NAMES,
     ROBOT_PALM_LINK_NAME,
@@ -55,29 +52,6 @@ from isaaclab.sensors import CameraCfg, ContactSensorCfg
 from isaaclab.utils.math import quat_from_euler_xyz
 
 import isaaclab.sim as sim_utils
-
-
-def _physx_kwargs():
-    """PhysxCfg kwargs, adding solve_articulation_contact_last only if this IsaacLab build has it.
-
-    Older IsaacLab (2.2.x, the Isaac Sim 4.5-compatible line) doesn't expose this PhysxCfg field --
-    PhysxCfg(solve_articulation_contact_last=...) raises TypeError there. Everything else is
-    identical either way, so this keeps the tuned solver settings on newer IsaacLab (2.3.2.post1,
-    Isaac Sim 5.x) while degrading gracefully instead of crashing on the older one.
-    """
-    kwargs = dict(
-        min_position_iteration_count=4,
-        max_position_iteration_count=64,
-        min_velocity_iteration_count=2,
-        max_velocity_iteration_count=16,
-        enable_ccd=True,
-        bounce_threshold_velocity=0.2,
-        gpu_max_rigid_patch_count=4 * 5 * 2**15,
-    )
-    if "solve_articulation_contact_last" in inspect.signature(PhysxCfg.__init__).parameters:
-        kwargs["solve_articulation_contact_last"] = True
-    return kwargs
-
 
 # Camera mount orientation on x5_camera_link as (roll, pitch, yaw).
 #   roll  = -45deg  -> compensates for the 45deg-tilted RealSense bracket on the ARX x5 wrist
@@ -259,52 +233,19 @@ class EventCfg:
         },
     )
 
-    # Gripper-finger-only friction. PhysX combines two materials with friction_combine_mode, which is
-    # "average" by default and is not overridden anywhere here -- so the contact coefficient at the
-    # grasp is the MEAN of the finger and handle materials, not the handle's. Only the two finger
-    # bodies receive the moderate/high-friction tape-like range (static 0.4..0.9,
-    # dynamic 0.3..0.6). The palm remains on the robot-wide/slippery material.
-    #
-    # Scoped only to the two finger bodies and defined AFTER robot_physics_material so it overwrites
-    # only their shapes (event terms run in definition order). The palm and arm links keep the
-    # robot-wide material.
-    robot_finger_physics_material = EventTerm(
-        func=randomize_body_material_subset,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names="panda_.*finger"),
-            "static_friction_range": (0.4, 0.9),
-            "dynamic_friction_range": (0.3, 0.6),
-            "restitution_range": (0.0, 0.0),
-            "num_buckets": 250,
-        },
-    )
-
-    # Keep the palm slick so it does not become an unintended second grasping surface. The tape-like
-    # friction above applies only to the two finger links; this term deliberately targets panda_hand.
-    robot_palm_physics_material = EventTerm(
-        func=randomize_body_material_subset,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names="panda_hand"),
-            "static_friction_range": (0.0, 0.05),
-            "dynamic_friction_range": (0.0, 0.05),
-            "restitution_range": (0.0, 0.0),
-            "num_buckets": 250,
-        },
-    )
-
-    # Door-wide friction/restitution for the frame + panel (link_1). The panel is subsequently
-    # overridden by door_panel_physics_material so it can use its higher 1.4..5.0 range; the handle
-    # is likewise overridden below with its slippery material. This stock event still defines the
-    # frame's material without introducing the old per-body host-RAM OOM at num_envs=4096.
+    # Door-wide friction/restitution for the frame + PANEL (link_1). The panel keeps a broad range
+    # so it still trains across slip<->jam. The handle (link_2) is deliberately re-materialized to a
+    # much slipperier range by door_handle_physics_material BELOW (it runs after this term, so it
+    # overrides link_2's material). Both use the stock num_buckets material mechanism (bounded by
+    # num_buckets, not num_envs), so neither reintroduces the host-RAM OOM the old custom per-body
+    # panel term caused at num_envs=4096.
     door_physics_material = EventTerm(
         func=randomize_rigid_body_material,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("door"),
-            "static_friction_range": (0.7, 4.5),
-            "dynamic_friction_range": (0.7, 4.5),
+            "static_friction_range": (0.7, 2.5),
+            "dynamic_friction_range": (0.7, 2.5),
             "restitution_range": (0.0, 0.0),
             "num_buckets": 250,
         },
@@ -313,19 +254,22 @@ class EventCfg:
     # Handle-only (link_2) friction. A real door handle is slippery metal, NOT like the panel: it
     # gets a much smaller friction range so the fingers cannot simply stick to it. Scoped to link_2
     # and defined AFTER door_physics_material so it overwrites the handle's material (event terms run
-    # in definition order)
+    # in definition order). Uses randomize_body_material_subset (not the stock term) because the
+    # stock per-body shape-count parse crashes on this convex-decomposition door. Tune the range if
+    # grasping the handle becomes too hard.
     door_handle_physics_material = EventTerm(
         func=randomize_body_material_subset,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("door", body_names="link_2"),
-            # Floor 0.0 -- many real handles (polished/oiled metal) are ~frictionless, so that belongs
-            # inside the sampled range, not just an eval-only extreme. Ceiling crushed 0.6 -> 0.05:
-            # near-zero-on-both-sides is the common real case (see robot_finger_physics_material above),
-            # not a rare tail worth only reaching down to, so most draws should sit near it. A pull
-            # still has to be form-closed through the lever slot rather than held on by friction.
-            "static_friction_range": (0.0, 0.05),  # was (0.0, 0.6), temp update
-            "dynamic_friction_range": (0.0, 0.05),  # was (0.0, 0.6), temp update
+            # Widened (was (0.2, 1.0)) after real-world observation that a metal lever can be very
+            # slippery: floor dropped to 0.05 so the policy trains on fingers that barely grip, ceiling
+            # raised to 1.2 so grippy handles are still covered. Real handle grip should be a subset.
+            # Widened (was (0.2, 1.0)) after real-world observation that a metal lever can be very
+            # slippery: floor 0.05 (fingers barely grip), ceiling 1.2 (grippy handles covered).
+            # Widened (was (0.2, 1.0)): floor 0.05 (fingers barely grip), ceiling 1.2 (grippy handles).
+            "static_friction_range": (0.05, 1.2),
+            "dynamic_friction_range": (0.05, 1.2),
             "restitution_range": (0.0, 0.0),
             "num_buckets": 250,
         },
@@ -355,11 +299,23 @@ class EventCfg:
         },
     )
 
-    # NOTE: there is deliberately NO gripper-armature randomization term. The Franka hand is a
-    # single-actuator screw drive whose reflected inertia is a fixed property of the mechanism, and
-    # the LEAP-era term that used to live here randomized it in ROTATIONAL units (kg-m^2) on what is
-    # now a PRISMATIC DOF (where armature is added MASS in kg). The nominal 0.05 kg is set once, in
-    # glorbot_cfg's GRIPPER_ARMATURE.
+    # Per-episode randomization of the LEAP finger joint armature (reflected rotor inertia the
+    # implicit PD sees). Lowered to a small armature (nominal 0.001) now that the finger actuator
+    # also carries joint friction (0.01, see glorbot_cfg): friction damps the overshoot/jitter that
+    # previously required a larger armature. Absolute values (not a scale). The ADR curriculum in
+    # `adr_cfg_dict` widens (0.001, 0.001) -> (0.001, 0.005). To also randomize the arm armature
+    # (currently fixed at 0), add an analogous term scoped to joint_names=["panda_joint.*",
+    # "x5_joint.*"] with an endpoint like (0.0, 0.08).
+    robot_finger_armature = EventTerm(
+        func=randomize_joint_parameters,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["finger_joint_.*"]),
+            "armature_distribution_params": (0.002, 0.002),
+            "operation": "abs",
+            "distribution": "uniform",
+        },
+    )
 
     # ADR-ramped panel-swing spring. Design intent: the panel is deliberately allowed to be very stiff,
     # and the door's perceived HEAVINESS is governed by the effort-limit cap
@@ -367,32 +323,29 @@ class EventCfg:
     # cap, so a stiff panel means a sharp breakaway that then holds a constant resistance in Nm, while
     # the low-stiffness end still gives a soft, freer-swinging door.
     #
-    # Both gains are sampled LOG-uniformly in absolute physical units: the stiffness range spans 120x
-    # (5..600 Nm/rad at full ADR), and uniform sampling would put almost every door at the stiff end
+    # Both gains are sampled LOG-uniformly in absolute physical units: the stiffness range spans 80x
+    # (5..400 Nm/rad at full ADR), and uniform sampling would put almost every door at the stiff end
     # and almost never visit the soft regime.
     door_board_joint_stiffness_and_damping = EventTerm(
         func=randomize_actuator_gains,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("door", joint_names="joint_1"),
-            # Start band 8..140 Nm/rad; ADR endpoint widens to 8..800. The FLOOR is the same at both
-            # ends, so genuinely free-swinging doors are in the mix from step 0 and ADR only widens
-            # the stiff side. Raised across the board (5..100 -> 8..140) because the policy was
-            # failing on the stiff doors: log-uniform, so lifting the floor moves the geometric mean
-            # more than lifting the ceiling does.
-            "stiffness_distribution_params": (8.0, 140.0),  # was (5.0, 100.0), temp update
-            # Raised with the stiffness (3..30 -> 4..45). zeta = c/(2*sqrt(k*I)) with I ~= 24 kg*m^2,
-            # so at the new k floor of 8 a damping of 4 is zeta ~= 0.14 -- the soft end stays light
-            # and free-swinging, which is the whole point of the floor. The ceiling adds real drag on
-            # the stiff doors instead of letting them swing freely once broken away.
-            "damping_distribution_params": (4.0, 45.0),  # was (3.0, 30.0), temp update
+            # Start band 5..150 Nm/rad; ADR endpoint widens to 5..400. The FLOOR is now the same at
+            # both ends (was 40 at the start, 20 at the endpoint), so genuinely free-swinging doors are
+            # in the mix from step 0 and ADR only widens the stiff side.
+            "stiffness_distribution_params": (5.0, 150.0),
+            # Damping is sampled independently of stiffness, so its range is CHOSEN via the damping
+            # ratio zeta = c / (2*sqrt(k*I)), with I ~= 24 kg*m^2 (panel about its hinge: m*w^2/3 for
+            # the nominal 80 kg board at the ~0.95 m mid panel width the generator emits). The old
+            # validated tuning (k=63, c=8.8) is zeta ~= 0.11. Damping floor lowered 7 -> 3 alongside the
+            # stiffness floor: at k = 5 the old floor of 7 was already zeta ~= 0.32 and the top of the
+            # range (30) was zeta ~= 1.4, i.e. the softest doors came out OVERDAMPED and sluggish rather
+            # than freely swinging -- which defeats the point of lowering the stiffness floor at all.
+            "damping_distribution_params": (3.0, 30.0),
             # Absolute physical gains, not multipliers of the board actuator defaults.
             "operation": "abs",
-            # "uniform" (was "log_uniform"): log-uniform spreads density evenly across decades, which
-            # keeps most draws well below the ceiling on a wide range like 8..800 (half the draws land
-            # below sqrt(8*800)=~80). Plain uniform puts most of the numeric span -- and therefore most
-            # draws -- in the upper part of the range, so stiff/heavy doors get sampled far more often.
-            "distribution": "uniform",  # was "log_uniform", temp update
+            "distribution": "log_uniform",
         },
     )
 
@@ -419,19 +372,8 @@ class EventCfg:
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("door", joint_names="joint_2"),
-            # Tuned for a lever that SPRINGS BACK FAST on release. The two gains pull opposite ways
-            # here, so they move opposite ways:
-            #  - stiffness UP (35 -> 45). The effort limit caps return torque at 1..5 Nm, so k only
-            #    matters where k*theta is still below the cap -- i.e. the last stretch back to zero.
-            #    45 keeps the spring saturated down to theta = 0.11 rad instead of 0.14, so the lever
-            #    drives itself fully home instead of creeping the final few degrees.
-            #  - damping DOWN (0.6 -> 0.35). Return speed is roughly torque/damping, so damping is
-            #    what throttles the snap-back: at the 2.5 Nm mid-band this takes terminal lever speed
-            #    from ~4 rad/s to ~7 rad/s, halving the time to travel the 0.95 rad back to closed.
-            #    Not lower than this -- the floor is what keeps the lever from slamming its hard stop
-            #    at zero and chattering.
-            "stiffness_distribution_params": (45.0, 45.0),  # was (35.0, 35.0), temp update
-            "damping_distribution_params": (0.35, 0.35),  # was (0.6, 0.6), temp update
+            "stiffness_distribution_params": (35.0, 35.0),
+            "damping_distribution_params": (0.6, 0.6),
             "operation": "abs",
         },
     )
@@ -460,16 +402,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     asymmetric_obs = True
 
     viewer: ViewerCfg = ViewerCfg(eye=(1.5, -2.0, 1.0), lookat=(0.4, 0.0, 0.7), origin_type="env")
-    # Hold the gripper at GRIPPER_OPEN_WIDTH and ignore the policy's finger action. The DOF stays in
-    # the action space, so checkpoints keep loading -- its command is just overwritten.
-    fixed_open_gripper = True
-    # Lever (joint_2) return-spring torque cap: the torque the robot has to overcome to press the
-    # handle. Ceiling cut 5 -> 3 Nm. It converts straight into press force at the grip, torque /
-    # moment arm, and the arm is only 0.06..0.14 m long: 5 Nm needed 50 N on a mean lever and 100 N
-    # on the shortest, against a Franka that sustains ~30 N at the end effector. For reference a real
-    # lever spring is 1..2 Nm, and the ADA 22 N hardware limit at a 0.10 m grip IS 2.2 Nm -- so 5 Nm
-    # was 2-3x a code-compliant door and unpressable on the short levers.
-    door_handle_effort_limit_range_nm = (1.0, 2.0)  # Vision 5 teacher run: cap handle ADR at 2 Nm
+    # Handle (joint_2) latch return-spring effort limit -- how hard the lever resists being rotated to
+    # unlatch. ADR ramps from the (1,1) EventTerm base up to (1, 5). 9-12 Nm was far more torque than a
+    # real lever return spring needs, so the ceiling is now 5.
+    door_handle_effort_limit_range_nm = (1.0, 3.0)
     door_handle_effort_limit_sim = door_handle_effort_limit_range_nm[0]
 
     # Panel-swing (joint_1) effort-limit CAP applied while unlatched (edit_door_articulation switches it
@@ -479,32 +415,26 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # from a narrow start band out to the full outer range, so heavy/light doors spread out only as the
     # curriculum advances.
     #
-    # This is the PRIMARY door-difficulty knob: panel stiffness is sampled wide (see
-    # door_board_joint_stiffness_and_damping) precisely so that the restoring torque saturates here,
-    # making the door feel like a constant-torque load of this many Nm.
+    # This is now the PRIMARY door-difficulty knob: panel stiffness is sampled very wide and high
+    # (see door_board_joint_stiffness_and_damping) precisely so that the restoring torque saturates
+    # here, making the door feel like a constant-torque load of this many Nm. Start band 10..25 Nm;
+    # ADR endpoint widens to 5..40 -- nearly free-swinging (5 Nm) up to heavy (40 Nm).
     #
-    # Lowered again for the 2-finger gripper (start 10..25 -> 5..15, ADR endpoint 5..60 -> 3..40).
-    # These Nm convert almost directly into the force the grasp has to transmit: with the handle
-    # ~0.8 m from the hinge, required pull = cap / 0.8, so the start band drops from 12..31 N to
-    # 6..19 N and the ADR ceiling from 75 N to 50 N. A pinch grasp can only pass 2*mu*F_grip
-    # (~50 N of clamp on a 20 mm bar), so this moves the slip threshold from mu >= 0.31 down to
-    # mu >= 0.19 -- i.e. from ~23% of the handle-friction draws slipping to ~12%.
-    # Floors raised: start 5 -> 10 Nm, full-ADR 3 -> 8 Nm. This is the knob that sets how heavy the
-    # door actually is (restoring torque plateaus here), so lifting the floor removes the nearly
-    # weightless doors the policy could open without ever loading the grasp. With the handle ~0.8 m
-    # from the hinge the required pull rises from 6..19 N to 12..19 N at the start band, and the
-    # lightest full-ADR door goes from 3.8 N to 10 N. The start floor sits ABOVE the full-ADR floor
-    # on purpose: ADR then re-introduces lighter doors as it widens, rather than only ever adding
-    # harder ones.
-    door_panel_effort_limit_start_range_nm = (10.0, 15.0)  # was (5.0, 15.0), temp update
-    # Floor 8 -> 3 Nm: below the start band's 10 Nm floor again, so ADR re-introduces lighter doors
-    # as it widens (not just adds heavier ones -- see the start-band note above). Ceiling trimmed
-    # back down 75 -> 70 Nm.
-    door_panel_effort_limit_range_nm = (3.0, 70.0)  # was (3.0, 75.0), temp update
+    # ADR CEILING LOWERED 60 -> 40 alongside the LEAP motor limit (LEAP_MOTOR_EFFORT_LIMIT, 0.95 ->
+    # 0.35 Nm). These Nm convert almost directly into the force the grasp has to transmit: with the
+    # handle ~0.8 m from the hinge, required pull = cap / 0.8, so the ceiling drops from 75 N to 50 N.
+    # At a third of the finger torque the hand can no longer generate the grip that 75 N of pull
+    # needed, so the old ceiling was asking for doors the real hardware could never hold onto.
+    door_panel_effort_limit_start_range_nm = (10.0, 25.0)
+    door_panel_effort_limit_range_nm = (5.0, 40.0)
 
-    # Handle (joint_2) unlatch angle threshold is no longer sampled per-env/ADR-ramped here -- every
-    # door now requires the same fixed near-complete press (DOOR_LATCH_HINGE_THRESHOLD_RAD in
-    # multi_dooropening_env.py) before the panel unlocks, read every step by edit_door_articulation.
+    # Handle (joint_2) unlatch angle threshold (radians): the door stays latched until the handle is
+    # rotated past this. Per-env, ADR-ramped from the fixed 0.8 start out to (0.65, 0.95) so the policy
+    # must learn to fully turn handles that unlatch late. Read every step by edit_door_articulation.
+    # Handle (joint_2) unlatch angle threshold (radians): per-env, ADR-ramped from the fixed 0.8 start
+    # out to (0.75, 0.9) -- tightened from (0.65, 0.95). Read every step by edit_door_articulation.
+    door_latch_threshold_start_range_rad = (0.8, 0.8)
+    door_latch_threshold_range_rad = (0.75, 0.85)
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
@@ -514,7 +444,16 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             static_friction=1.0,
             dynamic_friction=1.0,
         ),
-        physx=PhysxCfg(**_physx_kwargs()),
+        physx=PhysxCfg(
+            solve_articulation_contact_last=True,
+            min_position_iteration_count=4,
+            max_position_iteration_count=64,
+            min_velocity_iteration_count=2,
+            max_velocity_iteration_count=16,
+            enable_ccd=True,
+            bounce_threshold_velocity=0.2,
+            gpu_max_rigid_patch_count=4 * 5 * 2**15
+        ),
     )
 
     # Useful constants
@@ -537,14 +476,36 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         'panda_joint7',
     ]
 
-    # The gripper is ONE commanded DOF, so the action space carries a single finger entry. The
-    # follower (panda_finger_joint2) tracks it through the mimic coupling and must never get a
-    # target of its own. NOTE this makes the action space 1-wide here where the LEAP hand was 12,
-    # so policies/checkpoints trained on that hand are not loadable against this robot.
     finger_joints = [
-        DRIVEN_FINGER_JOINT_NAME,
+        'finger_joint_0',
+        'finger_joint_1',
+        'finger_joint_2',
+        'finger_joint_3',
+        'finger_joint_4',
+        'finger_joint_5',
+        'finger_joint_6',
+        'finger_joint_7',
+        'finger_joint_8',
+        'finger_joint_9',
+        'finger_joint_10',
+        'finger_joint_11',
+        # 'finger_joint_12',
+        # 'finger_joint_13',
+        # 'finger_joint_14',
+        # 'finger_joint_15',
     ]
 
+    # finger_joints = [
+    #     'finger_joint_1',
+    #     'finger_joint_2',
+    #     'finger_joint_3',
+    #     'finger_joint_5',
+    #     'finger_joint_6',
+    #     'finger_joint_7',
+    #     'finger_joint_9',
+    #     'finger_joint_10',
+    #     'finger_joint_11',
+    # ]
 
     arx_joints = CAMERA_JOINT_NAMES[:4]
 
@@ -555,7 +516,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         debug_vis=False,
         filter_prim_paths_expr=list(HANDLE_CONTACT_FILTER_PRIM_PATHS),
     )
-    # PUSH-door hand-only handle contact sensor: only panda_hand vs the handle (link_2).
+    # PUSH-door palm-only handle contact sensor: only palm_center/palm_lower vs the handle (link_2).
     # Drives the push palm-handle reward (fingers excluded).
     contact_forces_door2_palm = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Door/link_2",
@@ -564,10 +525,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         debug_vis=False,
         filter_prim_paths_expr=list(PALM_ONLY_HANDLE_CONTACT_FILTER_PRIM_PATHS),
     )
-    # Finger<->panel contact sensor: the gripper fingers against the door panel (Door/link_1).
-    # DIAGNOSTIC ONLY -- it feeds stats/finger_panel_contact_force_norm_* and the per-env
-    # `finger_panel_contact_force_norm` the play/eval scripts print. It drives no reward term
-    # (the old finger<->door contact penalty was removed along with the LEAP hand).
+    # Finger<->panel contact sensor: LEAP hand bodies against the door panel (Door/link_1).
+    # Gated by panel_contact_mask, a force above threshold here is penalized (fingers should
+    # grip the handle, not the panel) except where pushing the panel is the task.
     contact_forces_door_panel = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Door/link_1",
         update_period=0.0,
@@ -641,9 +601,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         debug_vis=False,
         filter_prim_paths_expr=list(SELF_COLLISION_FRANKA_FILTER_PRIM_PATHS),
     )
-    # Finger<->flange self-collision: the two gripper fingers filtered ONLY against the
+    # Finger<->flange self-collision: LEAP digit links (fingers + thumb) filtered ONLY against the
     # franka panda_link7 flange. Counted with the same self_collision_penalty_w. Intra-hand
-    # contacts are not in the filter set, so finger<->finger contact is NOT penalized.
+    # contacts are not in the filter set, so finger<->finger / finger<->thumb are NOT penalized.
     contact_forces_self_collision_hand = ContactSensorCfg(
         prim_path=SELF_COLLISION_HAND_PRIM_PATH,
         update_period=0.0,
@@ -652,6 +612,12 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         filter_prim_paths_expr=list(SELF_COLLISION_HAND_FILTER_PRIM_PATHS),
     )
     handle_contact_force_threshold = 1.0
+    # Finger<->door contact PROTECTION: finger<->panel (link_1) and finger<->handle (link_2) are
+    # processed TOGETHER. When the fingers press EITHER door body harder than this (N), a strong
+    # penalty (finger_door_contact_penalty_w) is applied -- but ONLY while the panel-contact mask is
+    # on (push: open-door + base-forward; pull: retract-arm + push-panel + hold-traverse). Below the
+    # threshold, or with the mask off, is free. Tune against stats/finger_door_contact_force_norm_max.
+    finger_door_contact_force_threshold = 10.0
     # Contact between a non-front base face and any door body above this (N) is penalized.
     base_door_contact_force_threshold = 5.0
     x5_body_contact_force_threshold = 1.5
@@ -739,10 +705,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # - proprioception: current actuated joint positions + joint velocities + PD targets
     #   => `actuated_joints_num * 3`
     #   Adding the 4 ARX joints increases this block by `4 * 3 = 12` dims.
-    # - current base and arm joint diffs to the reference motion (ENABLED in _build_observations)
-    #   => `len(base_joints) + len(arm_joints)`, counted at the bottom of observation_space.
-    #      NOT joint_reference_error_observation_space: that constant still includes the gripper
-    #      DOF, which the observation no longer carries.
+    # - current base, arm and finger joint diffs to the reference motion (ENABLED in
+    #   _build_observations)
+    #   => `joint_reference_error_observation_space`
     # - key-body position tracking error in the base frame
     #   => `len(robot_key_bodies) * 3`
     # - non-base key-body poses in the base frame:
@@ -759,6 +724,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # - future reference motion summary at twist indices
     #   => currently disabled in _build_observations(), so not counted in observation_space
     proprioception_observation_space = actuated_joints_num * 3
+    # Reference joint-angle error (sim reading - reference) for base + arm(franka) + finger.
     joint_reference_error_observation_space = len(base_joints) + len(arm_joints) + len(finger_joints)
     key_body_error_observation_space = len(robot_key_bodies) * 3
     robot_pose_observation_space = (len(robot_key_bodies) - 1) * (3 + 6)
@@ -769,15 +735,13 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     observation_space = (
         proprioception_observation_space
+        + joint_reference_error_observation_space
         + key_body_error_observation_space
         + robot_pose_observation_space
         + base_velocity_observation_space
         + door_body_observation_space
         + door_joint_observation_space
         + arx_joint_reference_observation_space
-        # base + arm reference joint-angle error (policy_joint_ref_err / clean_joint_ref_err).
-        + len(base_joints)
-        + len(arm_joints)
     )
     state_space = observation_space
     num_observations = observation_space
@@ -786,10 +750,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=False)
 
-    base_action_scale = 1.0
+    base_action_scale = 1.5
     arm_action_scale = 0.6
-    gripper_action_speed_headroom = 2.0
-    finger_action_scale = gripper_action_speed_headroom * GRIPPER_VELOCITY_LIMIT
+    finger_action_scale = 1.5
     arx_action_scale = 0.6
 
     # Deep Mimic Reward Parameters
@@ -797,39 +760,30 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_key_body_pos_w = 2.0
     robot_base_joint_pos_w = 3.0
     robot_arm_joint_pos_w = 3.0
-    # Gripper-opening tracking (the single driven finger DOF). There is deliberately no matching
-    # VELOCITY term: the gripper is a 1-DOF open/close command whose speed is already capped at the
-    # hardware limit, so tracking the reference's finger velocity added a term that was numerically
-    # constant and shaped nothing.
-    robot_gripper_joint_pos_w = 1.5
+    robot_finger_joint_pos_w = 1.5
     robot_arx_joint_pos_w = 5.0
     robot_arx_tuck_joint_pos_w = 2.0
     robot_base_joint_vel_w = 1.0
     robot_arm_joint_vel_w = 2.0
+    robot_finger_joint_vel_w = 0.5
     door_joint_pos_w = 4.0
-    # PULL-only binary bonus for the GRIPPER (panda_hand + the two fingers, see
-    # HANDLE_CONTACT_FILTER_PRIM_PATHS) touching the handle during the grasp/pull window.
-    hinge_gripper_contact_reward_w = 1.5
+    hinge_contact_reward_w = 1.5
     # PUSH-only palm-handle contact reward: +palm_handle_reward_w per step whenever palm_center/
-    # panda_hand presses the handle (> handle_contact_force_threshold) during the grasp->push-open window
+    # palm_lower press the handle (> handle_contact_force_threshold) during the grasp->push-open window
     # (hinge_contact_mask, keyframes 2..5). Binary. For PULL this is inactive (is_push gate = 0), and
-    # for PUSH the finger-inclusive hinge_gripper_contact reward is disabled -- fingers on the handle
-    # are no longer rewarded on push.
+    # for PUSH the old finger-inclusive hinge_contact reward is disabled -- fingers on the handle are
+    # no longer rewarded on push.
     palm_handle_reward_w = 5.0
     robot_body_lin_vel_w = 1.0
     robot_body_ang_vel_w = 0.5
-    # Joint-limit penalty, applied to the FRANKA ARM JOINTS ONLY (see joint_limit_penalty_joints).
     joint_limit_penalty_w = 40.0
     joint_limit_penalty_margin_ratio = 0.05
-    # Which DOFs the joint-limit penalty is scored over. Everything else is excluded on purpose:
-    #  - base x/y/rotation are virtual chassis DOFs whose limits are the arena, not the hardware;
-    #  - the arx/x5 joints are pinned to a fixed tuck pose and never driven by the policy;
-    #  - the gripper's limits ARE its operating points. Fully open (0.04) and fully closed (0.0) are
-    #    exactly the URDF limits, so including it charged a constant penalty for simply holding the
-    #    reference gripper pose and punished every real grasp squeeze.
-    joint_limit_penalty_joints = list(arm_joints)
     # lambda_c in r = r_target - lambda_l*r_limit - lambda_c*r_contact
     self_collision_penalty_w = 5.0
+    # Penalty weight for the unified finger<->door protection penalty: applied while the panel-contact
+    # mask is on and the finger<->panel OR finger<->handle force exceeds finger_door_contact_force_threshold.
+    # Deliberately STRONG (this replaces the old weak graded panel/handle penalties). Tune it.
+    finger_door_contact_penalty_w = 10.0
     # Penalty weight (per non-front base face in contact with the door). High on purpose: a
     # base panel hitting the door in the real world means a securely-mounted robot is injured.
     base_door_contact_penalty_w = 10.0
@@ -844,35 +798,15 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     franka_box_contact_penalty_min_force = 25.0
     franka_box_contact_penalty_max_force = 75.0
 
-    # Jerk penalty: sum((a_t - 2*a_t-1 + a_t-2)^2) over the whole policy action vector (base rot +
-    # base xy + arm + finger), each component in [-1, 1]. Targets the SHAPE of the policy's own
-    # output, not just its raw step-to-step size: a first-difference action-rate term also charges a
-    # smooth, deliberate ramp (e.g. a steady acceleration into the pull), while jerk is zero for any
-    # constant rate of change and only costs an actual kink or a sign-flipping oscillation -- the
-    # thing that reads as "shaky" on hardware. Nothing else in this reward discourages it (the
-    # *_joint_vel_w terms track the REFERENCE velocity, which says nothing about how smoothly the
-    # policy's own commands change).
-    #
-    # Starting guess -- tune it. Different scale from a first-difference term: a single-step sign
-    # flip (e.g. rate -1 -> +1) produces a jerk of up to 4 per dim (16 squared) instead of 2, so at
-    # ~11 action dims a policy that is merely noisy sits under ~0.1 total per step, while one that is
-    # actually oscillating near full-scale costs several units/step.
-    action_jerk_penalty_w = 1.0
-
     robot_body_quat_scale = 1.0
     robot_key_body_pos_scale = 3.0
     robot_base_joint_pos_scale = 0.5
     robot_arm_joint_pos_scale = 0.2
-    # Gripper tracking sharpness for exp(-scale * err^2). The error is a PRISMATIC opening in
-    # METRES, so the LEAP-era 1.0 (tuned for radians over a ~1.5 rad finger sweep) made the term
-    # numerically constant: the worst possible error is the 0.04 m stroke, i.e. err^2 = 1.6e-3, and
-    # exp(-1.6e-3) = 0.998 for every state. Scale is therefore derived from the stroke instead of
-    # hand-picked: 4 / stroke^2 puts a half-stroke error (0.02 m) at exp(-1) = 0.37.
-    gripper_stroke_m = 0.04
-    robot_gripper_joint_pos_scale = 4.0 / (gripper_stroke_m ** 2)
+    robot_finger_joint_pos_scale = 1.0
     robot_arx_tuck_joint_pos_scale = 0.2
     robot_base_joint_vel_scale = 0.5
     robot_arm_joint_vel_scale = 0.5
+    robot_finger_joint_vel_scale = 0.5
     door_joint_pos_scale = 5.0
     robot_body_lin_vel_scale = 10.0
     robot_body_ang_vel_scale = 10.0
@@ -898,10 +832,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     success_far_push_ref_dist = 0.75
     # We are slowly increasing our tolerance on base position drift and slowly only resettting the env from the first key frame
     # This variable is used to indicate when we stop increasing the tolerance and reset the env from the first key frame for the greatest probability
-    reset_progress_total = 2.5e5
+    reset_progress_total = 4e5
     use_motion_ref = True
     # ADR should ramp faster than the reference-motion reset curriculum so physics randomization is not lagging behind.
-    adr_reset_progress_total = 1e5
+    adr_reset_progress_total = 1.5e5
 
     alive_base = 10.0
     alive_bonus = 20.0
@@ -928,14 +862,28 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "stiffness_distribution_params": (0.8, 1.2),
             "damping_distribution_params": (0.7, 1.3),
         },
+        "robot_finger_armature": {
+            # Widen from the nominal 0.001 toward a small physical band for the geared LEAP fingers.
+            # Kept low -- joint friction (0.01) now handles jitter damping, so armature can stay near
+            # the real reflected inertia; ceiling well under the ~0.03 stability limit.
+            "armature_distribution_params": (0.001, 0.005),
+        },
         "door_board_joint_stiffness_and_damping": {
-            # FINAL (full-ADR) stiffness band, UNIFORM (not log-uniform -- see the "distribution"
-            # field on the EventCfg term itself, which ADR never touches) over 5..500 Nm/rad.
-            "stiffness_distribution_params": (5.0, 500.0),  # was (8.0, 800.0), temp update
-            # Nm*s/rad. zeta = c/(2*sqrt(k*I)), I ~= 24 kg*m^2. Rescaled with the stiffness band to
-            # hold the same damping ratios as before: zeta ~= 0.11 at the floor (free-swinging soft
-            # doors), ~= 0.32 at the ceiling (real drag on stiff doors).
-            "damping_distribution_params": (2.5, 70.0),  # was (3.0, 90.0), temp update
+            # FINAL (full-ADR) stiffness band, log-uniform over 5..400 Nm/rad: heaviness is set by the
+            # effort cap, so stiffness is free to go high (sharp breakaway, then constant resistance)
+            # and fairly low (soft swing).
+            #
+            # CEILING CUT 800 -> 400 alongside the effort-cap reduction. Stiffness only decides how
+            # ABRUPTLY the restoring torque reaches the cap: the panel saturates at theta = cap/k, so
+            # with the ADR cap now 40 Nm, k = 800 saturated after 0.05 rad (2.9 deg) -- an almost
+            # instantaneous wall -- while k = 400 gives 0.1 rad (5.7 deg). Keeps a sharp breakaway in
+            # the distribution without the very hardest hit, which is what tears a grasp loose.
+            # FLOOR lowered 20 -> 5 to match the start band, so ADR only ever widens the band.
+            "stiffness_distribution_params": (5.0, 400.0),
+            # Nm*s/rad. zeta = c/(2*sqrt(k*I)), I ~= 24 kg*m^2. Floor lowered 4 -> 2 to sit under the
+            # start band's 3 (otherwise ADR would RAISE the damping floor as it progressed) and to keep
+            # the k = 5 doors genuinely free-swinging rather than overdamped.
+            "damping_distribution_params": (2.0, 60.0),
         },
         "door_board_joint_friction": {
             # Coulomb breakaway friction on the panel swing. Ramps from the (0, 0) EventTerm base out to
@@ -944,16 +892,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "friction_distribution_params": (0.0, 0.7),
         },
         "door_hinge_joint_stiffness_and_damping": {
-            # Floor raised and ceiling trimmed (15..90 -> 25..70): the weak end was the problem, not
-            # the strong end. Below ~25 Nm/rad the spring stays UNDER the 1..5 Nm effort cap for most
-            # of the lever's travel, so those handles crept home instead of snapping; 25 keeps every
-            # door saturated down to theta = 0.2 rad. The ceiling buys nothing above that -- past
-            # saturation more stiffness only moves the onset -- so it comes back to 70.
-            "stiffness_distribution_params": (25.0, 70.0),  # was (10.0, 60.0), temp update
-            # Ceiling CUT 1.0 -> 0.5, same reasoning as the start band: the old ceiling let ADR draw
-            # handles that took ~1 s to return, which is a sluggish lever, not a hard one. Floor left
-            # near zero so nearly free-returning handles stay in the mix.
-            "damping_distribution_params": (0.02, 0.5),  # was (0.03, 1.0), temp update
+            "stiffness_distribution_params": (10.0, 60.0),
+            "damping_distribution_params": (0.03, 1.0),
         },
         "door_hinge_joint_effort_limit": {
             "effort_limit_distribution_params": door_handle_effort_limit_range_nm,
@@ -961,18 +901,12 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     }
 
     # These terms are sampled inside the env because they perturb reset state, observations, and controller targets.
-    #
-    # NOTE: the gripper DOF is deliberately absent from EVERY group here. All four LEAP-era finger
-    # entries were in radians against a ~1.5 rad finger sweep, which on the 0.04 m prismatic gripper
-    # meant spawn noise of 2.5x the whole stroke, observation noise of half the stroke, and velocity
-    # noise 3x the joint's own speed limit -- i.e. randomization far larger than the signal. The real
-    # hand is a single actuator with an accurate width encoder, so it now carries no reset,
-    # observation, or PD-target noise at all.
     adr_custom_cfg_dict = {
         "robot_spawn": {
             "base_xy_joint_pos_noise": (0.0, 0.1),
             "base_rot_joint_pos_noise": (0.0, 0.05),
             "arm_joint_pos_noise": (0.0, 0.15),
+            "finger_joint_pos_noise": (0.0, 0.1),
         },
         "robot_state_noise": {
             "base_xy_joint_pos_noise": (0.0, 0.003),
@@ -981,6 +915,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "base_rot_joint_pos_bias": (0.0, 0.006),
             "arm_joint_pos_noise": (0.0, 0.01),
             "arm_joint_pos_bias": (0.0, 0.006),
+            "finger_joint_pos_noise": (0.0, 0.02),
+            "finger_joint_pos_bias": (0.0, 0.01),
             "key_body_pos_noise": (0.0, 0.01),
             "key_body_pos_bias": (0.0, 0.005),
             "key_body_quat_noise": (0.0, 0.01),
@@ -991,6 +927,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "base_rot_joint_vel_bias": (0.0, 0.04),
             "arm_joint_vel_noise": (0.0, 0.1),
             "arm_joint_vel_bias": (0.0, 0.05),
+            "finger_joint_vel_noise": (0.0, 0.15),
+            "finger_joint_vel_bias": (0.0, 0.08),
             "body_lin_vel_noise": (0.0, 0.05),
             "body_lin_vel_bias": (0.0, 0.03),
             "body_ang_vel_noise": (0.0, 0.1),
@@ -1006,6 +944,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "base_xy_target_noise": (0.0, 0.0015),
             "base_rot_target_noise": (0.0, 0.005),
             "arm_target_noise": (0.0, 0.003),
+            "finger_target_noise": (0.0, 0.005),
         },
         # Action latency (in env/control steps; env dt = sim_dt * decimation = 1/30 s).
         # The PD target applied on a given step is the one the policy produced `latency` steps
