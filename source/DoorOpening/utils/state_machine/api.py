@@ -60,7 +60,7 @@ def compute_base_joint(base_pos_w, base_quat_w, abs_pos):
 
     return torch.cat([x_r, y_r, theta_r], dim=-1)
 
-def solve_ik(robot_urdf_path, q, palm_pose, base_pose, robot_initial_pose, num_attempts=8):
+def solve_ik(robot_urdf_path, q, palm_pose, base_pose, robot_initial_pose, num_attempts=8, reference_joint_pos=None):
     # num_attempts>1 lets a failed solve retry from randomized arm seeds (robust reposition), at
     # the cost of possibly jumping to a different IK branch. Pass num_attempts=1 inside continuity
     # -critical for-loops so a hard frame returns the best-effort NEAR the previous pose (smooth)
@@ -74,7 +74,7 @@ def solve_ik(robot_urdf_path, q, palm_pose, base_pose, robot_initial_pose, num_a
         urdf_path=robot_urdf_path,
         ee_link_name="palm_lower",
         controlled_joints=BASE_JOINT_NAMES + FRANKA_JOINT_NAMES,
-        reference_joint_pos=FRANKA_DEFAULT_JOINT_POS,
+        reference_joint_pos=(FRANKA_DEFAULT_JOINT_POS if reference_joint_pos is None else reference_joint_pos),
     )
     # if palm_pose is not None:
     #     palm_pose[:, 0] += 0.08
