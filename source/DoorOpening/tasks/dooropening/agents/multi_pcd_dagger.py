@@ -433,7 +433,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.temporal_target_history = None
         self.temporal_base_vel_history = None
         self.temporal_aux_handle_history = None
-        self.temporal_initial_handle_history = None
         self.temporal_push_pull_belief_history = None
         self.proprio_temporal_enabled = False
         self.proprio_temporal_obs_key = None
@@ -501,9 +500,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.aux_handle_noise_m = None
         self.aux_handle_gt_bias_m = None
         self.aux_handle_gt_bias = None
-        self.initial_handle_points_noise_m = None
-        self.initial_handle_points_bias_m = None
-        self.initial_handle_points_bias = None
         self.push_pull_detach_predicted_condition = True
         self.push_pull_family_one_hot = None
         self.push_pull_condition_buffer = None
@@ -785,13 +781,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             for key, cfg in self.student_model.pcd_encoders_cfg.items()
             if cfg.get("use_pcd", False)
         )
-        # A proprioception-only student must not initialize or render any point-cloud source,
-        # even if an older runtime YAML still contains pointcloud_source: depth/lidar/both.
-        if not self.pcd_encoders_keys:
-            self.pointcloud_source = "none"
-            self.append_robot_model_to_policy_cloud = False
-            if self.rank == 0:
-                print("[INFO] No point-cloud encoders configured; disabling point-cloud rendering in Python.")
 
         self.temporal_derived_state_specs = OrderedDict()
         for key in self.state_encoders_keys:
@@ -895,15 +884,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             self.runtime_cfg.get("aux_handle_gt_bias_m", 0.0),
             "aux_handle_gt_bias_m",
         )
-        # Smaller but nonzero detector error for the two visible initial handle endpoints.
-        self.initial_handle_points_noise_m = self._parse_aux_handle_offset_bound(
-            self.runtime_cfg.get("initial_handle_points_noise_m", 0.0),
-            "initial_handle_points_noise_m",
-        )
-        self.initial_handle_points_bias_m = self._parse_aux_handle_offset_bound(
-            self.runtime_cfg.get("initial_handle_points_bias_m", 0.0),
-            "initial_handle_points_bias_m",
-        )
         # Aux handle input mode:
         #   "recurrent"        -> legacy: policy input = previous step's aux prediction (aux_buffer).
         #   "closed_door_base" -> policy input = the closed-door (door joint=0) handle pose expressed
@@ -938,9 +918,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.aux_handle_gt_bias = None
         if self.has_aux_input and "aux_handle_pos" in self.aux_state_specs:
             self.aux_handle_gt_bias = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
-        self.initial_handle_points_bias = torch.zeros(
-            (self.num_envs, 2, 3), dtype=torch.float32, device=self.device
-        )
         self.temporal_aux_handle_enabled = (
             self.proprio_temporal_field_state_keys.get("aux_handle_pos") == "aux_handle_pos"
         )
@@ -1936,13 +1913,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             dtype=torch.float32,
             device=self.device,
         )
-        self.temporal_initial_handle_history = torch.zeros(
-            (self.num_envs, self.temporal_history_len, 6),
-            dtype=torch.float32,
-            device=self.device,
-        )
-        self.initial_handle_points_w = torch.zeros(
-            (self.num_envs, 2, 3), dtype=torch.float32, device=self.device
+        self.initial_handle_pos_w = torch.zeros(
+            (self.num_envs, 3), dtype=torch.float32, device=self.device
         )
         self.temporal_push_pull_belief_history = torch.zeros(
             (self.num_envs, self.temporal_history_len, 2),
@@ -2063,14 +2035,9 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         offsets_s = tuple(float(offset_s) for offset_s in offsets_s)
         offset_to_index = {offset_s: idx for idx, offset_s in enumerate(offsets_s)}
         include_aux_handle = self.temporal_aux_handle_enabled
-        include_initial_handle = self.proprio_temporal_field_state_keys.get("initial_handle_points") == "initial_handle_points"
         include_push_pull_belief = self.temporal_push_pull_belief_enabled
         if include_aux_handle:
             self._validate_temporal_history_buffer_shape("temporal_aux_handle_history", self.temporal_aux_handle_history, 3)
-        if include_initial_handle:
-            self._validate_temporal_history_buffer_shape(
-                "temporal_initial_handle_history", self.temporal_initial_handle_history, 6
-            )
         if include_push_pull_belief:
             self._validate_temporal_history_buffer_shape(
                 "temporal_push_pull_belief_history",
@@ -2090,11 +2057,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 if include_aux_handle
                 else None
             )
-            initial_handle_samples = (
-                self._gather_temporal_values(self.temporal_initial_handle_history, effective_steps)
-                if include_initial_handle
-                else None
-            )
             push_pull_belief_samples = (
                 self._gather_temporal_values(self.temporal_push_pull_belief_history, effective_steps)
                 if include_push_pull_belief
@@ -2111,11 +2073,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             aux_handle_history_by_offset = (
                 self._sample_temporal_history_offsets(self.temporal_aux_handle_history, nonzero_offsets)
                 if include_aux_handle
-                else {}
-            )
-            initial_handle_history_by_offset = (
-                self._sample_temporal_history_offsets(self.temporal_initial_handle_history, nonzero_offsets)
-                if include_initial_handle
                 else {}
             )
             push_pull_belief_history_by_offset = (
@@ -2151,18 +2108,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                         aux_handle_pos
                         if abs(offset_s) <= 1.0e-9
                         else aux_handle_history_by_offset[offset_s]
-                        for offset_s in offsets_s
-                    ],
-                    dim=1,
-                )
-            initial_handle_samples = None
-            if include_initial_handle:
-                initial_handle_now = self._get_noisy_initial_handle_points_base().detach()
-                initial_handle_samples = torch.stack(
-                    [
-                        initial_handle_now
-                        if abs(offset_s) <= 1.0e-9
-                        else initial_handle_history_by_offset[offset_s]
                         for offset_s in offsets_s
                     ],
                     dim=1,
@@ -2216,13 +2161,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         }
         if include_aux_handle:
             sample_cache["aux_handle_pos"] = aux_handle_samples
-        if include_initial_handle:
-            if initial_handle_samples is None or initial_handle_samples.ndim != 3 or initial_handle_samples.shape[-1] != 6:
-                raise RuntimeError(
-                    "Temporal initial_handle_points cache must have shape [N, T, 6], "
-                    f"got {None if initial_handle_samples is None else tuple(initial_handle_samples.shape)}."
-                )
-            sample_cache["initial_handle_points"] = initial_handle_samples
         if include_push_pull_belief:
             sample_cache["push_pull_belief"] = push_pull_belief_samples
         return sample_cache
@@ -2292,9 +2230,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             return
         self._validate_temporal_history_buffer_shape("temporal_aux_handle_history", self.temporal_aux_handle_history, 3)
         self._validate_temporal_history_buffer_shape(
-            "temporal_initial_handle_history", self.temporal_initial_handle_history, 6
-        )
-        self._validate_temporal_history_buffer_shape(
             "temporal_push_pull_belief_history",
             self.temporal_push_pull_belief_history,
             2,
@@ -2308,7 +2243,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             aux_handle_pos = self._get_temporal_aux_handle_for_history()
         if push_pull_belief is None:
             push_pull_belief = self._get_temporal_push_pull_belief_for_history()
-        initial_handle_points = self._get_noisy_initial_handle_points_base().detach()
 
         if env_ids is None:
             if self.temporal_history_len > 1:
@@ -2318,7 +2252,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 self.temporal_base_vel_history[:, 1:, :] = self.temporal_base_vel_history[:, :-1, :].clone()
                 self.temporal_base_translation_history[:, 1:, :] = self.temporal_base_translation_history[:, :-1, :].clone()
                 self.temporal_aux_handle_history[:, 1:, :] = self.temporal_aux_handle_history[:, :-1, :].clone()
-                self.temporal_initial_handle_history[:, 1:, :] = self.temporal_initial_handle_history[:, :-1, :].clone()
                 self.temporal_push_pull_belief_history[:, 1:, :] = (
                     self.temporal_push_pull_belief_history[:, :-1, :].clone()
                 )
@@ -2328,7 +2261,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             self.temporal_base_vel_history[:, 0, :] = base_vel
             self.temporal_base_translation_history[:, 0, :] = base_translation
             self.temporal_aux_handle_history[:, 0, :] = aux_handle_pos
-            self.temporal_initial_handle_history[:, 0, :] = initial_handle_points
             self.temporal_push_pull_belief_history[:, 0, :] = push_pull_belief
             return
 
@@ -2347,9 +2279,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             self.temporal_aux_handle_history[env_ids, 1:, :] = self.temporal_aux_handle_history[
                 env_ids, :-1, :
             ].clone()
-            self.temporal_initial_handle_history[env_ids, 1:, :] = self.temporal_initial_handle_history[
-                env_ids, :-1, :
-            ].clone()
             self.temporal_push_pull_belief_history[env_ids, 1:, :] = self.temporal_push_pull_belief_history[
                 env_ids, :-1, :
             ].clone()
@@ -2359,7 +2288,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.temporal_base_vel_history[env_ids, 0, :] = base_vel[env_ids]
         self.temporal_base_translation_history[env_ids, 0, :] = base_translation[env_ids]
         self.temporal_aux_handle_history[env_ids, 0, :] = aux_handle_pos[env_ids]
-        self.temporal_initial_handle_history[env_ids, 0, :] = initial_handle_points[env_ids]
         self.temporal_push_pull_belief_history[env_ids, 0, :] = push_pull_belief[env_ids]
 
     def _seed_temporal_histories(self, env_ids=None):
@@ -2373,12 +2301,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         base_translation = self._get_student_base_translation_vector().detach()
         timestamp = self._get_current_time_s()
         aux_handle = self._build_seed_temporal_aux_handle()
-        initial_handle = self._get_noisy_initial_handle_points_base().detach()
         push_pull_belief = self._build_initial_temporal_push_pull_belief()
         self._validate_temporal_history_buffer_shape("temporal_aux_handle_history", self.temporal_aux_handle_history, 3)
-        self._validate_temporal_history_buffer_shape(
-            "temporal_initial_handle_history", self.temporal_initial_handle_history, 6
-        )
         self._validate_temporal_history_buffer_shape(
             "temporal_push_pull_belief_history",
             self.temporal_push_pull_belief_history,
@@ -2394,9 +2318,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 -1, self.temporal_history_len, -1
             )
             self.temporal_aux_handle_history[:] = aux_handle.unsqueeze(1).expand(-1, self.temporal_history_len, -1)
-            self.temporal_initial_handle_history[:] = initial_handle.unsqueeze(1).expand(
-                -1, self.temporal_history_len, -1
-            )
             self.temporal_push_pull_belief_history[:] = push_pull_belief.unsqueeze(1).expand(
                 -1, self.temporal_history_len, -1
             )
@@ -2414,9 +2335,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             -1, self.temporal_history_len, -1
         )
         self.temporal_aux_handle_history[env_ids] = aux_handle[env_ids].unsqueeze(1).expand(
-            -1, self.temporal_history_len, -1
-        )
-        self.temporal_initial_handle_history[env_ids] = initial_handle[env_ids].unsqueeze(1).expand(
             -1, self.temporal_history_len, -1
         )
         self.temporal_push_pull_belief_history[env_ids] = self._build_initial_temporal_push_pull_belief(
@@ -2680,8 +2598,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             value = full_value[:, self.action_component_history_indices["hand"]]
         elif actual_state_key == "aux_handle_pos":
             value = self._get_temporal_sample_from_cache(sample_cache, "aux_handle_pos", timestamp_s)
-        elif actual_state_key == "initial_handle_points":
-            value = self._get_temporal_sample_from_cache(sample_cache, "initial_handle_points", timestamp_s)
         elif field_name == "push_pull_belief" or actual_state_key == self.push_pull_condition_obs_key:
             value = self._get_temporal_sample_from_cache(sample_cache, "push_pull_belief", timestamp_s)
         else:
@@ -2781,32 +2697,25 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             "for aux handle position prediction."
         )
 
-    def _get_initial_handle_points_base(self):
-        """Reset-time two-point handle anchor in the robot's current base frame."""
+    def _get_initial_handle_position_base(self):
+        """Reset-time handle anchor transformed into the robot's current base frame."""
         base_idx = int(self.ov_env._robot_base_body_link_idx)
         base_pos_w = self.ov_env.robot.data.body_pos_w[:, base_idx]
         base_quat_w = self.ov_env.robot.data.body_quat_w[:, base_idx]
-        points_base = world_to_local(self.initial_handle_points_w, base_pos_w, base_quat_w)
-        return points_base.reshape(self.num_envs, 6)
+        return world_to_local(
+            self.initial_handle_pos_w.unsqueeze(1), base_pos_w, base_quat_w
+        ).squeeze(1)
 
     def _capture_initial_handle_anchor(self, env_ids=None):
-        getter = getattr(self.ov_env, "get_closed_handle_anchor_points_in_base_frame", None)
-        if not callable(getter):
-            raise RuntimeError(
-                "Expected environment to expose get_closed_handle_anchor_points_in_base_frame()."
-            )
-        handle_points_base = getter()
+        handle_pos_base = self._get_handle_position_base()
         base_idx = int(self.ov_env._robot_base_body_link_idx)
         base_pos_w = self.ov_env.robot.data.body_pos_w[:, base_idx]
         base_quat_w = self.ov_env.robot.data.body_quat_w[:, base_idx]
-        handle_quat = base_quat_w.unsqueeze(1).expand(-1, 2, -1)
-        handle_points_w = quat_apply(
-            handle_quat.reshape(-1, 4), handle_points_base.reshape(-1, 3)
-        ).reshape(self.num_envs, 2, 3) + base_pos_w.unsqueeze(1)
+        handle_pos_w = quat_apply(base_quat_w, handle_pos_base) + base_pos_w
         if env_ids is None:
-            self.initial_handle_points_w[:] = handle_points_w.detach()
+            self.initial_handle_pos_w[:] = handle_pos_w.detach()
         elif env_ids.numel() > 0:
-            self.initial_handle_points_w[env_ids] = handle_points_w[env_ids].detach()
+            self.initial_handle_pos_w[env_ids] = handle_pos_w[env_ids].detach()
 
     def _get_closed_handle_position_base(self):
         # Closed-door (door joint=0) handle position in the CURRENT robot base frame. Simulates a
@@ -2911,33 +2820,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             self.aux_handle_gt_bias[env_ids] = self._sample_box_offset(
                 (int(env_ids.numel()), 3), self.aux_handle_gt_bias_m
             )
-
-    def _resample_initial_handle_points_bias(self, env_ids=None):
-        """Resample a constant per-episode bias independently for both endpoint observations."""
-        if self.initial_handle_points_bias is None:
-            return
-        if self.initial_handle_points_bias_m is None:
-            if env_ids is None:
-                self.initial_handle_points_bias.zero_()
-            elif env_ids.numel() > 0:
-                self.initial_handle_points_bias[env_ids] = 0.0
-            return
-        shape = (self.num_envs, 2, 3) if env_ids is None else (int(env_ids.numel()), 2, 3)
-        sampled = self._sample_box_offset(shape, self.initial_handle_points_bias_m)
-        if env_ids is None:
-            self.initial_handle_points_bias[:] = sampled
-        elif env_ids.numel() > 0:
-            self.initial_handle_points_bias[env_ids] = sampled
-
-    def _get_noisy_initial_handle_points_base(self):
-        points = self._get_initial_handle_points_base().reshape(self.num_envs, 2, 3)
-        if self.initial_handle_points_bias is not None:
-            points = points + self.initial_handle_points_bias
-        if self.initial_handle_points_noise_m is not None:
-            points = points + self._sample_isotropic_offset(
-                points.shape, self.initial_handle_points_noise_m, dtype=points.dtype
-            )
-        return points.reshape(self.num_envs, 6)
 
     def _apply_aux_handle_init_perturbation(self, handle_pos):
         # Add fresh per-call isotropic NOISE (aux_handle_noise_m) to a handle-pose input seed/anchor.
@@ -4380,8 +4262,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 obs[key] = lagged_base_vel if lag_active and lagged_base_vel is not None else base_vel
             elif key == "keyframe_pose_base":
                 obs[key] = keyframe_pose_base
-            elif key == "initial_handle_points":
-                obs[key] = self._get_noisy_initial_handle_points_base()
+            elif key == "initial_handle_pos":
+                obs[key] = self._get_initial_handle_position_base()
             elif key in self.temporal_derived_state_specs:
                 obs[key] = temporal_state_values[key]
             elif key in self.aux_state_specs:
@@ -4628,7 +4510,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             self._resample_door_hole_aug()
             self.temporal_current_time_s = self._iteration_to_time_s(start_iteration)
             self._resample_aux_handle_gt_bias()
-            self._resample_initial_handle_points_bias()
             self._seed_temporal_histories()
             self._seed_aux_buffer()
             self._seed_push_pull_condition_buffer()
@@ -4754,7 +4635,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                     self._resample_door_hole_aug(done_mask)
                     # Redraw the systematic GT bias BEFORE seeding, since the seed reads the biased GT.
                     self._resample_aux_handle_gt_bias(done_mask)
-                    self._resample_initial_handle_points_bias(done_mask)
                     self._seed_temporal_histories(done_mask)
                     self._seed_aux_buffer(done_mask)
                     self._seed_push_pull_condition_buffer(done_mask)

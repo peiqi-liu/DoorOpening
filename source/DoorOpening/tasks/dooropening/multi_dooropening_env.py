@@ -17,6 +17,7 @@ from DoorOpening.assets.door.multi_door_cfg import (
     asset_family_ids,
     board_offsets,
     closed_handle_offsets_base,
+    closed_handle_points_base,
     configure_multi_door_assets_for_rank,
     edit_door_articulation,
     get_multi_door_asset_start_index,
@@ -327,6 +328,9 @@ class DooropeningEnv(DirectRLEnv):
         # from the URDF (fix_base => static geometry), so the closed-handle anchor needs no sim
         # capture; see get_closed_handle_position_in_base_frame().
         self.closed_handle_pos_door_base = closed_handle_offsets_base.to(
+            device=self.device, dtype=torch.float32
+        )[self.env_asset_indices]
+        self.closed_handle_points_door_base = closed_handle_points_base.to(
             device=self.device, dtype=torch.float32
         )[self.env_asset_indices]
         self.use_motion_ref = bool(getattr(self.cfg, "use_motion_ref", True))
@@ -1748,6 +1752,40 @@ class DooropeningEnv(DirectRLEnv):
         ).squeeze(1)
 
         return handle_center_pos_base
+
+    def get_handle_anchor_points_in_base_frame(self) -> torch.Tensor:
+        """Return the two independent handle anchor points in the robot base frame.
+
+        The points are the two precomputed endpoints of the handle stick, kept as
+        separate 3D points rather than collapsed to a midpoint/axis representation.
+        Shape is (num_envs, 2, 3).
+        """
+        robot_base_pos_w = self.robot.data.body_pos_w[:, self._robot_base_body_link_idx]
+        robot_base_quat_w = self.robot.data.body_quat_w[:, self._robot_base_body_link_idx]
+
+        handle_body_local_idx = self.door_body_names.index("link_2")
+        handle_body_idx = int(self._door_body_idx[handle_body_local_idx])
+        handle_body_pos_w = self.door.data.body_pos_w[:, handle_body_idx]
+        handle_body_quat_w = self.door.data.body_quat_w[:, handle_body_idx]
+        offsets = self.handle_offsets.to(device=handle_body_pos_w.device, dtype=handle_body_pos_w.dtype)
+        handle_quat = handle_body_quat_w.unsqueeze(1).expand(-1, 2, -1)
+        handle_points_w = quat_apply(handle_quat.reshape(-1, 4), offsets.reshape(-1, 3)).reshape(
+            self.num_envs, 2, 3
+        ) + handle_body_pos_w.unsqueeze(1)
+        return world_to_local(handle_points_w, robot_base_pos_w, robot_base_quat_w)
+
+    def get_closed_handle_anchor_points_in_base_frame(self) -> torch.Tensor:
+        """Return the two handle endpoints at the closed-door pose in the current robot base frame."""
+        door_base_pos_w = self.door.data.body_pos_w[:, self._door_base_link_idx]
+        door_base_quat_w = self.door.data.body_quat_w[:, self._door_base_link_idx]
+        points_w = quat_apply(
+            door_base_quat_w.unsqueeze(1).expand(-1, 2, -1).reshape(-1, 4),
+            self.closed_handle_points_door_base.reshape(-1, 3),
+        ).reshape(self.num_envs, 2, 3) + door_base_pos_w.unsqueeze(1)
+
+        robot_base_pos_w = self.robot.data.body_pos_w[:, self._robot_base_body_link_idx]
+        robot_base_quat_w = self.robot.data.body_quat_w[:, self._robot_base_body_link_idx]
+        return world_to_local(points_w, robot_base_pos_w, robot_base_quat_w)
 
     def get_closed_handle_position_in_base_frame(self) -> torch.Tensor:
         """Closed-door (joints=0) handle position expressed in the CURRENT robot base frame.

@@ -202,15 +202,23 @@ def compute_exact_door_keypoints(urdf_path):
     link_2 = root.find(".//link[@name='link_2']")
     mesh_2 = process_link_mesh(urdf_path, link_2)
     if mesh_2 is not None:
-        # To find the true "tip", we look for the vertex furthest from the joint origin (0,0,0)
-        vertices = mesh_2.vertices
-        distances = np.linalg.norm(vertices, axis=1)
-        furthest_vertex = vertices[np.argmax(distances)]
+        # Use two separated points on the visible handle mesh. The joint origin is deliberately
+        # excluded: it is a kinematic attachment point and is not guaranteed to lie in a real
+        # camera/SAM3 handle mask.
+        vertices = np.asarray(mesh_2.vertices, dtype=np.float64)
+        radius = float(np.linalg.norm(vertices - vertices.mean(axis=0), axis=1).max())
+        clearance = max(0.005, 0.10 * radius)
+        candidate_mask = np.linalg.norm(vertices, axis=1) >= clearance
+        candidates = vertices[candidate_mask]
+        if candidates.shape[0] < 2:
+            candidates = vertices
+        # Linear-time farthest-pair approximation: a diameter endpoint followed by its farthest
+        # counterpart. This gives two distinct visible endpoints without choosing the joint origin.
+        first = candidates[np.argmax(np.linalg.norm(candidates - candidates.mean(axis=0), axis=1))]
+        second = candidates[np.argmax(np.linalg.norm(candidates - first, axis=1))]
+        handle_endpoints = np.asarray([first, second], dtype=np.float64)
 
-        keypoints["link_2"] = [
-            [0.0, 0.0, 0.0],
-            furthest_vertex.tolist()
-        ]
+        keypoints["link_2"] = handle_endpoints.tolist()
 
         # Handle center (mean of the two link_2 keypoints) expressed in the door "base" frame at the
         # CLOSED pose (all joints = 0). Because the door is fix_base, this is a static per-asset
@@ -219,9 +227,14 @@ def compute_exact_door_keypoints(urdf_path):
         joint_2 = find_joint_by_child(root, "link_2")
         board_to_handle_closed = origin_to_transform(None if joint_2 is None else joint_2.find("origin"))
         base_to_handle_closed = base_to_board_closed @ board_to_handle_closed
-        handle_center_local = (np.array([0.0, 0.0, 0.0], dtype=np.float64) + furthest_vertex) / 2.0
+        handle_center_local = handle_endpoints.mean(axis=0)
         handle_center_base = transform_points(handle_center_local[None, :], base_to_handle_closed)[0]
         keypoints["link_2_center_base"] = handle_center_base.tolist()
+        handle_points_base = transform_points(
+            handle_endpoints,
+            base_to_handle_closed,
+        )
+        keypoints["link_2_points_base"] = handle_points_base.tolist()
 
     # --- Full door outer bbox (frame + board + handle) in the base frame at the closed pose. Used
     # for wall-distractor placement so walls sit outside the WHOLE door, not just the link_1 panel:

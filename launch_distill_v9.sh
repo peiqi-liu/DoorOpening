@@ -1,0 +1,3 @@
+#!/bin/bash
+cd ~/DoorOpening
+~/miniforge3/envs/DoorOpening/bin/python -m torch.distributed.run   --nnodes=1   --nproc_per_node=2   ./scripts/distillation/run_multi_distillation.py   --task DooropeningMulti   --headless   --num_envs 280   --distributed   --video   --video_interval 5000   --video_length 1000   --teacher_partnetv5 logs/rl_games/door_opening/hook_return30pct_tape_discretegrip_rank000_local000/nn/last_door_opening_ep_3400_rew_38694.09.pth   --door-families PartNetv5_plus   --wandb-project-name dooropeningv22-distill   --wandb-entity peiqiliu   --wandb-name vision9_distill_basevel_hookteacher   --track   2>&1 | tee ~/DoorOpening/distill_vision9_basevel_$(date +%Y%m%d_%H%M%S).log

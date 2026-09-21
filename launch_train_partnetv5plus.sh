@@ -1,0 +1,3 @@
+#!/bin/bash
+cd ~/DoorOpening
+~/miniforge3/envs/DoorOpening/bin/python -m torch.distributed.run   --nnodes=1   --nproc_per_node=2   ./scripts/rl_games/train.py   --task DooropeningMulti   --num_envs 2048   agent.params.config.minibatch_size=8192   agent.params.config.save_frequency=100   --video_interval 10000   --video_length 1200   --max_iterations 30000   --headless   --video   --wandb-project-name dooropeningv22   --wandb-entity peiqiliu   --wandb-name "hook_return30pct_tape_discretegrip"   --exp-name "hook_return30pct_tape_discretegrip"   --seed 42   --track --distributed   --door_families PartNetv5_plus   2>&1 | tee ~/DoorOpening/train_hook_return30pct_tape_discretegrip_$(date +%Y%m%d_%H%M%S).log

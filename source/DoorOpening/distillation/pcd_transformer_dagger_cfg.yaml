@@ -64,14 +64,14 @@ temporal_state_encoders:
   fields:
     - q_arm
     - base_vel
-    - initial_handle_points
+    - initial_handle_pos
     # - push_pull_belief
     # - target_err_hand
     # - base_vel
     # aux_handle_pos is intentionally NOT in the temporal stack: it is a standalone, recurrent
     # handle-pose input seeded from ground truth on reset (see dagger.aux_handle_input_mode).
-    # initial_handle_points are the two independent SAM3-style handle anchor points, re-expressed
-    # in the base frame at each history timestamp.
+    # initial_handle_pos is the reset-time handle midpoint, re-expressed in the base frame at
+    # each history timestamp.
   hidden_dims: [128, 256]
   output_dim: 256
   activation: elu
@@ -116,16 +116,16 @@ state_encoders_cfg:
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  initial_handle_points:
-    # Two independent handle endpoints captured at reset and re-expressed in the current base frame.
-    input_dim: 6
+  initial_handle_pos:
+    # Initial handle measurement captured at reset and re-expressed in the current base frame.
+    input_dim: 3
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
   keyframe_pose_base:
-    # panda_link4 and panda_hand: position 3 + 6D orientation for each body.
-    body_names: [panda_link4, panda_hand]
-    input_dim: 18
+    # panda_link4: position 3 + 6D orientation.
+    body_names: [panda_link4]
+    input_dim: 9
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
@@ -155,8 +155,8 @@ state_encoders_cfg:
 
 transformer_cfg:
   type: "encoder_decoder"
-  encoder_layers: 6
-  decoder_layers: 6
+  encoder_layers: 4
+  decoder_layers: 4
   encoder_heads: 8
   decoder_heads: 8
   encoder_dim_feedforward: 1024
@@ -193,10 +193,6 @@ dagger:
   # NOISE: fresh per-step isotropic (ball) jitter, random direction x magnitude in [0, this] (m), added
   # to every aux input -- frame-to-frame detector noise. 0.0 disables it.
   aux_handle_noise_m: 0.1
-  # Two visible handle endpoints: smaller than aux noise/bias, but still substantial for SAM3
-  # endpoint uncertainty. Noise is per point/per observation; bias is per point/per episode.
-  initial_handle_points_noise_m: 0.05
-  initial_handle_points_bias_m: 0.025
   prediction_training:
     loss_window_start: 40
     loss_window_end: 100
