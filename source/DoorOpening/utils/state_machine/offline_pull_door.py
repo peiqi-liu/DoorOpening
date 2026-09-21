@@ -47,22 +47,6 @@ def _set_gripper(q_robot: torch.Tensor, width: float) -> None:
     q_robot[GRIPPER_Q_IDX] = width
 
 
-def _seed_ik_from_anchor(
-    q_robot: torch.Tensor,
-    anchor_joint_pos: dict[str, float],
-) -> torch.Tensor:
-    """Return an IK seed whose arm joints come from a deliberate posture anchor.
-
-    The base is intentionally left at its current value; ``solve_ik`` recomputes it from
-    ``base_pose``.  This is used only at the first pull waypoint so the planner can sacrifice
-    continuity at the grasp-to-pull transition, then continue from the newly solved posture.
-    """
-    q_seed = q_robot.clone()
-    for joint_name in FRANKA_JOINT_NAMES:
-        q_seed[FULL_JOINT_NAMES.index(joint_name)] = q_robot.new_tensor(anchor_joint_pos[joint_name])
-    return q_seed
-
-
 def get_rotation_quat(roll, pitch, yaw, device):
     return quat_from_euler_xyz(
         roll=torch.tensor([[roll]], device=device),
@@ -73,7 +57,6 @@ def get_rotation_quat(roll, pitch, yaw, device):
 
 def _make_pose(position: torch.Tensor, quat: torch.Tensor) -> torch.Tensor:
     return torch.cat([position, quat], dim=-1)
-
 
 # FRAME: every palm_pose below is a panda_hand pose, because that is what solve_ik drives
 # (api.py builds PinocchioIKSolver with ee_link_name="panda_hand").
@@ -377,7 +360,7 @@ def state_machine_offline_right_pull_door(
         device=device,
     )
 
-    for pull_step, theta in enumerate(theta_values):
+    for theta in theta_values:
         q_door = torch.tensor(
             [
                 theta.item(),
@@ -421,26 +404,13 @@ def state_machine_offline_right_pull_door(
         )
         palm_target_pose = _make_pose(palm_target_pos, palm_target_rot)
 
-        ik_seed = q_robot[:10]
-        ik_kwargs = {}
-        if pull_step == 0:
-            # Start the pull from a known null-space posture instead of the unlatch solution.
-            # The following waypoints use this solved pose as their continuity seed.
-            ik_seed = _seed_ik_from_anchor(q_robot, FRANKA_DEFAULT_JOINT_POS)[:10]
-            ik_kwargs = {
-                "reference_joint_pos": FRANKA_DEFAULT_JOINT_POS,
-                "num_attempts": 8,
-            }
-        else:
-            ik_kwargs = {"num_attempts": 1}
-
         q_robot[:10] = solve_ik(
             robot_urdf_path,
-            ik_seed,
+            q_robot[:10],
             palm_pose=palm_target_pose,
             base_pose=base_target_pose,
             robot_initial_pose=robot_initial_pose,
-            **ik_kwargs,
+            num_attempts=1,  # loop body: single seed for continuity (no random-restart branch jumps)
         )[0]
 
         _append_state(
@@ -778,17 +748,24 @@ def state_machine_offline_left_pull_door(
     )
 
     base_target_rot = robot_initial_pose[:, 3:].to(device).clone()
-    # Pregrasp/grasp yaw kept at the tuned -0.60*pi; unlatch and the pull sweep remain at
+    # Pregrasp/grasp yaw kept at the tuned -0.65*pi; unlatch and the pull sweep are restored to
     # their own original, independent pre-session values below (the "unify to one yaw" experiment
     # is reverted for everything except this one).
-    default_palm_rot = get_rotation_quat(math.pi / 2, 0, -0.60 * math.pi, device)
+    default_palm_rot = get_rotation_quat(math.pi / 2, 0, -0.65 * math.pi, device)
 
     # Guarantee the very first keyframe starts from a fully open gripper, regardless of whatever
     # gripper value the caller's robot_initial_q happened to carry -- staged closing below should
     # never put the reference into an already-grasping start state.
     _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
-    robot_traj[0] = q_robot.clone()
-    key_idx_in_key_indices.append(0)
+
+    _append_state(
+        robot_traj,
+        door_traj,
+        key_idx_in_key_indices,
+        q_robot,
+        q_door,
+        mark_keyframe=True,
+    )
 
     # -------------------------
     # Step 1: Pregrasp
@@ -811,9 +788,9 @@ def state_machine_offline_left_pull_door(
     # Pulled 5cm back off the +y side so the left door pregrasp doesn't reach so far right.
     pregrasp_base_y_offset = 0.25
     # Brought closer to the panel (0.25 -> 0.15) to match the new pregrasp/grasp yaw.
-    pregrasp_palm_x_offset = 0.3
+    pregrasp_palm_x_offset = 0.25
     pregrasp_palm_y_offset = 0.15
-    pregrasp_palm_z_offset = 0.08
+    pregrasp_palm_z_offset = 0.25
 
     base_target_pos = handle_pos.clone()
     base_target_pos[:, 0] += pregrasp_base_x_offset
@@ -856,10 +833,9 @@ def state_machine_offline_left_pull_door(
     # (-x, toward the handle/door). Robot faces -x, so right=+y / left=-y / forward=-x.
     # Palm<->door x gap kept at 0.035, matching the right-door planner so left/right grasp the
     # same distance out from the panel.
-    # Back the grasp pose away from the handle by 1.5 cm to reduce panel-side slip/contact.
-    grasp_palm_x_offset = 0.075
+    grasp_palm_x_offset = 0.06
     grasp_palm_y_offset = 0.015
-    grasp_palm_z_offset = 0.02
+    grasp_palm_z_offset = 0.04
 
     palm_target_pos = handle_pos.clone()
     palm_target_pos[:, 0] += grasp_palm_x_offset
@@ -875,9 +851,10 @@ def state_machine_offline_left_pull_door(
         robot_initial_pose=robot_initial_pose,
         reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
     )[0]
-    # Keep the gripper open for the complete left-pull reference. The handle is followed by the
-    # planned palm pose; no closed-gripper command should appear in the Viser trajectory.
-    _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
+    # Close fully to grip the handle here -- nothing resets the gripper again until Step 5
+    # releases it after the pull sweep, so this same closed width carries through unlatch and
+    # the pull.
+    _set_gripper(q_robot, GRIPPER_CLOSED_WIDTH)
 
     _append_state(
         robot_traj,
@@ -896,17 +873,17 @@ def state_machine_offline_left_pull_door(
     # what a person does and what gives the pull a rigid reaction point. Must stay above the
     # highest randomized unlatch threshold (0.85 rad) so every door actually unlatches.
     unlatch_hinge_angle = 0.95
-    unlatch_palm_y_delta = -0.01
-    unlatch_palm_z_delta = -0.08
+    unlatch_palm_y_delta = 0.015
+    unlatch_palm_z_delta = -0.10
 
     # Orientation shared with the pull sweep below: yaw fixed, roll held at the pull sweep's own
     # starting value (so this step ends exactly where Step 4 begins), and pitch tracks the HANDLE
-    # joint angle itself (from neutral to the configured hold angle) instead of jumping
+    # joint angle itself (0 at neutral -> 0.85 rad at the press hard-stop) instead of jumping
     # straight to one fixed final orientation. The pull loop reuses this same
     # handle_pitch_gain * handle_angle formula during its hinge-release stage, so the press and
     # the release are two continuous halves of the same motion instead of independently-tuned
     # endpoints with a pop between them.
-    unlatch_yaw = -0.65 * math.pi
+    unlatch_pull_yaw = -0.8 * math.pi
     pull_rot_roll_base = math.pi / 2
     pull_rot_roll_per_theta = 0.9
     pull_theta_start = 0.30
@@ -926,7 +903,7 @@ def state_machine_offline_left_pull_door(
         palm_target_pose[:, 3:] = get_rotation_quat(
             unlatch_roll,
             handle_pitch_gain * handle_angle,
-            unlatch_yaw,
+            unlatch_pull_yaw,
             device,
         )
 
@@ -967,7 +944,6 @@ def state_machine_offline_left_pull_door(
     # panda_link3 was hitting arx link4.
     pull_base_y_offset = 0.08
     pull_base_y_gain = -0.1 / 1.45
-    pull_yaw = -0.8 * math.pi
 
     # Held flat while the panel is not yet confidently open (0.3 rad -- matches pull_theta_start, well
     # past the door_closed_range=0.05 rad relock boundary), then released QUICKLY rather than dragged
@@ -984,7 +960,7 @@ def state_machine_offline_left_pull_door(
     # Roll tracks theta (restored from pre-session baseline, pull_rot_roll_base/per_theta defined
     # above near Step 3) so the wrist keeps rotating WITH the handle/panel as the sweep progresses.
     # Pitch tracks the handle joint angle via the same handle_pitch_gain used in Step 3 -- held at
-    # hold angle while the hinge hold keeps the handle pressed, then ramping back to 0 exactly as the
+    # 0.85 while the hinge hold keeps the handle pressed, then ramping back to 0 exactly as the
     # handle springs back (pull_hinge_hold_until_theta -> pull_hinge_release_by_theta below),
     # continuous with Step 3's ramp-up instead of holding pitch=0 through the whole sweep. Yaw
     # fixed at unlatch_pull_yaw, shared with Step 3.
@@ -995,10 +971,10 @@ def state_machine_offline_left_pull_door(
         pull_theta_step,
         device=device,
     )
-
+    
     # Retract active perception arms to safe range
 
-    for pull_step, theta in enumerate(theta_values):
+    for theta in theta_values:
         handle_angle = _pull_hinge_angle(
             theta.item(),
             unlatch_hinge_angle,
@@ -1035,29 +1011,19 @@ def state_machine_offline_left_pull_door(
         palm_target_rot = get_rotation_quat(
             pull_rot_roll_base + pull_rot_roll_per_theta * theta.item(),
             handle_pitch_gain * handle_angle,
-            pull_yaw,
+            unlatch_pull_yaw,
             device,
         )
         palm_target_pose = _make_pose(palm_target_pos, palm_target_rot)
 
-        ik_seed = q_robot[:10]
-        ik_kwargs = {
-            "reference_joint_pos": LEFT_PULL_IK_ANCHOR_JOINT_POS,
-            "num_attempts": 1,
-        }
-        if pull_step == 0:
-            # Deliberately re-anchor the first pull solve. Continuity starts after this waypoint,
-            # so the arm is not forced to drag the unlatch joint posture into the pull branch.
-            ik_seed = _seed_ik_from_anchor(q_robot, LEFT_PULL_IK_ANCHOR_JOINT_POS)[:10]
-            ik_kwargs["num_attempts"] = 8
-
         q_robot[:10] = solve_ik(
             robot_urdf_path,
-            ik_seed,
+            q_robot[:10],
             palm_pose=palm_target_pose,
             base_pose=base_target_pose,
             robot_initial_pose=robot_initial_pose,
-            **ik_kwargs,
+            reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
+            num_attempts=1,  # loop body: single seed for continuity (no random-restart branch jumps)
         )[0]
 
         _append_state(

@@ -95,7 +95,8 @@ class PinocchioIKSolver():
         controlled_joints: List[str],
         verbose: bool = False,
         reference_joint_pos: Optional[Union[np.ndarray, Dict[str, float]]] = None,
-        reference_joint_gain: float = 0.05,
+        reference_joint_gain: float = 0.5,
+        limit_avoidance_gain: float = 1.0,
     ):
         """
         urdf_path: path to urdf file
@@ -103,7 +104,26 @@ class PinocchioIKSolver():
         controlled_joints: list of joint names to control
         reference_joint_pos: optional joint configuration to bias redundant IK solutions toward.
             Dict inputs may contain any subset of model joint names.
-        reference_joint_gain: null-space gain for the reference joint bias.
+        reference_joint_gain: null-space gain for the reference joint bias (the ANCHOR pose).
+        limit_avoidance_gain: null-space gain pushing joints back toward the middle of their
+            range as they approach a limit.
+
+        Why both, and why the reference gain is no longer 0.05:
+
+        This is a 7-DOF arm solving a 6-DOF task, so there is a whole null space of solutions for
+        any reachable pose -- which is exactly why the real robot can hold poses this solver
+        reports as contorted. The solver was not using that freedom. It clamped the configuration
+        to the joint limits every DLS step (still does, below, as a backstop), so a joint that
+        drifted into a limit simply STUCK there: clamping kills the descent direction instead of
+        trading the excess off against the redundancy. The only null-space term was a weak (0.05)
+        pull toward the anchor, far too soft to keep a joint off a limit the task was driving it
+        into. Measured consequence: panda_joint6 pinned at 3.82 and panda_joint7 at +-2.967 (both
+        hard limits) for whole phases of the door trajectory, with the wrist then forced into a
+        ~320 deg unwind to escape.
+
+        Gradient projection (Liegeois) is the standard answer and costs one extra term: push down
+        the gradient of a joint-centering cost inside the null space, where it changes the arm's
+        posture WITHOUT disturbing the end-effector pose it has already achieved.
         """
         if verbose:
             print(f"{urdf_path=}")
@@ -153,6 +173,14 @@ class PinocchioIKSolver():
 
         self.has_joint_reference = reference_joint_pos is not None
         self.reference_joint_gain = reference_joint_gain if self.has_joint_reference else 0.0
+        self.limit_avoidance_gain = limit_avoidance_gain
+        # Centre and range of every ARM joint, precomputed for the null-space centering gradient.
+        # Only finite limits are usable: the base joints are effectively unbounded (+-5 m / +-1e5
+        # rad) and centering them is meaningless, so they are excluded by construction here.
+        _lo = self.model.lowerPositionLimit[self.arm_joint_indices]
+        _hi = self.model.upperPositionLimit[self.arm_joint_indices]
+        self._arm_limit_mid = 0.5 * (_lo + _hi)
+        self._arm_limit_range = np.maximum(_hi - _lo, 1e-6)
         self.q_ref = self.q_neutral.copy()
         if reference_joint_pos is not None:
             self.q_ref = self._qmap_control2model(
@@ -323,6 +351,21 @@ class PinocchioIKSolver():
         quat = R.from_matrix(self.data.oMf[frame_idx].rotation).as_quat()
         return pos.copy(), quat.copy()
 
+    def _limit_center_gradient(self, q):
+        """d/dq of a normalised joint-centering cost, for the ARM joints only.
+
+        H(q) = 1/2 * sum_i ((q_i - mid_i) / range_i)^2   ->   dH/dq_i = (q_i - mid_i) / range_i^2
+
+        Dividing by the joint's own range twice is deliberate: it makes the push proportional to
+        how far through ITS OWN travel the joint has drifted, so a tight joint (panda_joint7,
+        +-2.9671) is defended harder than a roomy one, and the term stays scale-free across joints
+        with very different spans. Projected into the null space by the caller, this re-poses the
+        arm without moving the end effector.
+        """
+        q_arm = np.asarray(q).flatten()[self.arm_joint_indices]
+        return (q_arm - self._arm_limit_mid) / (self._arm_limit_range ** 2)
+
+
     def compute_ik(
         self,
         pos_desired: Optional[np.ndarray]=None,
@@ -417,12 +460,24 @@ class PinocchioIKSolver():
                 J_arm = J[:, self.arm_joint_indices]
                 damping = J_arm.dot(J_arm.T) + self.DAMP * np.eye(J_arm.shape[0])
                 v = -J_arm.T.dot(np.linalg.solve(damping, err))
-                if self.reference_joint_gain > 0.0 and len(self.arm_joint_indices) > 0:
+                use_reference = self.reference_joint_gain > 0.0 and self.has_joint_reference
+                use_limit_avoidance = self.limit_avoidance_gain > 0.0
+                if (use_reference or use_limit_avoidance) and len(self.arm_joint_indices) > 0:
                     J_arm_pinv = np.linalg.pinv(J_arm, rcond=1e-4)
                     nullspace = np.eye(len(self.arm_joint_indices)) - J_arm_pinv.dot(J_arm)
-                    q_ref_delta = self.q_ref[self.arm_joint_indices] - q[self.arm_joint_indices]
-                    q_ref_delta = (q_ref_delta + np.pi) % (2 * np.pi) - np.pi
-                    v += nullspace.dot(self.reference_joint_gain * q_ref_delta)
+                    dq_null = np.zeros(len(self.arm_joint_indices))
+                    if use_reference:
+                        # Anchor: bias the redundancy toward the arm's natural (default) pose.
+                        q_ref_delta = self.q_ref[self.arm_joint_indices] - q[self.arm_joint_indices]
+                        q_ref_delta = (q_ref_delta + np.pi) % (2 * np.pi) - np.pi
+                        dq_null += self.reference_joint_gain * q_ref_delta
+                    if use_limit_avoidance:
+                        # Gradient projection: descend a joint-centering cost, normalised by each
+                        # joint's own range so a tight joint is defended harder than a loose one.
+                        # This is what keeps joint6/joint7 off their stops instead of clamping
+                        # them onto the stops and stalling there.
+                        dq_null += -self.limit_avoidance_gain * self._limit_center_gradient(q)
+                    v += nullspace.dot(dq_null)
                 # v = v.clip(-0.1, 0.1)
                 v_full = np.zeros(self.model.nv)
                 for k, idx in enumerate(self.arm_joint_indices):

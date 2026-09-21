@@ -11,7 +11,7 @@ import time
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT, DOOR_INITIAL_POS, DOOR_INITIAL_ROT
 import pickle as pkl
 import os
-from scipy.interpolate import CubicSpline
+from scipy.interpolate import PchipInterpolator
 import random
 
 from DoorOpening.utils.state_machine.pin import PinocchioIKSolver
@@ -588,7 +588,7 @@ def collocate_and_playback(robot_traj, door_traj, key_idx_in_key_indices, length
         # Drop consecutive duplicate waypoints first: the offline IK can return the same config
         # for two adjacent waypoints (e.g. an unreachable/saturated target that best-errors onto
         # its neighbour's pose), which makes the chord-length parameter non-strictly-increasing
-        # and crashes CubicSpline ("x must be strictly increasing").
+        # and crashes PchipInterpolator ("x must be strictly increasing").
         if len(ps) > 1:
             seg_dists = np.linalg.norm(ps[1:] - ps[:-1], axis=1)
             keep = np.concatenate([[True], seg_dists > 1e-9])
@@ -602,7 +602,12 @@ def collocate_and_playback(robot_traj, door_traj, key_idx_in_key_indices, length
             t_local = np.concatenate([[0.0], np.cumsum(dists)])
             t_local = t_local / max(t_local[-1], 1e-6)
 
-            cs = CubicSpline(t_local, ps, axis=0, bc_type="clamped")
+            # PCHIP (not a natural/clamped cubic spline): shape-preserving per DOF, so a segment
+            # containing a "moves then holds flat" pattern -- which the base-then-arm-only splits in
+            # the pull planners produce (e.g. base translates while the arm holds still, then the arm
+            # moves while the base holds still) -- interpolates straight to the plateau instead of
+            # curving past it and correcting back, the overshoot a C2 cubic spline forces there.
+            cs = PchipInterpolator(t_local, ps, axis=0)
 
             t_samples = np.linspace(
                 0.0, 1.0,
@@ -1028,19 +1033,6 @@ def play_and_save_traj(
     if len(key_indices) > 5:
         hinge_contact_mask[key_indices[2]:key_indices[5]] = 1
 
-    # panel_contact_mask: gates the unified finger<->door (panel Door/link_1 + handle Door/link_2)
-    # FORCE-PROTECTION penalty.
-    #   push: ON during the open-door + base-forward phase (keyframes 3..5), where the partly-open
-    #         hand presses the panel open -- there we still want the penalty to keep the push gentle.
-    #   pull: OFF for the whole trajectory (mask stays all-zero). Penalizing finger<->door contact on
-    #         pull made the robot "scared" to push the door panel with the arm, so pull carries no
-    #         finger<->door penalty at all.
-    panel_contact_mask = torch.zeros(len(robot_traj), dtype=torch.int8)
-    if planner_opening_direction == "push":
-        if len(key_indices) > 5:
-            panel_contact_mask[key_indices[3]:key_indices[5]] = 1
-    # else: pull -> no finger<->door penalty (see above); mask stays all-zero.
-
     # grasp_stage_mask: the PREGRASP -> GRASP window (keyframes 1..3: pregrasp, grasp, up to the
     # rotate keyframe). Used ONLY to gate the finger<->panel normal-force LOGGING (no reward) so we
     # can monitor how hard the fingers press the panel while approaching + closing on the handle.
@@ -1059,7 +1051,6 @@ def play_and_save_traj(
         "robot_joint_vel_traj": robot_traj_d,
         # "key_indices": torch.tensor(key_indices, dtype=torch.int32)[key_idx_in_key_indices]
         "hinge_contact_mask": hinge_contact_mask,
-        "panel_contact_mask": panel_contact_mask,
         "grasp_stage_mask": grasp_stage_mask,
         "key_indices": key_indices,
         "robot_body_pos_twist": robot_body_pos_twist,
