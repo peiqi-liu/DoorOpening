@@ -469,7 +469,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # on the shortest, against a Franka that sustains ~30 N at the end effector. For reference a real
     # lever spring is 1..2 Nm, and the ADA 22 N hardware limit at a 0.10 m grip IS 2.2 Nm -- so 5 Nm
     # was 2-3x a code-compliant door and unpressable on the short levers.
-    door_handle_effort_limit_range_nm = (1.0, 2.0)  # Vision 5 teacher run: cap handle ADR at 2 Nm
+    door_handle_effort_limit_range_nm = (1.0, 3.0)  # Vision 5 teacher run: cap handle ADR at 2 Nm
     door_handle_effort_limit_sim = door_handle_effort_limit_range_nm[0]
 
     # Panel-swing (joint_1) effort-limit CAP applied while unlatched (edit_door_articulation switches it
