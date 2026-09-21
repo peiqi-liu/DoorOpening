@@ -18,7 +18,7 @@ try:
 except ImportError:
     wandb = None
 
-from isaaclab.utils.math import quat_apply, quat_mul
+from isaaclab.utils.math import quat_apply, quat_conjugate, quat_mul
 from rl_games.algos_torch import torch_ext
 from rl_games.algos_torch.model_builder import ModelBuilder
 
@@ -57,6 +57,7 @@ from DoorOpening.utils.extract_pointcloud_from_articulation import (
 )
 from DoorOpening.utils.glorbot_collision_checker import GlorbotCollisionChecker
 from DoorOpening.utils.pose_utils import world_to_local
+from DoorOpening.utils.quat_utils import quat_to_6d
 from DoorOpening.utils.wall_distractors import (
     WallDistractorParams,
     compute_wall_bbox_ordering,
@@ -384,8 +385,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         )
         self.viser_raw_max_points = int(self.viser_raw_cfg.get("max_points", 12_000))
         self.viser_raw_max_frames = max(0, int(self.viser_raw_cfg.get("max_frames", 0)))
-        if self.pointcloud_source not in {"sampler", "depth", "lidar", "both"}:
-            raise ValueError(f"Unsupported pointcloud_source '{self.pointcloud_source}'.")
         if self.teacher_forcing_warmup_iters < 0:
             raise ValueError("teacher_forcing_warmup_iters must be non-negative.")
         if self.teacher_forcing_transition_iters < 0:
@@ -780,6 +779,13 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             for key, cfg in self.student_model.pcd_encoders_cfg.items()
             if cfg.get("use_pcd", False)
         )
+        # A proprioception-only student must not initialize or render any point-cloud source,
+        # even if an older runtime YAML still contains pointcloud_source: depth/lidar/both.
+        if not self.pcd_encoders_keys:
+            self.pointcloud_source = "none"
+            self.append_robot_model_to_policy_cloud = False
+            if self.rank == 0:
+                print("[INFO] No point-cloud encoders configured; disabling point-cloud rendering in Python.")
 
         self.temporal_derived_state_specs = OrderedDict()
         for key in self.state_encoders_keys:
@@ -1902,10 +1908,18 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             dtype=torch.float32,
             device=self.device,
         )
+        self.temporal_base_translation_history = torch.zeros(
+            (self.num_envs, self.temporal_history_len, 3),
+            dtype=torch.float32,
+            device=self.device,
+        )
         self.temporal_aux_handle_history = torch.zeros(
             (self.num_envs, self.temporal_history_len, 3),
             dtype=torch.float32,
             device=self.device,
+        )
+        self.initial_handle_pos_w = torch.zeros(
+            (self.num_envs, 3), dtype=torch.float32, device=self.device
         )
         self.temporal_push_pull_belief_history = torch.zeros(
             (self.num_envs, self.temporal_history_len, 2),
@@ -2014,6 +2028,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         q_pos,
         target_t,
         base_vel,
+        base_translation,
         offsets_s,
         apply_observation_lag=False,
         aux_handle_pos=None,
@@ -2039,6 +2054,9 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             q_samples_full = self._gather_temporal_values(self.temporal_q_history, effective_steps)
             target_samples = self._gather_temporal_values(self.temporal_target_history, effective_steps)
             base_vel_samples = self._gather_temporal_values(self.temporal_base_vel_history, effective_steps)
+            base_translation_samples = self._gather_temporal_values(
+                self.temporal_base_translation_history, effective_steps
+            )
             aux_handle_samples = (
                 self._gather_temporal_values(self.temporal_aux_handle_history, effective_steps)
                 if include_aux_handle
@@ -2054,6 +2072,9 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             q_history_by_offset = self._sample_temporal_history_offsets(self.temporal_q_history, nonzero_offsets)
             target_history_by_offset = self._sample_temporal_history_offsets(self.temporal_target_history, nonzero_offsets)
             base_vel_history_by_offset = self._sample_temporal_history_offsets(self.temporal_base_vel_history, nonzero_offsets)
+            base_translation_history_by_offset = self._sample_temporal_history_offsets(
+                self.temporal_base_translation_history, nonzero_offsets
+            )
             aux_handle_history_by_offset = (
                 self._sample_temporal_history_offsets(self.temporal_aux_handle_history, nonzero_offsets)
                 if include_aux_handle
@@ -2074,6 +2095,15 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             )
             base_vel_samples = torch.stack(
                 [base_vel if abs(offset_s) <= 1.0e-9 else base_vel_history_by_offset[offset_s] for offset_s in offsets_s],
+                dim=1,
+            )
+            base_translation_samples = torch.stack(
+                [
+                    base_translation
+                    if abs(offset_s) <= 1.0e-9
+                    else base_translation_history_by_offset[offset_s]
+                    for offset_s in offsets_s
+                ],
                 dim=1,
             )
             aux_handle_samples = None
@@ -2131,6 +2161,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             "target": target_samples,
             "target_err": target_err_samples,
             "base_vel": base_vel_samples,
+            "base_translation": base_translation_samples,
             "effective_age_ms": effective_age_ms,
         }
         if include_aux_handle:
@@ -2189,7 +2220,17 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         samples = torch.where(has_pair.unsqueeze(-1), interpolated, nearest_value)
         return {float(offset): samples[:, idx, :] for idx, offset in enumerate(offsets_s)}
 
-    def _push_temporal_history(self, timestamp, q, target, base_vel, aux_handle_pos=None, push_pull_belief=None, env_ids=None):
+    def _push_temporal_history(
+        self,
+        timestamp,
+        q,
+        target,
+        base_vel,
+        base_translation,
+        aux_handle_pos=None,
+        push_pull_belief=None,
+        env_ids=None,
+    ):
         if self.temporal_time_history is None:
             return
         self._validate_temporal_history_buffer_shape("temporal_aux_handle_history", self.temporal_aux_handle_history, 3)
@@ -2214,6 +2255,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 self.temporal_q_history[:, 1:, :] = self.temporal_q_history[:, :-1, :].clone()
                 self.temporal_target_history[:, 1:, :] = self.temporal_target_history[:, :-1, :].clone()
                 self.temporal_base_vel_history[:, 1:, :] = self.temporal_base_vel_history[:, :-1, :].clone()
+                self.temporal_base_translation_history[:, 1:, :] = self.temporal_base_translation_history[:, :-1, :].clone()
                 self.temporal_aux_handle_history[:, 1:, :] = self.temporal_aux_handle_history[:, :-1, :].clone()
                 self.temporal_push_pull_belief_history[:, 1:, :] = (
                     self.temporal_push_pull_belief_history[:, :-1, :].clone()
@@ -2222,6 +2264,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             self.temporal_q_history[:, 0, :] = q
             self.temporal_target_history[:, 0, :] = target
             self.temporal_base_vel_history[:, 0, :] = base_vel
+            self.temporal_base_translation_history[:, 0, :] = base_translation
             self.temporal_aux_handle_history[:, 0, :] = aux_handle_pos
             self.temporal_push_pull_belief_history[:, 0, :] = push_pull_belief
             return
@@ -2235,6 +2278,9 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             self.temporal_base_vel_history[env_ids, 1:, :] = self.temporal_base_vel_history[
                 env_ids, :-1, :
             ].clone()
+            self.temporal_base_translation_history[env_ids, 1:, :] = self.temporal_base_translation_history[
+                env_ids, :-1, :
+            ].clone()
             self.temporal_aux_handle_history[env_ids, 1:, :] = self.temporal_aux_handle_history[
                 env_ids, :-1, :
             ].clone()
@@ -2245,6 +2291,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.temporal_q_history[env_ids, 0, :] = q[env_ids]
         self.temporal_target_history[env_ids, 0, :] = target[env_ids]
         self.temporal_base_vel_history[env_ids, 0, :] = base_vel[env_ids]
+        self.temporal_base_translation_history[env_ids, 0, :] = base_translation[env_ids]
         self.temporal_aux_handle_history[env_ids, 0, :] = aux_handle_pos[env_ids]
         self.temporal_push_pull_belief_history[env_ids, 0, :] = push_pull_belief[env_ids]
 
@@ -2252,9 +2299,11 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         # A freshly (re)spawned base has issued no command yet -- zero the commanded-base-velocity
         # feedback for these envs before reading it below, regardless of base_vel_source.
         self._reset_commanded_base_vel(env_ids)
+        self._capture_initial_handle_anchor(env_ids)
         q = self._get_student_proprio_vector().detach()
         target = self._get_implemented_action_vector().detach()
         base_vel = self._get_student_base_velocity_vector().detach()
+        base_translation = self._get_student_base_translation_vector().detach()
         timestamp = self._get_current_time_s()
         aux_handle = self._build_seed_temporal_aux_handle()
         push_pull_belief = self._build_initial_temporal_push_pull_belief()
@@ -2270,6 +2319,9 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             self.temporal_q_history[:] = q.unsqueeze(1).expand(-1, self.temporal_history_len, -1)
             self.temporal_target_history[:] = target.unsqueeze(1).expand(-1, self.temporal_history_len, -1)
             self.temporal_base_vel_history[:] = base_vel.unsqueeze(1).expand(-1, self.temporal_history_len, -1)
+            self.temporal_base_translation_history[:] = base_translation.unsqueeze(1).expand(
+                -1, self.temporal_history_len, -1
+            )
             self.temporal_aux_handle_history[:] = aux_handle.unsqueeze(1).expand(-1, self.temporal_history_len, -1)
             self.temporal_push_pull_belief_history[:] = push_pull_belief.unsqueeze(1).expand(
                 -1, self.temporal_history_len, -1
@@ -2282,6 +2334,9 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.temporal_q_history[env_ids] = q[env_ids].unsqueeze(1).expand(-1, self.temporal_history_len, -1)
         self.temporal_target_history[env_ids] = target[env_ids].unsqueeze(1).expand(-1, self.temporal_history_len, -1)
         self.temporal_base_vel_history[env_ids] = base_vel[env_ids].unsqueeze(1).expand(
+            -1, self.temporal_history_len, -1
+        )
+        self.temporal_base_translation_history[env_ids] = base_translation[env_ids].unsqueeze(1).expand(
             -1, self.temporal_history_len, -1
         )
         self.temporal_aux_handle_history[env_ids] = aux_handle[env_ids].unsqueeze(1).expand(
@@ -2300,6 +2355,47 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         if q_pos.ndim != 2:
             raise RuntimeError(f"Expected joint_pos to be rank-2, got shape {tuple(q_pos.shape)}.")
         return q_pos
+
+    def _get_student_base_translation_vector(self):
+        """Measured base-link translation in the environment/world frame, relative to env origin."""
+        base_idx = int(self.ov_env._robot_base_body_link_idx)
+        base_pos_w = self.ov_env.robot.data.body_pos_w[:, base_idx]
+        env_origins = getattr(getattr(self.ov_env, "scene", None), "env_origins", None)
+        if env_origins is not None:
+            base_pos_w = base_pos_w - env_origins.to(device=base_pos_w.device, dtype=base_pos_w.dtype)
+        if base_pos_w.ndim != 2 or base_pos_w.shape[-1] != 3:
+            raise RuntimeError(f"Expected base translation shape [N, 3], got {tuple(base_pos_w.shape)}.")
+        return base_pos_w
+
+    def _get_student_keyframe_pose_base(self):
+        """Current non-base robot keyframe poses, expressed in the Franka base frame."""
+        body_pos_w = self.ov_env.robot.data.body_pos_w[:, self.ov_env._robot_key_body_idx]
+        body_quat_w = self.ov_env.robot.data.body_quat_w[:, self.ov_env._robot_key_body_idx]
+        base_key_idx = int(self.ov_env._robot_base_id_in_key_body_idx)
+        base_pos_w = body_pos_w[:, base_key_idx]
+        base_quat_w = body_quat_w[:, base_key_idx]
+        base_quat_inv = quat_conjugate(base_quat_w)
+        pos_base = world_to_local(body_pos_w, base_pos_w, base_quat_w)
+        quat_base = quat_mul(base_quat_inv.unsqueeze(1).expand_as(body_quat_w), body_quat_w)
+        pose_cfg = self.student_model.state_encoders_cfg.get("keyframe_pose_base", {})
+        requested_names = pose_cfg.get("body_names", ["panda_link4"])
+        available_names = list(getattr(self.ov_env, "_robot_key_body_names", ()))
+        requested_indices = []
+        for name in requested_names:
+            if name not in available_names:
+                raise KeyError(
+                    f"Requested keyframe body '{name}' is not in the environment key bodies: {available_names}."
+                )
+            body_idx = available_names.index(name)
+            if body_idx == base_key_idx:
+                raise ValueError("keyframe_pose_base.body_names cannot contain the robot base body.")
+            requested_indices.append(body_idx)
+        keep = torch.as_tensor(requested_indices, dtype=torch.long, device=body_pos_w.device)
+        return torch.cat(
+            [pos_base.index_select(1, keep).reshape(self.num_envs, -1),
+             quat_to_6d(quat_base.index_select(1, keep)).reshape(self.num_envs, -1)],
+            dim=-1,
+        )
 
     def _get_base_yaw(self):
         return self.ov_env.robot.data.joint_pos[:, self.ov_env._robot_base_rot_dof_idx].squeeze(-1)
@@ -2454,6 +2550,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 q_pos,
                 target_t,
                 base_vel,
+                self._get_student_base_translation_vector(),
                 required_offsets,
                 apply_observation_lag=self._is_observation_lag_active(),
             )
@@ -2496,6 +2593,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             value = full_value[:, self.ov_env._robot_finger_dof_idx]
         elif actual_state_key == "base_vel":
             value = self._get_temporal_sample_from_cache(sample_cache, "base_vel", timestamp_s)
+        elif actual_state_key == "base_translation":
+            value = self._get_temporal_sample_from_cache(sample_cache, "base_translation", timestamp_s)
         elif actual_state_key in {"target_err_arm", "tracking_err_arm"}:
             full_value = self._get_temporal_sample_from_cache(sample_cache, "target_err", timestamp_s)
             value = full_value[:, self.action_component_history_indices["arm"]]
@@ -2602,6 +2701,26 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             "Expected environment to expose get_handle_position_in_base_frame() "
             "for aux handle position prediction."
         )
+
+    def _get_initial_handle_position_base(self):
+        """Reset-time handle anchor transformed into the robot's current base frame."""
+        base_idx = int(self.ov_env._robot_base_body_link_idx)
+        base_pos_w = self.ov_env.robot.data.body_pos_w[:, base_idx]
+        base_quat_w = self.ov_env.robot.data.body_quat_w[:, base_idx]
+        return world_to_local(
+            self.initial_handle_pos_w.unsqueeze(1), base_pos_w, base_quat_w
+        ).squeeze(1)
+
+    def _capture_initial_handle_anchor(self, env_ids=None):
+        handle_pos_base = self._get_handle_position_base()
+        base_idx = int(self.ov_env._robot_base_body_link_idx)
+        base_pos_w = self.ov_env.robot.data.body_pos_w[:, base_idx]
+        base_quat_w = self.ov_env.robot.data.body_quat_w[:, base_idx]
+        handle_pos_w = quat_apply(base_quat_w, handle_pos_base) + base_pos_w
+        if env_ids is None:
+            self.initial_handle_pos_w[:] = handle_pos_w.detach()
+        elif env_ids.numel() > 0:
+            self.initial_handle_pos_w[env_ids] = handle_pos_w[env_ids].detach()
 
     def _get_closed_handle_position_base(self):
         # Closed-door (door joint=0) handle position in the CURRENT robot base frame. Simulates a
@@ -4040,6 +4159,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
     def _build_student_obs(self, iteration=None):
         q_pos = self._get_student_proprio_vector()
         base_vel = self._get_student_base_velocity_vector()
+        base_translation = self._get_student_base_translation_vector()
+        keyframe_pose_base = self._get_student_keyframe_pose_base()
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
         palm_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_palm_body_idx].unsqueeze(1)
@@ -4101,6 +4222,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             q_pos,
             target_t,
             base_vel,
+            base_translation,
             required_temporal_offsets_s,
             apply_observation_lag=lag_active,
             aux_handle_pos=current_aux_handle_temporal,
@@ -4143,6 +4265,10 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                     obs[key] = q_pos[:, self.ov_env._robot_finger_dof_idx]
             elif key == "base_vel":
                 obs[key] = lagged_base_vel if lag_active and lagged_base_vel is not None else base_vel
+            elif key == "keyframe_pose_base":
+                obs[key] = keyframe_pose_base
+            elif key == "initial_handle_pos":
+                obs[key] = self._get_initial_handle_position_base()
             elif key in self.temporal_derived_state_specs:
                 obs[key] = temporal_state_values[key]
             elif key in self.aux_state_specs:
@@ -4497,6 +4623,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                     q=q_after_step,
                     target=target_after_step,
                     base_vel=base_vel_after_step,
+                    base_translation=self._get_student_base_translation_vector().detach().clone(),
                 )
                 self.frame += self.num_envs
 
