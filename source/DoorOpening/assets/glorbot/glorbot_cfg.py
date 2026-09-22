@@ -92,10 +92,13 @@ HONOR_URDF_MIMIC = True
 #     Travel Speed (per finger)               50      mm/s
 #     Weight                                  730     g
 #
-# effort_limit = the top of the hardware's continuous band. Isaac Lab's stock 200 N is ~3x what
+# effort_limit = the top of the hardware's continuous band. This training variant uses a modest
+# simulation headroom above the nominal 70 N hardware setting so the fingers can open against
+# stubborn contact loads without changing their commanded speed.
+# Isaac Lab's stock 200 N is ~3x what
 # the real hand can produce; on a 15 g finger it is also ~13,000 m/s^2, enough to cross the whole
 # 40 mm travel in 2.5 ms (a 60 Hz step is 16.7 ms), so the drive slams rather than moves.
-GRIPPER_EFFORT_LIMIT = 70.0
+GRIPPER_EFFORT_LIMIT = 100.0
 
 # Max finger speed, straight from the manual. NOTE this is 4x SLOWER than the 0.2 m/s that Isaac
 # Lab's Franka and this URDF's <limit> author: the real hand needs 0.8 s to close from fully open,
@@ -111,8 +114,8 @@ GRIPPER_VELOCITY_LIMIT = 0.05
 # 10 mm of unreachable travel per finger, which gives:
 #     k = 2e3 (Isaac Lab stock) ->  20 N   below the hardware's 30 N minimum
 #     k = 5e3                   ->  50 N   mid-band  <-- chosen
-#     k = 1e4                   -> 100 N   clipped to 70 N, i.e. always saturated
-GRIPPER_STIFFNESS = 5e3
+#     k = 1e4                   -> 100 N   at the new simulation effort ceiling
+GRIPPER_STIFFNESS = 8e3
 
 # Damping is picked for zeta >= 1 in BOTH coupling modes, since the effective mass seen by the
 # driven DOF doubles when the mimic constraint drags the second finger along:

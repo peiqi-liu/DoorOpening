@@ -137,7 +137,7 @@ class GripperSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Door/link_1",
         update_period=0.0,
         history_length=6,
-        debug_vis=True,
+        debug_vis=args_cli.debug,
         filter_prim_paths_expr=["{ENV_REGEX_NS}/Robot"],
     )
 
@@ -145,7 +145,7 @@ class GripperSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Door/link_2",
         update_period=0.0,
         history_length=6,
-        debug_vis=True,
+        debug_vis=args_cli.debug,
         filter_prim_paths_expr=["{ENV_REGEX_NS}/Robot"],
     )
 
@@ -155,7 +155,7 @@ class GripperSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot/panda_leftfinger",
         update_period=0.0,
         history_length=6,
-        debug_vis=True,
+        debug_vis=args_cli.debug,
         filter_prim_paths_expr=["{ENV_REGEX_NS}/Door/link_1", "{ENV_REGEX_NS}/Door/link_2"],
     )
 
@@ -163,7 +163,7 @@ class GripperSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot/panda_rightfinger",
         update_period=0.0,
         history_length=6,
-        debug_vis=True,
+        debug_vis=args_cli.debug,
         filter_prim_paths_expr=["{ENV_REGEX_NS}/Door/link_1", "{ENV_REGEX_NS}/Door/link_2"],
     )
 
@@ -385,6 +385,17 @@ def main():
 
     # Initialize the simulation context
     sim_cfg = sim_utils.SimulationCfg(dt=1 / 60, device=args_cli.device)
+    # This script is normally run alongside training or playback jobs on the same GPU.  The
+    # default GUI profile enables DLSS and higher-cost RTX features; on a busy GPU that can fail
+    # during the first reset, leaving PhysX with no active scene and producing a misleading
+    # cascade of "No physics scene created" errors.  Keep the interactive camera, but use the
+    # low-memory real-time profile explicitly.
+    sim_cfg.render.rendering_mode = "performance"
+    sim_cfg.render.antialiasing_mode = "FXAA"
+    sim_cfg.render.enable_reflections = False
+    sim_cfg.render.enable_global_illumination = False
+    sim_cfg.render.enable_translucency = False
+    sim_cfg.render.enable_shadows = False
     sim = sim_utils.SimulationContext(sim_cfg)
     # Set main camera
     sim.set_camera_view(eye=[2.0, -2.5, 3.2], target=[0.0, 0.0, 0.7])
