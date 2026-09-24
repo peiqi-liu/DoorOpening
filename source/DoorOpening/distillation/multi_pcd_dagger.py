@@ -4143,6 +4143,12 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 # or wall point becomes visible.
                 cam_spec,
             )
+            solid_wall_depth = torch.where(
+                torch.isfinite(door_depth) & (solid_wall_depth >= door_depth - 0.002),
+                torch.full_like(solid_wall_depth, float("inf")),
+                solid_wall_depth,
+            )
+            scene_depth = torch.minimum(scene_depth, solid_wall_depth)
             if int(self.depth_cam_render_blur_kernel_px) > 1:
                 kernel2d, pad = build_depth_blur_kernel2d(
                     self.depth_cam_render_blur_kernel_px, self.depth_cam_render_blur_sigma_px,
