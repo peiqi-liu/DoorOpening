@@ -331,6 +331,26 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.depth_cam_render_robot_axial_jitter_std_m = float(
             self.depth_cam_render_cfg.get("robot_axial_jitter_std_m", 0.0)
         )
+        # RealSense robot self-occlusion: suppress scene depth behind a small dilated robot silhouette
+        # instead of backfilling the robot hole with wall/door points.
+        self.depth_cam_render_robot_hole_inflate_px = int(
+            self.depth_cam_render_cfg.get("robot_hole_inflate_px", 1)
+        )
+        # Walls are broad, low-frequency occluders. Render both their sampled and analytic
+        # passes at a small camera resolution, then upsample the valid depth into the normal
+        # door/robot image. This avoids materializing the expensive full-resolution
+        # (environment x wall-box x H x W x 3) intersection tensor.
+        self.depth_cam_render_wall_width_px = int(
+            self.depth_cam_render_cfg.get("wall_raster_width_px", 80)
+        )
+        self.depth_cam_render_wall_height_px = int(
+            self.depth_cam_render_cfg.get("wall_raster_height_px", 60)
+        )
+        self.depth_cam_render_wall_occluder_inflate_px = int(
+            self.depth_cam_render_cfg.get("wall_raster_occluder_inflate_px", 1)
+        )
+        if self.depth_cam_render_wall_width_px <= 0 or self.depth_cam_render_wall_height_px <= 0:
+            raise ValueError("depth_cam_render wall raster dimensions must be positive")
         # Optional override of the depth camera's HORIZONTAL / VERTICAL field of view (degrees). None =>
         # the physical D435 defaults in camera_utils (85 x 58). Lowering fov_y_deg raises fy, so the
         # rendered image spans a NARROWER vertical angle at the same resolution: points near the top/
@@ -3325,6 +3345,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         if self.pointcloud_source in {"sampler", "depth", "both"}:
             self.robot_camera_body_idx = int(self.ov_env.robot.find_bodies("x5_camera_link")[0][0])
             self.sampler_camera_spec = self._build_sampler_camera_spec()
+            self.wall_raster_camera_spec = self._build_wall_raster_camera_spec()
             # The real depth sensor is the `cam` prim mounted on x5_camera_link via the CameraCfg
             # offset rotation (a -45deg roll that compensates for the 45deg-tilted realsense bracket
             # on the ARX x5 wrist). The x5_camera_link frame itself is NOT the optical frame. The
@@ -3471,6 +3492,20 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         return build_realsense_sampler_spec(
             int(camera_cfg.height) // 2,
             int(camera_cfg.width) // 2,
+            device=self.device,
+            **fov_kwargs,
+        )
+
+    def _build_wall_raster_camera_spec(self):
+        """Build the reduced-resolution camera used only for wall rendering."""
+        fov_kwargs = {}
+        if self.depth_cam_render_fov_x_deg is not None:
+            fov_kwargs["fov_x_deg"] = float(self.depth_cam_render_fov_x_deg)
+        if self.depth_cam_render_fov_y_deg is not None:
+            fov_kwargs["fov_y_deg"] = float(self.depth_cam_render_fov_y_deg)
+        return build_realsense_sampler_spec(
+            self.depth_cam_render_wall_height_px,
+            self.depth_cam_render_wall_width_px,
             device=self.device,
             **fov_kwargs,
         )
@@ -3998,6 +4033,27 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         b, _, h, w, _, _ = patches.shape
         return patches.contiguous().view(b, h, w, k * k).median(dim=-1).values
 
+    @staticmethod
+    def _upsample_valid_depth(depth, target_height, target_width):
+        """Upsample depth without allowing invalid (+inf) background to bleed into walls."""
+        if depth.shape[-2:] == (int(target_height), int(target_width)):
+            return depth
+        valid = torch.isfinite(depth)
+        filled = torch.where(valid, depth, torch.zeros_like(depth))
+        numerator = torch.nn.functional.interpolate(
+            filled.unsqueeze(1), size=(int(target_height), int(target_width)),
+            mode="bilinear", align_corners=False,
+        ).squeeze(1)
+        denominator = torch.nn.functional.interpolate(
+            valid.to(depth.dtype).unsqueeze(1), size=(int(target_height), int(target_width)),
+            mode="bilinear", align_corners=False,
+        ).squeeze(1)
+        return torch.where(
+            denominator > 1e-6,
+            numerator / denominator.clamp_min(1e-6),
+            torch.full_like(numerator, float("inf")),
+        )
+
     def _render_depth_scene_with_crisp_robot(self, door_walls_pcd_world, robot_pcd_world, camera_pose):
         """Depth-cam obs render (world frame) with the robot kept CRISP -- the same logic as the viser
         tool's render_batch, so training and that preview stay identical.
@@ -4012,28 +4068,52 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         Returns (B, num_points, 3) world points, NaN-padded to a fixed count.
         """
         cam_spec = self.sampler_camera_spec
+        wall_cam_spec = self.wall_raster_camera_spec
         occ_inflate = self.depth_cam_render_occluder_inflate_px
-        # --- Scene depth: door + walls, z-buffer + occluder pass + edge-bleed blur. ---
-        if self.depth_cam_render_use_compile:
-            renderer = get_compiled_renderer_fixed_shapes(
-                cam_spec_dict=cam_spec,
-                inflate_px=self.depth_cam_render_inflate_px,
-                clip_mode=self.depth_cam_render_clip_mode,
-                jitter_mode="xyz",
-                blur_kernel_px=self.depth_cam_render_blur_kernel_px,
-                blur_sigma_px=self.depth_cam_render_blur_sigma_px,
-                occluder_inflate_px=occ_inflate,
-            )
-            if occ_inflate > 0:
-                scene_depth, _, _ = renderer(door_walls_pcd_world, camera_pose, 0.0, door_walls_pcd_world)
-            else:
-                scene_depth, _, _ = renderer(door_walls_pcd_world, camera_pose, 0.0)
-        else:
-            scene_depth, _ = rasterize_depth_zbuffer_from_pose(
-                door_walls_pcd_world, camera_pose, cam_spec,
+        # --- Scene depth: source-aware door/wall z-buffer. ---
+        # The first fixed-size block is the door cloud; the remainder is walls/reflection.  A plain
+        # min(door+walls) lets coplanar flush-wall samples win individual pixels through sparse gaps.
+        # Render the sources separately and let the door win only for wall samples that are behind or
+        # depth-tied with it.  A genuinely foreground wall remains visible, as it should.
+        door_n = min(int(self.scene_door_pcd_num_points), int(door_walls_pcd_world.shape[1]))
+        door_source = door_walls_pcd_world[:, :door_n]
+        wall_source = door_walls_pcd_world[:, door_n:]
+        door_depth, _ = rasterize_depth_zbuffer_from_pose(
+            door_source, camera_pose, cam_spec,
+            inflate_px=self.depth_cam_render_inflate_px, clip_mode=self.depth_cam_render_clip_mode,
+            occluder_pcd=door_source if occ_inflate > 0 else None,
+            occluder_inflate_px=occ_inflate,
+        )
+        if wall_source.shape[1] > 0:
+            wall_depth, _ = rasterize_depth_zbuffer_from_pose(
+                wall_source, camera_pose, wall_cam_spec,
                 inflate_px=self.depth_cam_render_inflate_px, clip_mode=self.depth_cam_render_clip_mode,
-                occluder_pcd=door_walls_pcd_world if occ_inflate > 0 else None,
-                occluder_inflate_px=occ_inflate,
+                occluder_pcd=wall_source if occ_inflate > 0 else None,
+                occluder_inflate_px=self.depth_cam_render_wall_occluder_inflate_px if occ_inflate > 0 else 0,
+            )
+            wall_depth = self._upsample_valid_depth(wall_depth, cam_spec["H"], cam_spec["W"])
+            # Door wins behind/tied walls, but not a physically foreground wall.
+            tie_eps_m = 0.002
+            wall_depth = torch.where(
+                torch.isfinite(door_depth) & (wall_depth >= door_depth - tie_eps_m),
+                torch.full_like(wall_depth, float("inf")),
+                wall_depth,
+            )
+            scene_depth = torch.minimum(door_depth, wall_depth)
+        else:
+            scene_depth = door_depth
+        # Solid wall occluder: wall point samples are retained for the observation, but this analytic
+        # box pass closes all projected sampling holes so geometry behind a wall cannot leak through.
+        if self._wall_distractor_world_boxes_min is not None:
+            solid_wall_depth, _ = rasterize_axis_aligned_boxes_depth_from_pose(
+                self._wall_distractor_world_boxes_min,
+                self._wall_distractor_world_boxes_max,
+                camera_pose,
+                wall_cam_spec,
+            )
+            solid_wall_depth = self._upsample_valid_depth(
+                solid_wall_depth, cam_spec["H"], cam_spec["W"]
+            )
             )
             if int(self.depth_cam_render_blur_kernel_px) > 1:
                 kernel2d, pad = build_depth_blur_kernel2d(

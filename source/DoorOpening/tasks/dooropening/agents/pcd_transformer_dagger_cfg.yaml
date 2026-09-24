@@ -273,6 +273,12 @@ dagger:
     # viser depth-cam replay (robot_depth_cam_obs stream) alongside a real capture.
     axial_jitter_std_m: 0.005
     robot_axial_jitter_std_m: 0.003
+    robot_hole_inflate_px: 1
+    # Wall-only raster resolution. Door and robot remain at the normal camera resolution.
+    # Keeping this small avoids the full-resolution analytic wall allocation at large env counts.
+    wall_raster_width_px: 80
+    wall_raster_height_px: 60
+    wall_raster_occluder_inflate_px: 1
     # After the blur, drop SCENE (door+wall) pixels sitting on a depth discontinuity larger than this
     # (m). The blur bleeds wall/door silhouettes into floating "flying pixel" smears; this removes them
     # (a real depth camera drops edge returns rather than bleeding them), so the walls stay clean. The
