@@ -1,0 +1,189 @@
+{
+  "replay": {
+    "recording": "runs/DoorOpening-Distillation-Eval_2026-09-24-18-55-08/viser/run01_PartNetv5_env001_scratch_door__rnd_01_pk467.3_pd46.9_pfr0.18_pcap24.6_pm80.88_hk28.8_hd0.29_hcap2.89_hfr0.03_lat0.95_w0.945_hh1.006_he0.081.pt",
+    "recorded_frames": 600,
+    "static_wall_points": 43809,
+    "base_displacement_first_to_last_m": 0.20538990199565887,
+    "base_max_pairwise_displacement_m": 0.7594308853149414,
+    "world_wall_overlay": "debug_output/wall_frame_investigation_20260924_env001_new/replay_world_wall_overlay.png",
+    "sampled_frames": [
+      {
+        "frame": 0,
+        "base_pos_world": [
+          1.1111723184585571,
+          0.1491347998380661,
+          0.0
+        ],
+        "camera_pos_world": [
+          1.0172703266143799,
+          0.3658585548400879,
+          0.8025444149971008
+        ],
+        "finite_rendered_points": 12000,
+        "camera_forward_fraction": 1.0,
+        "camera_world_roundtrip_max_m": 1.3072531146463007e-06,
+        "wall_returns_within_5cm": 7529,
+        "wall_return_fraction_within_5cm": 0.6274166703224182,
+        "wall_distance_median_m": 0.020076021552085876,
+        "wall_distance_p95_m": 0.24763105809688568,
+        "policy_finite_points": 4500,
+        "policy_zero_padding_rendered_at_base": 0,
+        "policy_current_base_roundtrip_max_m": 4.915124804938387e-07
+      },
+      {
+        "frame": 150,
+        "base_pos_world": [
+          0.7877596616744995,
+          0.02263569086790085,
+          0.0
+        ],
+        "camera_pos_world": [
+          0.7012729644775391,
+          0.24244697391986847,
+          0.8025676608085632
+        ],
+        "finite_rendered_points": 12000,
+        "camera_forward_fraction": 1.0,
+        "camera_world_roundtrip_max_m": 7.754333068987762e-07,
+        "wall_returns_within_5cm": 5582,
+        "wall_return_fraction_within_5cm": 0.4651666581630707,
+        "wall_distance_median_m": 0.06743056327104568,
+        "wall_distance_p95_m": 0.24759680032730103,
+        "policy_finite_points": 4500,
+        "policy_zero_padding_rendered_at_base": 0,
+        "policy_current_base_roundtrip_max_m": 4.2981520209650625e-07
+      },
+      {
+        "frame": 300,
+        "base_pos_world": [
+          1.3029628992080688,
+          0.058212727308273315,
+          0.0
+        ],
+        "camera_pos_world": [
+          1.2354450225830078,
+          0.28456053137779236,
+          0.8025473356246948
+        ],
+        "finite_rendered_points": 12000,
+        "camera_forward_fraction": 1.0,
+        "camera_world_roundtrip_max_m": 1.066656750481343e-06,
+        "wall_returns_within_5cm": 7779,
+        "wall_return_fraction_within_5cm": 0.6482499837875366,
+        "wall_distance_median_m": 0.018480654805898666,
+        "wall_distance_p95_m": 0.7485389113426208,
+        "policy_finite_points": 4133,
+        "policy_zero_padding_rendered_at_base": 0,
+        "policy_current_base_roundtrip_max_m": 1.3328003944934608e-07
+      },
+      {
+        "frame": 450,
+        "base_pos_world": [
+          1.4022451639175415,
+          -0.1527419239282608,
+          0.0
+        ],
+        "camera_pos_world": [
+          1.4575040340423584,
+          0.07687642425298691,
+          0.8025185465812683
+        ],
+        "finite_rendered_points": 12000,
+        "camera_forward_fraction": 1.0,
+        "camera_world_roundtrip_max_m": 1.2897900205643964e-06,
+        "wall_returns_within_5cm": 9823,
+        "wall_return_fraction_within_5cm": 0.8185833096504211,
+        "wall_distance_median_m": 0.016319116577506065,
+        "wall_distance_p95_m": 0.7686195373535156,
+        "policy_finite_points": 4167,
+        "policy_zero_padding_rendered_at_base": 0,
+        "policy_current_base_roundtrip_max_m": 4.2981520209650625e-07
+      },
+      {
+        "frame": 599,
+        "base_pos_world": [
+          1.0138070583343506,
+          -0.03171049803495407,
+          0.0
+        ],
+        "camera_pos_world": [
+          1.148274302482605,
+          0.16243912279605865,
+          0.8025209307670593
+        ],
+        "finite_rendered_points": 12000,
+        "camera_forward_fraction": 1.0,
+        "camera_world_roundtrip_max_m": 7.539457556049456e-07,
+        "wall_returns_within_5cm": 9696,
+        "wall_return_fraction_within_5cm": 0.8080000281333923,
+        "wall_distance_median_m": 0.01626790128648281,
+        "wall_distance_p95_m": 0.19147264957427979,
+        "policy_finite_points": 4500,
+        "policy_zero_padding_rendered_at_base": 0,
+        "policy_current_base_roundtrip_max_m": 6.743495646333031e-07
+      }
+    ],
+    "legacy_robot_replay": {
+      "visual": "debug_output/wall_frame_investigation_20260924_env001_new/replay_legacy_vs_physical_robot_path.png",
+      "chassis_error_mean_m": 0.5570295453071594,
+      "chassis_error_max_m": 1.0406749248504639,
+      "chassis_error_at_sampled_frames_m": {
+        "0": 0.3720240592956543,
+        "150": 0.42688795924186707,
+        "300": 0.617009699344635,
+        "450": 0.8605376482009888,
+        "599": 0.06917200237512589
+      }
+    }
+  },
+  "controlled_rotated_wall": {
+    "camera_displacement_m": 1.0071743726730347,
+    "exact_obb_pixels": [
+      8400,
+      3680
+    ],
+    "backprojected_face_residual_max_m": [
+      1.1920928955078125e-07,
+      1.1920928955078125e-07
+    ],
+    "backprojected_face_residual_p95_m": [
+      1.1920928955078125e-07,
+      1.1920928955078125e-07
+    ],
+    "legacy_aabb_pixels": [
+      10544,
+      10544
+    ],
+    "legacy_aabb_false_opacity_pixels": [
+      2144,
+      6864
+    ],
+    "controlled_cpu_ms_per_render": {
+      "exact_obb": 6.3866603741189465,
+      "legacy_aabb": 2.866191749490099
+    },
+    "sparse_zbuffer_penetration_pixels_before_fallback": [
+      8396,
+      3676
+    ],
+    "sparse_zbuffer_penetration_pixels_after_fallback": [
+      0,
+      0
+    ],
+    "front_geometry_pixels_behind_no_wall": [
+      625,
+      400
+    ],
+    "front_geometry_pixels_hidden_by_fallback": [
+      0,
+      0
+    ],
+    "penetration_check": "The sparse point-only pass leaks background through the wall. Nearest-depth composition with the exact OBB closes every leak while retaining every closer foreground pixel."
+  },
+  "legacy_camera_dependent_flush_helper": {
+    "flush_shift_with_camera_on_negative_panel_side_m": 0.04800000041723251,
+    "flush_shift_with_camera_on_positive_panel_side_m": -0.04800000041723251,
+    "same_authored_flush_point_world_separation_m": 0.09600000083446503,
+    "interpretation": "This helper changed authored wall geometry based on camera side; it is removed from the shared renderer. It flips only on a panel-side crossing, so it does not explain a continuous backing-away drift by itself."
+  }
+}

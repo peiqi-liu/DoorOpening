@@ -40,6 +40,7 @@ from DoorOpening.utils.camera_utils import (
     crop_local_pcd,
     drop_depth_edges,
     get_compiled_renderer_fixed_shapes,
+    rasterize_oriented_boxes_depth_from_pose,
     rasterize_depth_zbuffer_from_pose,
     render_depth_roundtrip_from_pose,
     shuffle_pcd,
@@ -3218,6 +3219,9 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.wall_distractor_num_points = self.wall_distractor_params.num_points
         self.wall_distractor_resample_each_step = self.wall_distractor_params.resample_each_step
         self._wall_distractor_local_points = None
+        self._wall_distractor_local_boxes = None
+        self._wall_distractor_boxes_base_for_render = None
+        self._wall_distractor_boxes_pose_world = None
         if (
             self.wall_distractors_enabled
             and self.wall_distractor_num_points > 0
@@ -3566,7 +3570,10 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 device=self.device,
             )
         if env_ids is None:
-            self._wall_distractor_local_points[:] = self._sample_wall_pointcloud_local()
+            env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+            points, boxes = self._sample_wall_pointcloud_local(return_boxes=True)
+            self._wall_distractor_local_points[:] = points
+            self._wall_distractor_local_boxes = boxes
             return
         env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
         if env_ids.numel() == 0:
@@ -3874,9 +3881,26 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             or self._wall_distractor_local_points is None
             or num_points != self.wall_distractor_num_points
         ):
-            wall_points_base = self._sample_wall_pointcloud_local(num_points=num_points)
+            # Wall layout is sampled in door-base coordinates and is independent of robot/camera pose.
+            # Place it in world using the door pose below; only the rendered observation is later
+            # transformed into the robot-base frame.
+            wall_points_base, wall_boxes_base = self._sample_wall_pointcloud_local(
+                num_points=num_points, return_boxes=True
+            )
         else:
             wall_points_base = self._wall_distractor_local_points
+            wall_boxes_base = self._wall_distractor_local_boxes
+        if wall_boxes_base is not None:
+            # Boxes are authored in door-base coordinates.  Preserve that orientation for the
+            # analytic ray pass: converting their rotated corners to a world AABB makes a larger,
+            # incorrect occluder and can hide geometry in space where no wall exists.
+            self._wall_distractor_boxes_base_for_render = wall_boxes_base
+            self._wall_distractor_boxes_pose_world = torch.cat(
+                [door_base_pos_w, door_base_quat_w[:, [1, 2, 3, 0]]], dim=-1
+            )
+        else:
+            self._wall_distractor_boxes_base_for_render = None
+            self._wall_distractor_boxes_pose_world = None
         quat = door_base_quat_w.unsqueeze(1).expand(-1, wall_points_base.shape[1], -1)
         return quat_apply(quat, wall_points_base) + door_base_pos_w.unsqueeze(1)
 
@@ -3962,6 +3986,9 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         door_pcd_world = self._sample_cached_door_pointcloud_world(hole_metadata=hole_metadata)
         robot_pcd_world = self._sample_robot_pointcloud_world_sampler()
         wall_pcd_world = self._sample_wall_pointcloud_world()
+        # Keep the sampled ground-truth wall geometry available to evaluation replay capture.
+        # It is stored once per Viser recording, rather than repeated in every frame.
+        self._last_ground_truth_wall_points_world = wall_pcd_world
         # scene-MINUS-robot = static scene geometry (door panel + wall distractors). This is both the
         # main (blurred + edge-dropped) depth cloud AND the occluder set: the robot is rendered in a
         # SEPARATE crisp pass so blur/edge-drop never touch it, and it stays out of the occluder-fill
@@ -4104,15 +4131,17 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             scene_depth = door_depth
         # Solid wall occluder: wall point samples are retained for the observation, but this analytic
         # box pass closes all projected sampling holes so geometry behind a wall cannot leak through.
-        if self._wall_distractor_world_boxes_min is not None:
-            solid_wall_depth, _ = rasterize_axis_aligned_boxes_depth_from_pose(
-                self._wall_distractor_world_boxes_min,
-                self._wall_distractor_world_boxes_max,
+        if self._wall_distractor_boxes_base_for_render is not None:
+            solid_wall_depth, _ = rasterize_oriented_boxes_depth_from_pose(
+                self._wall_distractor_boxes_base_for_render[:, :, 0],
+                self._wall_distractor_boxes_base_for_render[:, :, 1],
+                self._wall_distractor_boxes_pose_world,
                 camera_pose,
-                wall_cam_spec,
-            )
-            solid_wall_depth = self._upsample_valid_depth(
-                solid_wall_depth, cam_spec["H"], cam_spec["W"]
+                # Unlike sampled wall points, an analytic solid box must be evaluated at the
+                # final camera resolution.  Rendering it at the reduced wall raster and then
+                # upsampling can leave a one-pixel silhouette gap through which a farther door
+                # or wall point becomes visible.
+                cam_spec,
             )
             )
             if int(self.depth_cam_render_blur_kernel_px) > 1:
@@ -4163,6 +4192,10 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         rendered_pcd_world = self._render_depth_scene_with_crisp_robot(
             door_walls_pcd_world, robot_pcd_world, self._get_sampler_camera_pose()
         )
+        # Retain the exact world-frame render for evaluation/Viser. The policy receives the
+        # robot-base-frame copy below, but replaying that copy requires applying a second pose
+        # transform and can obscure frame mismatches in the saved visualization.
+        self._last_rendered_depth_pcd_world = rendered_pcd_world
         return world_to_local(rendered_pcd_world, robot_base_pos_w, robot_base_quat_w)
 
     def _sample_scene_obs_pointcloud_base_lidar(self):
@@ -4194,6 +4227,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         rendered_depth_pcd_world = self._render_depth_scene_with_crisp_robot(
             door_walls_pcd_world, robot_pcd_world, self._get_sampler_camera_pose()
         )
+        self._last_rendered_depth_pcd_world = rendered_depth_pcd_world
         depth_pcd_base = world_to_local(rendered_depth_pcd_world, robot_base_pos_w, robot_base_quat_w)
         lidar_pcd_base = self._render_lidar_scene_pointcloud_base(
             scene_full_pcd_world,
@@ -4211,6 +4245,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         # handle via proprioception, matching the real RealSense. Only the LIDAR cloud is robot-filtered
         # (_filter_robot_points_base). This kept-for-viser handle now equals the policy-facing depth cloud.
         self._last_rendered_depth_pcd_base = None
+        self._last_rendered_depth_pcd_world = None
         # Per-rollout hole: reuse the metadata drawn at the last reset (see _resample_door_hole_aug).
         # Only when resample_each_step is set do we redraw a fresh hole for the whole batch every step.
         if self.door_hole_aug_resample_each_step:

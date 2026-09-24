@@ -258,6 +258,17 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
+        "--solid-panel-visual",
+        action="store_true",
+        help="Emit link_1's main panel as a URDF box visual primitive instead of the board OBJ mesh. "
+        "The escutcheon remains a separate visual mesh when present.",
+    )
+    parser.add_argument(
+        "--solid-frame-visual",
+        action="store_true",
+        help="Emit link_0 frame members as URDF box visual primitives instead of frame.obj.",
+    )
+    parser.add_argument(
         "--asset-name-prefix",
         type=str,
         default="scratch_door",
@@ -1190,6 +1201,18 @@ def add_mesh_body(parent, tag, name, filename):
     return body
 
 
+def add_box_visual(link, name, center, size):
+    visual = ET.SubElement(link, "visual")
+    visual.attrib["name"] = name
+    origin = ET.SubElement(visual, "origin")
+    origin.attrib["xyz"] = format_vector(center)
+    origin.attrib["rpy"] = "0 0 0"
+    geometry = ET.SubElement(visual, "geometry")
+    box = ET.SubElement(geometry, "box")
+    box.attrib["size"] = format_vector(size)
+    return visual
+
+
 def add_box_collision(link, name, center, size):
     collision = ET.SubElement(link, "collision")
     collision.attrib["name"] = name
@@ -1201,14 +1224,34 @@ def add_box_collision(link, name, center, size):
     box.attrib["size"] = format_vector(size)
 
 
-def build_urdf_tree(handle_mesh_filename, handle_spec, collisions, door_axis, joint_1_origin):
+def build_urdf_tree(
+    handle_mesh_filename,
+    handle_spec,
+    collisions,
+    door_axis,
+    joint_1_origin,
+    board_min,
+    board_max,
+    frame_boxes,
+    solid_panel_visual=False,
+    solid_frame_visual=False,
+):
     robot = ET.Element("robot")
     robot.attrib["name"] = "scratch-door"
 
     ET.SubElement(robot, "link", {"name": "base"})
 
     link_0 = ET.SubElement(robot, "link", {"name": "link_0"})
-    add_mesh_body(link_0, "visual", "frame", "texture_dae/frame.obj")
+    if solid_frame_visual:
+        for box_index, (frame_min, frame_max) in enumerate(frame_boxes):
+            add_box_visual(
+                link_0,
+                f"frame_box_{box_index}",
+                midpoint(frame_min, frame_max),
+                [hi - lo for lo, hi in zip(frame_min, frame_max)],
+            )
+    else:
+        add_mesh_body(link_0, "visual", "frame", "texture_dae/frame.obj")
     add_mesh_body(link_0, "collision", None, "texture_dae/frame.obj")
 
     joint_0 = ET.SubElement(robot, "joint", {"name": "joint_0", "type": "fixed"})
@@ -1220,22 +1263,29 @@ def build_urdf_tree(handle_mesh_filename, handle_spec, collisions, door_axis, jo
     ET.SubElement(joint_0, "child", {"link": "link_0"})
 
     link_1 = ET.SubElement(robot, "link", {"name": "link_1"})
-    add_mesh_body(link_1, "visual", "board", "texture_dae/board.obj")
-    # Collision uses the PLATE-FREE mesh (board_collision.obj), not the visual one -- see the
-    # write_board_mesh call site for why. The plate's own collision is the explicit "handle_plate"
-    # box primitive added below, not VHACD decomposition of a combined mesh.
-    add_mesh_body(link_1, "collision", None, "texture_dae/board_collision.obj")
-    # Box escutcheon plate: baked into board.obj's mesh, so the mesh collision above ALSO has to
-    # represent it. That collision is built at spawn time by VHACD convex-decomposing board.obj
-    # (see multi_door_cfg.py collider_type="convex_decomposition") -- a >1m-wide, <5cm-thick panel
-    # with one small (1-20mm) local bump baked in is exactly the geometry VHACD handles worst: the
-    # panel dominates the decomposition and the plate is a tiny embedded detail, so it can come out
-    # merged into an oversized hull, dropped, or badly conditioned. The round boss on link_2 never has
-    # this problem because it gets its own explicit box primitive (build_handle_collision_primitives)
-    # instead of relying on mesh decomposition. Give the box plate the same treatment: an exact,
-    # hand-specified box collision at its true bounds, layered on top of the mesh collision so the
-    # panel's general (possibly irregular) shape still comes from VHACD but this one small, easy-to-
-    # get-wrong feature does not depend on it.
+    if solid_panel_visual:
+        add_box_visual(
+            link_1,
+            "solid_panel_visual",
+            midpoint(board_min, board_max),
+            [hi - lo for lo, hi in zip(board_min, board_max)],
+        )
+        if handle_spec.get("plate_min_link1") is not None and handle_spec.get("plate_max_link1") is not None:
+            add_mesh_body(link_1, "visual", "handle_plate_visual", "texture_dae/plate.obj")
+    else:
+        add_mesh_body(link_1, "visual", "board", "texture_dae/board.obj")
+    # Use an explicit solid box for the panel collision. The old plate-free OBJ collision could
+    # be imported as a thin/hollow shell by downstream URDF/USD conversion, which made the panel
+    # unreliable as a blocking volume. Keep board.obj for visual detail, but make the panel body
+    # itself an unambiguous filled primitive.
+    add_box_collision(
+        link_1,
+        "solid_panel",
+        midpoint(board_min, board_max),
+        [hi - lo for lo, hi in zip(board_min, board_max)],
+    )
+    # Keep the escutcheon as a separate exact box collision because it is baked into the
+    # visual mesh but is too small to rely on mesh decomposition for reliable contact.
     if handle_spec.get("plate_min_link1") is not None and handle_spec.get("plate_max_link1") is not None:
         plate_min = handle_spec["plate_min_link1"]
         plate_max = handle_spec["plate_max_link1"]
@@ -1284,6 +1334,8 @@ def validate_variant(variant_dir, root):
 
     if root.find(".//link[@name='link_1']/collision") is None:
         raise ValueError("link_1 collision must exist")
+    if root.find(".//link[@name='link_1']/collision[@name='solid_panel']") is None:
+        raise ValueError("link_1 must contain an explicit solid_panel box collision")
     if root.find(".//link[@name='link_2']/visual") is None:
         raise ValueError("link_2 visual must exist")
     if len(root.findall(".//link[@name='link_2']/collision")) < 2:
@@ -1431,16 +1483,11 @@ def generate_variants(args):
         if handle_spec.get("plate_min_link1") is not None and handle_spec.get("plate_max_link1") is not None:
             plate_box = (handle_spec["plate_min_link1"], handle_spec["plate_max_link1"])
         write_board_mesh(texture_dir / "board.obj", board_min, board_max, plate_box=plate_box)
-        # Plate-FREE collision mesh: board.obj (visual) bakes the escutcheon plate in for rendering,
-        # but handing that same combined mesh to VHACD (multi_door_cfg.py collider_type=
-        # "convex_decomposition") is exactly the geometry it decomposes worst -- a >1m panel with one
-        # tiny (1-20mm) local bump -- and empirically an explicit "handle_plate" collision primitive
-        # added alongside it (build_urdf_tree) did NOT fix box-shape door success (66.4% vs 67.3%
-        # baseline, no improvement), meaning the oversized/misshapen VHACD hull is what the hand
-        # actually contacts, not the correct primitive sitting redundantly inside/near it. Giving VHACD
-        # only the plain panel bounds here removes that hull entirely; the plate's own collision comes
-        # exclusively from the explicit box primitive from now on.
-        write_board_mesh(texture_dir / "board_collision.obj", board_min, board_max, plate_box=None)
+        if args.solid_panel_visual and plate_box is not None:
+            write_board_mesh(texture_dir / "plate.obj", plate_box[0], plate_box[1], plate_box=None)
+        # The visual mesh keeps the escutcheon detail; link_1 also receives an explicit
+        # solid box collision below so URDF/USD conversion cannot turn the panel into a
+        # thin or hollow imported shell.
         write_frame_mesh(texture_dir / "frame.obj", frame_boxes)
         handle_mesh_name = f"handle_{handle_spec['type']}.obj"
         write_handle_mesh(texture_dir / handle_mesh_name, handle_spec, args.handle_num_segments)
@@ -1451,6 +1498,11 @@ def generate_variants(args):
             collisions=collisions,
             door_axis=door_axis,
             joint_1_origin=joint_1_origin,
+            board_min=board_min,
+            board_max=board_max,
+            frame_boxes=frame_boxes,
+            solid_panel_visual=args.solid_panel_visual,
+            solid_frame_visual=args.solid_frame_visual,
         )
         ET.ElementTree(root).write(variant_dir / "mobility.urdf", encoding="utf-8", xml_declaration=True)
         validate_variant(variant_dir, root)

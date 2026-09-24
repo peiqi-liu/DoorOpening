@@ -377,9 +377,12 @@ def _camera_basis_from_pose_x_forward(
     R21 = 2.0 * (yz + wx)
     R22 = 1.0 - 2.0 * (xx + yy)
 
+    # The incoming pose uses Isaac's ``world`` camera convention: local +X is forward,
+    # +Y is left, and +Z is up. Pixel coordinates increase rightward (u) and downward (v),
+    # so their world directions are local -Y and -Z. Keep depth along +X.
     v_hat = torch.stack([R00, R10, R20], dim=-1)
-    u_hat = torch.stack([R01, R11, R21], dim=-1)
-    w_hat = torch.stack([R02, R12, R22], dim=-1)
+    u_hat = -torch.stack([R01, R11, R21], dim=-1)
+    w_hat = -torch.stack([R02, R12, R22], dim=-1)
 
     v_hat = v_hat / v_hat.norm(dim=-1, keepdim=True).clamp_min(1e-12)
     u_hat = u_hat / u_hat.norm(dim=-1, keepdim=True).clamp_min(1e-12)
@@ -485,6 +488,214 @@ def rasterize_depth_zbuffer_from_pose(
     depth = torch.where(depth >= near_m, depth, inf)
     depth = torch.where(depth <= far_val, depth, inf)
     return depth, intr
+
+
+@torch.no_grad()
+def rasterize_axis_aligned_boxes_depth_from_pose(
+    boxes_min_world: torch.Tensor,
+    boxes_max_world: torch.Tensor,
+    camera_pose: torch.Tensor,
+    cam_spec_dict: Dict,
+):
+    """Exact pinhole depth for solid world-axis-aligned boxes.
+
+    Unlike point z-buffering, this intersects every camera ray with the box volume, so a wall remains
+    opaque even when its surface point sampling is sparse. Inputs are ``(B,K,3)``; NaN/empty boxes
+    are ignored. This is intended as a cheap analytic occluder pass for rectangular distractor walls.
+    """
+    # Accept either one shared box set ``(K, 3)`` or per-environment boxes
+    # ``(B, K, 3)``.  Wall metadata is authored once in the door-base frame and
+    # is therefore commonly shared by all environments.
+    if camera_pose.ndim == 3 and camera_pose.shape[1] == 1:
+        camera_pose = camera_pose[:, 0]
+    if camera_pose.ndim != 2 or camera_pose.shape[-1] != 7:
+        raise ValueError(f"camera_pose must have shape (B, 7), got {tuple(camera_pose.shape)}")
+    if boxes_min_world.ndim == 2:
+        boxes_min_world = boxes_min_world.unsqueeze(0)
+        boxes_max_world = boxes_max_world.unsqueeze(0)
+    elif boxes_min_world.ndim != 3:
+        boxes_min_world = boxes_min_world.reshape(boxes_min_world.shape[0], -1, 3)
+        boxes_max_world = boxes_max_world.reshape(boxes_max_world.shape[0], -1, 3)
+    assert boxes_min_world.ndim == 3 and boxes_max_world.shape == boxes_min_world.shape
+    camera_batch = int(camera_pose.shape[0])
+    if boxes_min_world.shape[0] == 1 and camera_batch > 1:
+        boxes_min_world = boxes_min_world.expand(camera_batch, -1, -1)
+        boxes_max_world = boxes_max_world.expand(camera_batch, -1, -1)
+    elif boxes_min_world.shape[0] != camera_batch:
+        raise ValueError(
+            f"Box batch ({boxes_min_world.shape[0]}) must be 1 or match camera batch ({camera_batch})"
+        )
+    B, K, _ = boxes_min_world.shape
+    # The analytic intersection uses a temporary (B, K, H, W, 3) tensor.  At
+    # training scale, materializing all environments at once is needlessly
+    # expensive (and can exceed GPU memory by hundreds of GiB).  Tile only the
+    # environment batch; the result is exact and the peak memory is bounded by
+    # this small chunk rather than by the total number of environments.
+    batch_chunk = 4
+    if B > batch_chunk:
+        depths = []
+        for start in range(0, B, batch_chunk):
+            depth_chunk, _ = rasterize_axis_aligned_boxes_depth_from_pose(
+                boxes_min_world[start : start + batch_chunk],
+                boxes_max_world[start : start + batch_chunk],
+                camera_pose[start : start + batch_chunk],
+                cam_spec_dict,
+            )
+            depths.append(depth_chunk)
+        fx, fy, cx, cy = _get_render_intrinsics(cam_spec_dict, boxes_min_world.device, boxes_min_world.dtype)
+        return torch.cat(depths, dim=0), (fx, fy, cx, cy)
+    device, dtype = boxes_min_world.device, boxes_min_world.dtype
+    H, W = int(cam_spec_dict["H"]), int(cam_spec_dict["W"])
+    fx, fy, cx, cy = _get_render_intrinsics(cam_spec_dict, device, dtype)
+    u = torch.arange(W, device=device, dtype=dtype).view(1, 1, W).expand(B, H, W)
+    v = torch.arange(H, device=device, dtype=dtype).view(1, H, 1).expand(B, H, W)
+    x = (u - cx) / fx
+    y = (v - cy) / fy
+    u_hat, w_hat, v_hat = _camera_basis_from_pose_x_forward(camera_pose)
+    rays = (
+        x[..., None] * u_hat[:, None, None, :]
+        + y[..., None] * w_hat[:, None, None, :]
+        + v_hat[:, None, None, :]
+    )
+    origin = camera_pose[:, None, None, None, :3]
+    # Add an explicit box axis: direction is (B, 1, H, W, 3), while the box
+    # bounds are (B, K, 1, 1, 3).  Avoid relying on implicit broadcasting of
+    # the batch axis, which would produce an accidental (B, B, K, H, W) grid.
+    direction = rays[:, None, :, :, :]
+    bmin = boxes_min_world[:, :, None, None, :]
+    bmax = boxes_max_world[:, :, None, None, :]
+    with torch.no_grad():
+        inv_d = torch.where(direction.abs() > 1e-8, 1.0 / direction, torch.full_like(direction, float("inf")))
+        t0 = (bmin - origin) * inv_d
+        t1 = (bmax - origin) * inv_d
+        t_near = torch.minimum(t0, t1).amax(dim=-1)
+        t_far = torch.maximum(t0, t1).amin(dim=-1)
+        valid_box = torch.isfinite(bmin).all(dim=-1)[:, :, None, None] & (t_far >= torch.maximum(t_near, torch.zeros_like(t_near)))
+        depth = torch.where(valid_box, torch.maximum(t_near, torch.zeros_like(t_near)), torch.full_like(t_near, float("inf")))
+        # Depending on whether the camera basis carries a singleton batch axis, broadcasting can
+        # leave either (B,K,H,W) or (B,1,K,H,W); reduce all box-only axes until (B,H,W) remains.
+        while depth.ndim > 3:
+            depth = depth.amin(dim=1)
+    near_m = float(cam_spec_dict["near_m"])
+    far_m = cam_spec_dict["far_m"]
+    depth = torch.where(depth >= near_m, depth, torch.full_like(depth, float("inf")))
+    if far_m is not None:
+        depth = torch.where(depth <= float(far_m), depth, torch.full_like(depth, float("inf")))
+    return depth, (fx, fy, cx, cy)
+
+
+@torch.no_grad()
+def rasterize_oriented_boxes_depth_from_pose(
+    boxes_min_local: torch.Tensor,
+    boxes_max_local: torch.Tensor,
+    boxes_pose_world: torch.Tensor,
+    camera_pose: torch.Tensor,
+    cam_spec_dict: Dict,
+):
+    """Exact pinhole depth for solid boxes posed arbitrarily in world space.
+
+    ``boxes_min_local`` / ``boxes_max_local`` are ``(B, K, 3)`` bounds in each
+    environment's common box frame and ``boxes_pose_world`` is the corresponding
+    ``(B, 7)`` frame pose (xyz + xyzw).  Keeping the boxes in door-base
+    coordinates avoids the incorrect enclosing-world-AABB approximation for a
+    rotated door and makes the analytic occluder agree with sampled wall faces.
+    The returned depth is camera-forward depth, not Euclidean range, matching
+    :func:`rasterize_depth_zbuffer_from_pose`.
+    """
+    if camera_pose.ndim == 3 and camera_pose.shape[1] == 1:
+        camera_pose = camera_pose[:, 0]
+    if boxes_pose_world.ndim == 3 and boxes_pose_world.shape[1] == 1:
+        boxes_pose_world = boxes_pose_world[:, 0]
+    if camera_pose.ndim != 2 or camera_pose.shape[-1] != 7:
+        raise ValueError(f"camera_pose must have shape (B, 7), got {tuple(camera_pose.shape)}")
+    if boxes_pose_world.ndim != 2 or boxes_pose_world.shape[-1] != 7:
+        raise ValueError(f"boxes_pose_world must have shape (B, 7), got {tuple(boxes_pose_world.shape)}")
+    if boxes_min_local.ndim == 2:
+        boxes_min_local = boxes_min_local.unsqueeze(0)
+        boxes_max_local = boxes_max_local.unsqueeze(0)
+    if boxes_min_local.ndim != 3 or boxes_max_local.shape != boxes_min_local.shape:
+        raise ValueError("box bounds must have matching shape (B, K, 3) or (K, 3)")
+    batch = int(camera_pose.shape[0])
+    if boxes_min_local.shape[0] == 1 and batch > 1:
+        boxes_min_local = boxes_min_local.expand(batch, -1, -1)
+        boxes_max_local = boxes_max_local.expand(batch, -1, -1)
+    if boxes_pose_world.shape[0] == 1 and batch > 1:
+        boxes_pose_world = boxes_pose_world.expand(batch, -1)
+    if boxes_min_local.shape[0] != batch or boxes_pose_world.shape[0] != batch:
+        raise ValueError("box bounds, box poses, and camera poses must share a batch dimension")
+
+    # This pass materializes B*K*H*W*3 values.  Bound peak memory identically
+    # to the legacy AABB pass without changing the intersection result.
+    batch_chunk = 4
+    if batch > batch_chunk:
+        depths = []
+        for start in range(0, batch, batch_chunk):
+            depth_chunk, _ = rasterize_oriented_boxes_depth_from_pose(
+                boxes_min_local[start : start + batch_chunk],
+                boxes_max_local[start : start + batch_chunk],
+                boxes_pose_world[start : start + batch_chunk],
+                camera_pose[start : start + batch_chunk],
+                cam_spec_dict,
+            )
+            depths.append(depth_chunk)
+        fx, fy, cx, cy = _get_render_intrinsics(cam_spec_dict, boxes_min_local.device, boxes_min_local.dtype)
+        return torch.cat(depths, dim=0), (fx, fy, cx, cy)
+
+    device, dtype = boxes_min_local.device, boxes_min_local.dtype
+    height, width = int(cam_spec_dict["H"]), int(cam_spec_dict["W"])
+    fx, fy, cx, cy = _get_render_intrinsics(cam_spec_dict, device, dtype)
+    u = torch.arange(width, device=device, dtype=dtype).view(1, 1, width).expand(batch, height, width)
+    v = torch.arange(height, device=device, dtype=dtype).view(1, height, 1).expand(batch, height, width)
+    x = (u - cx) / fx
+    y = (v - cy) / fy
+    u_hat, w_hat, v_hat = _camera_basis_from_pose_x_forward(camera_pose)
+    ray_world = x[..., None] * u_hat[:, None, None, :] + y[..., None] * w_hat[:, None, None, :] + v_hat[:, None, None, :]
+
+    # Rotate origin and ray into the box frame with q^-1.  Quaternion rotation
+    # is written locally to keep this utility independent of IsaacLab.
+    q = boxes_pose_world[:, 3:7]
+    q = q / q.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+    q_inv_xyz = -q[:, :3]
+    q_inv_w = q[:, 3:4]
+
+    def _rotate_inv(vec: torch.Tensor) -> torch.Tensor:
+        q_xyz = q_inv_xyz[:, None, None, :]
+        qw = q_inv_w[:, None, None, :]
+        uv = torch.cross(q_xyz.expand_as(vec), vec, dim=-1)
+        uuv = torch.cross(q_xyz.expand_as(vec), uv, dim=-1)
+        return vec + 2.0 * (qw * uv + uuv)
+
+    camera_origin_local = _rotate_inv(
+        (camera_pose[:, :3] - boxes_pose_world[:, :3]).view(batch, 1, 1, 3)
+    )
+    ray_local = _rotate_inv(ray_world)
+    direction = ray_local[:, None, :, :, :]
+    origin = camera_origin_local[:, None, :, :, :]
+    bmin = boxes_min_local[:, :, None, None, :]
+    bmax = boxes_max_local[:, :, None, None, :]
+    # Robust slab intersection, including rays parallel to a box face.  A parallel
+    # ray has an unbounded interval when its origin lies inside that slab and no
+    # interval when it lies outside; multiplying a zero bound delta by infinity
+    # would instead create NaNs at exactly the cases this pass is meant to cover.
+    parallel = direction.abs() <= 1e-8
+    safe_direction = torch.where(parallel, torch.ones_like(direction), direction)
+    t0 = (bmin - origin) / safe_direction
+    t1 = (bmax - origin) / safe_direction
+    slab_inside = (origin >= bmin) & (origin <= bmax)
+    axis_near = torch.where(parallel & slab_inside, torch.full_like(t0, float("-inf")), torch.minimum(t0, t1))
+    axis_far = torch.where(parallel & slab_inside, torch.full_like(t0, float("inf")), torch.maximum(t0, t1))
+    axis_near = torch.where(parallel & ~slab_inside, torch.full_like(t0, float("inf")), axis_near)
+    axis_far = torch.where(parallel & ~slab_inside, torch.full_like(t0, float("-inf")), axis_far)
+    t_near = axis_near.amax(dim=-1)
+    t_far = axis_far.amin(dim=-1)
+    valid_box = torch.isfinite(bmin).all(dim=-1) & (t_far >= torch.maximum(t_near, torch.zeros_like(t_near)))
+    depth = torch.where(valid_box, torch.maximum(t_near, torch.zeros_like(t_near)), torch.full_like(t_near, float("inf"))).amin(dim=1)
+    near_m = float(cam_spec_dict["near_m"])
+    far_m = cam_spec_dict["far_m"]
+    depth = torch.where(depth >= near_m, depth, torch.full_like(depth, float("inf")))
+    if far_m is not None:
+        depth = torch.where(depth <= float(far_m), depth, torch.full_like(depth, float("inf")))
+    return depth, (fx, fy, cx, cy)
 
 
 @torch.no_grad()

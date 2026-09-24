@@ -1,0 +1,266 @@
+{
+  "generator": "generate_randomized_doors_scratch.py",
+  "variant_name": "scratch_door__rnd_01",
+  "source_asset": null,
+  "direction_pair_key": "scratch_door__rnd_01",
+  "target_properties": {
+    "panel_width_m": 0.8809581912082907,
+    "panel_height_m": 1.8103396695698009,
+    "handle_height_m": 0.8871894467378343,
+    "handle_to_edge_distance_m": 0.08018065816449113,
+    "flip_hinge_side": false,
+    "opening_direction": "pull",
+    "handle_side": "min"
+  },
+  "actual_properties": {
+    "panel_width_m": 0.8809581912082907,
+    "panel_height_m": 1.8103396695698009,
+    "frame_height_m": 1.9212120575284353,
+    "frame_panel_extra_height_m": 0.11087238795863441,
+    "handle_height_m": 0.8871894467378343,
+    "handle_to_edge_distance_m": 0.08018065816449116,
+    "handle_side": "min",
+    "opening_direction": "pull",
+    "handle_attachment_joint": "joint_2",
+    "board_min_x": -0.8809581912082907,
+    "board_max_x": 0.0,
+    "board_min_y": 0.0,
+    "board_max_y": 1.8103396695698009
+  },
+  "source_properties": {
+    "panel_width_m": 0.8809581912082907,
+    "panel_height_m": 1.8103396695698009,
+    "panel_thickness_m": 0.04557523077207605,
+    "frame_height_m": 1.9212120575284353,
+    "frame_panel_extra_height_m": 0.11087238795863441,
+    "handle_height_m": 0.8871894467378343,
+    "handle_to_edge_distance_m": 0.08018065816449116,
+    "handle_side": "min",
+    "opening_direction": "pull"
+  },
+  "initial_state": {
+    "robot_world_pose": {
+      "pos": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "rot": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    "door_world_pose": {
+      "pos": [
+        0.0,
+        0.0,
+        0.03
+      ],
+      "rot": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    "robot_joint_names": [
+      "base_x_joint",
+      "base_y_joint",
+      "base_rotation_joint",
+      "panda_joint1",
+      "panda_joint2",
+      "panda_joint3",
+      "panda_joint4",
+      "panda_joint5",
+      "panda_joint6",
+      "panda_joint7"
+    ],
+    "robot_joint_pos": [
+      -0.033821678751220205,
+      -0.12738974889733803,
+      0.12260413279201554,
+      -0.03557449166425625,
+      -0.8236189395896114,
+      -0.019151817589806566,
+      -2.324581854280342,
+      -0.03192736200760625,
+      1.578956343161143,
+      0.013891346892618409
+    ],
+    "robot_base_joint_pos": [
+      -0.033821678751220205,
+      -0.12738974889733803,
+      0.12260413279201554
+    ],
+    "robot_franka_joint_names": [
+      "panda_joint1",
+      "panda_joint2",
+      "panda_joint3",
+      "panda_joint4",
+      "panda_joint5",
+      "panda_joint6",
+      "panda_joint7"
+    ],
+    "robot_franka_joint_pos": [
+      -0.03557449166425625,
+      -0.8236189395896114,
+      -0.019151817589806566,
+      -2.324581854280342,
+      -0.03192736200760625,
+      1.578956343161143,
+      0.013891346892618409
+    ],
+    "door_joint_pos": [
+      0.0,
+      0.0
+    ],
+    "start_base_sampling": "paired",
+    "start_base_radius_m": 1.041640730568903,
+    "start_base_radius_range_m": [
+      1.0,
+      1.5
+    ],
+    "start_base_angle_range_deg": 8.0,
+    "start_base_pair_seed": 0,
+    "start_base_pair_key": "scratch_door__rnd_01",
+    "sampled_robot_world_pose": {
+      "pos": [
+        1.0338216787512202,
+        0.12738974889733803,
+        0.0
+      ],
+      "rot": [
+        0.06126367866092912,
+        0.0,
+        0.0,
+        -0.9981216166765102
+      ]
+    },
+    "sampled_approach_angle_rad": 0.12260413279201562
+  },
+  "topology": {
+    "links": [
+      "base",
+      "link_0",
+      "link_1",
+      "link_2"
+    ],
+    "joints": [
+      "joint_0",
+      "joint_1",
+      "joint_2"
+    ]
+  },
+  "panel": {
+    "width_m": 0.8809581912082907,
+    "height_m": 1.8103396695698009,
+    "thickness_m": 0.04557523077207605,
+    "bbox_link1": [
+      -0.8809581912082907,
+      0.0,
+      -0.022787615386038025,
+      0.0,
+      1.8103396695698009,
+      0.022787615386038025
+    ]
+  },
+  "frame": {
+    "post_width_m": 0.01810907166688569,
+    "head_height_m": 0.10717640086133784,
+    "depth_m": 0.10970667507377566,
+    "clearance_m": 0.0036959870972964816
+  },
+  "door": {
+    "hinge_side": "max",
+    "handle_side": "min",
+    "opening_direction": "pull",
+    "joint_1_origin_link0": [
+      0.44047909560414533,
+      0.0,
+      0.0
+    ],
+    "joint_1_axis": [
+      0.0,
+      1.0,
+      0.0
+    ]
+  },
+  "handle": {
+    "type": "straight",
+    "mesh": "texture_dae/handle_straight.obj",
+    "joint_origin_link1": [
+      -0.8007775330437995,
+      0.8871894467378343,
+      0.022787615386038025
+    ],
+    "joint_axis_link1": [
+      0.0,
+      0.0,
+      -1.0
+    ],
+    "lever_direction_link2": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "return_direction_link2": [
+      0.0,
+      0.0,
+      -1.0
+    ],
+    "radius_m": 0.00844397800076215,
+    "lever_thickness_m": 0.017306283522748316,
+    "stem_length_m": 0.060130904413348896,
+    "panel_underside_gap_m": 0.051477762651974734,
+    "plate_underside_gap_m": 0.049931211443571225,
+    "lever_length_m": 0.11392722165158478,
+    "return_length_m": 0.043824645256031525,
+    "return_tip_clearance_m": 0.01630625915731737,
+    "has_bump": true,
+    "bump_shape": "box",
+    "bump_protrusion_m": 0.00154655120840351,
+    "bump_height_m": 0.18674682009408705,
+    "bump_width_m": 0.05123973283474429,
+    "bump_radius_m": 0.021758390998780023,
+    "plate_min_link1": [
+      -0.8263973994611716,
+      0.7938160366907907,
+      0.019787615386038026
+    ],
+    "plate_max_link1": [
+      -0.7751576666264274,
+      0.9805628567848779,
+      0.024334166594441535
+    ],
+    "collision_primitives": [
+      {
+        "name": "handle_stem",
+        "origin_xyz": [
+          0.0,
+          0.0,
+          0.030065452206674448
+        ],
+        "size": [
+          0.0168879560015243,
+          0.0168879560015243,
+          0.060130904413348896
+        ]
+      },
+      {
+        "name": "handle_main_lever",
+        "origin_xyz": [
+          0.05696361082579239,
+          0.0,
+          0.060130904413348896
+        ],
+        "size": [
+          0.11392722165158478,
+          0.017306283522748316,
+          0.017306283522748316
+        ]
+      }
+    ]
+  }
+}

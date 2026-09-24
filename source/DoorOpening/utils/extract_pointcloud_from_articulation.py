@@ -1031,10 +1031,17 @@ class FrankaGripperSampler:
         self.door_geometry_aug_panel_width_axis = 1
         self.door_geometry_aug_panel_width_anchor = "origin"
         self.latest_door_geometry_aug_stats = {}
-        # Load meshes for all links with visuals
-        self.links = [l for l in self.robot.links if len(l.visuals) and (l.visuals[0].geometry.mesh is not None)]
-        self.hand_links = [l for l in self.links if ("panda" not in l.name) and l.visuals[0].geometry.mesh is not None]
+        # Load all links with supported visual geometry.  Scratch doors can use URDF
+        # box visuals for solid panel/frame bodies; the old first-visual mesh filter
+        # silently dropped those links from the point cloud.
+        self.links = [l for l in self.robot.links if any(self._visual_is_supported(v) for v in l.visuals)]
+        self.hand_links = [l for l in self.links if "panda" not in l.name]
         self.points = self._build_link_point_samples(num_points)
+
+    @staticmethod
+    def _visual_is_supported(visual):
+        geometry = getattr(visual, "geometry", None)
+        return getattr(geometry, "mesh", None) is not None or getattr(geometry, "box", None) is not None
 
     def _mesh_scale_to_xyz(self, scale):
         if scale is None:
@@ -1061,11 +1068,18 @@ class FrankaGripperSampler:
 
     def _load_visual_mesh_in_link_frame(self, visual):
         mesh_spec = getattr(visual.geometry, "mesh", None)
-        if mesh_spec is None:
+        box_spec = getattr(visual.geometry, "box", None)
+        if mesh_spec is not None:
+            mesh = trimesh.load(resolve_mesh_path(self.urdf_path, mesh_spec.filename), force="mesh")
+            mesh = mesh.copy()
+            mesh.apply_scale(self._mesh_scale_to_xyz(getattr(mesh_spec, "scale", None)))
+        elif box_spec is not None:
+            size = np.asarray(getattr(box_spec, "size", None), dtype=np.float32).reshape(-1)
+            if size.size != 3 or not np.isfinite(size).all() or np.any(size <= 0.0):
+                raise ValueError(f"URDF box visual must have three positive finite dimensions, got {size!r}")
+            mesh = trimesh.creation.box(extents=size)
+        else:
             return None
-        mesh = trimesh.load(resolve_mesh_path(self.urdf_path, mesh_spec.filename), force="mesh")
-        mesh = mesh.copy()
-        mesh.apply_scale(self._mesh_scale_to_xyz(getattr(mesh_spec, "scale", None)))
         origin = visual.origin.detach().cpu().numpy() if isinstance(visual.origin, torch.Tensor) else np.asarray(visual.origin)
         mesh.apply_transform(origin)
         return mesh
@@ -1078,7 +1092,11 @@ class FrankaGripperSampler:
             visual_areas = []
             for visual in link.visuals:
                 mesh = self._load_visual_mesh_in_link_frame(visual)
-                if mesh is None:
+                # Some imported URDF visual meshes are empty.  Trimesh's
+                # oriented-bounds/convex-hull path raises on those meshes;
+                # omit them so the remaining robot visuals can still be
+                # sampled for the policy point cloud.
+                if mesh is None or len(mesh.vertices) == 0 or len(mesh.faces) == 0:
                     continue
                 visual_meshes.append(mesh)
                 visual_areas.append(float(mesh.bounding_box_oriented.area))

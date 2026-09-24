@@ -14,6 +14,7 @@ import torch
 
 DEFAULT_CLOUD_COLORS = {
     "ground_truth": (120, 120, 120),
+    "ground_truth_walls": (125, 125, 135),
     "robot_lidar_obs": (255, 140, 0),
     "robot_depth_cam_obs": (79, 195, 247),
     "robot_obs": (79, 195, 247),
@@ -23,6 +24,7 @@ DEFAULT_CLOUD_COLORS = {
 }
 PREFERRED_STREAM_ORDER = (
     "ground_truth",
+    "ground_truth_walls",
     "robot_lidar_obs",
     "robot_depth_cam_obs",
     "policy_input",
@@ -30,6 +32,12 @@ PREFERRED_STREAM_ORDER = (
     "robot",
     "door",
 )
+
+# The replay URDF contains these virtual joints between ``base_link`` and the
+# physical chassis.  Simulation stores their values in the opposite convention
+# to the measured ``tidybot2_base_link`` world pose, so replay must not apply
+# both representations at once.
+VIRTUAL_BASE_JOINT_NAMES = frozenset(("base_x_joint", "base_y_joint", "base_rotation_joint"))
 
 # DoorOpening/scripts/ -> DoorOpening/, where the glorbot assets live.
 DEFAULT_URDF = (
@@ -219,6 +227,15 @@ def _robot_base_pose(frame: dict) -> tuple[np.ndarray, np.ndarray]:
     return pos.astype(np.float32, copy=False), quat.astype(np.float32, copy=False)
 
 
+def _pointcloud_base_pose(frame: dict) -> tuple[np.ndarray, np.ndarray] | None:
+    """Measured physical chassis pose used to normalize the point-cloud observation."""
+    pos = _to_numpy_vector(frame.get("pointcloud_base_pos_w"))
+    quat = _to_numpy_vector(frame.get("pointcloud_base_quat_w"))
+    if pos is None or pos.size != 3 or quat is None or quat.size != 4:
+        return None
+    return pos.astype(np.float32, copy=False), quat.astype(np.float32, copy=False)
+
+
 def _measured_base_pose(frame: dict, base_layout: dict[str, int] | None) -> tuple[np.ndarray, np.ndarray]:
     """Measured base world pose, preferring the reliable compact ``compact_q`` dims."""
     pose = _compact_base_pose(_to_numpy_vector(frame.get("compact_q")), base_layout)
@@ -303,6 +320,7 @@ def _coerce_color(value: object, default: tuple[int, int, int]) -> tuple[int, in
 def _stream_label(name: str) -> str:
     labels = {
         "ground_truth": "GT",
+        "ground_truth_walls": "Ground-truth wall points",
         "robot_lidar_obs": "Robot Lidar Obs",
         "robot_depth_cam_obs": "Robot Depth Cam Obs",
         "robot_obs": "Robot Obs",
@@ -339,6 +357,12 @@ def _discover_streams(payload: dict, frames: list[dict]) -> list[dict]:
             elif isinstance(raw_spec, dict):
                 _add_stream(streams, str(raw_spec.get("name", "")), raw_spec)
 
+    static_pointclouds = payload.get("static_pointclouds", {})
+    if isinstance(static_pointclouds, dict):
+        for name in static_pointclouds:
+            if name not in streams:
+                _add_stream(streams, str(name))
+
     for frame in frames:
         pointclouds = frame.get("pointclouds")
         if isinstance(pointclouds, dict):
@@ -355,7 +379,7 @@ def _discover_streams(payload: dict, frames: list[dict]) -> list[dict]:
     return [streams[name] for name in ordered_names]
 
 
-def _frame_cloud_points(frame: dict, stream: dict) -> np.ndarray:
+def _frame_cloud_points(frame: dict, stream: dict, static_pointclouds: dict | None = None) -> np.ndarray:
     name = stream["name"]
     pointclouds = frame.get("pointclouds")
     if isinstance(pointclouds, dict) and name in pointclouds:
@@ -363,13 +387,17 @@ def _frame_cloud_points(frame: dict, stream: dict) -> np.ndarray:
     for key in (stream.get("key"), f"{name}_points_world"):
         if key and key in frame:
             return _to_numpy_points(frame.get(key))
+    if isinstance(static_pointclouds, dict) and name in static_pointclouds:
+        return _to_numpy_points(static_pointclouds[name])
     return np.zeros((0, 3), dtype=np.float32)
 
 
-def _first_nonempty_cloud(frames: list[dict], streams: list[dict]) -> np.ndarray:
+def _first_nonempty_cloud(
+    frames: list[dict], streams: list[dict], static_pointclouds: dict | None = None
+) -> np.ndarray:
     for frame in frames:
         for stream in streams:
-            pts = _frame_cloud_points(frame, stream)
+            pts = _frame_cloud_points(frame, stream, static_pointclouds)
             if pts.shape[0] > 0:
                 return pts
     return np.zeros((0, 3), dtype=np.float32)
@@ -506,7 +534,8 @@ def main() -> None:
     if not args.no_grid:
         server.scene.add_grid("/grid", width=6, height=6, position=(0.0, 0.0, 0.0), shadow_opacity=0.1)
 
-    first_cloud = _first_nonempty_cloud(frames, streams)
+    static_pointclouds = payload.get("static_pointclouds", {})
+    first_cloud = _first_nonempty_cloud(frames, streams, static_pointclouds)
     if first_cloud.shape[0] > 0:
         center = first_cloud.mean(axis=0)
     elif robot_requested:
@@ -648,12 +677,25 @@ def main() -> None:
             return
         source_key = robot_label_to_key.get(robot_source.value, joint_sources[0][0]) if robot_source else joint_sources[0][0]
         compact_vec = _to_numpy_vector(frame.get(source_key))
-        # Place the base from the compact base dims of the selected source (reliable,
-        # and lets the Target view actually move the base); fall back to recorded fields.
-        base_pose = _compact_base_pose(compact_vec, base_layout) or _robot_base_pose(frame)
+        cfg = _compact_to_cfg(compact_vec, robot_joint_pairs, n_actuated)
+        # The point cloud is expressed in tidybot2_base_link.  Its saved pose is
+        # authoritative for a world-frame replay: the compact virtual-base joint
+        # values have the inverse sign convention, so using them under the fixed
+        # articulation root moves the mesh opposite to the cloud.  Place the URDF
+        # root at the physical chassis and neutralize those virtual joints.
+        base_pose = _pointcloud_base_pose(frame)
+        if base_pose is not None:
+            compact_names = payload.get("compact_target_joint_names", ())
+            for compact_idx, urdf_idx in robot_joint_pairs:
+                if compact_idx < len(compact_names) and compact_names[compact_idx] in VIRTUAL_BASE_JOINT_NAMES:
+                    cfg[urdf_idx] = 0.0
+        else:
+            # Legacy raw recordings lack pointcloud_base_*. Keep their original
+            # compact-joint reconstruction rather than silently changing them.
+            base_pose = _compact_base_pose(compact_vec, base_layout) or _robot_base_pose(frame)
         robot_frame.position = base_pose[0]
         robot_frame.wxyz = base_pose[1]
-        robot_urdf.update_cfg(_compact_to_cfg(compact_vec, robot_joint_pairs, n_actuated))
+        robot_urdf.update_cfg(cfg)
 
     def _update_door(frame: dict) -> None:
         if door_urdf is None:
@@ -675,7 +717,7 @@ def main() -> None:
     def _apply_frame(frame_idx: int) -> None:
         frame = frames[frame_idx]
         for stream in streams:
-            points = _frame_cloud_points(frame, stream)
+            points = _frame_cloud_points(frame, stream, static_pointclouds)
             handle = cloud_handles[stream["name"]]
             handle.points = points if show_clouds[stream["name"]].value else np.zeros((0, 3), dtype=np.float32)
         if aux_handle is not None and show_aux is not None:

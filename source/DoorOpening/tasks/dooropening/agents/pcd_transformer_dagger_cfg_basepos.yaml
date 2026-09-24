@@ -1,0 +1,421 @@
+hidden_dim: 256
+type_dim: 8
+dropout: 0.0
+
+normalize_state: True
+normalize_action: True
+action_space: "absolute"
+action_dim: 11  # base(3) + franka arm(7) + gripper(1); must equal the env action_space
+aux_weight: 0.1
+mode_prediction:
+  enabled: false
+  num_modes: 2  # Push/pull discriminator only.
+  weight: 0.01
+  return_latent: true
+door_joint_prediction:
+  enabled: true
+  output_dim: 2  # Must equal the number of dagger.door_joint_training.joints below.
+  weight: 0.01
+rollout_progress_prediction:
+  # Predict completed_frames / this_environment's_fixed_rollout_length in [0, 1]. This is a
+  # readout-only head and is not fed back into the policy observation.
+  enabled: true
+  weight: 0.01
+
+push_pull_condition:
+  # TEMPORARILY OFF: single-family distillation (PartNetv5_plusplus is 100% pull), so this one-hot
+  # is a constant and carries no information. Set back to true when training on mixed push+pull
+  # families. Disabling it also drops the `push_pull_cond` state encoder below (the model pops that
+  # entry when this block is present and disabled), so nothing else needs changing here.
+  enabled: false
+  source: oracle
+  obs_key: push_pull_cond
+  detach_predicted_condition: true
+  input_dim: 2
+  hidden_dims: [64, 256]
+  dropout: 0.0
+  use_layer_norm: true
+
+left_right_condition:
+  # Additive oracle one-hot for handle side (left/right), independent of push/pull. Oracle only
+  # (no predicted source) and no temporal history input. Flip enabled to true to turn it on; it
+  # auto-creates its own state encoder under obs_key from the hidden_dims below.
+  # TEMPORARILY OFF: PartNetv5_plusplus is 100% left-handle ('min'), so this one-hot is constant.
+  # Set back to true when training on families that mix handle sides.
+  enabled: false
+  obs_key: left_right_cond
+  input_dim: 2
+  hidden_dims: [64, 256]
+  dropout: 0.0
+  use_layer_norm: true
+
+scene_door_num_points: 30000  # GT door/model points cached in the scene before any sensor rendering.
+local_pcd_range: [1.2, 0.25, 0.25]
+x_direction_cutoff: -0.5
+
+temporal_obs:
+  history_s: 1.0
+  obs_delay_s: [0.0, 0.0]
+  command_delay_s: [0.0, 0.0]
+
+temporal_state_encoders:
+  enabled: true
+  timestamps_ms: [0, 300, 600, 900]
+  # timestamps_ms: [0, 400, 800, 1200, 1600, 2000, 2400, 2800]
+  # vision5 trial, NOT committed: swapped base_vel -> q_base (raw base translation/rotation
+  # history) per explicit request -- compare against vision9's base_vel proprioception.
+  fields:
+    - q_arm
+    - q_base
+    # - q_hand
+    # - target_err_arm
+    # - push_pull_belief
+    # - target_err_hand
+    # - aux_handle_pos
+    # aux_handle_pos is intentionally NOT in the temporal stack: it is a standalone, recurrent
+    # handle-pose input seeded from ground truth on reset (see dagger.aux_handle_input_mode).
+  hidden_dims: [128, 256]
+  output_dim: 256
+  activation: elu
+  dropout: 0.0
+  use_layer_norm: true
+  add_field_type_embedding: true
+  add_time_embedding: true
+
+push_pull_condition_perturb:
+  enabled: false
+  probability: 0.1
+  wrong_class_confidence_range: [0.85, 0.95]
+
+observation_lag:
+  enabled: true
+  max_jitter_ms: 150
+  mode: symmetric
+  apply_to_proprio: true
+  apply_to_pointcloud: false
+  per_env: true
+  per_timestamp: true
+  clamp_to_available_history: true
+
+pcd_encoders_cfg:
+  local_pcd_t:
+    type: "pointnet"
+    num_output_tokens: 128
+    num_points: [2500, 0, 0]  # Policy crop counts [base_crop, palm_crop, (robot slot)]. For pointcloud_source="both" each crop is split evenly across realsense+lidar (e.g. 2500 -> 1250 realsense + 1250 lidar). Robot model points are configured below.
+    use_pcd: true
+
+state_encoders_cfg:
+  q_arm:
+    input_dim: 7
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  q_hand:
+    # The gripper opening: ONE prismatic DOF (env cfg finger_joints), not the LEAP hand's 12.
+    # Must equal len(env._robot_finger_dof_idx) -- the dagger feeds exactly those columns.
+    # OFF: fixed_open_gripper pins the fingers at GRIPPER_OPEN_WIDTH, so this channel is a constant.
+    input_dim: 1
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: false
+  aux_handle_pos:
+    input_dim: 3
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  push_pull_cond:
+    input_dim: 2
+    hidden_dims: [64, 256]
+    dropout: 0.0
+    use_layer_norm: true
+    use_state: true
+  base_vel:
+    # OFF for this trial: replaced by q_base below (not referenced in temporal_state_encoders.fields
+    # anymore), use_state: false so it isn't built as a dead/unused encoder -- keeps the model the
+    # same size as the base_vel config for an apples-to-apples A/B comparison.
+    input_dim: 3
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: false
+  q_base:
+    # vision5 trial, NOT committed: raw base translation/rotation (x, y, yaw), replacing base_vel
+    # as the temporal_state_encoders field for this A/B comparison.
+    input_dim: 3
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  target_err_arm:
+    # Current-step Franka tracking error (PD target - measured joint angle), 7 DOF. No temporal
+    # suffix, so it is sampled at this step only. Must equal len(env._robot_arm_dof_idx).
+    input_dim: 7
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
+  # target_err_hand:
+  #   input_dim: 1  # gripper opening error (one DOF)
+  #   hidden_dims: [128, 256]
+  #   dropout: 0.0
+  #   use_state: true
+
+transformer_cfg:
+  type: "encoder_decoder"
+  encoder_layers: 6
+  decoder_layers: 6
+  encoder_heads: 8
+  decoder_heads: 8
+  encoder_dim_feedforward: 1024
+  decoder_dim_feedforward: 1024
+
+dagger:
+  learning_rate: 1.5e-4
+  lr_schedule: cosine
+  min_learning_rate: 1.5e-5
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  num_iters: 250000
+  lr_decay_iters: 70000
+  teacher_forcing_warmup_iters: 5000
+  teacher_forcing_transition_iters: 20000
+  teacher_forcing_min_beta: 0.0
+  # Aux handle input mode:
+  #   "recurrent"        -> policy input = previous step's aux prediction (fed back). The first step
+  #                         after each reset is seeded from aux_handle_init_source below; predictions
+  #                         take over from step 1.
+  #   "closed_door_base" -> policy input = the closed-door (door joint=0) handle pose, expressed in
+  #                         the CURRENT robot base frame, + fresh per-step noise. Non-recurrent.
+  aux_handle_input_mode: recurrent
+  aux_feedback_to_policy: true  # Recurrent feedback: previous step's aux prediction is fed back as the next-step input.
+  aux_handle_init_source: ground_truth  # First-step seed: feed the (noised/biased) sim handle pose only on the first step after each reset. Requires aux_feedback_to_policy: true.
+  # Two-term detector-error model on the aux handle pose (input only, never the aux target beyond what
+  # the bias bakes in). Both are redrawn/added to EVERY aux input the policy sees (reset seed + the
+  # recurrent fed-back prediction).
+  # BIAS: per-episode constant offset baked into the ground-truth handle (feeds target + seed together)
+  # so it PERSISTS all episode -- a real systematic per-door offset (off downward on one door, up/left
+  # on another). Sampled as a CUBE: each of x/y/z independently uniform in [-this, +this] (per-dim
+  # threshold in m, NOT a ball). 0.0 disables it.
+  aux_handle_gt_bias_m: 0.05
+  # NOISE: fresh per-step isotropic (ball) jitter, random direction x magnitude in [0, this] (m), added
+  # to every aux input -- frame-to-frame detector noise. 0.0 disables it.
+  aux_handle_noise_m: 0.1
+  prediction_training:
+    loss_window_start: 40
+    loss_window_end: 100
+    outside_window_weight: 0.25
+  door_joint_training:
+    # Door joints the aux head regresses, in output order. "hinge" = joint_2 (door swing angle),
+    # "latch" = joint_1 (handle/latch rotation). Targets are the raw joint angles in radians.
+    joints: ["hinge", "latch"]
+    loss_type: "mse"  # 'mse' or 'smooth_l1' regression on the raw joint angles (rad).
+  door_geometry_aug:
+    enabled: false
+    env_prob: 1.0
+    global_shift_std_m: [0.010, 0.010, 0.005]
+    global_shift_clip_m: [0.025, 0.025, 0.010]
+    handle_child_shift_std_m: [0.000, 0.012, 0.012]
+    handle_child_shift_clip_m: [0.000, 0.030, 0.030]
+    handle_scale_range: [0.97, 1.03]
+    panel_width_scale_range: [0.98, 1.02]
+    panel_width_axis: 1
+    panel_width_anchor: "origin"
+  log_interval: 100
+  save_interval: 5000
+  reset_progress_total: 20000
+  adr_reset_progress_total: 5000
+  pointcloud_source: "depth"
+  # "measured" (default): base_vel obs is the sensed base joint velocity (matches deploy's fused
+  # odometry). "commanded": base_vel obs is the student's own last commanded base action instead,
+  # clamped to [-1, 1] in robot frame (normalized, not scaled by base_action_scale) -- avoids odom
+  # noise/frame-convention issues but loses stall/slip feedback.
+  # MUST match door_policy.yaml's policy.base_vel_source on the deploy side; this is a trained input.
+  base_vel_source: "measured"
+  scene_robot_num_points: 30000  # GT robot/model points concatenated into the renderable scene cloud.
+  append_robot_model_to_policy_cloud: true
+  robot_model_policy_points: 2000  # Robot model points appended to the policy input after the depth/lidar crops.
+  robot_pointcloud_filter:
+    # Robot self-points are stripped from the LIDAR cloud only. The depth camera is a real sensor that
+    # sees the robot's own hand, so the depth cloud keeps its self-points (see _sample_scene_obs_pointcloud_base).
+    enabled: true
+    sdf_cutoff: 0.02
+    max_points_per_process: 5000
+  depth_cam_render:
+    # Geometric depth round-trip (3D points -> 2D z-buffer depth image -> 3D points), rendered by
+    # render_depth_roundtrip_from_pose. z-buffer + occluder anti-penetration pass + near/far clipping,
+    # plus an OPTIONAL RealSense-style spatial blur (blur_kernel_px/blur_sigma_px below) so thin features
+    # like the handle bleed into a blurry "bump" instead of rendering as a crisp lever.
+    num_points: 12000
+    # Depth-camera field of view (degrees). Omit / null -> D435 physical defaults (85 x 58). Lowering
+    # fov_y_deg narrows the VERTICAL angle at the same resolution, cropping top/bottom points to match a
+    # real camera that effectively sees less vertically than 58 deg. Set to reduce the vertical FOV;
+    # keep the deploy-time real camera crop (scripts/rl_games/play.py) in sync if this helps sim2real.
+    fov_y_deg: 50  # null -> D435 58 deg nominal. Set e.g. 45 to crop the vertical FOV (did not reproduce the real bug, so left off).
+    inflate_px: 0  # Main-pass z-buffer dilation (px). 0 = plain round-trip (each point -> one pixel -> back), which is what we want; the door/robot clouds are dense enough that the raw per-pixel z-buffer has no meaningful holes. Raise to 1-2 only if the surface looks holey/sparse.
+    clip_mode: "post"
+    use_compile: true
+    # Edge-bleeding spatial blur of the depth image before back-projection (mimics the RealSense SDK
+    # spatial filter). Flat surfaces are unchanged; thin features (the handle) smear into the door/plate
+    # behind them, so a crisp lever renders as the indistinct bump a real depth camera returns. Verified:
+    # kernel 5 already erases the handle's crisp plane. blur_kernel_px <= 1 disables it (0 = current
+    # behaviour). Recommended starting point to make the handle a bump: blur_kernel_px 5-7, blur_sigma_px
+    # 2-3 (larger sigma = softer). Set per-run; left off here so existing runs are unchanged.
+    # Kept at the MINIMUM that still turns the crisp lever into a blurry bump (kernel 5 already erases
+    # the handle's crisp plane, per the note above). Was 11: that extra kernel width is what smeared the
+    # handle laterally across the handle->panel gap and cast the "flying pixel" overshoot. The surface
+    # fuzz the wide blur used to add is now supplied by axial_jitter_std_m below, which stays on-ray and
+    # does NOT overshoot. Net: same blurry handle, far less overshoot.
+    blur_kernel_px: 5
+    blur_sigma_px: 3.0
+    # Axial (along-ray) depth noise added per-pixel before back-projection -- the physically-faithful
+    # RealSense range-noise model. Unlike the lateral blur it keeps every point on its own camera ray,
+    # so it fuzzes the handle/door surface in DEPTH (still looks blurry) without smearing across the
+    # silhouette into overshoot. axial_jitter_std_m -> scene (door+walls); robot_axial_jitter_std_m ->
+    # the crisp robot pass, so the robot body carries sensor-like fuzz without smearing its thin fingers.
+    # ~0.005 m ~ D435 range noise at this standoff. 0 on either disables that pass. Tune against the
+    # viser depth-cam replay (robot_depth_cam_obs stream) alongside a real capture.
+    axial_jitter_std_m: 0.005
+    robot_axial_jitter_std_m: 0.003
+    # After the blur, drop SCENE (door+wall) pixels sitting on a depth discontinuity larger than this
+    # (m). The blur bleeds wall/door silhouettes into floating "flying pixel" smears; this removes them
+    # (a real depth camera drops edge returns rather than bleeding them), so the walls stay clean. The
+    # ROBOT is rendered in a separate crisp pass and is NOT blurred/edge-dropped. 0 disables it.
+    edge_drop_m: 0.05
+    # Median filter (odd px) on the SCENE depth. Erases a THIN handle by replacing it with the
+    # surrounding panel depth -- the lever dissolves into a flat surface, reproducing "the handle is
+    # invisible in the point cloud" -- WITHOUT the flying-pixel overshoot a wider gaussian blur would add
+    # (median picks a real neighbor depth, never an in-between value). 0 disables; try 5-9 to hide the
+    # handle (bigger swallows fatter handles). A ~5 mm lever at ~1 m is only 1-2 px, so 5 already hides it.
+    median_kernel_px: 0
+    # GT robot/model points rendered as a SEPARATE crisp z-buffer pass and composited by nearest-surface
+    # min, so the robot self-occludes / occludes the door but never gets blur/edge-drop noise on its own
+    # body (unfaithful near-robot depth noise). See multi_pcd_dagger._render_depth_scene_with_crisp_robot.
+    # Door panel + wall distractor points are rasterized a second time with this much larger dilation
+    # and composited into the depth via a per-pixel min. At close range (near_m below) a sparse occluder
+    # leaves per-pixel z-buffer gaps that let farther points (background, the far side of the wall) show
+    # through; this second pass seals them so the walls render as solid boxes. 0 disables the pass. Tune
+    # against the viser point-cloud replay: raise if rays still visibly punch through the wall/door,
+    # lower if occluder silhouettes look too blocky.
+    occluder_inflate_px: 5  # Anti-penetration dilation of the door/wall occluder (px). Was 10 (too blocky) -> 3 (~0.2% leaked, too much) -> 5 (0% penetration, far less blocky than 10). This only dilates occluder EDGES, so interior surfaces stay sharp. Raise toward 6 if rays leak at closer standoffs; lower toward 4 (~0.01%) for slightly sharper edges.
+  lidar_render:
+    num_points: 9000
+    num_azimuth: 128
+    num_polar: 256
+    near_m: 0.1
+    far_m: 30.0
+    suppress_bins: 2
+    occlusion_eps_m: 0.02
+    occlusion_eps_rel: 0.01
+    jitter_std_m: 0.01
+    use_compile: true
+    # Lidar analog of depth_cam_render.occluder_inflate_px (bin radius, not pixels). 0 disables it.
+    occluder_fill_bins: 3
+  # Handle-visibility dropout: the protruding handle points are removed from the rendered door cloud, so
+  # the panel reads flat and the aux head must keep tracking the handle from the visible panel + seed.
+  # This is a BACKUP skill only -- reading the handle straight out of the point cloud stays the primary
+  # objective -- so the hidden fraction is kept moderate (~19% of episodes at these settings).
+  door_handle_dropout:
+    # PER-EPISODE, conditioned on the door's CLEAR UNDERSIDE GAP (standoff between the mounting surface
+    # and the lever's near face, read from variant_meta.json -> handle.{plate,panel}_underside_gap_m).
+    # Drawn once per env at reset and held for the WHOLE rollout: invisibility is a property of the DOOR,
+    # so a handle that is unresolvable on frame 0 stays unresolvable through the entire approach and the
+    # policy can never bank on it reappearing.
+    # A SMALL gap = lever nearly flush with the surface = the depth blur/median merges the two = likely
+    # invisible. A LARGE gap = lever standing well proud of the panel = essentially always resolvable.
+    # P ramps linearly from episode_prob_at_min_gap at gap <= gap_range_m[0] to episode_prob_at_max_gap
+    # at gap >= gap_range_m[1], clamped outside.
+    # The four trained *_plusplus families span gaps 0.040-0.085 m (median 0.064). Both ends of the ramp
+    # come from observed real-sensor behaviour: 40 mm is the "handle vanishes" regime (0.9 -- still a
+    # DRAW, never forced), and the lever is only reliably resolvable once the gap reaches 65 mm, so the
+    # floor is not reached before then. That leaves the whole lower half of the asset distribution (52%
+    # of doors are under 65 mm) on the ramp and the overall hidden rate at ~25% of episodes. That is the
+    # upper end of what this augmentation should cost: the handle stays visible in 3 of 4 episodes, so
+    # reading it from the cloud remains the dominant signal and tracking stays the backup.
+    # Remove gap_range_m to fall back to a flat `episode_prob`.
+    gap_range_m: [0.04, 0.065]
+    episode_prob_at_min_gap: 0.9
+    episode_prob_at_max_gap: 0.02  # "almost impossible" rather than exactly 0, so wide-gap doors still see a rare dropout.
+    missing_gap_prob: 0.02  # Legacy asset families whose variant_meta.json has no gap; defaults to episode_prob_at_max_gap.
+    # PER-FRAME flicker: redrawn every step, so the handle blinks in and out. OFF -- IID flicker lets the
+    # policy just average the handle back over a couple of frames, the exact crutch the episode component
+    # removes. Raise only to model genuinely transient dropouts (glare, one bad frame).
+    # Legacy key `door_handle_dropout_prob` (per-frame only) is still read as the default for this.
+    frame_prob: 0.0
+  wall_distractors:
+    enabled: true
+    wall_num_points: 50000
+    # The sampler builds two vertical "wall columns" beside the door panel in the door-panel local frame:
+    # - width axis: left/right across the panel, so the columns sit just outside the panel edges
+    # - height axis: bottom/top of the panel
+    # - thickness axis: through the panel, normal to the door slab
+    # Each sampled point comes from either the left or right column.
+    side_margin_m: [0.2, 1.2]  # Column width along the door width axis, i.e. how far each column extends outward from the left/right panel edge. Upper bound raised from 0.8 -> 1.2 because the reworked x5 camera pose (mount pitch 0 deg, tilt now carried by x5_joint2/3) sees a wider band beside the door: at 0.8 m the column often ended inside the frame, leaving an unrealistic floating wall edge.
+    edge_gap_m: [0.0, 0.04]  # Empty gap (m) between the door side edge and the inner face of the wall column, used ONLY on envs with no flush wall (see detached_within_flush_frac below for the flush case). Non-zero so the wall never sits flush against / overlapping the door (a zero gap is unrealistic). Clamped to >= 0 in code.
+    detached_within_flush_frac: [0.0, 1.0]  # On envs with a flush wall, the box column sits at (flush's own sampled extent * this fraction) from the panel edge instead of edge_gap_m -- a DETACHED wall that interrupts the flush drywall somewhere WITHIN its own span (flush hasn't visually finished when the box shows up), which is what a robot actually sights to judge its base rotation, rather than a jamb wall hugging the door OR a wall that only appears after flush's full run. 0 = right at the panel edge (start of the flush run); 1 = right at the flush wall's own far edge.
+    depth_m: [0.1, 1.5]  # Extra thickness added beyond the door slab thickness along the door-thickness axis, independently per front/back segment.
+    # Position of the seam where the front and back segments on one side butt together (see
+    # sample_seam), relative to the door's mid-thickness plane. Pinned to 0 so all 4 walls start
+    # exactly at the door plane; kept as a config key (rather than removed) so sample_seam/
+    # rand_range don't need a special zero-width-range code path.
+    center_offset_m: [-0.25, 0.25]
+    # BOX side-wall vertical extent [bottom, max-top] (m). Each box draws its own top in [bottom, max-top].
+    # Kept LOW on purpose: with the policy z-crop [0.55, 1.5], a box whose top < 0.55 vanishes from the
+    # policy input entirely, so many boxes are "not there" after processing while others (top up to 1.8)
+    # still fill the whole crop height. Remove this key to fall back to matching the door panel's bbox height.
+    height_range_m: [0.1, 1.8]
+    # Wall GT point count = total wall surface area * this density (points/m^2), capped at
+    # wall_num_points. Keeps point density roughly constant as walls change size (esp. with the
+    # randomized height above), instead of always emitting a fixed wall_num_points. Remove for the
+    # legacy fixed-count behavior.
+    point_density_per_m2: 3000
+    face_jitter_m: 0.1  # Small noise added only on the snapped outer faces so the walls do not look perfectly planar.
+    # --- Flush mounting wall (coexists with the box walls above) ---
+    # A thin slab coplanar with the door panel, flanking it left+right and running floor-to-above-door --
+    # the flat drywall surface a door sits flush in (the common case, but not the only one -- keep this
+    # below 1.0 so the fully-open/glass-frame envs, with no wall context at all, still occur). The box
+    # columns above are what vary the FAR-wall placement (see detached_within_flush_frac) on top of this.
+    flush_prob: 0.9
+    flush_point_fraction: 0.5   # Share of the wall point budget reserved for the flush wall (when present).
+    # Flush slab thickness range (m). null -> match the door panel's own thickness exactly (both faces coplanar).
+    flush_thickness_m: null
+    flush_extent_m: [0.6, 1.6]  # How far the flat surface spreads outward from each panel side edge (m).
+    flush_height_range_m: null  # [bottom, top] of the flat wall; null -> floor to just above the door top.
+  # Door-frame (link_0 casing/jamb) augmentation. The frame is fused into the door base and is normally
+  # ABSENT from the point cloud (only panel+handle are rendered). When enabled, each episode randomly
+  # includes or drops the frame per env (domain randomization for the often-thick PartNetv5_plusplus
+  # casings). Disabled by default -- set enabled: true to activate.
+  door_frame_aug:
+    enabled: true  # Real doors mostly DO have a visible casing/jamb, so the frame must appear in the input.
+    env_prob: 0.65  # Per-env probability the frame IS rendered this episode. The remainder covers frameless / flush-mounted doors.
+  door_hole_aug:
+    # Per-rollout door appearance is drawn once at reset from these two probabilities. With
+    # env_prob = P(hole) and glass_reflection.prob = P(reflection | hole), the three MUTUALLY
+    # EXCLUSIVE cases are (logged live as door_hole_aug/{no_hole,pure_hole,reflection}_fraction):
+    #   solid door           : 1 - env_prob                       = 0.55
+    #   pure hole (bright)    : env_prob * (1 - reflection.prob)   = 0.135  <- transparent glass, no veil
+    #   reflective glass (dark): env_prob * reflection.prob        = 0.315  <- hole + reflection blob
+    # Keep reflection.prob < 1 so the pure-hole (bright) case always occurs.
+    enabled: true # When enabled, drop points from link_1 to simulate a window/open hole in the door panel.
+    env_prob: 0.45 # P(this rollout's door has a window hole).
+    width_range_m: [0.12, 1.60]
+    height_range_m: [0.18, 2.20]
+    center_height_range_m: [0.10, 1.90]
+    side_margin_range_m: [0.0, 0.18]
+    surface_eps_m: 0.03
+    resample_each_step: false # false: draw ONE hole per rollout at reset, fixed for the whole episode. true: redraw every step (old behaviour).
+    glass_reflection:
+      enabled: true # When on, a fraction of hole envs show a robot-SIZED noise blob behind the window (dark-glass reflection stand-in; a rough robot copy, not a true mirror image).
+      prob: 0.7 # P(reflection | hole). < 1 leaves the rest as bright pure holes.
+      num_points: 400 # Points in the reflection blob.
+      blob_size_m: [0.5, 1.2, 0.3] # FULL robot-sized noise cluster (width, height, depth) -- compact, NOT a fill of the whole opening.
+      size_fraction_range: [0.3, 1.0] # Each blob dim is independently scaled by a fraction in this range, so the reflection ranges from a small/thin sliver (just an arm) up to the full robot. Placed at a random spot inside the window.
+      num_lobes: 3 # Number of overlapping Gaussian sub-clumps making up the cluster; more = lumpier / less box-like (1 = a single soft blob).
+      behind_range_m: [0.1, 0.6] # The blob centre sits this far (m) behind the panel back face (away from the camera), where a virtual mirror image would be. Kept moderate so the reflection sits clearly behind the glass (not embedded in the door plane) while staying inside the local_pcd_range crop instead of being pushed too far back and cropped off.
+      density_range: [0.3, 1.0] # Per-env fraction of num_points actually kept: low = faint (brighter), high = dense (darker). [1.0, 1.0] = always full.
+  viser:
+    raw:
+      enabled: false  # Save raw `.pt` replay chunks for offline debugging.
+      path: "viser_replay.pt"
+      capture_interval: 2  # Save one frame, skip one frame, so each replay chunk spans more rollout time.
+      save_interval: 10000  # Write one raw `.pt` file every N iterations.
+      max_points: 6000  # Raw replay is for debugging, not training; smaller clouds replay much better on laptops.
+      max_frames: 2000  # Keep at most this many frames in each raw `.pt` file; set 0 to disable the cap.
+  wandb:
+    enabled: false

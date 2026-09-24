@@ -149,12 +149,22 @@ def load_door_asset(urdf_path, num_points, device):
     return bbox, panel_bbox, panel_bbox_link1, link1_pose_base, panel_handle_pts, frame_pts, handle_center
 
 
-def load_robot_asset(num_points, device):
+def load_robot_asset(num_points, device, franka_q=None):
     """Glorbot surface points (base_link frame) + the x5_camera_link transform in base_link frame."""
     robot = _load_urdf(GLORBOT_URDF, {"glorbot": GLORBOT_DIR})
     names = list(robot.actuated_joint_names)
     cfg = np.zeros(len(names), dtype=np.float64)
-    for i, value in enumerate(FRANKA_READY_JOINT_POS):
+    # Keep the offline camera pose identical to IsaacLab.  The environment holds the
+    # non-policy x5 camera arm at these defaults; leaving them at zero points the
+    # synthetic camera away from the door even when the robot base pose is correct.
+    from DoorOpening.constants.robot_constants import CAMERA_JOINT_DEFAULT_VALUES
+
+    for name, value in CAMERA_JOINT_DEFAULT_VALUES.items():
+        if name in names:
+            cfg[names.index(name)] = float(value)
+    if franka_q is None:
+        franka_q = FRANKA_READY_JOINT_POS
+    for i, value in enumerate(franka_q):
         jn = f"panda_joint{i + 1}"
         if jn in names:
             cfg[names.index(jn)] = value

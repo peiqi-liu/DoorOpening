@@ -192,10 +192,16 @@ door_family_base_folders = OrderedDict(
 
 def _collect_multi_family_assets():
     family_asset_paths = OrderedDict()
+    asset_limit_spec = os.environ.get("DOOROPENING_MULTI_DOOR_ASSET_LIMIT", "").strip()
+    asset_limit = int(asset_limit_spec) if asset_limit_spec else 0
+    if asset_limit < 0:
+        raise ValueError("DOOROPENING_MULTI_DOOR_ASSET_LIMIT must be >= 0 (0 means unlimited).")
     for family_name, family_folder in door_family_base_folders.items():
         paths = sorted(glob.glob(os.path.join(family_folder, "**/mobility.urdf"), recursive=True))
         if len(paths) == 0:
             raise FileNotFoundError(f"No mobility.urdf files found under {family_folder}")
+        if asset_limit:
+            paths = paths[:asset_limit]
         family_asset_paths[family_name] = paths
 
     asset_counts = {family_name: len(paths) for family_name, paths in family_asset_paths.items()}

@@ -87,3 +87,9 @@ materials/
 **/PartNet*/*
 **/prompts/
 **/pretrained_checkpoints/
+
+**/.codex
+**/.claude
+
+**/*.mp4
+**/*.log

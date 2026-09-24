@@ -1,0 +1,177 @@
+{
+  "replay": {
+    "recording": "runs/DoorOpening-Distillation-Eval_2026-09-24-17-42-47/viser/run01_PartNetv5_env000_scratch_door__rnd_00_pk125.1_pd23.3_pfr0.54_pcap42_pm139.3_hk30.3_hd0.37_hcap1.74_hfr0.02_lat0.95_w0.881_hh0.971_he0.034.pt",
+    "recorded_frames": 473,
+    "static_wall_points": 45473,
+    "base_displacement_first_to_last_m": 0.6126027703285217,
+    "base_max_pairwise_displacement_m": 1.285753607749939,
+    "world_wall_overlay": "debug_output/wall_frame_investigation_20260924/replay_world_wall_overlay.png",
+    "sampled_frames": [
+      {
+        "frame": 0,
+        "base_pos_world": [
+          1.4727470874786377,
+          0.01908690668642521,
+          0.0
+        ],
+        "camera_pos_world": [
+          1.40547513961792,
+          0.24549640715122223,
+          0.802544355392456
+        ],
+        "finite_rendered_points": 12000,
+        "camera_forward_fraction": 1.0,
+        "camera_world_roundtrip_max_m": 7.638934675924247e-07,
+        "wall_returns_within_5cm": 1483,
+        "wall_return_fraction_within_5cm": 0.12358333170413971,
+        "wall_distance_median_m": 0.3856760561466217,
+        "wall_distance_p95_m": 0.47537049651145935,
+        "policy_finite_points": 4500,
+        "policy_zero_padding_rendered_at_base": 1471,
+        "policy_current_base_roundtrip_max_m": 3.3717478231665154e-07
+      },
+      {
+        "frame": 118,
+        "base_pos_world": [
+          0.8508849143981934,
+          -0.10566601157188416,
+          0.0
+        ],
+        "camera_pos_world": [
+          0.7381241321563721,
+          0.10191746056079865,
+          0.8025854825973511
+        ],
+        "finite_rendered_points": 12000,
+        "camera_forward_fraction": 1.0,
+        "camera_world_roundtrip_max_m": 4.789280296790821e-07,
+        "wall_returns_within_5cm": 4059,
+        "wall_return_fraction_within_5cm": 0.3382500112056732,
+        "wall_distance_median_m": 0.1321028620004654,
+        "wall_distance_p95_m": 0.4338614046573639,
+        "policy_finite_points": 4500,
+        "policy_zero_padding_rendered_at_base": 0,
+        "policy_current_base_roundtrip_max_m": 2.6656007889869215e-07
+      },
+      {
+        "frame": 236,
+        "base_pos_world": [
+          0.7964982986450195,
+          0.09460848569869995,
+          0.0
+        ],
+        "camera_pos_world": [
+          0.744297981262207,
+          0.324949711561203,
+          0.8025578260421753
+        ],
+        "finite_rendered_points": 12000,
+        "camera_forward_fraction": 1.0,
+        "camera_world_roundtrip_max_m": 4.777675712830387e-07,
+        "wall_returns_within_5cm": 6101,
+        "wall_return_fraction_within_5cm": 0.5084166526794434,
+        "wall_distance_median_m": 0.03898613154888153,
+        "wall_distance_p95_m": 0.4399925172328949,
+        "policy_finite_points": 4500,
+        "policy_zero_padding_rendered_at_base": 0,
+        "policy_current_base_roundtrip_max_m": 4.7706993200336e-07
+      },
+      {
+        "frame": 354,
+        "base_pos_world": [
+          1.3671817779541016,
+          -0.08739971369504929,
+          0.0
+        ],
+        "camera_pos_world": [
+          1.3444721698760986,
+          0.147699773311615,
+          0.8025484681129456
+        ],
+        "finite_rendered_points": 12000,
+        "camera_forward_fraction": 1.0,
+        "camera_world_roundtrip_max_m": 1.0990553391820868e-06,
+        "wall_returns_within_5cm": 6439,
+        "wall_return_fraction_within_5cm": 0.5365833044052124,
+        "wall_distance_median_m": 0.025083594024181366,
+        "wall_distance_p95_m": 0.5515745878219604,
+        "policy_finite_points": 4500,
+        "policy_zero_padding_rendered_at_base": 0,
+        "policy_current_base_roundtrip_max_m": 7.251218221426825e-07
+      },
+      {
+        "frame": 472,
+        "base_pos_world": [
+          1.9877161979675293,
+          -0.3127096891403198,
+          0.0
+        ],
+        "camera_pos_world": [
+          2.102614402770996,
+          -0.10630539059638977,
+          0.8025777339935303
+        ],
+        "finite_rendered_points": 12000,
+        "camera_forward_fraction": 1.0,
+        "camera_world_roundtrip_max_m": 1.140693370871304e-06,
+        "wall_returns_within_5cm": 2389,
+        "wall_return_fraction_within_5cm": 0.1990833282470703,
+        "wall_distance_median_m": 0.7677886486053467,
+        "wall_distance_p95_m": 0.9615589380264282,
+        "policy_finite_points": 4500,
+        "policy_zero_padding_rendered_at_base": 2500,
+        "policy_current_base_roundtrip_max_m": 2.4027400513659813e-07
+      }
+    ]
+  },
+  "controlled_rotated_wall": {
+    "camera_displacement_m": 1.0071743726730347,
+    "exact_obb_pixels": [
+      8400,
+      3680
+    ],
+    "backprojected_face_residual_max_m": [
+      1.1920928955078125e-07,
+      1.1920928955078125e-07
+    ],
+    "backprojected_face_residual_p95_m": [
+      1.1920928955078125e-07,
+      1.1920928955078125e-07
+    ],
+    "legacy_aabb_pixels": [
+      10544,
+      10544
+    ],
+    "legacy_aabb_false_opacity_pixels": [
+      2144,
+      6864
+    ],
+    "controlled_cpu_ms_per_render": {
+      "exact_obb": 5.337363625585567,
+      "legacy_aabb": 2.731716122070793
+    },
+    "sparse_zbuffer_penetration_pixels_before_fallback": [
+      8396,
+      3676
+    ],
+    "sparse_zbuffer_penetration_pixels_after_fallback": [
+      0,
+      0
+    ],
+    "front_geometry_pixels_behind_no_wall": [
+      625,
+      400
+    ],
+    "front_geometry_pixels_hidden_by_fallback": [
+      0,
+      0
+    ],
+    "penetration_check": "The sparse point-only pass leaks background through the wall. Nearest-depth composition with the exact OBB closes every leak while retaining every closer foreground pixel."
+  },
+  "legacy_camera_dependent_flush_helper": {
+    "flush_shift_with_camera_on_negative_panel_side_m": 0.04800000041723251,
+    "flush_shift_with_camera_on_positive_panel_side_m": -0.04800000041723251,
+    "same_authored_flush_point_world_separation_m": 0.09600000083446503,
+    "interpretation": "This helper changed authored wall geometry based on camera side; it is removed from the shared renderer. It flips only on a panel-side crossing, so it does not explain a continuous backing-away drift by itself."
+  }
+}

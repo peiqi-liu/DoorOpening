@@ -202,6 +202,9 @@ def _resolve_teacher_paths() -> dict[str, str]:
         if configured is not None:
             teacher_paths[family_name] = _resolve_path(configured)
             continue
+        if args_cli.checkpoint is not None:
+            teacher_paths[family_name] = _resolve_path(args_cli.checkpoint)
+            continue
         default_path = pathlib.Path(_default_teacher_path(family_name))
         if default_path.exists():
             teacher_paths[family_name] = str(default_path)

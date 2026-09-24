@@ -172,6 +172,46 @@ parser.add_argument(
     default=None,
     help="Comma-separated multi-door family list to evaluate, e.g. PartNetv9,PartNetv10.",
 )
+parser.add_argument(
+    "--max-door-assets",
+    type=int,
+    default=0,
+    help="Limit each selected door family to its first N sorted assets (0 keeps all assets).",
+)
+parser.add_argument(
+    "--wall-raster-width-px",
+    type=int,
+    default=None,
+    help="Override depth_cam_render.wall_raster_width_px without changing checkpoint model settings.",
+)
+parser.add_argument(
+    "--wall-raster-height-px",
+    type=int,
+    default=None,
+    help="Override depth_cam_render.wall_raster_height_px without changing checkpoint model settings.",
+)
+parser.add_argument(
+    "--wall-face-jitter-m",
+    type=float,
+    default=None,
+    help="Override wall_distractors.face_jitter_m without changing checkpoint model settings.",
+)
+parser.add_argument(
+    "--wall-height-range-m",
+    type=float,
+    nargs=2,
+    default=None,
+    metavar=("MIN", "MAX"),
+    help="Eval-only override for detached wall top heights in wall_distractors.height_range_m.",
+)
+parser.add_argument(
+    "--flush-wall-height-range-m",
+    type=float,
+    nargs=2,
+    default=None,
+    metavar=("BOTTOM", "TOP"),
+    help="Eval-only override for flush wall vertical bounds in wall_distractors.flush_height_range_m.",
+)
 parser.add_argument("--num_eval_runs", type=int, default=3, help="Number of repeated eval rollouts to run.")
 parser.add_argument(
     "--pointcloud_source",
@@ -261,6 +301,11 @@ student_dagger_defaults = _load_student_dagger_defaults(student_cfg_path)
 selected_door_families = _normalize_family_selection(
     args_cli.door_families if args_cli.door_families is not None else student_dagger_defaults.get("door_families")
 )
+if args_cli.max_door_assets < 0:
+    raise ValueError("--max-door-assets must be >= 0.")
+if args_cli.max_door_assets:
+    os.environ["DOOROPENING_MULTI_DOOR_ASSET_LIMIT"] = str(args_cli.max_door_assets)
+    print(f"[INFO] Limiting each selected door family to {args_cli.max_door_assets} assets.")
 if selected_door_families is not None:
     os.environ["DOOROPENING_MULTI_DOOR_FAMILIES"] = ",".join(selected_door_families)
     print(f"[INFO] Using multi-door families: {selected_door_families}")
@@ -1160,6 +1205,7 @@ def _build_viser_recorder(base_env, env_id):
         "door_joint_names": list(base_env.door.data.joint_names),
         "door_root_pos": (door_root[:3] - env_origin).detach().cpu().clone(),  # env-relative
         "door_root_quat": door_root[3:7].detach().cpu().clone(),
+        "ground_truth_walls_points_world": None,
         "frames": [],
     }
 
@@ -1206,6 +1252,25 @@ def _append_viser_frame(recorder, viser_meta, base_env, dagger, student_output):
         world = pts + 2.0 * (bq[0] * uv + uuv)
         return world + (rb_base_pos - org).to(torch.float32).unsqueeze(0)
 
+    def _pointcloud_base_to_world(points_base):
+        """Transform a padded base-frame cloud without rendering its zero padding at the robot."""
+        pts = points_base.detach().to(torch.float32)
+        # local_pcd_t is fixed-size and uses exact zero rows for absent/cropped samples.
+        # A literal base-frame origin is outside the configured point-cloud z crop, so it
+        # cannot be a real depth return.  Preserve it as NaN for replay, rather than
+        # rotating/translating it into a visible cluster that follows the base.
+        # Only the two crop blocks use zero padding.  If a separate robot-model
+        # block is appended, retain it even in the unlikely event it contains a
+        # physical point at its base-frame origin.
+        crop_point_count = min(pts.shape[0], sum(int(count) for count in dagger.local_pcd_points[:2]))
+        padding = torch.zeros(pts.shape[0], dtype=torch.bool, device=pts.device)
+        padding[:crop_point_count] = (
+            torch.isfinite(pts[:crop_point_count]).all(dim=-1)
+            & (pts[:crop_point_count].abs().amax(dim=-1) == 0.0)
+        )
+        world = _base_to_world(pts)
+        return torch.where(padding.unsqueeze(-1), torch.full_like(world, float("nan")), world)
+
     # ACTUAL sim door joints for this frame (NOT predicted); the replay poses the door URDF with these.
     dj = base_env.door.data.joint_pos[env_id].detach()
     frame = {
@@ -1215,20 +1280,45 @@ def _append_viser_frame(recorder, viser_meta, base_env, dagger, student_output):
         # URDF root (`base_link`) pose; base_x/base_y/base_rotation are replayed from compact_q.
         "robot_base_pos_w": (rb_root[:3] - org).cpu().clone(),
         "robot_base_quat_w": rb_root[3:7].cpu().clone(),
+        # Exact pose of the body frame used for pointcloud normalization. Keep separate from the
+        # articulation-root pose above so saved pointcloud-frame conversions can be audited.
+        "pointcloud_base_pos_w": (rb_base_pos - org).to(torch.float32).cpu().clone(),
+        "pointcloud_base_quat_w": rb_base_quat.to(torch.float32).cpu().clone(),
     }
+    # Preserve the exact camera pose used to render this observation.  This lets replay diagnostics
+    # distinguish a genuinely moving world surface from a camera/world reprojection error.
+    sampler_camera_pose = dagger._get_sampler_camera_pose()[env_id].detach().to(torch.float32).clone()
+    sampler_camera_pose[:3] -= org.to(torch.float32)
+    frame["sampler_camera_pose_env_xyzw"] = sampler_camera_pose.cpu()
     # Policy-input point cloud (the local_pcd_t the student consumes), cached on the dagger in
     # _build_student_obs. Pre-transform base-body-frame -> env-relative world here so the replay just
     # displays it (the `_points_world` suffix marks an already-world cloud stream).
     pcd_base = getattr(dagger, "_last_policy_input_pcd_base", None)
     if pcd_base is not None and pcd_base.shape[0] > env_id:
-        frame["policy_input_points_world"] = _base_to_world(pcd_base[env_id, ..., :3]).cpu().clone()
+        frame["policy_input_points_world"] = _pointcloud_base_to_world(pcd_base[env_id, ..., :3]).cpu().clone()
     # RealSense-rendered depth-cam cloud (the raw render, robot hand included and self-occluding the
     # door -- this is BEFORE _filter_robot_points_base strips the robot's own points for the policy).
     # Both clouds live in the same base-body frame, so _base_to_world applies identically. NaN padding
     # is carried through and dropped by replay_viser_pt.py's finite filter.
-    depth_cam_base = getattr(dagger, "_last_rendered_depth_pcd_base", None)
-    if depth_cam_base is not None and depth_cam_base.shape[0] > env_id:
-        frame["robot_depth_cam_obs_points_world"] = _base_to_world(depth_cam_base[env_id, ..., :3]).cpu().clone()
+    depth_cam_world = getattr(dagger, "_last_rendered_depth_pcd_world", None)
+    if depth_cam_world is not None and depth_cam_world.shape[0] > env_id:
+        # This is the direct world-frame render, before the world->robot-base transform used for policy
+        # input. Recording it directly prevents replay from depending on a second quaternion rotation.
+        frame["robot_depth_cam_obs_points_world"] = (
+            depth_cam_world[env_id, ..., :3] - org.to(torch.float32)
+        ).cpu().clone()
+    else:
+        depth_cam_base = getattr(dagger, "_last_rendered_depth_pcd_base", None)
+        if depth_cam_base is not None and depth_cam_base.shape[0] > env_id:
+            frame["robot_depth_cam_obs_points_world"] = _base_to_world(
+                depth_cam_base[env_id, ..., :3]
+            ).cpu().clone()
+    wall_points_world = getattr(dagger, "_last_ground_truth_wall_points_world", None)
+    if recorder["ground_truth_walls_points_world"] is None and wall_points_world is not None:
+        if wall_points_world.shape[0] > env_id:
+            recorder["ground_truth_walls_points_world"] = (
+                wall_points_world[env_id].detach().to(torch.float32) - org.to(torch.float32)
+            ).cpu().clone()
     # Aux handle position: the network's PREDICTED handle pos and the aux INPUT it received are both in
     # the base-body frame. Pre-transform to env-relative world here (the replay renders *_world directly)
     # so they track the point cloud instead of the root.
@@ -1272,6 +1362,17 @@ def _save_viser_recorders(recorders, viser_meta, base_env, out_dir, run_index):
                 "door_joint_names": recorder["door_joint_names"],
                 "door_root_pos": recorder["door_root_pos"],  # env-relative
                 "door_root_quat": recorder["door_root_quat"],
+                "pointcloud_streams": [
+                    {
+                        "name": "ground_truth_walls",
+                        "key": "ground_truth_walls_points_world",
+                        "label": "Ground-truth wall points",
+                        "color": (125, 125, 135),
+                    }
+                ],
+                "static_pointclouds": {
+                    "ground_truth_walls": recorder["ground_truth_walls_points_world"]
+                },
             },
             path,
         )
@@ -1353,6 +1454,41 @@ def main(env_cfg, agent_cfg: dict):
     dagger_runtime_cfg = dict(student_dagger_defaults)
     dagger_runtime_cfg.pop("wandb", None)
     dagger_runtime_cfg["pointcloud_source"] = pointcloud_source
+    depth_render_cfg = dict(dagger_runtime_cfg.get("depth_cam_render", {}))
+    wall_distractor_cfg = dict(dagger_runtime_cfg.get("wall_distractors", {}))
+    if args_cli.wall_raster_width_px is not None:
+        if args_cli.wall_raster_width_px <= 0:
+            raise ValueError("--wall-raster-width-px must be positive.")
+        depth_render_cfg["wall_raster_width_px"] = args_cli.wall_raster_width_px
+    if args_cli.wall_raster_height_px is not None:
+        if args_cli.wall_raster_height_px <= 0:
+            raise ValueError("--wall-raster-height-px must be positive.")
+        depth_render_cfg["wall_raster_height_px"] = args_cli.wall_raster_height_px
+    if args_cli.wall_face_jitter_m is not None:
+        if args_cli.wall_face_jitter_m < 0.0:
+            raise ValueError("--wall-face-jitter-m must be non-negative.")
+        wall_distractor_cfg["face_jitter_m"] = args_cli.wall_face_jitter_m
+    if args_cli.wall_height_range_m is not None:
+        low, high = map(float, args_cli.wall_height_range_m)
+        if low < 0.0 or high < low:
+            raise ValueError("--wall-height-range-m requires 0 <= MIN <= MAX.")
+        wall_distractor_cfg["height_range_m"] = [low, high]
+    if args_cli.flush_wall_height_range_m is not None:
+        low, high = map(float, args_cli.flush_wall_height_range_m)
+        if low < 0.0 or high < low:
+            raise ValueError("--flush-wall-height-range-m requires 0 <= BOTTOM <= TOP.")
+        wall_distractor_cfg["flush_height_range_m"] = [low, high]
+    if (
+        args_cli.wall_raster_width_px is not None
+        or args_cli.wall_raster_height_px is not None
+    ):
+        dagger_runtime_cfg["depth_cam_render"] = depth_render_cfg
+    if (
+        args_cli.wall_face_jitter_m is not None
+        or args_cli.wall_height_range_m is not None
+        or args_cli.flush_wall_height_range_m is not None
+    ):
+        dagger_runtime_cfg["wall_distractors"] = wall_distractor_cfg
     if "reset_progress_total" in dagger_runtime_cfg:
         env_cfg.reset_progress_total = dagger_runtime_cfg["reset_progress_total"]
     if "adr_reset_progress_total" in dagger_runtime_cfg:
@@ -1380,6 +1516,14 @@ def main(env_cfg, agent_cfg: dict):
     os.makedirs(summaries_dir, exist_ok=True)
     print(f"[INFO] Eval output directory: {experiment_dir}")
     print(f"[INFO] pointcloud_source={pointcloud_source}, render_mode={env_cfg.pointcloud_render_mode}")
+    print(
+        "[INFO] Wall renderer config: "
+        f"raster={depth_render_cfg.get('wall_raster_width_px', 80)}x"
+        f"{depth_render_cfg.get('wall_raster_height_px', 60)}, "
+        f"face_jitter_m={wall_distractor_cfg.get('face_jitter_m', 0.004)}, "
+        f"side_height_m={wall_distractor_cfg.get('height_range_m')}, "
+        f"flush_height_m={wall_distractor_cfg.get('flush_height_range_m')}"
+    )
 
     # Eval never streams the raw per-env viser recordings; the only viser output is the single-env
     # URDF replay written below when --viser is set. Force the dagger's raw viser recorder off.
@@ -1643,6 +1787,14 @@ def main(env_cfg, agent_cfg: dict):
                 acting_mask = active.clone()
                 last_action_loss = _compute_eval_action_loss(dagger, obs, student_output, acting_mask)
                 actions[~active.to(device=actions.device)] = 0.0
+                if viser_recorders is not None:
+                    # The policy/depth point clouds were sampled from the current observation,
+                    # so capture the matching robot and door pose before advancing physics.
+                    # Recording after env.step paired those clouds with the next base pose and
+                    # made the world-frame Viser clouds appear detached/lagged during base motion.
+                    for _recorder in viser_recorders:
+                        if bool(active[_recorder["env_id"]].item()):
+                            _append_viser_frame(_recorder, viser_meta, base_env, dagger, student_output)
                 if replay_runs is not None:
                     # Save BASE-FRAME (robot-frame) actions so deployment applies them
                     # directly (clamp + real-world scale, no world->robot rotation). The
@@ -1660,12 +1812,6 @@ def main(env_cfg, agent_cfg: dict):
                     _run_active.append(active.detach().cpu().clone())
                 obs, _, _, _, _ = env.step(actions)
                 frozen_state.restore()
-                if viser_recorders is not None:
-                    # Record each selected env while it is ACTIVE (skip frozen frames). One file per env
-                    # is written at the end of the run.
-                    for _recorder in viser_recorders:
-                        if bool(active[_recorder["env_id"]].item()):
-                            _append_viser_frame(_recorder, viser_meta, base_env, dagger, student_output)
                 if replay_runs is not None:
                     _run_applied_targets.append(base_env.applied_robot_dof_targets.detach().cpu().clone())
                 if mode_tracker is not None:
@@ -1675,11 +1821,13 @@ def main(env_cfg, agent_cfg: dict):
                 q_after_step = dagger._get_student_proprio_vector().detach().clone()
                 target_after_step = dagger._get_implemented_action_vector().detach().clone()
                 base_vel_after_step = dagger._get_student_base_velocity_vector().detach().clone()
+                base_translation_after_step = dagger._get_student_base_translation_vector().detach().clone()
                 dagger._push_temporal_history(
                     timestamp=dagger.temporal_current_time_s,
                     q=q_after_step,
                     target=target_after_step,
                     base_vel=base_vel_after_step,
+                    base_translation=base_translation_after_step,
                 )
 
                 drift_mask, timeout_mask = _get_eval_done_status(base_env)

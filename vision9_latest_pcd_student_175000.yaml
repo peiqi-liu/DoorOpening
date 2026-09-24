@@ -1,0 +1,340 @@
+hidden_dim: 256
+type_dim: 8
+dropout: 0.0
+normalize_state: true
+normalize_action: true
+action_space: absolute
+action_dim: 11
+aux_weight: 0.1
+mode_prediction:
+  enabled: false
+  num_modes: 2
+  weight: 0.01
+  return_latent: true
+door_joint_prediction:
+  enabled: true
+  output_dim: 2
+  weight: 0.01
+rollout_progress_prediction:
+  enabled: false
+  weight: 0.0
+push_pull_condition:
+  enabled: false
+  source: oracle
+  obs_key: push_pull_cond
+  detach_predicted_condition: true
+  input_dim: 2
+  hidden_dims:
+  - 64
+  - 128
+  dropout: 0.0
+  use_layer_norm: true
+left_right_condition:
+  enabled: false
+  obs_key: left_right_cond
+  input_dim: 2
+  hidden_dims:
+  - 64
+  - 128
+  dropout: 0.0
+  use_layer_norm: true
+scene_door_num_points: 30000
+local_pcd_range:
+- 1.2
+- 0.25
+- 0.25
+x_direction_cutoff: -0.5
+temporal_obs:
+  history_s: 1.0
+  obs_delay_s:
+  - 0.0
+  - 0.0
+  command_delay_s:
+  - 0.0
+  - 0.0
+temporal_state_encoders:
+  enabled: true
+  timestamps_ms:
+  - 0
+  - 300
+  - 600
+  - 900
+  fields:
+  - q_arm
+  - base_vel
+  - target_err_arm
+  - aux_handle_pos
+  hidden_dims:
+  - 128
+  - 256
+  output_dim: 256
+  activation: elu
+  dropout: 0.0
+  use_layer_norm: true
+  add_field_type_embedding: true
+  add_time_embedding: true
+push_pull_condition_perturb:
+  enabled: false
+  probability: 0.1
+  wrong_class_confidence_range:
+  - 0.85
+  - 0.95
+observation_lag:
+  enabled: true
+  max_jitter_ms: 150
+  mode: symmetric
+  apply_to_proprio: true
+  apply_to_pointcloud: false
+  per_env: true
+  per_timestamp: true
+  clamp_to_available_history: true
+pcd_encoders_cfg:
+  local_pcd_t:
+    type: pointnet
+    num_output_tokens: 128
+    num_points:
+    - 2500
+    - 0
+    - 0
+    use_pcd: true
+state_encoders_cfg:
+  q_arm:
+    input_dim: 7
+    hidden_dims:
+    - 128
+    - 256
+    dropout: 0.0
+    use_state: true
+  q_hand:
+    input_dim: 1
+    hidden_dims:
+    - 128
+    - 256
+    dropout: 0.0
+    use_state: false
+  aux_handle_pos:
+    input_dim: 3
+    hidden_dims:
+    - 128
+    - 256
+    dropout: 0.0
+    use_state: true
+  keyframe_pose_base:
+    body_names:
+    - panda_link4
+    - panda_hand
+    input_dim: 18
+    hidden_dims:
+    - 128
+    - 256
+    dropout: 0.0
+    use_state: true
+  push_pull_cond:
+    input_dim: 2
+    hidden_dims:
+    - 64
+    - 256
+    dropout: 0.0
+    use_layer_norm: true
+    use_state: true
+  base_vel:
+    input_dim: 3
+    hidden_dims:
+    - 128
+    - 256
+    dropout: 0.0
+    use_state: true
+  target_err_arm:
+    input_dim: 7
+    hidden_dims:
+    - 128
+    - 256
+    dropout: 0.0
+    use_state: true
+transformer_cfg:
+  type: encoder_decoder
+  encoder_layers: 6
+  decoder_layers: 6
+  encoder_heads: 8
+  decoder_heads: 8
+  encoder_dim_feedforward: 1024
+  decoder_dim_feedforward: 1024
+dagger:
+  learning_rate: 0.00015
+  lr_schedule: cosine
+  min_learning_rate: 1.5e-05
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  num_iters: 250000
+  lr_decay_iters: 70000
+  teacher_forcing_warmup_iters: 5000
+  teacher_forcing_transition_iters: 20000
+  teacher_forcing_min_beta: 0.0
+  aux_handle_input_mode: recurrent
+  aux_feedback_to_policy: true
+  aux_handle_init_source: ground_truth
+  aux_handle_gt_bias_m: 0.05
+  aux_handle_noise_m: 0.1
+  prediction_training:
+    loss_window_start: 40
+    loss_window_end: 100
+    outside_window_weight: 0.25
+  door_joint_training:
+    joints:
+    - hinge
+    - latch
+    loss_type: mse
+  door_geometry_aug:
+    enabled: false
+    env_prob: 1.0
+    global_shift_std_m:
+    - 0.01
+    - 0.01
+    - 0.005
+    global_shift_clip_m:
+    - 0.025
+    - 0.025
+    - 0.01
+    handle_child_shift_std_m:
+    - 0.0
+    - 0.012
+    - 0.012
+    handle_child_shift_clip_m:
+    - 0.0
+    - 0.03
+    - 0.03
+    handle_scale_range:
+    - 0.97
+    - 1.03
+    panel_width_scale_range:
+    - 0.98
+    - 1.02
+    panel_width_axis: 1
+    panel_width_anchor: origin
+  log_interval: 100
+  save_interval: 5000
+  reset_progress_total: 20000
+  adr_reset_progress_total: 5000
+  pointcloud_source: depth
+  base_vel_source: measured
+  scene_robot_num_points: 30000
+  append_robot_model_to_policy_cloud: true
+  robot_model_policy_points: 2000
+  robot_pointcloud_filter:
+    enabled: true
+    sdf_cutoff: 0.02
+    max_points_per_process: 5000
+  depth_cam_render:
+    num_points: 12000
+    fov_y_deg: 50
+    inflate_px: 0
+    clip_mode: post
+    use_compile: true
+    blur_kernel_px: 5
+    blur_sigma_px: 3.0
+    axial_jitter_std_m: 0.005
+    robot_axial_jitter_std_m: 0.003
+    edge_drop_m: 0.05
+    median_kernel_px: 0
+    occluder_inflate_px: 5
+  lidar_render:
+    num_points: 9000
+    num_azimuth: 128
+    num_polar: 256
+    near_m: 0.1
+    far_m: 30.0
+    suppress_bins: 2
+    occlusion_eps_m: 0.02
+    occlusion_eps_rel: 0.01
+    jitter_std_m: 0.01
+    use_compile: true
+    occluder_fill_bins: 3
+  door_handle_dropout:
+    gap_range_m:
+    - 0.04
+    - 0.065
+    episode_prob_at_min_gap: 0.9
+    episode_prob_at_max_gap: 0.02
+    missing_gap_prob: 0.02
+    frame_prob: 0.0
+  wall_distractors:
+    enabled: true
+    wall_num_points: 50000
+    side_margin_m:
+    - 0.2
+    - 1.2
+    edge_gap_m:
+    - 0.0
+    - 0.04
+    detached_within_flush_frac:
+    - 0.0
+    - 1.0
+    depth_m:
+    - 0.1
+    - 1.5
+    center_offset_m:
+    - -0.25
+    - 0.25
+    height_range_m:
+    - 0.1
+    - 1.8
+    point_density_per_m2: 3000
+    face_jitter_m: 0.1
+    flush_prob: 0.9
+    flush_point_fraction: 0.5
+    flush_thickness_m: null
+    flush_extent_m:
+    - 0.6
+    - 1.6
+    flush_height_range_m: null
+  door_frame_aug:
+    enabled: true
+    env_prob: 0.65
+  door_hole_aug:
+    enabled: true
+    env_prob: 0.45
+    width_range_m:
+    - 0.12
+    - 1.6
+    height_range_m:
+    - 0.18
+    - 2.2
+    center_height_range_m:
+    - 0.1
+    - 1.9
+    side_margin_range_m:
+    - 0.0
+    - 0.18
+    surface_eps_m: 0.03
+    resample_each_step: false
+    glass_reflection:
+      enabled: true
+      prob: 0.7
+      num_points: 400
+      blob_size_m:
+      - 0.5
+      - 1.2
+      - 0.3
+      size_fraction_range:
+      - 0.3
+      - 1.0
+      num_lobes: 3
+      behind_range_m:
+      - 0.1
+      - 0.6
+      density_range:
+      - 0.3
+      - 1.0
+  viser:
+    raw:
+      enabled: false
+      path: viser_replay.pt
+      capture_interval: 2
+      save_interval: 10000
+      max_points: 6000
+      max_frames: 2000
+  wandb:
+    enabled: true
+    project: dooropeningv22-distill
+    entity: peiqiliu
+    name: vision9_gripper_visual_temporal_640_2x320_retry2_20260922

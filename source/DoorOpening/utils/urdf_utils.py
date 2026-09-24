@@ -91,34 +91,42 @@ def get_visual_transform(visual_element):
     return xyz, rpy, scale
 
 def process_link_mesh(urdf_path, link_element):
-    """Loads a mesh, applies URDF visual transforms, and returns it in the link's local frame."""
-    mesh_el = link_element.find(".//visual/geometry/mesh")
-    if mesh_el is None:
+    """Load every visual mesh/box, apply each visual origin, and merge in link-local coordinates."""
+    meshes = []
+    for visual_el in link_element.findall("./visual"):
+        geometry = visual_el.find("./geometry")
+        if geometry is None:
+            continue
+        mesh_el = geometry.find("./mesh")
+        box_el = geometry.find("./box")
+        if mesh_el is not None:
+            mesh_rel_path = mesh_el.attrib["filename"]
+            if mesh_rel_path.startswith("package://"):
+                mesh_rel_path = mesh_rel_path.split("/", 3)[-1]
+            mesh_abs_path = os.path.join(os.path.dirname(urdf_path), mesh_rel_path)
+            scale = np.asarray(
+                [float(x) for x in mesh_el.attrib.get("scale", "1 1 1").split()], dtype=np.float64
+            )
+            if scale.size == 1:
+                scale = np.repeat(scale, 3)
+            mesh = trimesh.load(mesh_abs_path, force="mesh")
+            mesh.apply_scale(scale)
+        elif box_el is not None:
+            size = np.asarray([float(x) for x in box_el.attrib["size"].split()], dtype=np.float64)
+            mesh = trimesh.creation.box(extents=size)
+        else:
+            continue
+
+        xyz, rpy, _ = get_visual_transform(visual_el)
+        transform_matrix = np.eye(4)
+        transform_matrix[:3, :3] = R.from_euler("xyz", rpy).as_matrix()
+        transform_matrix[:3, 3] = xyz
+        mesh.apply_transform(transform_matrix)
+        meshes.append(mesh)
+
+    if not meshes:
         return None
-        
-    # Dynamically resolve the absolute path to the mesh
-    mesh_rel_path = mesh_el.attrib['filename']
-    mesh_abs_path = os.path.join(os.path.dirname(urdf_path), mesh_rel_path)
-    
-    # Extract transforms
-    visual_el = link_element.find(".//visual")
-    xyz, rpy, scale = get_visual_transform(visual_el)
-    
-    # Load mesh (force='mesh' ensures we get a Trimesh object, not a Scene)
-    mesh = trimesh.load(mesh_abs_path, force='mesh')
-    
-    # 1. Apply Scale
-    mesh.apply_scale(scale)
-    
-    # 2. Apply Rotation (RPY) and Translation (XYZ)
-    rot_matrix = R.from_euler('xyz', rpy).as_matrix()
-    transform_matrix = np.eye(4)
-    transform_matrix[:3, :3] = rot_matrix
-    transform_matrix[:3, 3] = xyz
-    
-    mesh.apply_transform(transform_matrix)
-    
-    return mesh
+    return trimesh.util.concatenate(meshes)
 
 def compute_exact_door_keypoints(urdf_path):
     tree = ET.parse(urdf_path)

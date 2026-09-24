@@ -310,22 +310,15 @@ class EventCfg:
         },
     )
 
-    # Handle-only (link_2) friction. A real door handle is slippery metal, NOT like the panel: it
-    # gets a much smaller friction range so the fingers cannot simply stick to it. Scoped to link_2
-    # and defined AFTER door_physics_material so it overwrites the handle's material (event terms run
-    # in definition order)
+    # Handle-only (link_2) surface friction. Keep the handle surface slippery; the separate joint
+    # friction term below is the intended resistance knob for the lever itself.
     door_handle_physics_material = EventTerm(
         func=randomize_body_material_subset,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("door", body_names="link_2"),
-            # Floor 0.0 -- many real handles (polished/oiled metal) are ~frictionless, so that belongs
-            # inside the sampled range, not just an eval-only extreme. Ceiling crushed 0.6 -> 0.05:
-            # near-zero-on-both-sides is the common real case (see robot_finger_physics_material above),
-            # not a rare tail worth only reaching down to, so most draws should sit near it. A pull
-            # still has to be form-closed through the lever slot rather than held on by friction.
-            "static_friction_range": (0.0, 0.05),  # was (0.0, 0.6), temp update
-            "dynamic_friction_range": (0.0, 0.05),  # was (0.0, 0.6), temp update
+            "static_friction_range": (0.0, 0.05),
+            "dynamic_friction_range": (0.0, 0.05),
             "restitution_range": (0.0, 0.0),
             "num_buckets": 250,
         },
@@ -432,6 +425,18 @@ class EventCfg:
             #    at zero and chattering.
             "stiffness_distribution_params": (45.0, 45.0),  # was (35.0, 35.0), temp update
             "damping_distribution_params": (0.35, 0.35),  # was (0.6, 0.6), temp update
+            "operation": "abs",
+        },
+    )
+
+    # Dry friction of the handle/lever joint itself (joint_2). This is a joint-space coefficient,
+    # not the contact-material friction of the handle surface above.
+    door_hinge_joint_friction = EventTerm(
+        func=randomize_joint_parameters,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("door", joint_names="joint_2"),
+            "friction_distribution_params": (0.3, 0.3),
             "operation": "abs",
         },
     )
@@ -786,7 +791,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=False)
 
-    base_action_scale = 1.0
+    base_action_scale = 1.5
     arm_action_scale = 0.6
     gripper_action_speed_headroom = 2.0
     finger_action_scale = gripper_action_speed_headroom * GRIPPER_VELOCITY_LIMIT
