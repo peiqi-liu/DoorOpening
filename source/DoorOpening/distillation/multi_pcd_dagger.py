@@ -4143,7 +4143,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 # or wall point becomes visible.
                 cam_spec,
             )
-            )
             if int(self.depth_cam_render_blur_kernel_px) > 1:
                 kernel2d, pad = build_depth_blur_kernel2d(
                     self.depth_cam_render_blur_kernel_px, self.depth_cam_render_blur_sigma_px,
