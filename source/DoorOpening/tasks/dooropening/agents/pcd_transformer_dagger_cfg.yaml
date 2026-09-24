@@ -276,8 +276,8 @@ dagger:
     robot_hole_inflate_px: 1
     # Wall-only raster resolution. Door and robot remain at the normal camera resolution.
     # Keeping this small avoids the full-resolution analytic wall allocation at large env counts.
-    wall_raster_width_px: 80
-    wall_raster_height_px: 60
+    wall_raster_width_px: 10
+    wall_raster_height_px: 7
     wall_raster_occluder_inflate_px: 1
     # After the blur, drop SCENE (door+wall) pixels sitting on a depth discontinuity larger than this
     # (m). The blur bleeds wall/door silhouettes into floating "flying pixel" smears; this removes them
