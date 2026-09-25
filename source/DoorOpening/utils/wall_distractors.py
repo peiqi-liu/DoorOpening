@@ -297,6 +297,7 @@ def sample_wall_points_local(
     device,
     flush_bbox_min_ordered: torch.Tensor = None,
     flush_bbox_max_ordered: torch.Tensor = None,
+    return_boxes: bool = False,
 ) -> torch.Tensor:
     """Sample wall-distractor surface points in the door-base local frame.
 
@@ -330,7 +331,9 @@ def sample_wall_points_local(
     num_points = int(num_points)
     env_count = int(axis_order.shape[0])
     if num_points <= 0 or env_count == 0:
-        return torch.zeros((env_count, 0, 3), dtype=torch.float32, device=device)
+        points = torch.zeros((env_count, 0, 3), dtype=torch.float32, device=device)
+        empty_boxes = torch.zeros((env_count, 0, 2, 3), dtype=torch.float32, device=device)
+        return (points, empty_boxes) if return_boxes else points
 
     # Ordered coordinates: axis 0 = thickness (normal to slab), 1 = width (L/R), 2 = height.
     thickness_min, width_min, height_min = bbox_min_ordered.unbind(dim=-1)
@@ -386,6 +389,8 @@ def sample_wall_points_local(
     detached_ref_min = torch.where(flush_present, f_width_min, width_min)
 
     parts = []
+    box_min_parts = []
+    box_max_parts = []
 
     # ---- Box side walls: {left, right} x {front, back}, each side's pair butted at a shared seam. ----
     if box_np > 0:
@@ -453,6 +458,8 @@ def sample_wall_points_local(
             device=device,
         )
         parts.append(box_pts)
+        box_min_parts.append(torch.stack([torch.stack([v[0], v[2], v[4]], dim=-1) for v in variants], dim=1))
+        box_max_parts.append(torch.stack([torch.stack([v[1], v[3], v[5]], dim=-1) for v in variants], dim=1))
 
     # ---- Flush mounting wall: thin coplanar slab, left+right of the panel, existence-gated. ----
     if flush_np > 0:
@@ -492,6 +499,23 @@ def sample_wall_points_local(
             flush_present.view(env_count, 1, 1), flush_pts, torch.full_like(flush_pts, float("nan"))
         )
         parts.append(flush_pts)
+        flush_min = torch.stack(
+            [
+                torch.stack([f_tmin, wlo[:, 0], hlo[:, 0]], dim=-1),
+                torch.stack([f_tmin, wlo[:, 1], hlo[:, 1]], dim=-1),
+            ],
+            dim=1,
+        )
+        flush_max = torch.stack(
+            [
+                torch.stack([f_tmax, whi[:, 0], hhi[:, 0]], dim=-1),
+                torch.stack([f_tmax, whi[:, 1], hhi[:, 1]], dim=-1),
+            ],
+            dim=1,
+        )
+        flush_valid = flush_present.view(env_count, 1, 1)
+        box_min_parts.append(torch.where(flush_valid, flush_min, torch.full_like(flush_min, float("nan"))))
+        box_max_parts.append(torch.where(flush_valid, flush_max, torch.full_like(flush_max, float("nan"))))
 
     wall_points_ordered = parts[0] if len(parts) == 1 else torch.cat(parts, dim=1)
 
@@ -503,4 +527,21 @@ def sample_wall_points_local(
         axis_order.unsqueeze(1).expand(-1, wall_points_ordered.shape[1], -1),
         wall_points_ordered,
     )
-    return wall_points_base
+    if not return_boxes:
+        return wall_points_base
+    box_min_ordered = (
+        torch.cat(box_min_parts, dim=1)
+        if box_min_parts
+        else torch.zeros((env_count, 0, 3), dtype=torch.float32, device=device)
+    )
+    box_max_ordered = (
+        torch.cat(box_max_parts, dim=1)
+        if box_max_parts
+        else torch.zeros((env_count, 0, 3), dtype=torch.float32, device=device)
+    )
+    box_min_base = torch.zeros_like(box_min_ordered)
+    box_max_base = torch.zeros_like(box_max_ordered)
+    scatter_axis = axis_order.unsqueeze(1).expand(-1, box_min_ordered.shape[1], -1)
+    box_min_base.scatter_(2, scatter_axis, box_min_ordered)
+    box_max_base.scatter_(2, scatter_axis, box_max_ordered)
+    return wall_points_base, torch.stack([box_min_base, box_max_base], dim=2)
