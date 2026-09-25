@@ -44,6 +44,7 @@ from render_depth_roundtrip_viser import (  # noqa: E402
     yaw_quat_wxyz,
 )
 from DoorOpening.utils.visual_scene_sampler import CachedVisualSceneSampler  # noqa: E402
+from mock_depth_compositing import composite_robot_scene_depth  # noqa: E402
 from DoorOpening.utils.wall_distractors import (  # noqa: E402
     WallDistractorParams,
     compute_wall_bbox_ordering,
@@ -479,7 +480,7 @@ def main():
     wall_in_panel = panel_silhouette & torch.isfinite(wall_depth[0]) & (wall_depth[0] < panel_depth[0])
     protected_wall_depth = torch.where(wall_in_panel, torch.full_like(wall_depth, float("inf")), wall_depth)
     protected_scene_depth = torch.minimum(door_depth, protected_wall_depth)
-    depth = torch.minimum(protected_scene_depth, robot_depth)
+    depth, _ = composite_robot_scene_depth(protected_scene_depth, robot_depth)
     rendered, valid = backproject_depth_to_world_from_pose(depth, camera_pose, intr)
     points = rendered[0][valid[0]].detach().cpu().numpy()
     scene_depth = protected_scene_depth

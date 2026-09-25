@@ -7,6 +7,7 @@ import torch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "source")); sys.path.insert(0, str(ROOT / "scripts" / "tools"))
 import render_dex_style_wall_scene as rd
+from mock_depth_compositing import composite_robot_scene_depth
 from DoorOpening.utils.camera_utils import rasterize_depth_zbuffer_from_pose, backproject_depth_to_world_from_pose
 from DoorOpening.utils.wall_distractors import WallDistractorParams, compute_wall_bbox_ordering, sample_wall_points_local
 
@@ -58,7 +59,8 @@ def main():
         panel_depth, _ = rasterize_depth_zbuffer_from_pose(panel_world.unsqueeze(0), camera_pose, cam, inflate_px=2, clip_mode="post")
         panel_mask = torch.isfinite(panel_depth[0])
         protected_walls = torch.where(panel_mask & (wall_depth[0] < panel_depth[0]), torch.full_like(wall_depth[0], float("inf")), wall_depth[0])
-        depth = torch.minimum(torch.minimum(door_depth[0], protected_walls), robot_depth[0]).unsqueeze(0)
+        scene_depth = torch.minimum(door_depth[0], protected_walls).unsqueeze(0)
+        depth, _ = composite_robot_scene_depth(scene_depth, robot_depth)
         rendered, valid = backproject_depth_to_world_from_pose(depth, camera_pose, intr)
         policy = rendered[0][valid[0]].detach().cpu().to(torch.float16)
         frames.append({"pointclouds": {

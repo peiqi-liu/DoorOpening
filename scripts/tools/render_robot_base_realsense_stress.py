@@ -9,6 +9,7 @@ import torch.nn.functional as F
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / "source"), str(ROOT / "scripts" / "tools")]
 import render_dex_style_wall_scene as rd
+from mock_depth_compositing import composite_robot_scene_depth
 from DoorOpening.utils.camera_utils import (
     rasterize_axis_aligned_boxes_depth_from_pose,
     rasterize_depth_zbuffer_from_pose,
@@ -135,9 +136,7 @@ def main():
         wall_for_scene_2d = wall_for_scene[0] if wall_for_scene.ndim == 3 else wall_for_scene
         scene_d = torch.minimum(door_d[0], wall_for_scene_2d).unsqueeze(0)
         robot_mask = torch.isfinite(robot_d)
-        hole_mask = torch.nn.functional.max_pool2d(robot_mask.to(scene_d.dtype).unsqueeze(1), 3, 1, 1).squeeze(1) > 0
-        scene_d = torch.where(hole_mask, torch.full_like(scene_d, float("inf")), scene_d)
-        depth = torch.minimum(scene_d, robot_d)
+        depth, hole_mask = composite_robot_scene_depth(scene_d, robot_d)
         rendered, valid = backproject_depth_to_world_from_pose(depth, camera, intr)
         policy = rendered[0][valid[0]].to(torch.float16)
         robot_pixels = torch.isfinite(robot_d[0]) & (robot_d[0] <= scene_d[0])

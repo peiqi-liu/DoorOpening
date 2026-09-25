@@ -41,7 +41,14 @@ if str(SOURCE_ROOT) not in sys.path:
 import yaml
 
 from isaaclab.utils.math import quat_apply
-from DoorOpening.utils.camera_utils import crop_local_pcd, simulate_depth_cam_render_from_pose
+from DoorOpening.utils.camera_utils import (
+    apply_depth_spatial_blur,
+    backproject_depth_to_world_from_pose,
+    build_depth_blur_kernel2d,
+    crop_local_pcd,
+    rasterize_depth_zbuffer_from_pose,
+    simulate_depth_cam_render_from_pose,
+)
 from DoorOpening.utils.door_window_dropout import (
     apply_window_dropout_to_door_points,
     sample_random_window_hole_metadata,
@@ -53,6 +60,7 @@ from DoorOpening.utils.wall_distractors import (
     compute_wall_bbox_ordering,
     sample_wall_points_local,
 )
+from mock_depth_compositing import composite_robot_scene_depth
 
 DEFAULT_STUDENT_CFG = (
     SOURCE_ROOT
@@ -760,9 +768,52 @@ def main():
         gt_world = torch.cat(scene_parts, dim=1)
         occluder_world = torch.cat([board_gt_holed, wall_world], dim=1)
 
-        rendered_world, _ = simulate_depth_cam_render_from_pose(
-            pcd=gt_world, camera_pose=camera_pose, occluder_pcd=occluder_world, **depth_render_kwargs
-        )  # RAW depth render: includes the robot's own body AND its occlusion of the door/walls.
+        if robot_world is None:
+            rendered_world, _ = simulate_depth_cam_render_from_pose(
+                pcd=gt_world, camera_pose=camera_pose, occluder_pcd=occluder_world, **depth_render_kwargs
+            )
+        else:
+            # Match the DEX mock's layer order: render scene and robot independently,
+            # clear scene depth beneath the dilated robot silhouette, then composite.
+            scene_depth, intr = rasterize_depth_zbuffer_from_pose(
+                occluder_world,
+                camera_pose,
+                cam_spec,
+                inflate_px=depth_render_kwargs["inflate_px"],
+                clip_mode=depth_render_kwargs["clip_mode"],
+                occluder_pcd=occluder_world if depth_render_kwargs["occluder_inflate_px"] > 0 else None,
+                occluder_inflate_px=depth_render_kwargs["occluder_inflate_px"],
+            )
+            blur_kernel_px = int(depth_render_kwargs["blur_kernel_px"])
+            if blur_kernel_px > 1:
+                kernel, pad = build_depth_blur_kernel2d(
+                    blur_kernel_px, depth_render_kwargs["blur_sigma_px"], scene_depth.device, scene_depth.dtype
+                )
+                scene_depth = apply_depth_spatial_blur(scene_depth, kernel, pad)
+            if depth_render_kwargs["jitter_std_m"] > 0.0 and depth_render_kwargs["jitter_mode"].lower() in {
+                "axial", "ray", "depth"
+            }:
+                finite = torch.isfinite(scene_depth)
+                scene_depth = torch.where(
+                    finite,
+                    scene_depth + torch.randn_like(scene_depth) * depth_render_kwargs["jitter_std_m"],
+                    scene_depth,
+                )
+            robot_depth, _ = rasterize_depth_zbuffer_from_pose(
+                robot_world,
+                camera_pose,
+                cam_spec,
+                inflate_px=depth_render_kwargs["inflate_px"],
+                clip_mode=depth_render_kwargs["clip_mode"],
+            )
+            depth, _ = composite_robot_scene_depth(scene_depth, robot_depth)
+            rendered_world, valid = backproject_depth_to_world_from_pose(depth, camera_pose, intr)
+            if depth_render_kwargs["jitter_std_m"] > 0.0 and depth_render_kwargs["jitter_mode"].lower() not in {
+                "axial", "ray", "depth"
+            }:
+                noise = torch.randn_like(rendered_world) * depth_render_kwargs["jitter_std_m"]
+                rendered_world = torch.where(valid[..., None], rendered_world + noise, rendered_world)
+            rendered_world = rendered_world.view(gt_world.shape[0], -1, 3)
 
         rendered_base = world_to_local(rendered_world, base_pos, base_quat)
         # Filtered obs: drop the robot's own body points (Dagger._filter_robot_points_base). This is
