@@ -4,10 +4,25 @@ from typing import Literal
 import torch
 from isaaclab.utils.math import euler_xyz_from_quat, quat_from_euler_xyz
 
-from DoorOpening.constants.robot_constants import FRANKA_DEFAULT_JOINT_POS, FRANKA_END_JOINT_POS, FRANKA_JOINT_NAMES
-from DoorOpening.utils.state_machine.api import get_board_edge, get_hinge_pos, open_hand, solve_ik
+from DoorOpening.constants.robot_constants import (
+    DRIVEN_FINGER_JOINT_NAME,
+    FULL_JOINT_NAMES,
+    FRANKA_DEFAULT_JOINT_POS,
+    FRANKA_END_JOINT_POS,
+    FRANKA_JOINT_NAMES,
+    GRIPPER_CLOSED_WIDTH,
+    GRIPPER_OPEN_WIDTH,
+)
+from DoorOpening.utils.state_machine.api import get_board_edge, get_hinge_pos, solve_ik
 
 HandleSide = Literal["right", "left"]
+GRIPPER_Q_IDX = FULL_JOINT_NAMES.index(DRIVEN_FINGER_JOINT_NAME)
+
+
+def _set_gripper_fraction(q_robot: torch.Tensor, open_fraction: float) -> None:
+    """Set the Franka gripper's single driven finger joint; its mate is mimic-coupled."""
+    width = GRIPPER_CLOSED_WIDTH + (GRIPPER_OPEN_WIDTH - GRIPPER_CLOSED_WIDTH) * float(open_fraction)
+    q_robot[GRIPPER_Q_IDX] = width
 
 
 def get_rotation_quat(roll, pitch, yaw, device):
@@ -133,7 +148,6 @@ def state_machine_offline_push_right_door(
     base_target_rot = robot_initial_pose[:, 3:].to(device).clone()
     default_palm_rot = get_rotation_quat(math.pi, math.pi, math.pi, device)
     push_palm_rot = get_rotation_quat(0.0, 0.0, -math.pi / 2, device)
-    safe_open_hand_q = open_hand(1.0).to(q_robot.device)
     franka_default_q = torch.tensor(
         [FRANKA_DEFAULT_JOINT_POS[name] for name in FRANKA_JOINT_NAMES],
         device=device,
@@ -215,7 +229,7 @@ def state_machine_offline_push_right_door(
         base_pose=base_target_pose,
         robot_initial_pose=robot_initial_pose,
     )[0]
-    q_robot[10:26] = open_hand(0.7).to(q_robot.device)
+    _set_gripper_fraction(q_robot, 0.7)
 
     _append_state(
         robot_traj,
@@ -317,9 +331,9 @@ def state_machine_offline_push_right_door(
         # Grasp the handle until the door is cracked open (~0.4 rad), then relax to a PARTLY
         # open hand (not fully open) and push the rest of the way with it.
         if theta.item() < 0.4:
-            q_robot[10:26] = open_hand(0.7).to(q_robot.device)
+            _set_gripper_fraction(q_robot, 0.7)
         else:
-            q_robot[10:26] = open_hand(0.85).to(q_robot.device)
+            _set_gripper_fraction(q_robot, 0.85)
 
         _append_state(
             robot_traj,
@@ -357,7 +371,7 @@ def state_machine_offline_push_right_door(
             robot_initial_pose=robot_initial_pose,
             num_attempts=1,  # loop body: single seed for continuity (no random-restart branch jumps)
         )[0]
-        q_robot[10:26] = safe_open_hand_q
+        _set_gripper_fraction(q_robot, 1.0)
         _append_state(
             robot_traj,
             door_traj,
@@ -383,7 +397,7 @@ def state_machine_offline_push_right_door(
     #     base_pose=traverse_mid_base_pose,
     #     robot_initial_pose=robot_initial_pose,
     # )[0]
-    # q_robot[10:26] = safe_open_hand_q
+    # _set_gripper_fraction(q_robot, 1.0)
 
     # _append_state(
     #     robot_traj,
@@ -414,7 +428,7 @@ def state_machine_offline_push_right_door(
         robot_initial_pose=robot_initial_pose,
     )[0]
     q_robot[3:10] = franka_end_q
-    q_robot[10:26] = safe_open_hand_q
+    _set_gripper_fraction(q_robot, 1.0)
     q_door = torch.tensor([0.0, 0.0], device=device)
 
     _append_state(
@@ -453,7 +467,6 @@ def state_machine_offline_push_left_door(
     base_target_rot = robot_initial_pose[:, 3:].to(device).clone()
     default_palm_rot = get_rotation_quat(math.pi, math.pi, math.pi, device)
     push_palm_rot = get_rotation_quat(0.0, 0.0, -math.pi / 2, device)
-    safe_open_hand_q = open_hand(1.0).to(q_robot.device)
     franka_default_q = torch.tensor(
         [FRANKA_DEFAULT_JOINT_POS[name] for name in FRANKA_JOINT_NAMES],
         device=device,
@@ -543,7 +556,7 @@ def state_machine_offline_push_left_door(
         base_pose=base_target_pose,
         robot_initial_pose=robot_initial_pose,
     )[0]
-    q_robot[10:26] = open_hand(0.7).to(q_robot.device)
+    _set_gripper_fraction(q_robot, 0.7)
 
     _append_state(
         robot_traj,
@@ -647,9 +660,9 @@ def state_machine_offline_push_left_door(
         # Grasp the handle until the door is cracked open (~0.4 rad), then relax to a PARTLY
         # open hand (not fully open) and push the rest of the way with it.
         if theta.item() < 0.4:
-            q_robot[10:26] = open_hand(0.7).to(q_robot.device)
+            _set_gripper_fraction(q_robot, 0.7)
         else:
-            q_robot[10:26] = open_hand(0.85).to(q_robot.device)
+            _set_gripper_fraction(q_robot, 0.85)
 
         _append_state(
             robot_traj,
@@ -687,7 +700,7 @@ def state_machine_offline_push_left_door(
             robot_initial_pose=robot_initial_pose,
             num_attempts=1,  # loop body: single seed for continuity (no random-restart branch jumps)
         )[0]
-        q_robot[10:26] = safe_open_hand_q
+        _set_gripper_fraction(q_robot, 1.0)
         _append_state(
             robot_traj,
             door_traj,
@@ -717,7 +730,7 @@ def state_machine_offline_push_left_door(
         robot_initial_pose=robot_initial_pose,
     )[0]
     q_robot[3:10] = franka_end_q
-    q_robot[10:26] = safe_open_hand_q
+    _set_gripper_fraction(q_robot, 1.0)
     q_door = torch.tensor([0.0, 0.0], device=device)
 
     _append_state(

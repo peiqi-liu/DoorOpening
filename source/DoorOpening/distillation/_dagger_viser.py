@@ -62,7 +62,6 @@ class ViserDebugMixin:
                 "frame_count": 0,
                 "chunk_index": 0,
                 "latest_iteration": None,
-                "initial_snapshot_written": False,
                 "resample_env_each_chunk": True,
             }
             self._resample_viser_raw_stream_env(self._viser_raw_streams[family_name])
@@ -76,7 +75,6 @@ class ViserDebugMixin:
                 "frame_count": 0,
                 "chunk_index": 0,
                 "latest_iteration": None,
-                "initial_snapshot_written": False,
                 "resample_env_each_chunk": True,
             }
             self._resample_viser_raw_stream_env(self._viser_raw_streams["env"])
@@ -176,36 +174,21 @@ class ViserDebugMixin:
     def _maybe_flush_viser_raw_snapshot(self, iteration):
         if not self.viser_raw_enabled or self.rank != 0:
             return
-        if self.viser_raw_save_interval <= 0:
-            return
-        # Persist the first captured frame immediately so a replay is available from
-        # iteration 0 (or the first capture after resuming), instead of waiting for
-        # the normal periodic snapshot interval.
+        interval_due = self.viser_raw_save_interval > 0 and (
+            (int(iteration) + 1) % self.viser_raw_save_interval == 0
+        )
         for stream in self._viser_raw_streams.values():
-            if stream["frame_count"] > 0 and not stream["initial_snapshot_written"]:
-                stream["initial_snapshot_written"] = True
-                # Write an immediate one-frame preview without consuming the live chunk.
-                # The normal recording continues until max_frames / save_interval.
-                preview = dict(stream)
-                preview["frames"] = stream["frames"][:1]
-                preview["frame_count"] = len(preview["frames"])
-                preview_tag = f"{stream['family_name']}_preview_iter_{int(iteration)}"
-                torch.save(
-                    self._build_viser_raw_payload(preview),
-                    self._format_iterated_record_path(self.viser_raw_path, preview_tag),
+            is_full = self.viser_raw_max_frames > 0 and stream["frame_count"] >= self.viser_raw_max_frames
+            # With a frame cap, emit only complete normal-length chunks. Without a cap,
+            # retain the iteration-based save cadence.
+            if is_full:
+                self._flush_viser_raw_stream(stream, chunk_complete=True, reason="max_frames reached")
+            elif interval_due and self.viser_raw_max_frames <= 0:
+                self._flush_viser_raw_stream(
+                    stream,
+                    chunk_complete=True,
+                    reason=f"save_interval {self.viser_raw_save_interval} reached at iteration {int(iteration)}",
                 )
-                print(
-                    f"Saved immediate Viser preview for {stream['family_name']} env "
-                    f"{stream['env_id']} at iteration {int(iteration)} (1 frame; full chunk continues)."
-                )
-        if (int(iteration) + 1) % self.viser_raw_save_interval != 0:
-            return
-        for stream in self._viser_raw_streams.values():
-            self._flush_viser_raw_stream(
-                stream,
-                chunk_complete=True,
-                reason=f"save_interval {self.viser_raw_save_interval} reached at iteration {int(iteration)}",
-            )
 
     def _flush_viser_raw_recording(self, chunk_complete, reason):
         if not self.viser_raw_enabled or self.rank != 0:
@@ -217,6 +200,12 @@ class ViserDebugMixin:
         if not self.viser_raw_enabled or self.rank != 0:
             return
         if stream["frame_count"] <= 0:
+            return
+        if self.viser_raw_max_frames > 0 and stream["frame_count"] < self.viser_raw_max_frames:
+            print(
+                f"Skipped incomplete Viser raw chunk for {stream['family_name']} env {stream['env_id']}: "
+                f"{stream['frame_count']}/{self.viser_raw_max_frames} frames ({reason})."
+            )
             return
 
         latest_iteration = int(stream["latest_iteration"])

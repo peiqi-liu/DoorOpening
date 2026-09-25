@@ -380,10 +380,10 @@ dagger:
       density_range: [0.3, 1.0] # Per-env fraction of num_points actually kept: low = faint (brighter), high = dense (darker). [1.0, 1.0] = always full.
   viser:
     raw:
-      enabled: true  # Save raw `.pt` replay chunks during training so the first render can be inspected.
+      enabled: true  # Save normal-length raw `.pt` replay chunks during training.
       path: "viser_replay.pt"
       capture_interval: 2  # Save one frame, skip one frame, so each replay chunk spans more rollout time.
-      save_interval: 4000  # 2000 captured frames at capture_interval=2; preview is written immediately.
+      save_interval: 4000  # Fallback cadence when max_frames is disabled; incomplete capped chunks are skipped.
       max_points: 12000  # Preserve the full policy cloud in raw replay.
       max_frames: 2000  # Normal replay chunk length; set 0 to disable the cap.
   wandb:
