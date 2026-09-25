@@ -402,13 +402,41 @@ def _dilate_depth_min_pool(depth: torch.Tensor, inflate_px: int) -> torch.Tensor
     return (-pooled_neg).squeeze(1)
 
 
+def suppress_scene_behind_robot(scene_depth: torch.Tensor, robot_depth: torch.Tensor, inflate_px: int = 4):
+    """Clear scene depth beneath the robot's dilated camera-space silhouette (DEX mock behavior)."""
+    if scene_depth.shape != robot_depth.shape:
+        raise ValueError(
+            f"scene and robot depth shapes must match, got {tuple(scene_depth.shape)} and "
+            f"{tuple(robot_depth.shape)}"
+        )
+    radius = max(0, int(inflate_px))
+    robot_pixels = torch.isfinite(robot_depth)
+    silhouette = robot_pixels
+    if radius > 0:
+        kernel = 2 * radius + 1
+        silhouette = F.max_pool2d(
+            robot_pixels.to(scene_depth.dtype).unsqueeze(1),
+            kernel_size=kernel,
+            stride=1,
+            padding=radius,
+        ).squeeze(1) > 0
+    return torch.where(silhouette, torch.full_like(scene_depth, float("inf")), scene_depth), silhouette
+
+
+def composite_robot_scene_depth(scene_depth: torch.Tensor, robot_depth: torch.Tensor, inflate_px: int = 4):
+    """Apply the mock's robot-silhouette suppression, then nearest-depth composite the two layers."""
+    scene_depth, silhouette = suppress_scene_behind_robot(scene_depth, robot_depth, inflate_px)
+    return torch.minimum(scene_depth, robot_depth), silhouette
+
+
 def _zbuffer_scatter_raw_depth(
     pcd: torch.Tensor,
     camera_pose: torch.Tensor,
     cam_spec_dict: Dict,
     clip_mode: str,
-) -> torch.Tensor:
-    """Per-pixel min-depth z-buffer scatter, before dilation and before near/far clipping."""
+    source_split_idx: Optional[int] = None,
+) -> torch.Tensor | Tuple[torch.Tensor, torch.Tensor]:
+    """Per-pixel min-depth scatter, optionally returning a source-index pixel mask."""
     B, _, _ = pcd.shape
     H = int(cam_spec_dict["H"])
     W = int(cam_spec_dict["W"])
@@ -445,11 +473,20 @@ def _zbuffer_scatter_raw_depth(
         raise RuntimeError("Tensor.scatter_reduce_ not found. Need PyTorch >= 1.12.")
 
     inf = torch.full((), float("inf"), device=device, dtype=dtype)
-    z_masked = torch.where(inside, z, inf)
     K = H * W
-    min_depth = torch.full((B, K), float("inf"), device=device, dtype=dtype)
-    min_depth.scatter_reduce_(dim=1, index=pix, src=z_masked, reduce="amin", include_self=True)
-    return min_depth.view(B, H, W)
+    if source_split_idx is None:
+        z_masked = torch.where(inside, z, inf)
+        min_depth = torch.full((B, K), float("inf"), device=device, dtype=dtype)
+        min_depth.scatter_reduce_(dim=1, index=pix, src=z_masked, reduce="amin", include_self=True)
+        return min_depth.view(B, H, W)
+    point_idx = torch.arange(pcd.shape[1], device=device)[None, :]
+    scene_z = torch.where(inside & (point_idx < int(source_split_idx)), z, inf)
+    robot_z = torch.where(inside & (point_idx >= int(source_split_idx)), z, inf)
+    scene_depth = torch.full((B, K), float("inf"), device=device, dtype=dtype)
+    robot_depth = torch.full((B, K), float("inf"), device=device, dtype=dtype)
+    scene_depth.scatter_reduce_(dim=1, index=pix, src=scene_z, reduce="amin", include_self=True)
+    robot_depth.scatter_reduce_(dim=1, index=pix, src=robot_z, reduce="amin", include_self=True)
+    return scene_depth.view(B, H, W), robot_depth.view(B, H, W)
 
 
 @torch.no_grad()
@@ -461,6 +498,7 @@ def rasterize_depth_zbuffer_from_pose(
     clip_mode: str = "post",
     occluder_pcd: Optional[torch.Tensor] = None,
     occluder_inflate_px: int = 0,
+    source_split_idx: Optional[int] = None,
 ):
     """
     occluder_pcd / occluder_inflate_px: an optional second point set (e.g. wall distractors)
@@ -476,7 +514,21 @@ def rasterize_depth_zbuffer_from_pose(
     device, dtype = pcd.device, pcd.dtype
     intr = _get_render_intrinsics(cam_spec_dict, device, dtype)
 
-    depth = _zbuffer_scatter_raw_depth(pcd, camera_pose, cam_spec_dict, clip_mode)
+    rasterized = _zbuffer_scatter_raw_depth(
+        pcd, camera_pose, cam_spec_dict, clip_mode, source_split_idx=source_split_idx
+    )
+    if source_split_idx is None:
+        depth = rasterized
+    else:
+        scene_depth, robot_depth = rasterized
+        if occluder_pcd is not None:
+            raise ValueError("occluder_pcd cannot be combined with source_split_idx")
+        inf = torch.full((), float("inf"), device=device, dtype=dtype)
+        scene_depth = _dilate_depth_min_pool(scene_depth, inflate_px)
+        robot_depth = _dilate_depth_min_pool(robot_depth, inflate_px)
+        scene_depth = torch.where((scene_depth >= near_m) & (scene_depth <= far_val), scene_depth, inf)
+        robot_depth = torch.where((robot_depth >= near_m) & (robot_depth <= far_val), robot_depth, inf)
+        return scene_depth, robot_depth, intr
     depth = _dilate_depth_min_pool(depth, inflate_px)
 
     if occluder_pcd is not None and occluder_inflate_px > 0 and occluder_pcd.shape[1] > 0:

@@ -184,10 +184,19 @@ class ViserDebugMixin:
         for stream in self._viser_raw_streams.values():
             if stream["frame_count"] > 0 and not stream["initial_snapshot_written"]:
                 stream["initial_snapshot_written"] = True
-                self._flush_viser_raw_stream(
-                    stream,
-                    chunk_complete=True,
-                    reason=f"initial Viser snapshot at iteration {int(iteration)}",
+                # Write an immediate one-frame preview without consuming the live chunk.
+                # The normal recording continues until max_frames / save_interval.
+                preview = dict(stream)
+                preview["frames"] = stream["frames"][:1]
+                preview["frame_count"] = len(preview["frames"])
+                preview_tag = f"{stream['family_name']}_preview_iter_{int(iteration)}"
+                torch.save(
+                    self._build_viser_raw_payload(preview),
+                    self._format_iterated_record_path(self.viser_raw_path, preview_tag),
+                )
+                print(
+                    f"Saved immediate Viser preview for {stream['family_name']} env "
+                    f"{stream['env_id']} at iteration {int(iteration)} (1 frame; full chunk continues)."
                 )
         if (int(iteration) + 1) % self.viser_raw_save_interval != 0:
             return
