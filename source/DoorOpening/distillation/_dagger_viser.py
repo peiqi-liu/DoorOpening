@@ -62,6 +62,7 @@ class ViserDebugMixin:
                 "frame_count": 0,
                 "chunk_index": 0,
                 "latest_iteration": None,
+                "initial_snapshot_written": False,
                 "resample_env_each_chunk": True,
             }
             self._resample_viser_raw_stream_env(self._viser_raw_streams[family_name])
@@ -75,6 +76,7 @@ class ViserDebugMixin:
                 "frame_count": 0,
                 "chunk_index": 0,
                 "latest_iteration": None,
+                "initial_snapshot_written": False,
                 "resample_env_each_chunk": True,
             }
             self._resample_viser_raw_stream_env(self._viser_raw_streams["env"])
@@ -176,6 +178,17 @@ class ViserDebugMixin:
             return
         if self.viser_raw_save_interval <= 0:
             return
+        # Persist the first captured frame immediately so a replay is available from
+        # iteration 0 (or the first capture after resuming), instead of waiting for
+        # the normal periodic snapshot interval.
+        for stream in self._viser_raw_streams.values():
+            if stream["frame_count"] > 0 and not stream["initial_snapshot_written"]:
+                stream["initial_snapshot_written"] = True
+                self._flush_viser_raw_stream(
+                    stream,
+                    chunk_complete=True,
+                    reason=f"initial Viser snapshot at iteration {int(iteration)}",
+                )
         if (int(iteration) + 1) % self.viser_raw_save_interval != 0:
             return
         for stream in self._viser_raw_streams.values():

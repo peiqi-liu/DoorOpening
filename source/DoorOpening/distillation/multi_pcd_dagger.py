@@ -35,12 +35,9 @@ from DoorOpening.utils.camera_utils import (
     apply_depth_spatial_blur,
     backproject_depth_to_world_from_pose,
     build_depth_blur_kernel2d,
-    build_pinhole_intrinsics,
     build_realsense_sampler_spec,
     crop_local_pcd,
     drop_depth_edges,
-    get_compiled_renderer_fixed_shapes,
-    rasterize_oriented_boxes_depth_from_pose,
     rasterize_depth_zbuffer_from_pose,
     render_depth_roundtrip_from_pose,
     shuffle_pcd,
@@ -299,59 +296,32 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             self.runtime_cfg.get("sampler_render", {}),
         )
         self.depth_cam_render_num_points = self.depth_cam_render_cfg.get("num_points")
+        self.depth_cam_render_width_px = int(self.depth_cam_render_cfg.get("width_px", 0))
+        self.depth_cam_render_height_px = int(self.depth_cam_render_cfg.get("height_px", 0))
         self.depth_cam_render_inflate_px = int(self.depth_cam_render_cfg.get("inflate_px", 0))
         self.depth_cam_render_clip_mode = str(self.depth_cam_render_cfg.get("clip_mode", "post"))
-        self.depth_cam_render_use_compile = bool(self.depth_cam_render_cfg.get("use_compile", True))
-        # Static occluders (door panel + wall distractors) are rasterized a second time with this much
-        # larger inflate_px and composited via a per-pixel min with the main depth. Sparse occluders
-        # (esp. the wall distractors) otherwise leave per-pixel z-buffer gaps at close range that let
-        # farther points (background, the other side of the wall) show through. 0 disables the pass.
-        self.depth_cam_render_occluder_inflate_px = int(self.depth_cam_render_cfg.get("occluder_inflate_px", 0))
         # RealSense-style edge-bleeding spatial blur on the depth image before back-projection. Smears
         # thin features (the handle) into the door/plate so the rendered cloud looks like the blurry
         # "bump" a real depth camera returns instead of a crisp lever. blur_kernel_px <= 1 disables it.
         self.depth_cam_render_blur_kernel_px = int(self.depth_cam_render_cfg.get("blur_kernel_px", 0))
         self.depth_cam_render_blur_sigma_px = float(self.depth_cam_render_cfg.get("blur_sigma_px", 0.0))
-        # Edge dropout on the SCENE depth (after blur) to remove flying-pixel smears on wall/door edges.
+        # Edge dropout after blur to remove flying-pixel smears at depth boundaries.
         self.depth_cam_render_edge_drop_m = float(self.depth_cam_render_cfg.get("edge_drop_m", 0.0))
-        # Median filter (odd kernel px) on the SCENE depth. Unlike the gaussian blur it does NOT average
+        # Median filter (odd kernel px) on the combined depth. Unlike the gaussian blur it does NOT average
         # across the handle->panel step, so it makes a THIN lever vanish into the flat panel (a minority
         # of near pixels in the window -> the median picks the panel depth) WITHOUT creating flying-pixel
         # overshoot -- every output pixel stays a real surface depth. Use to reproduce "the handle is
         # invisible in the point cloud, the robot sees a flat surface". 0/1 disables it.
         self.depth_cam_render_median_kernel_px = int(self.depth_cam_render_cfg.get("median_kernel_px", 0))
-        # Axial (along-ray) depth jitter, in meters, added per-pixel BEFORE back-projection. Unlike the
-        # image-space blur, axial jitter keeps every point on its own camera ray, so it fuzzes surfaces
-        # (a realistic RealSense range-noise look on the handle) WITHOUT the lateral "point -> ray"
-        # overshoot the blur casts across silhouettes. Applied separately to the scene (door+walls) and
-        # to the crisp robot pass so the robot body can carry sensor-like fuzz without smearing fingers.
-        # 0 disables. Prefer this over blur_kernel_px to keep the handle blurry while cutting overshoot.
+        # Axial (along-ray) depth jitter, in meters, applied after the combined scene+robot depth pass.
+        # It fuzzes surfaces without lateral point overshoot. 0 disables.
         self.depth_cam_render_axial_jitter_std_m = float(
             self.depth_cam_render_cfg.get("axial_jitter_std_m", 0.0)
         )
-        self.depth_cam_render_robot_axial_jitter_std_m = float(
-            self.depth_cam_render_cfg.get("robot_axial_jitter_std_m", 0.0)
-        )
-        # RealSense robot self-occlusion: suppress scene depth behind a small dilated robot silhouette
-        # instead of backfilling the robot hole with wall/door points.
-        self.depth_cam_render_robot_hole_inflate_px = int(
-            self.depth_cam_render_cfg.get("robot_hole_inflate_px", 1)
-        )
-        # Walls are broad, low-frequency occluders. Render both their sampled and analytic
-        # passes at a small camera resolution, then upsample the valid depth into the normal
-        # door/robot image. This avoids materializing the expensive full-resolution
-        # (environment x wall-box x H x W x 3) intersection tensor.
-        self.depth_cam_render_wall_width_px = int(
-            self.depth_cam_render_cfg.get("wall_raster_width_px", 80)
-        )
-        self.depth_cam_render_wall_height_px = int(
-            self.depth_cam_render_cfg.get("wall_raster_height_px", 60)
-        )
-        self.depth_cam_render_wall_occluder_inflate_px = int(
-            self.depth_cam_render_cfg.get("wall_raster_occluder_inflate_px", 1)
-        )
-        if self.depth_cam_render_wall_width_px <= 0 or self.depth_cam_render_wall_height_px <= 0:
-            raise ValueError("depth_cam_render wall raster dimensions must be positive")
+        if self.depth_cam_render_width_px < 0 or self.depth_cam_render_height_px < 0:
+            raise ValueError("depth_cam_render width_px and height_px must be non-negative")
+        if (self.depth_cam_render_width_px == 0) != (self.depth_cam_render_height_px == 0):
+            raise ValueError("depth_cam_render width_px and height_px must both be set, or both be omitted")
         # Optional override of the depth camera's HORIZONTAL / VERTICAL field of view (degrees). None =>
         # the physical D435 defaults in camera_utils (85 x 58). Lowering fov_y_deg raises fy, so the
         # rendered image spans a NARROWER vertical angle at the same resolution: points near the top/
@@ -3219,9 +3189,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.wall_distractor_num_points = self.wall_distractor_params.num_points
         self.wall_distractor_resample_each_step = self.wall_distractor_params.resample_each_step
         self._wall_distractor_local_points = None
-        self._wall_distractor_local_boxes = None
-        self._wall_distractor_boxes_base_for_render = None
-        self._wall_distractor_boxes_pose_world = None
         if (
             self.wall_distractors_enabled
             and self.wall_distractor_num_points > 0
@@ -3349,7 +3316,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         if self.pointcloud_source in {"sampler", "depth", "both"}:
             self.robot_camera_body_idx = int(self.ov_env.robot.find_bodies("x5_camera_link")[0][0])
             self.sampler_camera_spec = self._build_sampler_camera_spec()
-            self.wall_raster_camera_spec = self._build_wall_raster_camera_spec()
             # The real depth sensor is the `cam` prim mounted on x5_camera_link via the CameraCfg
             # offset rotation (a -45deg roll that compensates for the 45deg-tilted realsense bracket
             # on the ARX x5 wrist). The x5_camera_link frame itself is NOT the optical frame. The
@@ -3484,8 +3450,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
 
     def _build_sampler_camera_spec(self):
         camera_cfg = self.ov_env.cfg.pointcloud_camera_cfg
-        # Half-res D435 model. The intrinsics/range live in DoorOpening.utils.camera_utils so that
-        # scripts/rl_games/play.py can drive the real IsaacLab camera to the identical spec. fov_*_deg
+        # Resolution is independently configurable for the synthetic training depth render; FOV/range
+        # still match the RealSense camera model. Omitted width/height retain the prior half-res default.
         # default to None -> the D435 physical FOV; depth_cam_render.fov_y_deg can narrow the vertical
         # field (see the config note in __init__).
         fov_kwargs = {}
@@ -3493,23 +3459,11 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             fov_kwargs["fov_x_deg"] = float(self.depth_cam_render_fov_x_deg)
         if self.depth_cam_render_fov_y_deg is not None:
             fov_kwargs["fov_y_deg"] = float(self.depth_cam_render_fov_y_deg)
+        height_px = self.depth_cam_render_height_px or int(camera_cfg.height) // 2
+        width_px = self.depth_cam_render_width_px or int(camera_cfg.width) // 2
         return build_realsense_sampler_spec(
-            int(camera_cfg.height) // 2,
-            int(camera_cfg.width) // 2,
-            device=self.device,
-            **fov_kwargs,
-        )
-
-    def _build_wall_raster_camera_spec(self):
-        """Build the reduced-resolution camera used only for wall rendering."""
-        fov_kwargs = {}
-        if self.depth_cam_render_fov_x_deg is not None:
-            fov_kwargs["fov_x_deg"] = float(self.depth_cam_render_fov_x_deg)
-        if self.depth_cam_render_fov_y_deg is not None:
-            fov_kwargs["fov_y_deg"] = float(self.depth_cam_render_fov_y_deg)
-        return build_realsense_sampler_spec(
-            self.depth_cam_render_wall_height_px,
-            self.depth_cam_render_wall_width_px,
+            height_px,
+            width_px,
             device=self.device,
             **fov_kwargs,
         )
@@ -3574,14 +3528,12 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             )
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
-            points, boxes = self._sample_wall_pointcloud_local(return_boxes=True)
-            self._wall_distractor_local_points[:] = points
-            self._wall_distractor_local_boxes = boxes
+            self._wall_distractor_local_points[:] = self._sample_wall_pointcloud_local()
             return
         env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
         if env_ids.numel() == 0:
             return
-        self._wall_distractor_local_points[env_ids] = self._sample_wall_pointcloud_local(env_ids=env_ids)
+            self._wall_distractor_local_points[env_ids] = self._sample_wall_pointcloud_local(env_ids=env_ids)
 
     def _resample_door_frame_visibility(self, env_ids=None):
         """Redraw the per-env boolean deciding whether the door frame (link_0) is rendered this episode."""
@@ -3887,23 +3839,9 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             # Wall layout is sampled in door-base coordinates and is independent of robot/camera pose.
             # Place it in world using the door pose below; only the rendered observation is later
             # transformed into the robot-base frame.
-            wall_points_base, wall_boxes_base = self._sample_wall_pointcloud_local(
-                num_points=num_points, return_boxes=True
-            )
+            wall_points_base = self._sample_wall_pointcloud_local(num_points=num_points)
         else:
             wall_points_base = self._wall_distractor_local_points
-            wall_boxes_base = self._wall_distractor_local_boxes
-        if wall_boxes_base is not None:
-            # Boxes are authored in door-base coordinates.  Preserve that orientation for the
-            # analytic ray pass: converting their rotated corners to a world AABB makes a larger,
-            # incorrect occluder and can hide geometry in space where no wall exists.
-            self._wall_distractor_boxes_base_for_render = wall_boxes_base
-            self._wall_distractor_boxes_pose_world = torch.cat(
-                [door_base_pos_w, door_base_quat_w[:, [1, 2, 3, 0]]], dim=-1
-            )
-        else:
-            self._wall_distractor_boxes_base_for_render = None
-            self._wall_distractor_boxes_pose_world = None
         quat = door_base_quat_w.unsqueeze(1).expand(-1, wall_points_base.shape[1], -1)
         return quat_apply(quat, wall_points_base) + door_base_pos_w.unsqueeze(1)
 
@@ -3992,10 +3930,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         # Keep the sampled ground-truth wall geometry available to evaluation replay capture.
         # It is stored once per Viser recording, rather than repeated in every frame.
         self._last_ground_truth_wall_points_world = wall_pcd_world
-        # scene-MINUS-robot = static scene geometry (door panel + wall distractors). This is both the
-        # main (blurred + edge-dropped) depth cloud AND the occluder set: the robot is rendered in a
-        # SEPARATE crisp pass so blur/edge-drop never touch it, and it stays out of the occluder-fill
-        # pass so its thin links (fingers) aren't dilated/bloated. See _render_depth_scene_with_crisp_robot.
+        # Door, wall distractors, and reflection samples form the static scene cloud. The depth path
+        # concatenates this with the robot for a single common-resolution z-buffer pass.
         scene_parts = [door_pcd_world]
         if wall_pcd_world.shape[1] > 0:
             scene_parts.append(wall_pcd_world)
@@ -4063,115 +3999,33 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         b, _, h, w, _, _ = patches.shape
         return patches.contiguous().view(b, h, w, k * k).median(dim=-1).values
 
-    @staticmethod
-    def _upsample_valid_depth(depth, target_height, target_width):
-        """Upsample depth without allowing invalid (+inf) background to bleed into walls."""
-        if depth.shape[-2:] == (int(target_height), int(target_width)):
-            return depth
-        valid = torch.isfinite(depth)
-        filled = torch.where(valid, depth, torch.zeros_like(depth))
-        numerator = torch.nn.functional.interpolate(
-            filled.unsqueeze(1), size=(int(target_height), int(target_width)),
-            mode="bilinear", align_corners=False,
-        ).squeeze(1)
-        denominator = torch.nn.functional.interpolate(
-            valid.to(depth.dtype).unsqueeze(1), size=(int(target_height), int(target_width)),
-            mode="bilinear", align_corners=False,
-        ).squeeze(1)
-        return torch.where(
-            denominator > 1e-6,
-            numerator / denominator.clamp_min(1e-6),
-            torch.full_like(numerator, float("inf")),
-        )
+    def _render_depth_scene_single_pass(self, door_walls_pcd_world, robot_pcd_world, camera_pose):
+        """Render door, walls, and robot together through one low-resolution z-buffer pass.
 
-    def _render_depth_scene_with_crisp_robot(self, door_walls_pcd_world, robot_pcd_world, camera_pose):
-        """Depth-cam obs render (world frame) with the robot kept CRISP -- the same logic as the viser
-        tool's render_batch, so training and that preview stay identical.
-
-        The SCENE (door + walls) goes through the z-buffer + occluder anti-penetration pass + RealSense
-        edge-bleed blur; edge-drop then removes the blur's flying-pixel smears on wall/door silhouettes;
-        optional axial (on-ray) jitter adds range fuzz without lateral overshoot. The ROBOT is rasterized
-        in a SEPARATE crisp pass (NO lateral blur / edge-drop, only optional axial jitter) and composited
-        by nearest-surface ``minimum``, so it self-occludes / occludes the door while its thin fingers
-        stay sharp. door+walls is BOTH the main and the occluder cloud here.
-
-        Returns (B, num_points, 3) world points, NaN-padded to a fixed count.
+        This matches the approved offline mock: one common 200x150 grid preserves wall/door
+        alignment, and a single nearest-surface rasterization includes robot self-occlusion.
+        No separate wall, analytic-box, robot, or dilated-occluder raster pass is performed.
         """
-        cam_spec = self.sampler_camera_spec
-        wall_cam_spec = self.wall_raster_camera_spec
-        occ_inflate = self.depth_cam_render_occluder_inflate_px
-        # --- Scene depth: source-aware door/wall z-buffer. ---
-        # The first fixed-size block is the door cloud; the remainder is walls/reflection.  A plain
-        # min(door+walls) lets coplanar flush-wall samples win individual pixels through sparse gaps.
-        # Render the sources separately and let the door win only for wall samples that are behind or
-        # depth-tied with it.  A genuinely foreground wall remains visible, as it should.
-        door_n = min(int(self.scene_door_pcd_num_points), int(door_walls_pcd_world.shape[1]))
-        door_source = door_walls_pcd_world[:, :door_n]
-        wall_source = door_walls_pcd_world[:, door_n:]
-        door_depth, _ = rasterize_depth_zbuffer_from_pose(
-            door_source, camera_pose, cam_spec,
-            inflate_px=self.depth_cam_render_inflate_px, clip_mode=self.depth_cam_render_clip_mode,
-            occluder_pcd=door_source if occ_inflate > 0 else None,
-            occluder_inflate_px=occ_inflate,
+        render_pcd_world = torch.cat((door_walls_pcd_world, robot_pcd_world), dim=1)
+        depth, intr = rasterize_depth_zbuffer_from_pose(
+            render_pcd_world,
+            camera_pose,
+            self.sampler_camera_spec,
+            inflate_px=self.depth_cam_render_inflate_px,
+            clip_mode=self.depth_cam_render_clip_mode,
         )
-        if wall_source.shape[1] > 0:
-            wall_depth, _ = rasterize_depth_zbuffer_from_pose(
-                wall_source, camera_pose, wall_cam_spec,
-                inflate_px=self.depth_cam_render_inflate_px, clip_mode=self.depth_cam_render_clip_mode,
-                occluder_pcd=wall_source if occ_inflate > 0 else None,
-                occluder_inflate_px=self.depth_cam_render_wall_occluder_inflate_px if occ_inflate > 0 else 0,
+        if int(self.depth_cam_render_blur_kernel_px) > 1:
+            kernel2d, pad = build_depth_blur_kernel2d(
+                self.depth_cam_render_blur_kernel_px,
+                self.depth_cam_render_blur_sigma_px,
+                depth.device,
+                depth.dtype,
             )
-            wall_depth = self._upsample_valid_depth(wall_depth, cam_spec["H"], cam_spec["W"])
-            # Door wins behind/tied walls, but not a physically foreground wall.
-            tie_eps_m = 0.002
-            wall_depth = torch.where(
-                torch.isfinite(door_depth) & (wall_depth >= door_depth - tie_eps_m),
-                torch.full_like(wall_depth, float("inf")),
-                wall_depth,
-            )
-            scene_depth = torch.minimum(door_depth, wall_depth)
-        else:
-            scene_depth = door_depth
-        # Solid wall occluder: wall point samples are retained for the observation, but this analytic
-        # box pass closes all projected sampling holes so geometry behind a wall cannot leak through.
-        if self._wall_distractor_boxes_base_for_render is not None:
-            solid_wall_depth, _ = rasterize_oriented_boxes_depth_from_pose(
-                self._wall_distractor_boxes_base_for_render[:, :, 0],
-                self._wall_distractor_boxes_base_for_render[:, :, 1],
-                self._wall_distractor_boxes_pose_world,
-                camera_pose,
-                # Unlike sampled wall points, an analytic solid box must be evaluated at the
-                # final camera resolution.  Rendering it at the reduced wall raster and then
-                # upsampling can leave a one-pixel silhouette gap through which a farther door
-                # or wall point becomes visible.
-                cam_spec,
-            )
-            solid_wall_depth = torch.where(
-                torch.isfinite(door_depth) & (solid_wall_depth >= door_depth - 0.002),
-                torch.full_like(solid_wall_depth, float("inf")),
-                solid_wall_depth,
-            )
-            scene_depth = torch.minimum(scene_depth, solid_wall_depth)
-            if int(self.depth_cam_render_blur_kernel_px) > 1:
-                kernel2d, pad = build_depth_blur_kernel2d(
-                    self.depth_cam_render_blur_kernel_px, self.depth_cam_render_blur_sigma_px,
-                    scene_depth.device, scene_depth.dtype,
-                )
-                scene_depth = apply_depth_spatial_blur(scene_depth, kernel2d, pad)
-        # --- Edge dropout on the scene: remove the blur's flying-pixel smears at wall/door edges. ---
+            depth = apply_depth_spatial_blur(depth, kernel2d, pad)
         if self.depth_cam_render_edge_drop_m > 0.0:
-            scene_depth = drop_depth_edges(scene_depth, self.depth_cam_render_edge_drop_m)
-        # --- Median filter: dissolve the thin handle into the flat panel (no overshoot). ---
-        scene_depth = self._apply_depth_median_filter(scene_depth, self.depth_cam_render_median_kernel_px)
-        # --- Scene axial jitter: fuzz surfaces (blurry handle) along the ray, no lateral overshoot. ---
-        scene_depth = self._apply_axial_depth_jitter(scene_depth, self.depth_cam_render_axial_jitter_std_m)
-        # --- Robot: crisp z-buffer (no blur / edge-drop), then optional axial-only sensor fuzz. ---
-        robot_depth, intr = rasterize_depth_zbuffer_from_pose(
-            robot_pcd_world, camera_pose, cam_spec,
-            inflate_px=self.depth_cam_render_inflate_px, clip_mode=self.depth_cam_render_clip_mode,
-        )
-        robot_depth = self._apply_axial_depth_jitter(robot_depth, self.depth_cam_render_robot_axial_jitter_std_m)
-        depth = torch.minimum(scene_depth, robot_depth)
+            depth = drop_depth_edges(depth, self.depth_cam_render_edge_drop_m)
+        depth = self._apply_depth_median_filter(depth, self.depth_cam_render_median_kernel_px)
+        depth = self._apply_axial_depth_jitter(depth, self.depth_cam_render_axial_jitter_std_m)
         pcd_world, _ = backproject_depth_to_world_from_pose(depth, camera_pose, intr)
         # --- Fixed-N packing (same as render_depth_roundtrip_from_pose): shuffle, push NaN to the end. ---
         batch = pcd_world.shape[0]
@@ -4197,7 +4051,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(
                 torch.cat([door_walls_pcd_world, robot_pcd_world], dim=1)
             )
-        rendered_pcd_world = self._render_depth_scene_with_crisp_robot(
+        rendered_pcd_world = self._render_depth_scene_single_pass(
             door_walls_pcd_world, robot_pcd_world, self._get_sampler_camera_pose()
         )
         # Retain the exact world-frame render for evaluation/Viser. The policy receives the
@@ -4232,7 +4086,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         if self.viser_raw_enabled:
             self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(scene_full_pcd_world)
 
-        rendered_depth_pcd_world = self._render_depth_scene_with_crisp_robot(
+        rendered_depth_pcd_world = self._render_depth_scene_single_pass(
             door_walls_pcd_world, robot_pcd_world, self._get_sampler_camera_pose()
         )
         self._last_rendered_depth_pcd_world = rendered_depth_pcd_world
