@@ -95,7 +95,12 @@ observation_lag:
   per_timestamp: true
   clamp_to_available_history: true
 
-pcd_encoders_cfg: {}
+pcd_encoders_cfg:
+  local_pcd_t:
+    type: "pointnet"
+    num_output_tokens: 128
+    num_points: [2500, 0, 0]
+    use_pcd: true
 
 state_encoders_cfg:
   q_arm:

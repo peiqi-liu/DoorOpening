@@ -431,15 +431,15 @@ class EventCfg:
 
     # Dry friction of the handle/lever joint itself (joint_2). This is a joint-space coefficient,
     # not the contact-material friction of the handle surface above.
-    door_hinge_joint_friction = EventTerm(
-        func=randomize_joint_parameters,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("door", joint_names="joint_2"),
-            "friction_distribution_params": (0.3, 0.3),
-            "operation": "abs",
-        },
-    )
+    # door_hinge_joint_friction = EventTerm(
+    #     func=randomize_joint_parameters,
+    #     mode="reset",
+    #     params={
+    #         "asset_cfg": SceneEntityCfg("door", joint_names="joint_2"),
+    #         "friction_distribution_params": (0.3, 0.3),
+    #         "operation": "abs",
+    #     },
+    # )
 
     door_hinge_joint_effort_limit = EventTerm(
         func=randomize_joint_effort_limits,
@@ -488,19 +488,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # door_board_joint_stiffness_and_damping) precisely so that the restoring torque saturates here,
     # making the door feel like a constant-torque load of this many Nm.
     #
-    # Lowered again for the 2-finger gripper (start 10..25 -> 5..15, ADR endpoint 5..60 -> 3..40).
-    # These Nm convert almost directly into the force the grasp has to transmit: with the handle
-    # ~0.8 m from the hinge, required pull = cap / 0.8, so the start band drops from 12..31 N to
-    # 6..19 N and the ADR ceiling from 75 N to 50 N. A pinch grasp can only pass 2*mu*F_grip
-    # (~50 N of clamp on a 20 mm bar), so this moves the slip threshold from mu >= 0.31 down to
-    # mu >= 0.19 -- i.e. from ~23% of the handle-friction draws slipping to ~12%.
-    # Floors raised: start 5 -> 10 Nm, full-ADR 3 -> 8 Nm. This is the knob that sets how heavy the
-    # door actually is (restoring torque plateaus here), so lifting the floor removes the nearly
-    # weightless doors the policy could open without ever loading the grasp. With the handle ~0.8 m
-    # from the hinge the required pull rises from 6..19 N to 12..19 N at the start band, and the
-    # lightest full-ADR door goes from 3.8 N to 10 N. The start floor sits ABOVE the full-ADR floor
-    # on purpose: ADR then re-introduces lighter doors as it widens, rather than only ever adding
-    # harder ones.
     door_panel_effort_limit_start_range_nm = (10.0, 15.0)  # was (5.0, 15.0), temp update
     # Floor 8 -> 3 Nm: below the start band's 10 Nm floor again, so ADR re-introduces lighter doors
     # as it widens (not just adds heavier ones -- see the start-band note above). Ceiling trimmed
