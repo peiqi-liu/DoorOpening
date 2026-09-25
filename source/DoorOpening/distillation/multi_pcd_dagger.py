@@ -3533,7 +3533,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         lidar_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_lidar_body_idx]
         return torch.cat([lidar_pos_w, lidar_quat_w[:, [1, 2, 3, 0]]], dim=-1)
 
-    def _sample_wall_pointcloud_local(self, env_ids=None, num_points=None):
+    def _sample_wall_pointcloud_local(self, env_ids=None, num_points=None, return_boxes: bool = False):
         if num_points is None:
             num_points = self.wall_distractor_num_points
         num_points = int(num_points)
@@ -3543,7 +3543,9 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
         env_count = int(env_ids.numel())
         if num_points <= 0 or env_count == 0:
-            return torch.zeros((env_count, 0, 3), dtype=torch.float32, device=self.device)
+            points = torch.zeros((env_count, 0, 3), dtype=torch.float32, device=self.device)
+            empty_boxes = torch.zeros((env_count, 0, 2, 3), dtype=torch.float32, device=self.device)
+            return (points, empty_boxes) if return_boxes else points
 
         return sample_wall_points_local(
             axis_order=self.wall_distractor_axis_order[env_ids],
@@ -3554,6 +3556,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             device=self.device,
             flush_bbox_min_ordered=self.wall_distractor_panel_bbox_min_ordered[env_ids],
             flush_bbox_max_ordered=self.wall_distractor_panel_bbox_max_ordered[env_ids],
+            return_boxes=return_boxes,
         )
 
     def _resample_wall_distractors(self, env_ids=None):
