@@ -123,9 +123,9 @@ state_encoders_cfg:
   #   dropout: 0.0
   #   use_state: true
   keyframe_pose_base:
-    # panda_link4 and panda_hand: position 3 + 6D orientation for each body.
-    body_names: [panda_hand] # [panda_link4, panda_hand]
-    input_dim: 18
+    # panda_hand: position 3 + 6D orientation.
+    body_names: [panda_hand]
+    input_dim: 9
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
