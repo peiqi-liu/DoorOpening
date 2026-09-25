@@ -64,7 +64,7 @@ temporal_state_encoders:
   fields:
     - q_arm
     - base_vel
-    - initial_handle_points
+    # - initial_handle_points
     # - push_pull_belief
     # - target_err_hand
     # - base_vel
@@ -116,25 +116,25 @@ state_encoders_cfg:
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  initial_handle_points:
-    # Two independent handle endpoints captured at reset and re-expressed in the current base frame.
-    input_dim: 6
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
+  # initial_handle_points:
+  #   # Two independent handle endpoints captured at reset and re-expressed in the current base frame.
+  #   input_dim: 6
+  #   hidden_dims: [128, 256]
+  #   dropout: 0.0
+  #   use_state: true
   keyframe_pose_base:
     # panda_link4 and panda_hand: position 3 + 6D orientation for each body.
-    body_names: [panda_link4, panda_hand]
+    body_names: [panda_hand] # [panda_link4, panda_hand]
     input_dim: 18
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  push_pull_cond:
-    input_dim: 2
-    hidden_dims: [64, 256]
-    dropout: 0.0
-    use_layer_norm: true
-    use_state: true
+  # push_pull_cond:
+  #   input_dim: 2
+  #   hidden_dims: [64, 256]
+  #   dropout: 0.0
+  #   use_layer_norm: true
+  #   use_state: true
   base_vel:
     input_dim: 3
     hidden_dims: [128, 256]
