@@ -237,8 +237,8 @@ dagger:
     # Match scripts/tools/render_depth_roundtrip_viser.py: concatenate door, walls, and robot,
     # rasterize one shared z-buffer, blur/drop-edge/jitter that depth image, then back-project.
     num_points: 12000
-    width_px: 200
-    height_px: 150
+    width_px: 240
+    height_px: 180
     # Depth-camera field of view (degrees). Omit / null -> D435 physical defaults (85 x 58). Lowering
     # fov_y_deg narrows the VERTICAL angle at the same resolution, cropping top/bottom points to match a
     # real camera that effectively sees less vertically than 58 deg. Set to reduce the vertical FOV;
