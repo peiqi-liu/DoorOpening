@@ -362,14 +362,17 @@ def parse_args():
     p.add_argument("--camera-height", type=float, default=1.0)
     p.add_argument("--camera-look-z", type=float, default=1.0, help="World z the camera aims at on the panel.")
     p.add_argument("--camera-right", type=float, default=0.12, help="Lateral camera offset to the robot's RIGHT (world +X).")
-    p.add_argument("--cam-width-px", type=int, default=320)
-    p.add_argument("--cam-height-px", type=int, default=240)
+    p.add_argument("--cam-width-px", type=int, default=None,
+                   help="Render width (px). Default: dagger.depth_cam_render.width_px in the student cfg (320 if absent).")
+    p.add_argument("--cam-height-px", type=int, default=None,
+                   help="Render height (px). Default: dagger.depth_cam_render.height_px in the student cfg (240 if absent).")
     p.add_argument("--near-m", type=float, default=0.3)
     p.add_argument("--far-m", type=float, default=3.0)
     p.add_argument("--inflate-px", type=int, default=None,
                    help="Main-pass z-buffer dilation (0 = plain round-trip). Default: read from the cfg's "
                    "dagger.depth_cam_render.inflate_px (locked to training).")
-    p.add_argument("--jitter-std-m", type=float, default=0.0, help="Optional gaussian range noise on the depth (m).")
+    p.add_argument("--jitter-std-m", type=float, default=None,
+                   help="Gaussian axial range noise (m). Default: dagger.depth_cam_render.axial_jitter_std_m.")
     p.add_argument("--blur-kernel-px", type=int, default=None,
                    help="RealSense-style edge-bleeding blur kernel (px); smears the handle into a bump. "
                    "Default: read from the cfg's dagger.depth_cam_render.blur_kernel_px. <=1 disables.")
@@ -393,6 +396,15 @@ def main():
     frame_cfg = dict(cfg.get("dagger", {}).get("door_frame_aug", {}))
     hole_cfg = dict(cfg.get("dagger", {}).get("door_hole_aug", {}))
     depth_cfg = dict(cfg.get("dagger", {}).get("depth_cam_render", {}))
+    # Use the same camera resolution/noise values as training unless explicitly overridden.
+    args.cam_width_px = int(args.cam_width_px or depth_cfg.get("width_px", 320))
+    args.cam_height_px = int(args.cam_height_px or depth_cfg.get("height_px", 240))
+    axial_jitter_std_m = (
+        float(args.jitter_std_m)
+        if args.jitter_std_m is not None
+        else float(depth_cfg.get("axial_jitter_std_m", 0.0))
+    )
+    depth_cfg["axial_jitter_std_m"] = axial_jitter_std_m
     # Policy-input crop knobs, read from the SAME student cfg multi_pcd_dagger uses (_build_local_pcd ->
     # crop_local_pcd base cylindrical crop). Height bounds [0.55, 1.5] are crop_local_pcd's own defaults.
     student_cfg = dict(cfg.get("student", {}))
