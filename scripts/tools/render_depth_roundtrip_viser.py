@@ -548,12 +548,6 @@ def main():
     wall_params.num_points = max(1, int(wall_params.num_points * args.gt_scale))
     if wall_params.point_density_per_m2 is not None:
         wall_params.point_density_per_m2 = wall_params.point_density_per_m2 * args.gt_scale
-    # The offline probe intentionally oversamples walls to expose whether remaining
-    # ray leaks are just sampling gaps. Keep this fixed here; it is not a YAML knob.
-    wall_params.num_points *= 3
-    if wall_params.point_density_per_m2 is not None:
-        wall_params.point_density_per_m2 *= 3.0
-
     axis_order, bbox_min_ordered, bbox_max_ordered = compute_wall_bbox_ordering(board_bbox)
     # Flush slab is driven by the PANEL bbox, reordered by the SAME axis order (matches training).
     panel_bbox_min_ordered = torch.gather(panel_bbox[:, 0], 1, axis_order)

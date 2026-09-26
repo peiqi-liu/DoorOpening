@@ -234,62 +234,26 @@ dagger:
     sdf_cutoff: 0.02
     max_points_per_process: 5000
   depth_cam_render:
-    # Geometric depth round-trip (3D points -> 2D z-buffer depth image -> 3D points), rendered by
-    # render_depth_roundtrip_from_pose. z-buffer + occluder anti-penetration pass + near/far clipping,
-    # plus an OPTIONAL RealSense-style spatial blur (blur_kernel_px/blur_sigma_px below) so thin features
-    # like the handle bleed into a blurry "bump" instead of rendering as a crisp lever.
+    # Match scripts/tools/render_depth_roundtrip_viser.py: concatenate door, walls, and robot,
+    # rasterize one shared z-buffer, blur/drop-edge/jitter that depth image, then back-project.
     num_points: 12000
+    width_px: 200
+    height_px: 150
     # Depth-camera field of view (degrees). Omit / null -> D435 physical defaults (85 x 58). Lowering
     # fov_y_deg narrows the VERTICAL angle at the same resolution, cropping top/bottom points to match a
     # real camera that effectively sees less vertically than 58 deg. Set to reduce the vertical FOV;
     # keep the deploy-time real camera crop (scripts/rl_games/play.py) in sync if this helps sim2real.
     fov_y_deg: 50  # null -> D435 58 deg nominal. Set e.g. 45 to crop the vertical FOV (did not reproduce the real bug, so left off).
-    inflate_px: 0  # Main-pass z-buffer dilation (px). 0 = plain round-trip (each point -> one pixel -> back), which is what we want; the door/robot clouds are dense enough that the raw per-pixel z-buffer has no meaningful holes. Raise to 1-2 only if the surface looks holey/sparse.
+    inflate_px: 0
     clip_mode: "post"
     use_compile: true
-    # Edge-bleeding spatial blur of the depth image before back-projection (mimics the RealSense SDK
-    # spatial filter). Flat surfaces are unchanged; thin features (the handle) smear into the door/plate
-    # behind them, so a crisp lever renders as the indistinct bump a real depth camera returns. Verified:
-    # kernel 5 already erases the handle's crisp plane. blur_kernel_px <= 1 disables it (0 = current
-    # behaviour). Recommended starting point to make the handle a bump: blur_kernel_px 5-7, blur_sigma_px
-    # 2-3 (larger sigma = softer). Set per-run; left off here so existing runs are unchanged.
-    # Kept at the MINIMUM that still turns the crisp lever into a blurry bump (kernel 5 already erases
-    # the handle's crisp plane, per the note above). Was 11: that extra kernel width is what smeared the
-    # handle laterally across the handle->panel gap and cast the "flying pixel" overshoot. The surface
-    # fuzz the wide blur used to add is now supplied by axial_jitter_std_m below, which stays on-ray and
-    # does NOT overshoot. Net: same blurry handle, far less overshoot.
+    # Values shared with the Viser mock's depth_cfg processing path.
     blur_kernel_px: 5
     blur_sigma_px: 3.0
-    # Axial (along-ray) depth noise added per-pixel before back-projection -- the physically-faithful
-    # RealSense range-noise model. Unlike the lateral blur it keeps every point on its own camera ray,
-    # so it fuzzes the handle/door surface in DEPTH (still looks blurry) without smearing across the
-    # silhouette into overshoot. axial_jitter_std_m -> scene (door+walls); robot_axial_jitter_std_m ->
-    # the crisp robot pass, so the robot body carries sensor-like fuzz without smearing its thin fingers.
-    # ~0.005 m ~ D435 range noise at this standoff. 0 on either disables that pass. Tune against the
-    # viser depth-cam replay (robot_depth_cam_obs stream) alongside a real capture.
+    # Axial noise is applied to all finite pixels after the combined-depth blur and edge drop.
     axial_jitter_std_m: 0.005
-    robot_axial_jitter_std_m: 0.003
-    # After the blur, drop SCENE (door+wall) pixels sitting on a depth discontinuity larger than this
-    # (m). The blur bleeds wall/door silhouettes into floating "flying pixel" smears; this removes them
-    # (a real depth camera drops edge returns rather than bleeding them), so the walls stay clean. The
-    # ROBOT is rendered in a separate crisp pass and is NOT blurred/edge-dropped. 0 disables it.
+    # Drop pixels across depth discontinuities after blur, before axial jitter.
     edge_drop_m: 0.05
-    # Median filter (odd px) on the SCENE depth. Erases a THIN handle by replacing it with the
-    # surrounding panel depth -- the lever dissolves into a flat surface, reproducing "the handle is
-    # invisible in the point cloud" -- WITHOUT the flying-pixel overshoot a wider gaussian blur would add
-    # (median picks a real neighbor depth, never an in-between value). 0 disables; try 5-9 to hide the
-    # handle (bigger swallows fatter handles). A ~5 mm lever at ~1 m is only 1-2 px, so 5 already hides it.
-    median_kernel_px: 0
-    # GT robot/model points rendered as a SEPARATE crisp z-buffer pass and composited by nearest-surface
-    # min, so the robot self-occludes / occludes the door but never gets blur/edge-drop noise on its own
-    # body (unfaithful near-robot depth noise). See multi_pcd_dagger._render_depth_scene_with_crisp_robot.
-    # Door panel + wall distractor points are rasterized a second time with this much larger dilation
-    # and composited into the depth via a per-pixel min. At close range (near_m below) a sparse occluder
-    # leaves per-pixel z-buffer gaps that let farther points (background, the far side of the wall) show
-    # through; this second pass seals them so the walls render as solid boxes. 0 disables the pass. Tune
-    # against the viser point-cloud replay: raise if rays still visibly punch through the wall/door,
-    # lower if occluder silhouettes look too blocky.
-    occluder_inflate_px: 5  # Anti-penetration dilation of the door/wall occluder (px). Was 10 (too blocky) -> 3 (~0.2% leaked, too much) -> 5 (0% penetration, far less blocky than 10). This only dilates occluder EDGES, so interior surfaces stay sharp. Raise toward 6 if rays leak at closer standoffs; lower toward 4 (~0.01%) for slightly sharper edges.
   lidar_render:
     num_points: 9000
     num_azimuth: 128
@@ -336,7 +300,7 @@ dagger:
     frame_prob: 0.0
   wall_distractors:
     enabled: true
-    wall_num_points: 50000
+    wall_num_points: 150000
     # The sampler builds two vertical "wall columns" beside the door panel in the door-panel local frame:
     # - width axis: left/right across the panel, so the columns sit just outside the panel edges
     # - height axis: bottom/top of the panel
@@ -360,7 +324,7 @@ dagger:
     # wall_num_points. Keeps point density roughly constant as walls change size (esp. with the
     # randomized height above), instead of always emitting a fixed wall_num_points. Remove for the
     # legacy fixed-count behavior.
-    point_density_per_m2: 3000
+    point_density_per_m2: 9000
     face_jitter_m: 0.1  # Small noise added only on the snapped outer faces so the walls do not look perfectly planar.
     # --- Flush mounting wall (coexists with the box walls above) ---
     # A thin slab coplanar with the door panel, flanking it left+right and running floor-to-above-door --
