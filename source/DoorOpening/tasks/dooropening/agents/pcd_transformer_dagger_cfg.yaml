@@ -243,9 +243,8 @@ dagger:
     sdf_cutoff: 0.02
     max_points_per_process: 5000
   depth_cam_render:
-    # One combined door+wall+robot point cloud -> one depth z-buffer -> point cloud. This is the
-    # same low-cost mock that was inspected in Viser: common-resolution occlusion, no separate wall,
-    # robot, analytic-box, or dilated-occluder raster passes.
+    # Match scripts/tools/render_depth_roundtrip_viser.py: concatenate door, walls, and robot,
+    # rasterize one shared z-buffer, blur/drop-edge/jitter that depth image, then back-project.
     num_points: 12000
     width_px: 240
     height_px: 180
@@ -254,14 +253,11 @@ dagger:
     # real camera that effectively sees less vertically than 58 deg. Set to reduce the vertical FOV;
     # keep the deploy-time real camera crop (scripts/rl_games/play.py) in sync if this helps sim2real.
     fov_y_deg: 50  # null -> D435 58 deg nominal. Set e.g. 45 to crop the vertical FOV (did not reproduce the real bug, so left off).
-    inflate_px: 0  # No pixel dilation; gaps from sparse sampled surfaces may remain.
+    inflate_px: 0
     clip_mode: "post"
-    # Mild scene-only 3x3 blur reduces isolated pixel noise; robot depth remains crisp as in the mock.
     blur_kernel_px: 5
     blur_sigma_px: 3.0
     edge_drop_m: 0.05
-    # Low scene-only axial range noise before robot composition; mock noise is configurable separately.
-    # Keep synthetic range noise low; zero disables it.
     axial_jitter_std_m: 0.005
   lidar_render:
     num_points: 9000
