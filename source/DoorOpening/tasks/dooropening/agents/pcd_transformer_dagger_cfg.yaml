@@ -243,26 +243,22 @@ dagger:
     sdf_cutoff: 0.02
     max_points_per_process: 5000
   depth_cam_render:
-    # One combined door+wall+robot point cloud -> one depth z-buffer -> point cloud. This is the
-    # same low-cost mock that was inspected in Viser: common-resolution occlusion, no separate wall,
-    # robot, analytic-box, or dilated-occluder raster passes.
+    # Match scripts/tools/render_depth_roundtrip_viser.py: concatenate door, walls, and robot,
+    # rasterize one shared z-buffer, blur/drop-edge/jitter that depth image, then back-project.
     num_points: 12000
-    width_px: 200
-    height_px: 150
-    robot_hole_inflate_px: 4  # DEX-style silhouette gap-fill from the same robot projection pass.
+    width_px: 240
+    height_px: 180
     # Depth-camera field of view (degrees). Omit / null -> D435 physical defaults (85 x 58). Lowering
     # fov_y_deg narrows the VERTICAL angle at the same resolution, cropping top/bottom points to match a
     # real camera that effectively sees less vertically than 58 deg. Set to reduce the vertical FOV;
     # keep the deploy-time real camera crop (scripts/rl_games/play.py) in sync if this helps sim2real.
     fov_y_deg: 50  # null -> D435 58 deg nominal. Set e.g. 45 to crop the vertical FOV (did not reproduce the real bug, so left off).
-    inflate_px: 0  # No pixel dilation; gaps from sparse sampled surfaces may remain.
+    inflate_px: 0
     clip_mode: "post"
-    # Mild scene-only 3x3 blur reduces isolated pixel noise; robot depth remains crisp as in the mock.
-    blur_kernel_px: 3
-    blur_sigma_px: 1.5
-    # Low scene-only axial range noise before robot composition; mock noise is configurable separately.
-    # Keep synthetic range noise low; zero disables it.
-    axial_jitter_std_m: 0.001
+    blur_kernel_px: 5
+    blur_sigma_px: 3.0
+    edge_drop_m: 0.05
+    axial_jitter_std_m: 0.005
   lidar_render:
     num_points: 9000
     num_azimuth: 128
@@ -309,7 +305,7 @@ dagger:
     frame_prob: 0.0
   wall_distractors:
     enabled: true
-    wall_num_points: 50000
+    wall_num_points: 150000
     # The sampler builds two vertical "wall columns" beside the door panel in the door-panel local frame:
     # - width axis: left/right across the panel, so the columns sit just outside the panel edges
     # - height axis: bottom/top of the panel
@@ -333,7 +329,7 @@ dagger:
     # wall_num_points. Keeps point density roughly constant as walls change size (esp. with the
     # randomized height above), instead of always emitting a fixed wall_num_points. Remove for the
     # legacy fixed-count behavior.
-    point_density_per_m2: 3000
+    point_density_per_m2: 9000
     face_jitter_m: 0.1  # Small noise added only on the snapped outer faces so the walls do not look perfectly planar.
     # --- Flush mounting wall (coexists with the box walls above) ---
     # A thin slab coplanar with the door panel, flanking it left+right and running floor-to-above-door --
