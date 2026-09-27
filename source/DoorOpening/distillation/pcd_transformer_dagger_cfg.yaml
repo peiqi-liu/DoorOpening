@@ -235,7 +235,7 @@ dagger:
     max_points_per_process: 5000
   depth_cam_render:
     # Match scripts/tools/render_depth_roundtrip_viser.py: concatenate door, walls, and robot,
-    # rasterize one shared z-buffer, blur/drop-edge/jitter that depth image, then back-project.
+    # rasterize one shared z-buffer, min-pool depth, drop edges/jitter, then back-project.
     num_points: 12000
     width_px: 240
     height_px: 180
@@ -248,8 +248,7 @@ dagger:
     clip_mode: "post"
     use_compile: true
     # Values shared with the Viser mock's depth_cfg processing path.
-    blur_kernel_px: 5
-    blur_sigma_px: 3.0
+    blur_kernel_px: 7
     # Axial noise is applied to all finite pixels after the combined-depth blur and edge drop.
     axial_jitter_std_m: 0.005
     # Drop pixels across depth discontinuities after blur, before axial jitter.
@@ -371,11 +370,13 @@ dagger:
       density_range: [0.3, 1.0] # Per-env fraction of num_points actually kept: low = faint (brighter), high = dense (darker). [1.0, 1.0] = always full.
   viser:
     raw:
-      enabled: false  # Save raw `.pt` replay chunks for offline debugging.
+      enabled: true  # Save raw `.pt` replay chunks for offline debugging.
       path: "viser_replay.pt"
+      initial_capture_frames: 200  # First real training frames; flush this first chunk immediately.
+      initial_capture_interval: 1  # Capture every training iteration during the initial chunk.
       capture_interval: 2  # Save one frame, skip one frame, so each replay chunk spans more rollout time.
-      save_interval: 10000  # Write one raw `.pt` file every N iterations.
-      max_points: 6000  # Raw replay is for debugging, not training; smaller clouds replay much better on laptops.
+      save_interval: 4000  # Fallback cadence when max_frames is disabled.
+      max_points: 12000  # Match the configured policy point-cloud budget.
       max_frames: 2000  # Keep at most this many frames in each raw `.pt` file; set 0 to disable the cap.
   wandb:
     enabled: false

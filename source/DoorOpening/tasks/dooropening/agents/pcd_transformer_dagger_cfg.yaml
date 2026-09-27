@@ -244,7 +244,7 @@ dagger:
     max_points_per_process: 5000
   depth_cam_render:
     # Match scripts/tools/render_depth_roundtrip_viser.py: concatenate door, walls, and robot,
-    # rasterize one shared z-buffer, blur/drop-edge/jitter that depth image, then back-project.
+    # rasterize one shared z-buffer, min-pool depth, drop edges/jitter, then back-project.
     num_points: 12000
     width_px: 240
     height_px: 180
@@ -255,8 +255,7 @@ dagger:
     fov_y_deg: 50  # null -> D435 58 deg nominal. Set e.g. 45 to crop the vertical FOV (did not reproduce the real bug, so left off).
     inflate_px: 0
     clip_mode: "post"
-    blur_kernel_px: 5
-    blur_sigma_px: 3.0
+    blur_kernel_px: 7
     edge_drop_m: 0.05
     axial_jitter_std_m: 0.005
   lidar_render:
@@ -376,8 +375,10 @@ dagger:
       density_range: [0.3, 1.0] # Per-env fraction of num_points actually kept: low = faint (brighter), high = dense (darker). [1.0, 1.0] = always full.
   viser:
     raw:
-      enabled: true  # Save normal-length raw `.pt` replay chunks during training.
+      enabled: true  # Save raw `.pt` replay chunks from actual training frames.
       path: "viser_replay.pt"
+      initial_capture_frames: 200  # First real training frames; flush this first chunk immediately.
+      initial_capture_interval: 1  # Capture every training iteration during the initial chunk.
       capture_interval: 2  # Save one frame, skip one frame, so each replay chunk spans more rollout time.
       save_interval: 4000  # Fallback cadence when max_frames is disabled; incomplete capped chunks are skipped.
       max_points: 12000  # Preserve the full policy cloud in raw replay.

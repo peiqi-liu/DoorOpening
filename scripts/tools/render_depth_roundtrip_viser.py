@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import math
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +37,7 @@ if str(SOURCE_ROOT) not in sys.path:
 import yaml
 
 from DoorOpening.utils.camera_utils import (
+    _dilate_depth_min_pool,
     apply_depth_spatial_blur,
     backproject_depth_to_world_from_pose,
     build_depth_blur_kernel2d,
@@ -68,11 +70,11 @@ GLORBOT_URDF = GLORBOT_DIR / "glorbot.urdf"
 # RealSense mount offset on x5_camera_link: -45deg roll about the optical axis (matches
 # POINTCLOUD_CAMERA_QUAT = quat_from_euler_xyz(-pi/4, 0, 0) in multi_dooropening_env_cfg.py).
 CAMERA_MOUNT_EULER_XYZ = (-math.pi / 4.0, 0.0, 0.0)
-# Franka "ready" arm pose (matches generate_randomized_doors_scratch.FRANKA_DEFAULT_JOINT_POS).
-FRANKA_READY_JOINT_POS = [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.0]
-# Robot base lateral offset along world X (0 = dead-center in front of the door, like render_wall_configs's
-# nominal base). The camera moves with the base. Constant on purpose (not a per-run config).
-ROBOT_RIGHT_M = 0.0
+# Slightly adjusted Franka pose used by the approved local mock preview.
+FRANKA_READY_JOINT_POS = [0.05, -0.70, 0.05, -2.20, 0.05, 1.48, 0.10]
+# Robot base lateral offset along world X. The camera moves with the base. Constant on purpose
+# (not a per-run config); this is a mock-scene pose only, not a training reset pose.
+ROBOT_RIGHT_M = 0.04
 
 
 # --------------------------------------------------------------------------------------
@@ -307,7 +309,8 @@ def _axial_jitter(depth, std_m):
     return torch.where(torch.isfinite(depth), depth + torch.randn_like(depth) * float(std_m), depth)
 
 
-def render_dex_style_depth(scene_cloud, robot_cloud, camera_pose, camera_spec, depth_cfg):
+def render_dex_style_depth(scene_cloud, robot_cloud, camera_pose, camera_spec, depth_cfg,
+                           depth_filter="min_pool", blur_sigma_px=1.5):
     """Rasterize door, walls, and robot together once, then back-project."""
     inflate = int(depth_cfg.get("inflate_px", 0))
     clip_mode = str(depth_cfg.get("clip_mode", "post"))
@@ -320,10 +323,15 @@ def render_dex_style_depth(scene_cloud, robot_cloud, camera_pose, camera_spec, d
     )
     blur_kernel = int(depth_cfg.get("blur_kernel_px", 0))
     if blur_kernel > 1:
-        kernel, pad = build_depth_blur_kernel2d(
-            blur_kernel, float(depth_cfg.get("blur_sigma_px", 0.0)), depth.device, depth.dtype
-        )
-        depth = apply_depth_spatial_blur(depth, kernel, pad)
+        if depth_filter == "gaussian":
+            kernel, pad = build_depth_blur_kernel2d(
+                blur_kernel, float(blur_sigma_px), depth.device, depth.dtype
+            )
+            depth = apply_depth_spatial_blur(depth, kernel, pad)
+        elif depth_filter == "min_pool":
+            depth = _dilate_depth_min_pool(depth, blur_kernel // 2)
+        else:
+            raise ValueError(f"Unsupported depth filter: {depth_filter}")
     depth = drop_depth_edges(depth, float(depth_cfg.get("edge_drop_m", 0.0)))
     depth = _axial_jitter(depth, depth_cfg.get("axial_jitter_std_m", 0.0))
     world, valid = backproject_depth_to_world_from_pose(depth, camera_pose, intr)
@@ -352,13 +360,19 @@ def parse_args():
     p.add_argument("--gt-scale", type=float, default=1.0,
                    help="Scale the GT input density: multiplies the door, wall AND robot point counts.")
     p.add_argument("--no-walls", action="store_true", help="Door only, skip the wall distractors.")
-    p.add_argument("--robot", action="store_true",
-                   help="Place the glorbot robot in front of the door (base +90deg yaw, facing +Y, camera "
-                   "on its right) and use its own x5_camera_link (with the -45deg mount offset) as the "
-                   "camera, so the robot is IN the ray cast and self-occludes -- exactly like "
-                   f"render_wall_configs_viser --robot / training. Lateral offset ROBOT_RIGHT_M={ROBOT_RIGHT_M} m.")
+    robot_group = p.add_mutually_exclusive_group()
+    robot_group.add_argument("--robot", dest="robot", action="store_true",
+                             help="Include the robot in the combined depth ray cast (the default).")
+    robot_group.add_argument("--no-robot", dest="robot", action="store_false",
+                             help="Render only the door/walls with a virtual camera.")
+    p.set_defaults(robot=True)
+    p.add_argument("--robot-lateral-offset", type=float, default=ROBOT_RIGHT_M,
+                   help="Shift the robot base along world +X relative to the door (m).")
+    p.add_argument("--franka-joints", type=float, nargs=7, default=None,
+                   metavar=("J1", "J2", "J3", "J4", "J5", "J6", "J7"),
+                   help="Override the seven Panda arm joint angles (rad); default is FRANKA_READY_JOINT_POS.")
     # Camera placement (virtual front look-at, like render_wall_configs_viser's non-robot branch).
-    p.add_argument("--standoff", type=float, default=0.8, help="Robot/camera distance from the door along -Y (m).")
+    p.add_argument("--standoff", type=float, default=1.0, help="Robot/camera distance from the door along -Y (m).")
     p.add_argument("--camera-height", type=float, default=1.0)
     p.add_argument("--camera-look-z", type=float, default=1.0, help="World z the camera aims at on the panel.")
     p.add_argument("--camera-right", type=float, default=0.12, help="Lateral camera offset to the robot's RIGHT (world +X).")
@@ -374,15 +388,21 @@ def parse_args():
     p.add_argument("--jitter-std-m", type=float, default=None,
                    help="Gaussian axial range noise (m). Default: dagger.depth_cam_render.axial_jitter_std_m.")
     p.add_argument("--blur-kernel-px", type=int, default=None,
-                   help="RealSense-style edge-bleeding blur kernel (px); smears the handle into a bump. "
-                   "Default: read from the cfg's dagger.depth_cam_render.blur_kernel_px. <=1 disables.")
+                   help="Depth-filter window/kernel size (px). Default: read from the cfg's "
+                   "dagger.depth_cam_render.blur_kernel_px. <=1 disables.")
+    p.add_argument("--depth-filter", choices=("auto", "min_pool", "gaussian"), default="auto",
+                   help="Depth-image filter. 'auto' uses Gaussian when blur_sigma_px exists in the cfg "
+                   "(as in older saved configs), otherwise nearest-return min pooling.")
     p.add_argument("--blur-sigma-px", type=float, default=None,
-                   help="Gaussian sigma for the depth blur (px); larger = softer. Default: cfg value.")
+                   help="Gaussian sigma in pixels. Defaults to cfg blur_sigma_px, or 1.5 when explicitly "
+                   "selecting Gaussian without a sigma in the cfg.")
     p.add_argument("--edge-drop-m", type=float, default=None,
                    help="Drop SCENE pixels on a depth discontinuity > this (m) to remove the blur's "
                    "flying-pixel smears on wall/door edges. Default: cfg dagger.depth_cam_render.edge_drop_m.")
     p.add_argument("--batch-size", type=int, default=32, help="Configs rendered per GPU launch (higher = faster, more VRAM).")
     p.add_argument("--max-points", type=int, default=8000, help="Per-cloud point cap for viser display.")
+    p.add_argument("--compare-policy-prefilter", action="store_true",
+                   help="Also render only source points inside the policy's base-frame crop volume; saves both results and times both paths.")
     return p.parse_args()
 
 
@@ -408,8 +428,12 @@ def main():
     # Policy-input crop knobs, read from the SAME student cfg multi_pcd_dagger uses (_build_local_pcd ->
     # crop_local_pcd base cylindrical crop). Height bounds [0.55, 1.5] are crop_local_pcd's own defaults.
     student_cfg = dict(cfg.get("student", {}))
-    policy_crop_range = float(student_cfg.get("local_pcd_range", [1.0, 0.35, 0.35])[0])
-    policy_x_cutoff = float(student_cfg.get("x_direction_cutoff", -0.5))
+    policy_crop_range_cfg = student_cfg.get("local_pcd_range", cfg.get("local_pcd_range", [1.0, 0.35, 0.35]))
+    policy_crop_range = float(policy_crop_range_cfg[0])
+    policy_x_cutoff = float(student_cfg.get("x_direction_cutoff", cfg.get("x_direction_cutoff", -0.5)))
+    local_pcd_cfg = dict(cfg.get("pcd_encoders_cfg", {}).get("local_pcd_t", {}))
+    local_point_counts = list(local_pcd_cfg.get("num_points", [12000, 0, 0]))
+    policy_base_points = int(local_point_counts[0]) if local_point_counts else 12000
     scene_door_num_points = int(cfg.get("scene_door_num_points", cfg.get("door_pcd_num_points", 30000)))
     scene_robot_num_points = int(cfg.get("dagger", {}).get("scene_robot_num_points", 30000))
     # GT density: scale down BOTH door + wall points (see --gt-scale) to see how the round-trip degrades.
@@ -420,7 +444,14 @@ def main():
     clip_mode = str(depth_cfg.get("clip_mode", "post"))
     # Depth blur defaults to the same cfg block training reads; CLI overrides win.
     blur_kernel_px = args.blur_kernel_px if args.blur_kernel_px is not None else int(depth_cfg.get("blur_kernel_px", 0))
-    blur_sigma_px = args.blur_sigma_px if args.blur_sigma_px is not None else float(depth_cfg.get("blur_sigma_px", 0.0))
+    depth_filter = args.depth_filter
+    if depth_filter == "auto":
+        depth_filter = "gaussian" if "blur_sigma_px" in depth_cfg else "min_pool"
+    blur_sigma_px = (
+        float(args.blur_sigma_px)
+        if args.blur_sigma_px is not None
+        else float(depth_cfg.get("blur_sigma_px", 1.5))
+    )
     edge_drop_m = args.edge_drop_m if args.edge_drop_m is not None else float(depth_cfg.get("edge_drop_m", 0.0))
     # The source-aware mock renderer reads these resolved values from the depth cfg.
     # Propagate the already-supported CLI overrides so replay experiments really apply.
@@ -583,7 +614,7 @@ def main():
     # Robot base pose in world (base at (ROBOT_RIGHT_M, -standoff, 0), +90deg yaw so base +x -> world +Y).
     # Computed unconditionally: it also defines the frame for the policy-input crop below, so that crop
     # matches multi_pcd_dagger (which crops in the robot base frame) whether or not the robot is drawn.
-    base_pos = np.array([ROBOT_RIGHT_M, -args.standoff, 0.0], dtype=np.float64)
+    base_pos = np.array([args.robot_lateral_offset, -args.standoff, 0.0], dtype=np.float64)
     base_R = _quat_wxyz_to_matrix(yaw_quat_wxyz(math.pi / 2.0))
     base_R_t = torch.tensor(base_R, dtype=torch.float32, device=device)
     base_pos_t = torch.tensor(base_pos, dtype=torch.float32, device=device)
@@ -593,7 +624,9 @@ def main():
         # Scale the robot too, so --gt-scale thins the WHOLE input cloud. It joins the
         # scene before the single z-buffer pass, so its sampling density affects visibility.
         robot_num_points = max(1, int(scene_robot_num_points * args.gt_scale))
-        robot_pts_base, cam_T_base = load_robot_asset(robot_num_points, device)  # base_link frame
+        robot_pts_base, cam_T_base = load_robot_asset(
+            robot_num_points, device, franka_q=args.franka_joints
+        )  # base_link frame
         robot_world = (robot_pts_base @ base_R_t.T + base_pos_t).unsqueeze(0)  # (1, M, 3) world
         cam_np = robot_camera_pose_world(cam_T_base, base_pos, base_R)
         camera_pose = torch.from_numpy(cam_np).to(device).unsqueeze(0)
@@ -630,13 +663,19 @@ def main():
     print(f"[INFO] window hole    : {'on (env_prob=' + str(hole_env_prob) + ', per-config w' + str(hole_width_range) + ' h' + str(hole_height_range) + ')' if hole_aug_enabled else 'off'}")
     print(f"[INFO] glass reflect  : {'on (prob=' + str(reflection_prob) + ', ' + str(reflection_num_points) + ' pts, blob' + str(reflection_blob_size) + ' m x frac' + str(reflection_size_fraction) + ', ' + str(reflection_num_lobes) + ' lobes, behind' + str(reflection_behind_range) + ' m, front_sign=' + str(reflection_front_sign) + ')' if reflection_enabled else 'off'}")
     print(f"[INFO] robot          : {'on (' + str(robot_world.shape[1]) + ' pts, in ray cast)' if robot_world is not None else 'off'}")
+    if robot_world is not None:
+        joint_values = args.franka_joints if args.franka_joints is not None else FRANKA_READY_JOINT_POS
+        print(f"[INFO] robot pose     : base={base_pos.tolist()}, Panda joints={joint_values}")
     print(f"[INFO] camera         : {args.cam_width_px}x{args.cam_height_px}px RealSense, "
           f"range [{args.near_m}, {args.far_m}] m, {cam_desc}")
     print(f"[INFO] gt_scale       : {args.gt_scale}  (door {board_num_points} pts, walls {wall_params.num_points} pts cap)")
     print(f"[INFO] rasterization  : one combined scene+robot z-buffer pass (inflate_px={inflate_px}; no occluder pass)")
-    print(f"[INFO] depth blur     : kernel {blur_kernel_px}px sigma {blur_sigma_px}px  ({'ON -> handle blurs to a bump' if blur_kernel_px>1 else 'off'})")
+    filter_info = (f"Gaussian ({blur_kernel_px}px, sigma={blur_sigma_px:g}px)"
+                   if depth_filter == "gaussian" else f"min pooling ({blur_kernel_px}px window)")
+    print(f"[INFO] depth filter   : {filter_info}")
     print(f"[INFO] edge drop      : {edge_drop_m} m  ({'ON -> scene edge smears dropped' if edge_drop_m>0 else 'off'})")
-    print(f"[INFO] policy input   : base-frame crop -> z[0.55,1.5], cyl r<{policy_crop_range}, x>{policy_x_cutoff} "
+    print(f"[INFO] policy input   : {policy_base_points} sampled base-crop points -> z[0.55,1.5], "
+          f"cyl r<{policy_crop_range}, x>{policy_x_cutoff} "
           f"(multi_pcd_dagger._build_local_pcd / crop_local_pcd)")
     print(f"[INFO] round-trip: GT points -> depth image -> points, {args.num_configs} configs")
 
@@ -650,7 +689,7 @@ def main():
         cropped, _ = crop_local_pcd(
             base_pts.unsqueeze(0),
             local_range=policy_crop_range,
-            num_local_points=base_pts.shape[0],
+            num_local_points=min(policy_base_points, base_pts.shape[0]),
             is_cylindrical=True,
             crop_center=torch.zeros((1, 3), device=device, dtype=torch.float32),
             x_direction_cutoff=policy_x_cutoff,
@@ -659,6 +698,29 @@ def main():
         cropped = cropped[0]
         valid = cropped.abs().sum(-1) > 1e-9  # crop_local_pcd zero-pads; base-frame origin => padding
         return cropped[valid] @ base_R_t.T + base_pos_t  # base -> world
+
+    def prefilter_to_policy_volume(cloud_world):
+        """Experimental: remove points outside the configured base cylindrical crop BEFORE ray casting.
+
+        This is intentionally only the base crop (the current cfg allocates no palm-crop points).
+        It is not assumed equivalent: out-of-crop geometry can still occlude in-crop returns.
+        """
+        if cloud_world is None or cloud_world.shape[1] == 0:
+            return cloud_world
+        base_pts = (cloud_world - base_pos_t) @ base_R_t
+        finite = torch.isfinite(base_pts).all(dim=-1)
+        keep = (
+            finite
+            & (base_pts[..., 2] >= 0.55)
+            & (base_pts[..., 2] <= 1.5)
+            & (torch.linalg.vector_norm(base_pts[..., :2], dim=-1) < policy_crop_range)
+            & (base_pts[..., 0] > policy_x_cutoff)
+        )
+        return cloud_world[keep].unsqueeze(0)
+
+    def sync_render_device():
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
 
     frames = [None] * args.num_configs
     for start in range(0, args.num_configs, args.batch_size):
@@ -699,9 +761,56 @@ def main():
         robot_b = robot_world.expand(len(idxs), -1, -1) if robot_world is not None else None
         cam_b = camera_pose.expand(len(idxs), -1)
 
+        # Exclude one-time CUDA/context initialization from the comparison. Warm both full and
+        # prefiltered paths on identical geometry before timing the first batch.
+        if args.compare_policy_prefilter and start == 0 and device.type == "cuda":
+            warm_scene = scene_clouds[:1]
+            warm_robot = robot_b[:1] if robot_b is not None else None
+            warm_cam = cam_b[:1]
+            render_dex_style_depth(warm_scene, warm_robot, warm_cam, cam_spec, depth_cfg,
+                                   depth_filter=depth_filter, blur_sigma_px=blur_sigma_px)
+            warm_scene_filtered = prefilter_to_policy_volume(warm_scene[0:1])
+            if warm_robot is not None:
+                warm_robot_filtered = prefilter_to_policy_volume(warm_robot).expand(1, -1, -1)
+            else:
+                warm_robot_filtered = None
+            render_dex_style_depth(warm_scene_filtered, warm_robot_filtered, warm_cam, cam_spec, depth_cfg,
+                                   depth_filter=depth_filter, blur_sigma_px=blur_sigma_px)
+            sync_render_device()
+
+        sync_render_device()
+        full_start = time.perf_counter()
         rep_list, n_px = render_dex_style_depth(
             scene_clouds, robot_b, cam_b, cam_spec, depth_cfg,
+            depth_filter=depth_filter, blur_sigma_px=blur_sigma_px,
         )
+        sync_render_device()
+        full_render_ms = (time.perf_counter() - full_start) * 1000.0
+
+        prefiltered_rep_list = None
+        prefiltered_scene_counts = []
+        prefiltered_robot = None
+        prefiltered_render_ms = None
+        if args.compare_policy_prefilter:
+            sync_render_device()
+            cropped_start = time.perf_counter()
+            prefiltered_scenes = []
+            for batch_idx in range(scene_clouds.shape[0]):
+                filtered = prefilter_to_policy_volume(scene_clouds[batch_idx:batch_idx + 1])
+                prefiltered_scene_counts.append(int(filtered.shape[1]))
+                prefiltered_scenes.append(filtered)
+            prefiltered_scene_batch = pad_cloud_batch(prefiltered_scenes)
+            if robot_world is not None:
+                prefiltered_robot = prefilter_to_policy_volume(robot_world)
+                prefiltered_robot_b = prefiltered_robot.expand(len(idxs), -1, -1)
+            else:
+                prefiltered_robot_b = None
+            prefiltered_rep_list, _ = render_dex_style_depth(
+                prefiltered_scene_batch, prefiltered_robot_b, cam_b, cam_spec, depth_cfg,
+                depth_filter=depth_filter, blur_sigma_px=blur_sigma_px,
+            )
+            sync_render_device()
+            prefiltered_render_ms = (time.perf_counter() - cropped_start) * 1000.0
 
         for j, config_idx in enumerate(idxs):
             frames[config_idx] = {
@@ -713,21 +822,38 @@ def main():
                     # included in ground_truth and the ray cast above; this stream is
                     # purely for inspecting exactly which geometry self-occludes.
                     **({"robot": pack(robot_world[0], args.max_points)} if robot_world is not None else {}),
+                    **({
+                        "prefiltered_reprojected": pack(prefiltered_rep_list[j], args.max_points),
+                        "prefiltered_policy_input": pack(policy_input_from_world(prefiltered_rep_list[j]), args.max_points),
+                    } if prefiltered_rep_list is not None else {}),
                 }
             }
         last = idxs[-1]
         print(f"  configs {idxs[0] + 1}-{last + 1}/{args.num_configs} (batch {len(idxs)}): "
-              f"valid px≈{rep_list[-1].shape[0]}/{n_px}")
+              f"valid px≈{rep_list[-1].shape[0]}/{n_px}; full render {full_render_ms / len(idxs):.2f} ms/config")
+        if prefiltered_rep_list is not None:
+            original_points = int(scene_clouds.shape[1]) + (int(robot_b.shape[1]) if robot_b is not None else 0)
+            cropped_points = max(prefiltered_scene_counts, default=0) + (int(prefiltered_robot.shape[1]) if prefiltered_robot is not None else 0)
+            print(f"    prefilter: max {cropped_points:,}/{original_points:,} source pts; "
+                  f"render {prefiltered_render_ms / len(idxs):.2f} ms/config "
+                  f"({full_render_ms / max(prefiltered_render_ms, 1e-9):.2f}x full/prefiltered)")
 
     payload = {
         "format": "dooropening_viser_replay_v1",
         "pointcloud_frame": "world",
         "pointcloud_source": "single_zbuffer_scene_plus_robot",
+        "depth_filter": depth_filter,
+        "robot_base_pos_w": base_pos.tolist() if robot_world is not None else None,
+        "franka_joint_pos": (args.franka_joints if args.franka_joints is not None else FRANKA_READY_JOINT_POS)
+        if robot_world is not None else None,
         "pointcloud_streams": [
             {"name": "ground_truth", "label": "GT (door + walls [+ robot])", "color": (120, 120, 120), "point_size_scale": 1.0},
             *([{"name": "robot", "label": "Robot (ray-cast geometry)", "color": (255, 140, 0), "point_size_scale": 1.4}] if args.robot else []),
             {"name": "reprojected", "label": "Single-pass depth (combined scene + robot)", "color": (79, 195, 247), "point_size_scale": 1.4},
             {"name": "policy_input", "label": "Policy input (cropped)", "color": (124, 240, 130), "point_size_scale": 1.8},
+            *([{"name": "prefiltered_reprojected", "label": "Early policy-volume render", "color": (240, 100, 220), "point_size_scale": 1.4},
+               {"name": "prefiltered_policy_input", "label": "Early-render policy input", "color": (255, 220, 80), "point_size_scale": 1.8}]
+              if args.compare_policy_prefilter else []),
         ],
         "frame_dt": 0.5,
         "frame_fps": 2.0,

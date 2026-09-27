@@ -32,14 +32,12 @@ from DoorOpening.assets.door.multi_door_cfg import motion_family_ids, motion_tra
 from DoorOpening.assets.glorbot.glorbot_cfg import glorbot_urdf_path
 from DoorOpening.model.transformer import PCDTransformer, strip_prefix_from_state_dict
 from DoorOpening.utils.camera_utils import (
-    apply_depth_spatial_blur,
+    _dilate_depth_min_pool,
     backproject_depth_to_world_from_pose,
-    build_depth_blur_kernel2d,
     build_realsense_sampler_spec,
     crop_local_pcd,
     drop_depth_edges,
     rasterize_depth_zbuffer_from_pose,
-    shuffle_pcd,
     simulate_lidar_render_from_pose,
 )
 from DoorOpening.utils.door_window_dropout import (
@@ -299,11 +297,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.depth_cam_render_height_px = int(self.depth_cam_render_cfg.get("height_px", 0))
         self.depth_cam_render_inflate_px = int(self.depth_cam_render_cfg.get("inflate_px", 0))
         self.depth_cam_render_clip_mode = str(self.depth_cam_render_cfg.get("clip_mode", "post"))
-        # RealSense-style edge-bleeding spatial blur on the depth image before back-projection. Smears
-        # thin features (the handle) into the door/plate so the rendered cloud looks like the blurry
-        # "bump" a real depth camera returns instead of a crisp lever. blur_kernel_px <= 1 disables it.
+        # Always use nearest-return min pooling before back-projection.
         self.depth_cam_render_blur_kernel_px = int(self.depth_cam_render_cfg.get("blur_kernel_px", 0))
-        self.depth_cam_render_blur_sigma_px = float(self.depth_cam_render_cfg.get("blur_sigma_px", 0.0))
         self.depth_cam_render_edge_drop_m = float(self.depth_cam_render_cfg.get("edge_drop_m", 0.0))
         # Match render_depth_roundtrip_viser's axial range noise on the combined depth image.
         self.depth_cam_render_axial_jitter_std_m = float(
@@ -3179,13 +3174,15 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.wall_distractors_enabled = self.wall_distractor_params.enabled
         self.wall_distractor_num_points = self.wall_distractor_params.num_points
         self.wall_distractor_resample_each_step = self.wall_distractor_params.resample_each_step
-        self._wall_distractor_local_points = None
+        # The door root is fixed in the configured assets; cache sampled points in world coordinates
+        # so every observation avoids transforming the full wall cloud again.
+        self._wall_distractor_world_points = None
         if (
             self.wall_distractors_enabled
             and self.wall_distractor_num_points > 0
             and not self.wall_distractor_resample_each_step
         ):
-            self._wall_distractor_local_points = torch.zeros(
+            self._wall_distractor_world_points = torch.zeros(
                 (self.num_envs, self.wall_distractor_num_points, 3),
                 dtype=torch.float32,
                 device=self.device,
@@ -3511,20 +3508,24 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             or self.wall_distractor_resample_each_step
         ):
             return
-        if self._wall_distractor_local_points is None:
-            self._wall_distractor_local_points = torch.zeros(
+        if self._wall_distractor_world_points is None:
+            self._wall_distractor_world_points = torch.zeros(
                 (self.num_envs, self.wall_distractor_num_points, 3),
                 dtype=torch.float32,
                 device=self.device,
             )
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
-            self._wall_distractor_local_points[:] = self._sample_wall_pointcloud_local()
-            return
-        env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
-        if env_ids.numel() == 0:
-            return
-            self._wall_distractor_local_points[env_ids] = self._sample_wall_pointcloud_local(env_ids=env_ids)
+            points_base = self._sample_wall_pointcloud_local()
+        else:
+            env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+            if env_ids.numel() == 0:
+                return
+            points_base = self._sample_wall_pointcloud_local(env_ids=env_ids)
+        door_base_pos_w = self.ov_env.door.data.body_pos_w[env_ids, self.door_base_body_idx]
+        door_base_quat_w = self.ov_env.door.data.body_quat_w[env_ids, self.door_base_body_idx]
+        quat = door_base_quat_w.unsqueeze(1).expand(-1, points_base.shape[1], -1)
+        self._wall_distractor_world_points[env_ids] = quat_apply(quat, points_base) + door_base_pos_w.unsqueeze(1)
 
     def _resample_door_frame_visibility(self, env_ids=None):
         """Redraw the per-env boolean deciding whether the door frame (link_0) is rendered this episode."""
@@ -3820,19 +3821,16 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         if num_points <= 0:
             return torch.zeros((self.num_envs, 0, 3), dtype=torch.float32, device=self.device)
 
+        if (
+            not self.wall_distractor_resample_each_step
+            and self._wall_distractor_world_points is not None
+            and num_points == self.wall_distractor_num_points
+        ):
+            return self._wall_distractor_world_points
+        # Keep the dynamic/unusual-size path equivalent to the original implementation.
+        wall_points_base = self._sample_wall_pointcloud_local(num_points=num_points)
         door_base_pos_w = self.ov_env.door.data.body_pos_w[:, self.door_base_body_idx]
         door_base_quat_w = self.ov_env.door.data.body_quat_w[:, self.door_base_body_idx]
-        if (
-            self.wall_distractor_resample_each_step
-            or self._wall_distractor_local_points is None
-            or num_points != self.wall_distractor_num_points
-        ):
-            # Wall layout is sampled in door-base coordinates and is independent of robot/camera pose.
-            # Place it in world using the door pose below; only the rendered observation is later
-            # transformed into the robot-base frame.
-            wall_points_base = self._sample_wall_pointcloud_local(num_points=num_points)
-        else:
-            wall_points_base = self._wall_distractor_local_points
         quat = door_base_quat_w.unsqueeze(1).expand(-1, wall_points_base.shape[1], -1)
         return quat_apply(quat, wall_points_base) + door_base_pos_w.unsqueeze(1)
 
@@ -3980,24 +3978,19 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             clip_mode=self.depth_cam_render_clip_mode,
         )
         if self.depth_cam_render_blur_kernel_px > 1:
-            kernel2d, pad = build_depth_blur_kernel2d(
-                self.depth_cam_render_blur_kernel_px,
-                self.depth_cam_render_blur_sigma_px,
-                depth.device,
-                depth.dtype,
-            )
-            depth = apply_depth_spatial_blur(depth, kernel2d, pad)
+            depth = _dilate_depth_min_pool(depth, self.depth_cam_render_blur_kernel_px // 2)
         depth = drop_depth_edges(depth, self.depth_cam_render_edge_drop_m)
         depth = self._apply_axial_depth_jitter(depth, self.depth_cam_render_axial_jitter_std_m)
         pcd_world, _ = backproject_depth_to_world_from_pose(depth, camera_pose, intr)
-        # --- Fixed-N packing (same as render_depth_roundtrip_from_pose): shuffle, push NaN to the end. ---
+        # Select a uniform random subset of finite depth returns without sorting the full point cloud.
         batch = pcd_world.shape[0]
-        rendered = shuffle_pcd(pcd_world.view(batch, -1, 3))
-        num_total = rendered.shape[1]
+        rendered = pcd_world.view(batch, -1, 3)
         nan_mask = torch.isnan(rendered).any(dim=-1)
-        sort_idx = torch.argsort(nan_mask.int(), dim=-1)
-        batch_idx = torch.arange(batch, device=rendered.device)[:, None].expand(batch, num_total)
-        return rendered[batch_idx, sort_idx][:, : self.depth_cam_render_num_points]
+        sample_scores = torch.rand(nan_mask.shape, device=rendered.device)
+        sample_scores.masked_fill_(nan_mask, float("inf"))
+        num_points = min(self.depth_cam_render_num_points, rendered.shape[1])
+        sort_idx = torch.topk(sample_scores, num_points, dim=-1, largest=False, sorted=True).indices
+        return rendered.gather(1, sort_idx.unsqueeze(-1).expand(-1, -1, 3))
 
     def _sample_scene_obs_pointcloud_base_sampler(self):
         return self._sample_scene_obs_pointcloud_base_depth()
@@ -4556,6 +4549,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
 
         try:
             start_iteration = int(self.resume_iteration)
+            self._viser_run_start_iteration = start_iteration
             end_iteration = start_iteration + int(self.num_iters)
             obs, reset_extras = self.env.reset()
             self._update_logged_env_metrics(reset_extras)

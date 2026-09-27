@@ -24,6 +24,17 @@ class ViserDebugMixin:
         self._viser_cached_sensor_obs_pcd_base = OrderedDict()
         self._viser_pending_debug_frame = None
         self._viser_raw_streams = OrderedDict()
+        self.viser_raw_initial_capture_frames = max(0, int(self.viser_raw_cfg.get("initial_capture_frames", 0)))
+        self.viser_raw_initial_capture_interval = max(
+            1, int(self.viser_raw_cfg.get("initial_capture_interval", 1))
+        )
+        self._viser_run_start_iteration = int(getattr(self, "resume_iteration", 0))
+        if (
+            self.viser_raw_initial_capture_frames > 0
+            and self.viser_raw_max_frames > 0
+            and self.viser_raw_initial_capture_frames > self.viser_raw_max_frames
+        ):
+            raise ValueError("viser.raw.initial_capture_frames cannot exceed viser.raw.max_frames.")
 
         # Keep replay outputs next to checkpoints by default so a run's artifacts stay together.
         default_record_dir = Path(self.nn_dir).parent if self.nn_dir is not None else Path(os.getcwd())
@@ -63,6 +74,8 @@ class ViserDebugMixin:
                 "chunk_index": 0,
                 "latest_iteration": None,
                 "resample_env_each_chunk": True,
+                "initial_capture_saved": False,
+                "capture_interval": None,
             }
             self._resample_viser_raw_stream_env(self._viser_raw_streams[family_name])
 
@@ -76,6 +89,8 @@ class ViserDebugMixin:
                 "chunk_index": 0,
                 "latest_iteration": None,
                 "resample_env_each_chunk": True,
+                "initial_capture_saved": False,
+                "capture_interval": None,
             }
             self._resample_viser_raw_stream_env(self._viser_raw_streams["env"])
 
@@ -149,7 +164,8 @@ class ViserDebugMixin:
         return streams
 
     def _build_viser_raw_payload(self, stream):
-        frame_dt = float(self.viser_env_step_dt * self.viser_raw_capture_interval)
+        capture_interval = max(1, int(stream.get("capture_interval") or self.viser_raw_capture_interval))
+        frame_dt = float(self.viser_env_step_dt * capture_interval)
         return {
             "format": "dooropening_viser_replay_v1",
             "pointcloud_frame": "world",
@@ -163,6 +179,7 @@ class ViserDebugMixin:
             "frame_fps": 1.0 / frame_dt,
             "pointcloud_sensor_dt": frame_dt,
             "pointcloud_sensor_fps": 1.0 / frame_dt,
+            "capture_interval": capture_interval,
             "frames": stream["frames"],
         }
 
@@ -178,10 +195,23 @@ class ViserDebugMixin:
             (int(iteration) + 1) % self.viser_raw_save_interval == 0
         )
         for stream in self._viser_raw_streams.values():
+            initial_capture_due = (
+                self.viser_raw_initial_capture_frames > 0
+                and not stream.get("initial_capture_saved", False)
+                and stream["frame_count"] >= self.viser_raw_initial_capture_frames
+            )
             is_full = self.viser_raw_max_frames > 0 and stream["frame_count"] >= self.viser_raw_max_frames
-            # With a frame cap, emit only complete normal-length chunks. Without a cap,
-            # retain the iteration-based save cadence.
-            if is_full:
+            # Flush one short chunk of real rollout frames immediately at the beginning of a run;
+            # thereafter retain the configured normal chunk length/cadence.
+            if initial_capture_due:
+                stream["initial_capture_saved"] = True
+                self._flush_viser_raw_stream(
+                    stream,
+                    chunk_complete=True,
+                    reason=f"initial_capture_frames {self.viser_raw_initial_capture_frames} reached",
+                    force=True,
+                )
+            elif is_full:
                 self._flush_viser_raw_stream(stream, chunk_complete=True, reason="max_frames reached")
             elif interval_due and self.viser_raw_max_frames <= 0:
                 self._flush_viser_raw_stream(
@@ -196,12 +226,12 @@ class ViserDebugMixin:
         for stream in self._viser_raw_streams.values():
             self._flush_viser_raw_stream(stream, chunk_complete=chunk_complete, reason=reason)
 
-    def _flush_viser_raw_stream(self, stream, chunk_complete, reason):
+    def _flush_viser_raw_stream(self, stream, chunk_complete, reason, force=False):
         if not self.viser_raw_enabled or self.rank != 0:
             return
         if stream["frame_count"] <= 0:
             return
-        if self.viser_raw_max_frames > 0 and stream["frame_count"] < self.viser_raw_max_frames:
+        if self.viser_raw_max_frames > 0 and stream["frame_count"] < self.viser_raw_max_frames and not force:
             print(
                 f"Skipped incomplete Viser raw chunk for {stream['family_name']} env {stream['env_id']}: "
                 f"{stream['frame_count']}/{self.viser_raw_max_frames} frames ({reason})."
@@ -229,6 +259,7 @@ class ViserDebugMixin:
         stream["frames"] = []
         stream["frame_count"] = 0
         stream["latest_iteration"] = None
+        stream["capture_interval"] = None
         if bool(stream.get("resample_env_each_chunk", False)):
             self._resample_viser_raw_stream_env(stream)
 
@@ -265,10 +296,19 @@ class ViserDebugMixin:
         return format_iterated_record_path(path_str, iteration)
 
     def _is_viser_capture_iteration(self, iteration):
-        # Mirrors the capture gate in _maybe_update_viser_debug so callers can avoid composing a
-        # ground-truth cloud on iterations that would be skipped anyway.
+        return self._viser_capture_interval_for_iteration(iteration) is not None
+
+    def _viser_capture_interval_for_iteration(self, iteration):
+        """Return the capture stride for this iteration, including an initial dense chunk."""
+        iteration = int(iteration)
+        run_offset = iteration - int(self._viser_run_start_iteration)
+        initial_window = self.viser_raw_initial_capture_frames * self.viser_raw_initial_capture_interval
+        if self.viser_raw_initial_capture_frames > 0 and 0 <= run_offset < initial_window:
+            if run_offset % self.viser_raw_initial_capture_interval == 0:
+                return self.viser_raw_initial_capture_interval
+            return None
         interval = max(1, int(self.viser_raw_capture_interval))
-        return int(iteration) % interval == 0
+        return interval if iteration % interval == 0 else None
 
     def _maybe_update_viser_debug(
         self,
@@ -284,7 +324,8 @@ class ViserDebugMixin:
         """Append one replay frame for each selected multi-door family env."""
         if not self.viser_raw_enabled:
             return
-        if int(iteration) % self.viser_raw_capture_interval != 0:
+        capture_interval = self._viser_capture_interval_for_iteration(iteration)
+        if capture_interval is None:
             # Save cadence is iteration-based, not capture-based. Still check whether an
             # existing chunk should flush on iterations where we intentionally skip capture.
             self._maybe_flush_viser_raw_snapshot(iteration)
@@ -294,6 +335,7 @@ class ViserDebugMixin:
             env_id = int(stream["env_id"])
             if stream["frame_count"] == 0:
                 stream["chunk_index"] += 1
+                stream["capture_interval"] = capture_interval
             stream["latest_iteration"] = int(iteration)
 
             selected_ground_truth = None
