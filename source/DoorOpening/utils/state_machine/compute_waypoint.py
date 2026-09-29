@@ -679,12 +679,14 @@ def play_trajectories_in_viser(
         "/robot_root",
         position=robot_world_pos,
         wxyz=robot_world_quat,
+        show_axes=False,
     )
 
     server.scene.add_frame(
         "/door_root",
         position=door_world_pos,
         wxyz=door_world_quat,
+        show_axes=False,
     )
 
     # server.scene.add_frame(
