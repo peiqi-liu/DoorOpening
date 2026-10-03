@@ -43,7 +43,7 @@ from DoorOpening.utils.camera_utils import (
 )
 from DoorOpening.utils.door_window_dropout import (
     apply_window_dropout_to_door_points,
-    sample_glass_reflection_points,
+    reflect_robot_points_in_window,
     sample_random_window_hole_metadata,
 )
 from DoorOpening.utils.extract_pointcloud_from_articulation import (
@@ -3110,9 +3110,9 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 raise ValueError(f"door_hole_aug.{range_name} must contain exactly two values.")
             if float(value_range[1]) < float(value_range[0]):
                 raise ValueError(f"door_hole_aug.{range_name} must satisfy min <= max.")
-        # Glass-door reflection: on a fraction of the hole envs, add a sparse veil of noise points over
-        # the window opening (a cheap stand-in for a dark glass door mirroring the robot/room instead of
-        # showing through). Sampled per rollout alongside the hole. See sample_glass_reflection_points.
+        # Glass-door reflection: on a fraction of the hole envs, add a clipped reflection of the
+        # current robot cloud behind the actual sampled opening. The reflection is recomputed at
+        # observation time from live robot and door poses.
         reflection_cfg = dict(self.door_hole_aug_cfg.get("glass_reflection", {}))
         self.door_hole_reflection_enabled = bool(reflection_cfg.get("enabled", False))
         # prob = P(reflection | hole). With door_hole_aug.env_prob = P(hole), the three per-rollout door
@@ -3625,23 +3625,12 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         return torch.where(dot >= 0, torch.ones_like(dot), -torch.ones_like(dot))
 
     def _add_glass_reflection_to_metadata(self, metadata):
-        # Attach a sparse per-env "reflection" cloud (link_1 local frame) to the hole metadata. No-op
-        # (leaves the keys absent) when reflection is disabled or has no budget.
+        # Store only the per-rollout reflection mask. The actual reflected cloud is generated from
+        # the current robot pointcloud at observation time, so it follows the robot's motion.
         if not (self.door_hole_reflection_enabled and self.door_hole_reflection_num_points > 0):
             return metadata
-        metadata.update(
-            sample_glass_reflection_points(
-                hole_metadata=metadata,
-                board_bbox_link1=self.env_board_bboxes_link1,
-                num_points=self.door_hole_reflection_num_points,
-                reflect_prob=self.door_hole_reflection_prob,
-                blob_size=self.door_hole_reflection_blob_size_m,
-                size_fraction_range=self.door_hole_reflection_size_fraction_range,
-                num_lobes=self.door_hole_reflection_num_lobes,
-                behind_range=self.door_hole_reflection_behind_range_m,
-                density_range=self.door_hole_reflection_density_range,
-                front_sign=self._door_panel_front_sign(),
-            )
+        metadata["reflection_enabled"] = metadata["enabled"] & (
+            torch.rand(self.num_envs, device=self.device) < self.door_hole_reflection_prob
         )
         return metadata
 
@@ -3667,19 +3656,23 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 self._door_hole_aug_metadata[key][env_ids] = value[env_ids]
         self._update_door_hole_aug_stats()
 
-    def _sample_door_reflection_pointcloud_world(self, hole_metadata):
-        # Transform the cached link_1-frame reflection veil into world coords using each door's current
-        # link_1 pose. NaN entries (non-reflecting envs) survive as NaN and are ignored by the renderer.
-        if hole_metadata is None or "reflection_points_link1" not in hole_metadata:
+    def _sample_door_reflection_pointcloud_world(self, hole_metadata, robot_pcd_world):
+        # Reflect the current robot cloud across the door's front/window plane. NaN entries and points
+        # outside the sampled opening are ignored by the renderer.
+        if hole_metadata is None or "reflection_enabled" not in hole_metadata:
             return torch.zeros((self.num_envs, 0, 3), dtype=torch.float32, device=self.device)
-        points_link1 = hole_metadata["reflection_points_link1"]
-        if points_link1.shape[1] == 0:
+        if robot_pcd_world is None or robot_pcd_world.shape[1] == 0:
             return torch.zeros((self.num_envs, 0, 3), dtype=torch.float32, device=self.device)
         link1_pose_world = self._get_link1_pose_world()
-        link1_pos = link1_pose_world[:, :3]
-        link1_quat = link1_pose_world[:, 3:7]
-        quat = link1_quat.unsqueeze(1).expand(-1, points_link1.shape[1], -1)
-        return quat_apply(quat, points_link1) + link1_pos.unsqueeze(1)
+        return reflect_robot_points_in_window(
+            robot_points_world=robot_pcd_world,
+            link1_pose_world=link1_pose_world,
+            board_bbox_link1=self.env_board_bboxes_link1,
+            hole_metadata=hole_metadata,
+            front_sign=self._door_panel_front_sign(),
+            num_points=self.door_hole_reflection_num_points,
+            density_range=self.door_hole_reflection_density_range,
+        )
 
     def _apply_door_hole_aug_to_world(self, pointcloud_world, link1_pose_world, board_bbox_link1, hole_metadata):
         if pointcloud_world is None or hole_metadata is None:
@@ -3805,9 +3798,9 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         scene_parts = [door_pcd_world]
         if wall_pcd_world.shape[1] > 0:
             scene_parts.append(wall_pcd_world)
-        # Glass-door reflection veil: a few sparse points on the window opening, added to the static
-        # scene (so it renders + occludes like any door-plane surface). Cheap; NaN where not reflecting.
-        reflection_pcd_world = self._sample_door_reflection_pointcloud_world(hole_metadata)
+        # Reflected robot points are part of the static scene side of the combined render, so they
+        # occlude/render like geometry behind the glass. NaN entries are ignored by the renderer.
+        reflection_pcd_world = self._sample_door_reflection_pointcloud_world(hole_metadata, robot_pcd_world)
         if reflection_pcd_world.shape[1] > 0:
             scene_parts.append(reflection_pcd_world)
         door_walls_pcd_world = torch.cat(scene_parts, dim=1)

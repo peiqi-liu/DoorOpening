@@ -153,6 +153,15 @@ class CheckpointMixin:
     def _restore_lr_scheduler_state(self, checkpoint):
         if self.lr_scheduler is None:
             return
+        override_step = getattr(self, "lr_scheduler_resume_step", None)
+        if override_step is not None:
+            self._set_lr_scheduler_step(int(override_step))
+            if self.rank == 0:
+                print(
+                    "LR scheduler checkpoint state ignored; resumed at explicit scheduler step "
+                    f"{int(override_step)}."
+                )
+            return
         scheduler_state = checkpoint.get("lr_scheduler_state_dict") if isinstance(checkpoint, dict) else None
         if scheduler_state is not None:
             try:
@@ -169,6 +178,10 @@ class CheckpointMixin:
         # Older checkpoints may not include scheduler state. Reconstruct the
         # scheduler position from the number of completed optimizer updates.
         resume_updates = max(0, int(self.student_update_steps))
+        self._set_lr_scheduler_step(resume_updates)
+
+    def _set_lr_scheduler_step(self, scheduler_step):
+        resume_updates = max(0, int(scheduler_step))
         self.lr_scheduler.last_epoch = resume_updates - 1
         self.lr_scheduler._step_count = max(1, resume_updates)
         current_lr = float(self.lr) * float(self._get_lr_schedule_factor(self.lr_scheduler.last_epoch))

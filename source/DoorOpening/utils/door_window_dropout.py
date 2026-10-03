@@ -325,6 +325,84 @@ def sample_glass_reflection_points(
     return _finish(points)
 
 
+def reflect_robot_points_in_window(
+    robot_points_world: torch.Tensor,
+    link1_pose_world: torch.Tensor,
+    board_bbox_link1: torch.Tensor,
+    hole_metadata: dict[str, torch.Tensor],
+    front_sign: torch.Tensor | float,
+    num_points: int,
+    density_range: tuple[float, float] = (1.0, 1.0),
+) -> torch.Tensor:
+    """Reflect the current robot point cloud across the door/window plane.
+
+    The returned points are in world coordinates and have shape ``(B, num_points, 3)``.
+    Only reflected points whose x/y coordinates fall inside the sampled window are retained;
+    unused slots are NaN so the renderer ignores them.  ``front_sign`` identifies the local
+    link_1 z direction facing the robot/camera (+1 or -1).
+    """
+    points, _ = _as_batched_points(robot_points_world)
+    pose, _ = _as_batched_pose(link1_pose_world)
+    bbox_min, bbox_max, _ = _as_batched_bbox(board_bbox_link1)
+    hole_bbox = hole_metadata["hole_bbox_link1"]
+    enabled = hole_metadata["reflection_enabled"].to(dtype=torch.bool)
+    if hole_bbox.ndim == 1:
+        hole_bbox = hole_bbox.view(1, 6)
+    if enabled.ndim == 0:
+        enabled = enabled.view(1)
+    if points.shape[0] != pose.shape[0] or points.shape[0] != hole_bbox.shape[0]:
+        raise ValueError("robot_points_world, link1_pose_world, and hole_metadata batch sizes must match.")
+
+    num_points = max(0, int(num_points))
+    out = torch.full(
+        (points.shape[0], num_points, 3), float("nan"), device=points.device, dtype=points.dtype
+    )
+    if num_points == 0 or points.shape[1] == 0:
+        return out
+
+    local = _transform_points_to_link1_local(points, pose)
+    fs = torch.as_tensor(front_sign, device=points.device, dtype=points.dtype).reshape(-1)
+    if fs.numel() == 1:
+        fs = fs.expand(points.shape[0])
+    fs = torch.where(fs >= 0, torch.ones_like(fs), -torch.ones_like(fs)).view(-1, 1)
+
+    # The front face is the face toward the robot. Reflect local z across that plane:
+    # z' = 2*z_front - z. Points must be in front of the plane before reflection.
+    z_front = torch.where(fs > 0, bbox_max[:, 2:3], bbox_min[:, 2:3])
+    in_front = fs * (local[..., 2] - z_front) >= 0.0
+    reflected = local.clone()
+    reflected[..., 2] = 2.0 * z_front - local[..., 2]
+    hole_min, hole_max = hole_bbox[:, :3], hole_bbox[:, 3:]
+    in_window = (
+        (reflected[..., 0] >= hole_min[:, None, 0])
+        & (reflected[..., 0] <= hole_max[:, None, 0])
+        & (reflected[..., 1] >= hole_min[:, None, 1])
+        & (reflected[..., 1] <= hole_max[:, None, 1])
+    )
+    finite = torch.isfinite(local).all(dim=-1)
+    valid = enabled[:, None] & in_front & in_window & finite
+
+    density_min, density_max = map(float, density_range)
+    if not (0.0 <= density_min <= density_max <= 1.0):
+        raise ValueError("density_range must satisfy 0 <= min <= max <= 1")
+    if density_min != 1.0 or density_max != 1.0:
+        fill = torch.empty((points.shape[0], 1), device=points.device, dtype=points.dtype).uniform_(density_min, density_max)
+        valid = valid & (torch.rand(valid.shape, device=points.device) < fill)
+
+    # Uniformly subsample the valid reflected robot points into the configured budget.
+    scores = torch.rand(valid.shape, device=points.device)
+    scores.masked_fill_(~valid, float("inf"))
+    take = min(num_points, points.shape[1])
+    indices = torch.topk(scores, take, dim=-1, largest=False, sorted=True).indices
+    selected = reflected.gather(1, indices.unsqueeze(-1).expand(-1, -1, 3))
+    selected_valid = valid.gather(1, indices)
+    selected_world = _quat_apply_wxyz(
+        pose[:, None, 3:7].expand(-1, take, -1), selected
+    ) + pose[:, None, :3]
+    out[:, :take] = torch.where(selected_valid[..., None], selected_world, torch.full_like(selected_world, float("nan")))
+    return out
+
+
 def apply_window_dropout_to_door_points(
     points_world: torch.Tensor,
     link1_pose_world: torch.Tensor,

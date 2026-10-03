@@ -365,7 +365,7 @@ dagger:
     surface_eps_m: 0.03
     resample_each_step: false # false: draw ONE hole per rollout at reset, fixed for the whole episode. true: redraw every step (old behaviour).
     glass_reflection:
-      enabled: true # When on, a fraction of hole envs show a robot-SIZED noise blob behind the window (dark-glass reflection stand-in; a rough robot copy, not a true mirror image).
+      enabled: true # When on, a fraction of hole envs show the current robot cloud reflected behind the window.
       prob: 0.7 # P(reflection | hole). < 1 leaves the rest as bright pure holes.
       num_points: 400 # Points in the reflection blob.
       blob_size_m: [0.5, 1.2, 0.3] # FULL robot-sized noise cluster (width, height, depth) -- compact, NOT a fill of the whole opening.
