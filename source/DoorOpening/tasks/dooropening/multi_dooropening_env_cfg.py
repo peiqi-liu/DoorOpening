@@ -455,7 +455,7 @@ class EventCfg:
 @configclass
 class DooropeningEnvCfg(DirectRLEnvCfg):
     sim_dt = 1/120
-    decimation = 4
+    decimation = 8
     episode_length_s = 36.
     num_sim_steps_to_render=4
     # - spaces definition
@@ -778,7 +778,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=False)
 
-    base_action_scale = 1.5
+    base_action_scale = 1.0
     arm_action_scale = 0.6
     gripper_action_speed_headroom = 2.0
     finger_action_scale = gripper_action_speed_headroom * GRIPPER_VELOCITY_LIMIT
@@ -849,7 +849,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # flip (e.g. rate -1 -> +1) produces a jerk of up to 4 per dim (16 squared) instead of 2, so at
     # ~11 action dims a policy that is merely noisy sits under ~0.1 total per step, while one that is
     # actually oscillating near full-scale costs several units/step.
-    action_jerk_penalty_w = 1.0
+    action_jerk_penalty_w = 0.8
+    # Penalize large normalized commands across all policy actions (base, arm, and fingers).
+    # Kept modest so the teacher can still make purposeful reaches, pulls, and base motion.
+    action_magnitude_penalty_w = 0.1
 
     robot_body_quat_scale = 1.0
     robot_key_body_pos_scale = 3.0
@@ -999,9 +1002,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "base_rot_target_noise": (0.0, 0.005),
             "arm_target_noise": (0.0, 0.003),
         },
-        # Action latency (in env/control steps; env dt = sim_dt * decimation = 1/30 s).
+        # Action latency (in env/control steps; env dt = sim_dt * decimation = 1/15 s).
         # The PD target applied on a given step is the one the policy produced `latency` steps
-        # earlier. ADR ramps the upper bound from 1 step up to 4 steps (~4/30 s ≈ 133 ms); the
+        # earlier. ADR ramps the upper bound from 1 step up to 3 steps (~3/15 s = 200 ms); the
         # lower bound stays at 1, so latency is sampled uniformly in [1, current_max] per env at
         # each reset. Index [0] is the starting/minimum latency, index [1] the max at full ADR.
         "action_latency": {

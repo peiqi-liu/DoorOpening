@@ -94,10 +94,17 @@ SELF_COLLISION_FRANKA_BODIES = (
 # The other two groups the franka arm is checked AGAINST (kept fixed relative to each other).
 # x5_base_link and link1 were missing relative to X5_BODY_NAMES (which the x5<->door sensors use), so
 # a franka body striking the camera arm's mount or first link went unpenalized. This tuple must stay
-# FIRST in _self_collision_filter_prims below: the env's franka<->arx force helper slices the filter
-# axis by range(len(SELF_COLLISION_X5_BODIES)).
+# FIRST in SELF_COLLISION_FRANKA_FILTER_PRIM_PATHS: the env's franka<->arx force helper selects slot 0.
 SELF_COLLISION_X5_BODIES = ("x5_base_link", "link1", "link2", "link3", "link4", "link5", "x5_camera_link")
 SELF_COLLISION_BASE_BODIES = ("tidybot2_base_link", "franka_control_box")
+SELF_COLLISION_BASE_FILTER_BODIES = (
+    "tidybot2_base_link",
+    "franka_control_box",
+    "left_panel",
+    "right_panel",
+    "front_panel",
+    "back_panel",
+)
 
 # The fixed door frame (URDF link_0, merged to `base` at runtime): a franka body striking the
 # immovable frame is scored as a self-collision too.
@@ -117,9 +124,24 @@ def _self_collision_filter_prims(*body_name_groups) -> tuple[str, ...]:
     return prims + (DOOR_FRAME_FILTER_PRIM_PATH,)
 
 
+def _body_group_filter_prim_path(body_names, *, root="Robot") -> str:
+    """Build one PhysX filter expression matching a same-sized group of bodies."""
+    return f"/World/envs/env_.*/{root}/(" + "|".join(body_names) + ")"
+
+
 # Single franka self-collision sensor, filtered against the x5 group + base group + door frame.
 SELF_COLLISION_FRANKA_PRIM_PATH = _self_collision_group_prim_path(SELF_COLLISION_FRANKA_BODIES)
-SELF_COLLISION_FRANKA_FILTER_PRIM_PATHS = _self_collision_filter_prims(SELF_COLLISION_X5_BODIES, SELF_COLLISION_BASE_BODIES)
+SELF_COLLISION_FRANKA_FILTER_PRIM_PATHS = (
+    # Each PhysX filter expression must match all seven bodies on the sensor side per env. The
+    # force-matrix filter axis has one slot per expression, not one slot per matched body.
+    # Keep X5 first so _get_franka_arx_contact_force_norm can select slot 0.
+    _body_group_filter_prim_path(SELF_COLLISION_X5_BODIES),
+    # Keep Robot and Door as alternatives in the root component (never put a slash inside an
+    # alternative); this yields six robot/base bodies plus Door/base = seven matches per env.
+    "/World/envs/env_.*/(Robot|Door)/("
+    + "|".join((*SELF_COLLISION_BASE_FILTER_BODIES, "base"))
+    + ")",
+)
 
 # Finger<->flange self-collision: the fingers filtered ONLY against panda_link7. The hand is
 # excluded from the franka self-collision group above, but a wrist pose that folds the gripper back
@@ -132,9 +154,15 @@ SELF_COLLISION_HAND_PRIM_PATH = _self_collision_group_prim_path(HAND_DIGIT_BODIE
 # Flange AND the x5 camera arm. The fingers stick out ~10 cm past panda_hand, so on the swing to the
 # panel-hold pose they lead the arm into the camera arm; filtering them only against the flange left
 # that unsensed. Still no intra-hand entry, so finger<->finger remains unpenalized by construction.
-SELF_COLLISION_HAND_FILTER_PRIM_PATHS = (
-    f"/World/envs/env_.*/Robot/{FRANKA_FLANGE_BODY}",
-) + tuple(f"/World/envs/env_.*/Robot/{name}" for name in SELF_COLLISION_X5_BODIES)
+SELF_COLLISION_HAND_FILTER_PRIM_PATHS = tuple(
+    _body_group_filter_prim_path(group)
+    for group in (
+        (FRANKA_FLANGE_BODY, "x5_base_link"),
+        ("link1", "link2"),
+        ("link3", "link4"),
+        ("link5", "x5_camera_link"),
+    )
+)
 
 
 def get_filtered_contact_force_w(sensor, expected_num_envs=None, filter_indices: tuple[int, ...] | None = None) -> torch.Tensor:

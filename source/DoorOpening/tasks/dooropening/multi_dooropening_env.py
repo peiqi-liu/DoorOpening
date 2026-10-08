@@ -244,6 +244,7 @@ class DooropeningEnv(DirectRLEnv):
         # reset are not charged for the jump away from an arbitrary zero.
         self._prev_action = torch.zeros((self.num_envs, self.num_policy_actions), device=self.device)
         self._prev_prev_action = torch.zeros((self.num_envs, self.num_policy_actions), device=self.device)
+        self._action_magnitude_penalty = torch.zeros(self.num_envs, device=self.device)
         self.fixed_arx_pose = bool(getattr(self.cfg, "fixed_arx_pose", True))
         # Ignore the policy's gripper action and hold the fingers at the open width. The gripper DOF
         # stays in the action vector (checkpoints keep loading); its command is simply overwritten.
@@ -288,6 +289,7 @@ class DooropeningEnv(DirectRLEnv):
         self.self_collision_penalty_w = self.cfg.self_collision_penalty_w
         self.franka_box_contact_penalty_w = self.cfg.franka_box_contact_penalty_w
         self.action_jerk_penalty_w = self.cfg.action_jerk_penalty_w
+        self.action_magnitude_penalty_w = self.cfg.action_magnitude_penalty_w
 
         self.reset_key_body_pos_delta_min = self.cfg.reset_key_body_pos_delta_min
         self.reset_key_body_quat_delta_min = self.cfg.reset_key_body_quat_delta_min
@@ -515,11 +517,10 @@ class DooropeningEnv(DirectRLEnv):
     def _get_franka_arx_contact_force_norm(self) -> torch.Tensor:
         """Total contact-force magnitude between the franka arm and the arx/x5 camera arm, per env.
 
-        The franka self-collision sensor filters against [x5 bodies, base bodies, door frame]; the
-        arx (x5) bodies are the FIRST ``len(SELF_COLLISION_X5_BODIES)`` filters. Sum the franka<->arx
-        contact forces (over all franka bodies + those arx filters) and return the magnitude.
+        The franka self-collision sensor has two grouped filters: X5/arx first, then base/frame.
+        Select the first filter slot to sum only franka<->arx contacts over all Franka bodies.
         """
-        arx_filter_indices = tuple(range(len(SELF_COLLISION_X5_BODIES)))
+        arx_filter_indices = (0,)
         force_w = self._get_filtered_contact_force_w(
             self.scene.sensors["contact_forces_self_collision_franka"],
             expected_num_envs=self.num_envs,
@@ -1162,13 +1163,7 @@ class DooropeningEnv(DirectRLEnv):
         return scaled_actions
 
     def base_target_from_scaled_actions(self, scaled_base_actions: torch.Tensor) -> torch.Tensor:
-        """Base PD targets: MEASURED base pose + dt * scaled action.
-
-        Base only. The arm and finger keep integrating onto the previous target; the base command is
-        a velocity applied to where the base actually is, so the target cannot drift away from the
-        base and no distillation-side conversion is needed -- teacher and student both predict this
-        same q-relative delta.
-        """
+        """Base PD targets: clean measured base pose + dt * scaled velocity action."""
         base_stop = self._target_base_xy_slice.stop
         # CLEAN base pose: robot.data.joint_pos is the raw physics state. Every noisy variant is a
         # .clone() made for the observation only (_build_observations' policy_joint_pos,
@@ -1184,27 +1179,15 @@ class DooropeningEnv(DirectRLEnv):
         )
 
     def arm_target_windup_envelope(self) -> torch.Tensor:
-        """Max |target - measured| the arm PD targets are allowed to hold, per joint.
-
-        Fixed vector (panda_joint1-7), matching FRANKA_POLICY_MAX_JOINT_POS_ERROR_RAD in deploy's
-        door_policy_node.py.
-        """
+        """Maximum allowed target error from measured arm position for each joint."""
         return torch.tensor(
             [0.152930, 0.152930, 0.152930, 0.152930, 0.082317, 0.082317, 0.259616],
             device=self.device,
         )
 
     def clamp_arm_target_to_effort_envelope(self, arm_targets: torch.Tensor) -> torch.Tensor:
-        """Hold the integrated arm target within a saturating-torque envelope of the MEASURED pose.
-
-        Same idea the base already gets from base_target_from_scaled_actions (which re-anchors on
-        the measured pose every step): the command may lead the state, but only by as much as the
-        drive can actually act on.
-        """
+        """Keep the integrated PD target within the arm effort envelope around measured q."""
         envelope = self.arm_target_windup_envelope()
-        # CLEAN arm pose, for the same reason the base command uses it: robot.data.joint_pos is the
-        # raw physics state, and anchoring the command on the noisy observation would random-walk
-        # the target.
         arm_q = self.robot.data.joint_pos[:, self._robot_arm_dof_idx]
         return torch.clamp(arm_targets, arm_q - envelope, arm_q + envelope)
 
@@ -1278,19 +1261,18 @@ class DooropeningEnv(DirectRLEnv):
         clamped_actions = actions.clamp(-1.0, 1.0)
         jerk = clamped_actions - 2.0 * self._prev_action + self._prev_prev_action
         self._action_jerk_penalty = jerk.pow(2).sum(dim=-1)
+        # Penalize command magnitude across the complete policy action vector: base, arm, and fingers.
+        self._action_magnitude_penalty = clamped_actions.pow(2).sum(dim=-1)
         self._prev_prev_action = self._prev_action
         self._prev_action = clamped_actions.detach().clone()
 
         # delta actions
         self.scaled_actions = self._scale_actions(actions)
         targets = self.robot_dof_targets + self.dt * self.scaled_actions
-        # Base slice goes through the shared helper so the distillation label (which calls the same
-        # helper) describes exactly the target physics will store.
+        # Base is re-anchored on clean measured q; arm delta accumulates on the previous PD target,
+        # matching the pd_target + delta checkpoint semantics, with an effort/windup envelope.
         base_stop = self._target_base_xy_slice.stop
         targets[:, :base_stop] = self.base_target_from_scaled_actions(self.scaled_actions[:, :base_stop])
-        # The arm keeps integrating, but never further from the measured pose than the drive can
-        # push: past effort_limit / stiffness the torque is already clipped, so the surplus is
-        # wind-up the policy would have to unwind before it could reverse.
         targets[:, self._target_arm_slice] = self.clamp_arm_target_to_effort_envelope(
             targets[:, self._target_arm_slice]
         )
@@ -2084,7 +2066,9 @@ class DooropeningEnv(DirectRLEnv):
 
         # Jerk penalty, computed in _pre_physics_step (see there for why it has to be measured on
         # the raw clamped action rather than anything derived from it).
+        weighted_action_magnitude_penalty = self.action_magnitude_penalty_w * self._action_magnitude_penalty
         weighted_action_jerk_penalty = self.action_jerk_penalty_w * self._action_jerk_penalty
+        self.extras["error/action_magnitude_penalty"] = weighted_action_magnitude_penalty.mean().item()
         self.extras["error/action_jerk_penalty"] = weighted_action_jerk_penalty.mean().item()
 
         return (
@@ -2093,6 +2077,7 @@ class DooropeningEnv(DirectRLEnv):
             + weighted_base_door_contact_penalty
             + weighted_x5_door_contact_penalty
             + weighted_franka_box_contact_penalty
+            + weighted_action_magnitude_penalty
             + weighted_action_jerk_penalty
         )
 

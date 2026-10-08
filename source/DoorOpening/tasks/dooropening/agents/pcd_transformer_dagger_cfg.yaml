@@ -58,7 +58,7 @@ temporal_obs:
   command_delay_s: [0.0, 0.0]
 
 temporal_state_encoders:
-  enabled: true
+  enabled: false
   timestamps_ms: [0, 300, 600, 900]
   # timestamps_ms: [0, 400, 800, 1200, 1600, 2000, 2400, 2800]
   fields:
@@ -127,13 +127,13 @@ state_encoders_cfg:
   #   hidden_dims: [128, 256]
   #   dropout: 0.0
   #   use_state: true
-  keyframe_pose_base:
-    # panda_hand: position 3 + 6D orientation.
-    body_names: [panda_hand]
-    input_dim: 9
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
+  # keyframe_pose_base:
+  #   # panda_hand: position 3 + 6D orientation.
+  #   body_names: [panda_hand]
+  #   input_dim: 9
+  #   hidden_dims: [128, 256]
+  #   dropout: 0.0
+  #   use_state: true
   # push_pull_cond:
   #   input_dim: 2
   #   hidden_dims: [64, 256]
@@ -235,7 +235,7 @@ dagger:
   base_vel_source: "measured"
   scene_robot_num_points: 30000  # GT robot/model points concatenated into the renderable scene cloud.
   append_robot_model_to_policy_cloud: true
-  robot_model_policy_points: 2000  # Robot model points appended to the policy input after the depth/lidar crops.
+  robot_model_policy_points: 1000  # Robot model points appended to the policy input after the depth/lidar crops.
   robot_pointcloud_filter:
     # Robot self-points are stripped from the LIDAR cloud only. The depth camera is a real sensor that
     # sees the robot's own hand, so the depth cloud keeps its self-points (see _sample_scene_obs_pointcloud_base).
