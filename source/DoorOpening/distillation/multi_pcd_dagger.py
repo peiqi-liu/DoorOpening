@@ -174,6 +174,28 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.teacher_cfg = self.config.get("teacher", {})
         self.play_policy = bool(self.config.get("play_policy", False))
         self.runtime_cfg = self.config.get("dagger", {})
+        measured_arm_cfg = dict(self.runtime_cfg.get("student_measured_arm_target", {}) or {})
+        self.student_measured_arm_target_enabled = bool(measured_arm_cfg.get("enabled", False))
+        self.student_measured_arm_target_scale = float(measured_arm_cfg.get("action_scale", 1.0))
+        self.student_measured_arm_target_envelope = torch.as_tensor(
+            measured_arm_cfg.get(
+                "envelope_rad",
+                [0.152930, 0.152930, 0.152930, 0.152930, 0.082317, 0.082317, 0.259616],
+            ),
+            device=self.device,
+            dtype=torch.float32,
+        )
+        if self.student_measured_arm_target_scale <= 0.0:
+            raise ValueError("dagger.student_measured_arm_target.action_scale must be positive.")
+        if self.student_measured_arm_target_envelope.numel() != arm_action_dim or torch.any(
+            self.student_measured_arm_target_envelope <= 0.0
+        ):
+            raise ValueError("dagger.student_measured_arm_target.envelope_rad must contain one positive value per arm joint.")
+        self.ov_env.student_arm_target_mode_mask = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self.ov_env.student_arm_target_action_scale = self.student_measured_arm_target_scale
+        self.ov_env.student_arm_target_envelope = self.student_measured_arm_target_envelope
         self.wall_distractor_cfg = dict(self.runtime_cfg.get("wall_distractors", {}))
         # Handle-visibility dropout: the protruding handle (link_2) points are removed from the rendered
         # door cloud so the panel reads flat. Keeps the aux head able to track the handle from the visible
@@ -2513,6 +2535,30 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         student_actions[:, :3] = self._env_base_vector_to_robot_frame(env_actions[:, :3])
         return student_actions
 
+    def _teacher_actions_to_student_labels(self, teacher_actions):
+        """Convert teacher normalized actions into student measured-q-relative action labels.
+
+        The teacher still advances its target as previous_target + dt * 0.6 * action. The
+        student label instead asks for the equivalent bounded action under measured_q +
+        dt * student_scale * action and the same per-joint windup envelope.
+        Base-frame conversion is applied first; only the arm channels are relabeled.
+        """
+        student_actions = self._env_actions_to_student_actions(teacher_actions)
+        if not self.student_measured_arm_target_enabled:
+            return student_actions
+
+        arm_slice = self.action_component_history_indices["arm"]
+        arm_q = self.ov_env.robot.data.joint_pos[:, self.ov_env._robot_arm_dof_idx]
+        previous_targets = self.ov_env.robot_dof_targets[:, self.ov_env._target_arm_slice]
+        teacher_arm_scale = float(self.ov_env.cfg.arm_action_scale)
+        teacher_next_target = previous_targets + self.ov_env.dt * teacher_arm_scale * teacher_actions[:, arm_slice]
+        envelope = self.student_measured_arm_target_envelope.to(device=arm_q.device, dtype=arm_q.dtype)
+        teacher_next_target = torch.clamp(teacher_next_target, arm_q - envelope, arm_q + envelope)
+        student_actions[:, arm_slice] = (
+            (teacher_next_target - arm_q) / (self.ov_env.dt * self.student_measured_arm_target_scale)
+        ).clamp(-1.0, 1.0)
+        return student_actions
+
     def _student_actions_to_env_actions(self, student_actions):
         if student_actions.ndim != 2 or student_actions.shape[-1] != self.num_actions:
             raise RuntimeError(
@@ -3407,7 +3453,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 )
                 missing_family_names = [DOOR_FAMILY_NAMES[int(family_id)] for family_id in missing_family_ids]
                 raise RuntimeError(f"Missing teacher model for door families: {missing_family_names}.")
-            student_teacher_actions = self._env_actions_to_student_actions(teacher_actions)
+            student_teacher_actions = self._teacher_actions_to_student_labels(teacher_actions)
             return {
                 "mus": student_teacher_actions,
                 "actions": teacher_actions,
@@ -3421,7 +3467,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         with torch.no_grad():
             res_dict = self.teacher_model(batch_dict)
         teacher_actions = torch.clamp(res_dict["mus"], -1.0, 1.0)
-        student_teacher_actions = self._env_actions_to_student_actions(teacher_actions)
+        student_teacher_actions = self._teacher_actions_to_student_labels(teacher_actions)
         return {
             "mus": student_teacher_actions,
             "actions": teacher_actions,
@@ -4659,6 +4705,10 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                     teacher_actions,
                     iteration,
                 )
+                if self.student_measured_arm_target_enabled and teacher_actions is not None:
+                    self.ov_env.student_arm_target_mode_mask[:] = ~self.teacher_forcing_env_mask
+                else:
+                    self.ov_env.student_arm_target_mode_mask.zero_()
                 obs, rew, out_of_reach, timed_out, step_extras = self.env.step(step_actions)
                 self._update_logged_env_metrics(step_extras)
                 self.temporal_current_time_s = self._iteration_to_time_s(iteration + 1)

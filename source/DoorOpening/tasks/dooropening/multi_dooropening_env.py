@@ -225,6 +225,10 @@ class DooropeningEnv(DirectRLEnv):
         # We are going to update this variables to control the robot
         self.robot_dof_targets = torch.zeros((self.num_envs, len(self._robot_dof_idx)), device=self.device)
         self.applied_robot_dof_targets = torch.zeros_like(self.robot_dof_targets)
+        # DAgger can opt student-controlled environments into measured-q-relative arm targets while
+        # teacher-controlled environments retain the normal target-plus-delta semantics. The mask
+        # is installed by the distillation driver immediately before each env.step().
+        self.student_arm_target_mode_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._target_base_rot_slice = slice(0, 1)
         self._target_base_xy_slice = slice(1, self.num_base_joints)
         self._target_arm_slice = slice(self.num_base_joints, self.num_base_joints + self.num_arm_joints)
@@ -1276,6 +1280,26 @@ class DooropeningEnv(DirectRLEnv):
         targets[:, self._target_arm_slice] = self.clamp_arm_target_to_effort_envelope(
             targets[:, self._target_arm_slice]
         )
+        student_mask = getattr(self, "student_arm_target_mode_mask", None)
+        if student_mask is not None and torch.any(student_mask):
+            student_mask = student_mask.to(device=actions.device, dtype=torch.bool)
+            arm_scale = float(getattr(self, "student_arm_target_action_scale", 1.0))
+            if arm_scale <= 0.0:
+                raise RuntimeError("student_arm_target_action_scale must be positive.")
+            envelope = getattr(self, "student_arm_target_envelope", None)
+            if envelope is None:
+                envelope = self.arm_target_windup_envelope()
+            envelope = torch.as_tensor(envelope, device=actions.device, dtype=actions.dtype)
+            if envelope.numel() != len(self._robot_arm_dof_idx) or torch.any(envelope <= 0.0):
+                raise RuntimeError("student_arm_target_envelope must contain one positive value per arm joint.")
+            measured_arm_q = self.robot.data.joint_pos[:, self._robot_arm_dof_idx]
+            measured_relative_targets = measured_arm_q + self.dt * arm_scale * clamped_actions[:, self._policy_arm_slice]
+            measured_relative_targets = torch.clamp(
+                measured_relative_targets,
+                measured_arm_q - envelope,
+                measured_arm_q + envelope,
+            )
+            targets[student_mask, self._target_arm_slice] = measured_relative_targets[student_mask]
         targets = self._pin_arx_targets_to_fixed_pose(targets)
         targets = self._pin_gripper_target_open(targets)
         # NOTE: no explicit contact-sensor update() here. This runs BEFORE the physics step, so it

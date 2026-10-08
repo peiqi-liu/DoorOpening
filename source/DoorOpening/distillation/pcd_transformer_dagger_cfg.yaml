@@ -140,13 +140,6 @@ state_encoders_cfg:
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  target_err_arm:
-    # Current-step Franka tracking error (PD target - measured joint angle), 7 DOF. No temporal
-    # suffix, so it is sampled at this step only. Must equal len(env._robot_arm_dof_idx).
-    input_dim: 7
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
   # target_err_hand:
   #   input_dim: 1  # gripper opening error (one DOF)
   #   hidden_dims: [128, 256]
@@ -173,6 +166,14 @@ dagger:
   teacher_forcing_warmup_iters: 5000
   teacher_forcing_transition_iters: 20000
   teacher_forcing_min_beta: 0.0
+  # Student-only arm target semantics for the measured-q-relative experiment. Teacher actions still
+  # use the normal previous-PD-target + dt*0.6*action path; labels are converted to the equivalent
+  # measured_q + dt*1.0*action command and the environment applies this only on student-controlled
+  # environments. Keep the policy output bounded to [-1, 1].
+  student_measured_arm_target:
+    enabled: true
+    action_scale: 1.0
+    envelope_rad: [0.152930, 0.152930, 0.152930, 0.152930, 0.082317, 0.082317, 0.259616]
   # Aux handle input mode:
   #   "recurrent"        -> policy input = previous step's aux prediction (fed back). The first step
   #                         after each reset is seeded from aux_handle_init_source below; predictions
