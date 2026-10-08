@@ -194,8 +194,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.ov_env.student_arm_target_mode_mask = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device
         )
-        self.ov_env.student_arm_target_action_scale = self.student_measured_arm_target_scale
-        self.ov_env.student_arm_target_envelope = self.student_measured_arm_target_envelope
         self.wall_distractor_cfg = dict(self.runtime_cfg.get("wall_distractors", {}))
         # Handle-visibility dropout: the protruding handle (link_2) points are removed from the rendered
         # door cloud so the panel reads flat. Keeps the aux head able to track the handle from the visible
@@ -2567,12 +2565,21 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
 
         env_actions = student_actions.clone()
         # Base output is a normalized [-1, 1] robot-frame action; only rotate it into the
-        # env [wz, vx_w, vy_w] frame. Base scale and dt are applied by the env. The arm
-        # channels are physical measured-q-relative target offsets in radians, so do not clamp them.
+        # env [wz, vx_w, vy_w] frame. Convert student arm velocity-like actions into the env's
+        # normalized PD-target-delta convention before env.step().
         env_actions[:, :3] = self._robot_base_vector_to_env_frame(student_actions[:, :3])
         env_actions[:, :3] = env_actions[:, :3].clamp(-1.0, 1.0)
         hand_indices = self.action_component_history_indices["hand"]
         env_actions[:, hand_indices] = env_actions[:, hand_indices].clamp(-1.0, 1.0)
+        if self.student_measured_arm_target_enabled:
+            arm_indices = self.action_component_history_indices["arm"]
+            arm_q = self.ov_env.robot.data.joint_pos[:, self.ov_env._robot_arm_dof_idx]
+            current_pd_target = self.ov_env.robot_dof_targets[:, self.ov_env._target_arm_slice]
+            desired_target = arm_q + self.ov_env.dt * self.student_measured_arm_target_scale * student_actions[:, arm_indices]
+            envelope = self.student_measured_arm_target_envelope.to(device=arm_q.device, dtype=arm_q.dtype)
+            desired_target = torch.clamp(desired_target, arm_q - envelope, arm_q + envelope)
+            env_arm_scale = float(self.ov_env.cfg.arm_action_scale)
+            env_actions[:, arm_indices] = (desired_target - current_pd_target) / (self.ov_env.dt * env_arm_scale)
 
         # Record the student's own commanded base velocity for base_vel_source == "commanded": the
         # raw robot-frame base action clamped to [-1, 1], WITHOUT applying base_action_scale. Kept
@@ -4707,8 +4714,11 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                     teacher_actions,
                     iteration,
                 )
-                if self.student_measured_arm_target_enabled and teacher_actions is not None:
-                    self.ov_env.student_arm_target_mode_mask[:] = ~self.teacher_forcing_env_mask
+                if self.student_measured_arm_target_enabled:
+                    if teacher_actions is not None:
+                        self.ov_env.student_arm_target_mode_mask[:] = ~self.teacher_forcing_env_mask
+                    else:
+                        self.ov_env.student_arm_target_mode_mask.fill_(True)
                 else:
                     self.ov_env.student_arm_target_mode_mask.zero_()
                 obs, rew, out_of_reach, timed_out, step_extras = self.env.step(step_actions)

@@ -1149,6 +1149,12 @@ class DooropeningEnv(DirectRLEnv):
                 f"Expected policy action shape [N, {self.num_policy_actions}], got {tuple(actions.shape)}."
             )
         clamped_actions = actions.clamp(-1.0, 1.0)
+        student_mask = getattr(self, "student_arm_target_mode_mask", None)
+        if student_mask is not None and torch.any(student_mask):
+            # Student arm actions have already been converted to the env's PD-target delta
+            # convention by DAgger. Preserve those raw arm values; base and gripper remain normalized.
+            student_mask = student_mask.to(device=actions.device, dtype=torch.bool)
+            clamped_actions[student_mask, self._policy_arm_slice] = actions[student_mask, self._policy_arm_slice]
         scaled_actions = torch.zeros(
             (actions.shape[0], self.num_robot_actions),
             device=actions.device,
@@ -1280,28 +1286,6 @@ class DooropeningEnv(DirectRLEnv):
         targets[:, self._target_arm_slice] = self.clamp_arm_target_to_effort_envelope(
             targets[:, self._target_arm_slice]
         )
-        student_mask = getattr(self, "student_arm_target_mode_mask", None)
-        if student_mask is not None and torch.any(student_mask):
-            student_mask = student_mask.to(device=actions.device, dtype=torch.bool)
-            envelope = getattr(self, "student_arm_target_envelope", None)
-            if envelope is None:
-                envelope = self.arm_target_windup_envelope()
-            envelope = torch.as_tensor(envelope, device=actions.device, dtype=actions.dtype)
-            if envelope.numel() != len(self._robot_arm_dof_idx) or torch.any(envelope <= 0.0):
-                raise RuntimeError("student_arm_target_envelope must contain one positive value per arm joint.")
-            measured_arm_q = self.robot.data.joint_pos[:, self._robot_arm_dof_idx]
-            arm_scale = float(getattr(self, "student_arm_target_action_scale", 1.0))
-            if arm_scale <= 0.0:
-                raise RuntimeError("student_arm_target_action_scale must be positive.")
-            # Student arm actions are velocity-like target commands. Convert the desired
-            # measured-q-relative target into the delta from the currently held PD target.
-            measured_relative_targets = measured_arm_q + self.dt * arm_scale * actions[:, self._policy_arm_slice]
-            measured_relative_targets = torch.clamp(
-                measured_relative_targets,
-                measured_arm_q - envelope,
-                measured_arm_q + envelope,
-            )
-            targets[student_mask, self._target_arm_slice] = measured_relative_targets[student_mask]
         targets = self._pin_arx_targets_to_fixed_pose(targets)
         targets = self._pin_gripper_target_open(targets)
         # NOTE: no explicit contact-sensor update() here. This runs BEFORE the physics step, so it
