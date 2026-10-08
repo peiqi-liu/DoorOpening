@@ -176,6 +176,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.runtime_cfg = self.config.get("dagger", {})
         measured_arm_cfg = dict(self.runtime_cfg.get("student_measured_arm_target", {}) or {})
         self.student_measured_arm_target_enabled = bool(measured_arm_cfg.get("enabled", False))
+        self.student_measured_arm_target_scale = float(measured_arm_cfg.get("action_scale", 1.0))
         self.student_measured_arm_target_envelope = torch.as_tensor(
             measured_arm_cfg.get(
                 "envelope_rad",
@@ -188,9 +189,12 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             self.student_measured_arm_target_envelope <= 0.0
         ):
             raise ValueError("dagger.student_measured_arm_target.envelope_rad must contain one positive value per arm joint.")
+        if self.student_measured_arm_target_scale <= 0.0:
+            raise ValueError("dagger.student_measured_arm_target.action_scale must be positive.")
         self.ov_env.student_arm_target_mode_mask = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device
         )
+        self.ov_env.student_arm_target_action_scale = self.student_measured_arm_target_scale
         self.ov_env.student_arm_target_envelope = self.student_measured_arm_target_envelope
         self.wall_distractor_cfg = dict(self.runtime_cfg.get("wall_distractors", {}))
         # Handle-visibility dropout: the protruding handle (link_2) points are removed from the rendered
@@ -2535,8 +2539,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         """Convert teacher normalized actions into student measured-q-relative action labels.
 
         The teacher still advances its target as previous_target + dt * 0.6 * action. The
-        student label is the physical target offset from measured_q, in radians, with the
-        same per-joint windup envelope applied as a safety bound.
+        student label is a velocity-like target command, normalized by dt and the student
+        arm action scale, with the same per-joint windup envelope applied as a safety bound.
         Base-frame conversion is applied first; only the arm channels are relabeled.
         """
         student_actions = self._env_actions_to_student_actions(teacher_actions)
@@ -2550,7 +2554,9 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         teacher_next_target = previous_targets + self.ov_env.dt * teacher_arm_scale * teacher_actions[:, arm_slice]
         envelope = self.student_measured_arm_target_envelope.to(device=arm_q.device, dtype=arm_q.dtype)
         teacher_next_target = torch.clamp(teacher_next_target, arm_q - envelope, arm_q + envelope)
-        student_actions[:, arm_slice] = teacher_next_target - arm_q
+        student_actions[:, arm_slice] = (
+            (teacher_next_target - arm_q) / (self.ov_env.dt * self.student_measured_arm_target_scale)
+        )
         return student_actions
 
     def _student_actions_to_env_actions(self, student_actions):
