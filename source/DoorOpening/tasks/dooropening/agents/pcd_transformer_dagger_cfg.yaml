@@ -145,13 +145,6 @@ state_encoders_cfg:
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
-  target_err_arm:
-    # Current-step Franka tracking error (PD target - measured joint angle), 7 DOF. No temporal
-    # suffix, so it is sampled at this step only. Must equal len(env._robot_arm_dof_idx).
-    input_dim: 7
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
   # target_err_hand:
   #   input_dim: 1  # gripper opening error (one DOF)
   #   hidden_dims: [128, 256]
