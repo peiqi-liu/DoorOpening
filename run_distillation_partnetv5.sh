@@ -16,7 +16,7 @@ python -m torch.distributed.run \
   ./scripts/distillation/run_multi_distillation.py \
   --task DooropeningMulti \
   --headless \
-  --num_envs 300 \
+  --num_envs 400 \
   --distributed \
   --teacher_partnetv5 source/DoorOpening/assets/door/PartNetv5/door_opening.pth \
   --door-families PartNetv5 \
