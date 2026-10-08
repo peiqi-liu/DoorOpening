@@ -4660,6 +4660,11 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 if not self.play_policy:
                     teacher_output = self._get_teacher_actions(obs)
                     teacher_actions = teacher_output["actions"]
+                    # Teacher labels are expressed in the student's measured-q-relative
+                    # action convention. Convert those same labels back to env PD-target
+                    # delta units for teacher-forced rollouts, so the transition used to
+                    # generate the next observation matches the action being supervised.
+                    teacher_env_actions = self._student_actions_to_env_actions(teacher_output["mus"])
                     aux_target = None
                     if self.has_aux_prediction:
                         if self.latest_aux_target_vector is None:
@@ -4695,12 +4700,14 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
 
                 step_actions, teacher_forcing_beta = self._mix_actions(
                     student_env_actions.detach(),
-                    teacher_actions,
+                    teacher_env_actions if not self.play_policy else None,
                     iteration,
                 )
                 if self.student_measured_arm_target_enabled:
                     if teacher_actions is not None:
-                        self.ov_env.student_arm_target_mode_mask[:] = ~self.teacher_forcing_env_mask
+                        # Both student and teacher actions have already been converted to
+                        # env PD-target deltas. Preserve arm values for every source.
+                        self.ov_env.student_arm_target_mode_mask.fill_(True)
                     else:
                         self.ov_env.student_arm_target_mode_mask.fill_(True)
                 else:
