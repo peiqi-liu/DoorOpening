@@ -176,7 +176,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.runtime_cfg = self.config.get("dagger", {})
         measured_arm_cfg = dict(self.runtime_cfg.get("student_measured_arm_target", {}) or {})
         self.student_measured_arm_target_enabled = bool(measured_arm_cfg.get("enabled", False))
-        self.student_measured_arm_target_scale = float(measured_arm_cfg.get("action_scale", 1.0))
         self.student_measured_arm_target_envelope = torch.as_tensor(
             measured_arm_cfg.get(
                 "envelope_rad",
@@ -185,8 +184,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             device=self.device,
             dtype=torch.float32,
         )
-        if self.student_measured_arm_target_scale <= 0.0:
-            raise ValueError("dagger.student_measured_arm_target.action_scale must be positive.")
         if self.student_measured_arm_target_envelope.numel() != arm_action_dim or torch.any(
             self.student_measured_arm_target_envelope <= 0.0
         ):
@@ -194,7 +191,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.ov_env.student_arm_target_mode_mask = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device
         )
-        self.ov_env.student_arm_target_action_scale = self.student_measured_arm_target_scale
         self.ov_env.student_arm_target_envelope = self.student_measured_arm_target_envelope
         self.wall_distractor_cfg = dict(self.runtime_cfg.get("wall_distractors", {}))
         # Handle-visibility dropout: the protruding handle (link_2) points are removed from the rendered
@@ -2539,8 +2535,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         """Convert teacher normalized actions into student measured-q-relative action labels.
 
         The teacher still advances its target as previous_target + dt * 0.6 * action. The
-        student label instead asks for the equivalent bounded action under measured_q +
-        dt * student_scale * action and the same per-joint windup envelope.
+        student label is the physical target offset from measured_q, in radians, with the
+        same per-joint windup envelope applied as a safety bound.
         Base-frame conversion is applied first; only the arm channels are relabeled.
         """
         student_actions = self._env_actions_to_student_actions(teacher_actions)
@@ -2554,9 +2550,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         teacher_next_target = previous_targets + self.ov_env.dt * teacher_arm_scale * teacher_actions[:, arm_slice]
         envelope = self.student_measured_arm_target_envelope.to(device=arm_q.device, dtype=arm_q.dtype)
         teacher_next_target = torch.clamp(teacher_next_target, arm_q - envelope, arm_q + envelope)
-        student_actions[:, arm_slice] = (
-            (teacher_next_target - arm_q) / (self.ov_env.dt * self.student_measured_arm_target_scale)
-        ).clamp(-1.0, 1.0)
+        student_actions[:, arm_slice] = teacher_next_target - arm_q
         return student_actions
 
     def _student_actions_to_env_actions(self, student_actions):
@@ -2567,10 +2561,12 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
 
         env_actions = student_actions.clone()
         # Base output is a normalized [-1, 1] robot-frame action; only rotate it into the
-        # env [wz, vx_w, vy_w] frame. base_action_scale and dt are applied by the env in
-        # _scale_actions/_pre_physics_step. Keep arm/hand untouched.
+        # env [wz, vx_w, vy_w] frame. Base scale and dt are applied by the env. The arm
+        # channels are physical measured-q-relative target offsets in radians, so do not clamp them.
         env_actions[:, :3] = self._robot_base_vector_to_env_frame(student_actions[:, :3])
-        env_actions = env_actions.clamp(-1.0, 1.0)
+        env_actions[:, :3] = env_actions[:, :3].clamp(-1.0, 1.0)
+        hand_indices = self.action_component_history_indices["hand"]
+        env_actions[:, hand_indices] = env_actions[:, hand_indices].clamp(-1.0, 1.0)
 
         # Record the student's own commanded base velocity for base_vel_source == "commanded": the
         # raw robot-frame base action clamped to [-1, 1], WITHOUT applying base_action_scale. Kept

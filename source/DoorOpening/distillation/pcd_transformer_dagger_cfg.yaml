@@ -168,11 +168,10 @@ dagger:
   teacher_forcing_min_beta: 0.0
   # Student-only arm target semantics for the measured-q-relative experiment. Teacher actions still
   # use the normal previous-PD-target + dt*0.6*action path; labels are converted to the equivalent
-  # measured_q + dt*1.0*action command and the environment applies this only on student-controlled
-  # environments. Keep the policy output bounded to [-1, 1].
+  # measured_q + target-offset action (radians) command and the environment applies this only on
+  # student-controlled environments. The envelope is a safety bound, not an action normalization.
   student_measured_arm_target:
     enabled: true
-    action_scale: 1.0
     envelope_rad: [0.152930, 0.152930, 0.152930, 0.152930, 0.082317, 0.082317, 0.259616]
   # Aux handle input mode:
   #   "recurrent"        -> policy input = previous step's aux prediction (fed back). The first step

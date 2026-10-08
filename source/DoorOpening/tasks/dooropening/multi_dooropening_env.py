@@ -1283,9 +1283,6 @@ class DooropeningEnv(DirectRLEnv):
         student_mask = getattr(self, "student_arm_target_mode_mask", None)
         if student_mask is not None and torch.any(student_mask):
             student_mask = student_mask.to(device=actions.device, dtype=torch.bool)
-            arm_scale = float(getattr(self, "student_arm_target_action_scale", 1.0))
-            if arm_scale <= 0.0:
-                raise RuntimeError("student_arm_target_action_scale must be positive.")
             envelope = getattr(self, "student_arm_target_envelope", None)
             if envelope is None:
                 envelope = self.arm_target_windup_envelope()
@@ -1293,7 +1290,9 @@ class DooropeningEnv(DirectRLEnv):
             if envelope.numel() != len(self._robot_arm_dof_idx) or torch.any(envelope <= 0.0):
                 raise RuntimeError("student_arm_target_envelope must contain one positive value per arm joint.")
             measured_arm_q = self.robot.data.joint_pos[:, self._robot_arm_dof_idx]
-            measured_relative_targets = measured_arm_q + self.dt * arm_scale * clamped_actions[:, self._policy_arm_slice]
+            # Student arm actions are physical target offsets in radians. Convert the desired
+            # measured-q-relative target into the delta from the currently held PD target.
+            measured_relative_targets = measured_arm_q + actions[:, self._policy_arm_slice]
             measured_relative_targets = torch.clamp(
                 measured_relative_targets,
                 measured_arm_q - envelope,
