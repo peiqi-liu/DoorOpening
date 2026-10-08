@@ -177,18 +177,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         measured_arm_cfg = dict(self.runtime_cfg.get("student_measured_arm_target", {}) or {})
         self.student_measured_arm_target_enabled = bool(measured_arm_cfg.get("enabled", False))
         self.student_measured_arm_target_scale = float(measured_arm_cfg.get("action_scale", 1.0))
-        self.student_measured_arm_target_envelope = torch.as_tensor(
-            measured_arm_cfg.get(
-                "envelope_rad",
-                [0.152930, 0.152930, 0.152930, 0.152930, 0.082317, 0.082317, 0.259616],
-            ),
-            device=self.device,
-            dtype=torch.float32,
-        )
-        if self.student_measured_arm_target_envelope.numel() != arm_action_dim or torch.any(
-            self.student_measured_arm_target_envelope <= 0.0
-        ):
-            raise ValueError("dagger.student_measured_arm_target.envelope_rad must contain one positive value per arm joint.")
         if self.student_measured_arm_target_scale <= 0.0:
             raise ValueError("dagger.student_measured_arm_target.action_scale must be positive.")
         self.ov_env.student_arm_target_mode_mask = torch.zeros(
@@ -2538,7 +2526,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
 
         The teacher still advances its target as previous_target + dt * 0.6 * action. The
         student label is a velocity-like target command, normalized by dt and the student
-        arm action scale, with the same per-joint windup envelope applied as a safety bound.
+        arm action scale. Safety bounds remain owned by the environment.
         Base-frame conversion is applied first; only the arm channels are relabeled.
         """
         student_actions = self._env_actions_to_student_actions(teacher_actions)
@@ -2550,8 +2538,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         previous_targets = self.ov_env.robot_dof_targets[:, self.ov_env._target_arm_slice]
         teacher_arm_scale = float(self.ov_env.cfg.arm_action_scale)
         teacher_next_target = previous_targets + self.ov_env.dt * teacher_arm_scale * teacher_actions[:, arm_slice]
-        envelope = self.student_measured_arm_target_envelope.to(device=arm_q.device, dtype=arm_q.dtype)
-        teacher_next_target = torch.clamp(teacher_next_target, arm_q - envelope, arm_q + envelope)
         student_actions[:, arm_slice] = (
             (teacher_next_target - arm_q) / (self.ov_env.dt * self.student_measured_arm_target_scale)
         )
@@ -2576,8 +2562,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             arm_q = self.ov_env.robot.data.joint_pos[:, self.ov_env._robot_arm_dof_idx]
             current_pd_target = self.ov_env.robot_dof_targets[:, self.ov_env._target_arm_slice]
             desired_target = arm_q + self.ov_env.dt * self.student_measured_arm_target_scale * student_actions[:, arm_indices]
-            envelope = self.student_measured_arm_target_envelope.to(device=arm_q.device, dtype=arm_q.dtype)
-            desired_target = torch.clamp(desired_target, arm_q - envelope, arm_q + envelope)
             env_arm_scale = float(self.ov_env.cfg.arm_action_scale)
             env_actions[:, arm_indices] = (desired_target - current_pd_target) / (self.ov_env.dt * env_arm_scale)
 
