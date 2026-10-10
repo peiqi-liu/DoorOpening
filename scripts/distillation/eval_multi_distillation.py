@@ -221,6 +221,18 @@ parser.add_argument(
     help="Point-cloud source. Defaults to dagger.pointcloud_source in the student YAML.",
 )
 parser.add_argument(
+    "--base-action-scale",
+    type=float,
+    default=None,
+    help="Eval-only override for the environment base action scale.",
+)
+parser.add_argument(
+    "--arm-action-scale",
+    type=float,
+    default=None,
+    help="Eval-only override for the environment Franka arm action scale.",
+)
+parser.add_argument(
     "--max_steps",
     type=int,
     default=0,
@@ -874,6 +886,8 @@ def _disable_observation_lag_for_eval(dagger):
 
 def _build_student_actions(dagger, iteration):
     student_obs = dagger._build_student_obs(iteration=iteration)
+    # _append_viser_frame serializes the exact history tensors used by this policy forward.
+    dagger.latest_eval_student_obs = student_obs
     student_output = dagger._student_forward(student_obs)
     if dagger.has_aux_prediction:
         aux_prediction = dagger._decode_aux_prediction(student_output["aux"].detach())
@@ -903,11 +917,37 @@ def _render_attention_jpgs(attn_state, run_index=None):
         print(f"[ATTN] matplotlib unavailable ({exc}); skipping jpg rendering.")
         return
 
+    mass_rows = []
+    raw_token_rows = []
     for step, labels, attn, _pcd in snapshots:
         attn_np = attn.numpy() if hasattr(attn, "numpy") else np.asarray(attn, dtype=float)
+        raw_token_rows.append(
+            {
+                "step": int(step),
+                "tokens": [
+                    {"index": int(i), "label": str(label), "attention": float(attn_np[i])}
+                    for i, label in enumerate(labels)
+                ],
+            }
+        )
         vmin, vmax = float(attn_np.min()), float(attn_np.max())
         pcd_idx = [i for i, lb in enumerate(labels) if lb == "pointcloud"]
         other_idx = [i for i, lb in enumerate(labels) if lb != "pointcloud"]
+        q_arm_idx = [i for i, lb in enumerate(labels) if isinstance(lb, str) and lb.startswith("q_arm ")]
+        base_vel_idx = [i for i, lb in enumerate(labels) if isinstance(lb, str) and lb.startswith("base_vel ")]
+        q_arm_mass = float(attn_np[q_arm_idx].sum()) if q_arm_idx else 0.0
+        base_vel_mass = float(attn_np[base_vel_idx].sum()) if base_vel_idx else 0.0
+        pointcloud_mass = float(attn_np[pcd_idx].sum()) if pcd_idx else 0.0
+        mass_rows.append(
+            {
+                "step": int(step),
+                "pointcloud": pointcloud_mass,
+                "q_arm_history": q_arm_mass,
+                "base_vel_history": base_vel_mass,
+                "other_state_tokens": max(0.0, 1.0 - pointcloud_mass - q_arm_mass - base_vel_mass),
+                "pointcloud_token_count": len(pcd_idx),
+            }
+        )
 
         n_other = max(1, len(other_idx))
         fig = plt.figure(figsize=(13.0, max(5.0, 0.34 * n_other)))
@@ -948,8 +988,179 @@ def _render_attention_jpgs(attn_state, run_index=None):
         path = os.path.join(out_dir, f"attn_{_tag}{step}.jpg")
         fig.savefig(path, dpi=100, format="jpg")
         plt.close(fig)
+    if mass_rows:
+        steps = [row["step"] for row in mass_rows]
+        fig, ax = plt.subplots(figsize=(9.5, 4.8))
+        for key, label, color in (
+            ("pointcloud", "Point cloud (sum of all tokens)", "#e69f00"),
+            ("q_arm_history", "Arm proprioception history", "#0072b2"),
+            ("base_vel_history", "Base-velocity history", "#009e73"),
+            ("other_state_tokens", "Other state / condition tokens", "#7f7f7f"),
+        ):
+            values = [row[key] for row in mass_rows]
+            ax.plot(steps, values, marker="o", linewidth=2, label=label, color=color)
+            if key == "pointcloud":
+                for x, y in zip(steps, values):
+                    ax.annotate(f"{y:.0%}", (x, y), xytext=(0, 8), textcoords="offset points", ha="center")
+        ax.set_ylim(0.0, 1.0)
+        ax.set_xlabel("Policy step")
+        ax.set_ylabel("Summed action-query attention mass")
+        ax.set_title(f"Attention mass by modality — env {env_id}{_rlbl}")
+        ax.grid(True, alpha=0.25)
+        ax.legend(loc="best", fontsize=8)
+        fig.tight_layout()
+        mass_path = os.path.join(out_dir, f"attn_mass_{_tag.rstrip('_') or 'eval'}.jpg")
+        fig.savefig(mass_path, dpi=140, format="jpg")
+        plt.close(fig)
+        json_path = os.path.splitext(mass_path)[0] + ".json"
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(mass_rows, f, indent=2)
+        print(f"[ATTN] saved summed modality attention plot + values to {mass_path}")
+    if raw_token_rows:
+        token_path = os.path.join(out_dir, f"attn_tokens_{_tag.rstrip('_') or 'eval'}.json")
+        with open(token_path, "w", encoding="utf-8") as f:
+            json.dump(raw_token_rows, f, indent=2)
+        print(f"[ATTN] saved all per-token weights to {token_path}")
+
+        # Plot every non-pointcloud memory token separately over time. In particular, each
+        # proprioceptive field/timestamp (e.g. q_arm 300ms) remains its own curve, not a subtotal.
+        all_labels = []
+        for row in raw_token_rows:
+            for token in row["tokens"]:
+                label = token["label"]
+                if label != "pointcloud" and label not in all_labels:
+                    all_labels.append(label)
+        history_fig, history_ax = plt.subplots(figsize=(12.0, 6.5))
+        steps = [row["step"] for row in raw_token_rows]
+        history_ax.plot(
+            steps,
+            [row["pointcloud"] for row in mass_rows],
+            color="#e69f00",
+            linewidth=2.5,
+            marker="o",
+            markersize=3,
+            label="Point cloud (sum of all tokens)",
+        )
+        for label in all_labels:
+            values = []
+            for row in raw_token_rows:
+                values.append(
+                    sum(token["attention"] for token in row["tokens"] if token["label"] == label)
+                )
+            history_ax.plot(steps, values, linewidth=1.4, label=label)
+        history_ax.set_xlabel("Policy step")
+        history_ax.set_ylabel("Action-query attention weight")
+        history_ax.set_title(f"Per-token history attention over rollout — env {env_id}{_rlbl}")
+        history_ax.set_ylim(bottom=0.0)
+        history_ax.grid(True, alpha=0.25)
+        history_ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=8)
+        history_fig.tight_layout()
+        history_path = os.path.join(out_dir, f"attn_history_{_tag.rstrip('_') or 'eval'}.jpg")
+        history_fig.savefig(history_path, dpi=130, format="jpg", bbox_inches="tight")
+        plt.close(history_fig)
+        print(f"[ATTN] saved per-token history timeline to {history_path}")
     _run_str = f" (run {run_index})" if run_index is not None else ""
     print(f"[ATTN] saved {len(snapshots)} per-step token tables{_run_str} to {out_dir}")
+
+
+def _render_query_attention_maps(attn_state, run_index=None):
+    """Render separate observation-importance maps for action, aux-handle, and door-joint queries."""
+    snapshots = attn_state.get("query_snapshots", [])
+    if not snapshots:
+        return
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+    except Exception as exc:  # noqa: BLE001
+        print(f"[ATTN] matplotlib unavailable for query maps ({exc}); skipping.")
+        return
+
+    out_dir = attn_state["out_dir"]
+    env_id = attn_state["env_id"]
+    tag = f"run{run_index}_" if run_index is not None else ""
+    for query_name in ("action", "aux_handle", "door_joint"):
+        rows = []
+        for step, labels, query_weights in snapshots:
+            if query_name not in query_weights:
+                continue
+            values = query_weights[query_name].numpy()
+            rows.append({
+                "step": int(step),
+                "tokens": [
+                    {"index": int(i), "label": str(label), "attention": float(values[i])}
+                    for i, label in enumerate(labels)
+                ],
+            })
+            pcd_idx = [i for i, label in enumerate(labels) if label == "pointcloud"]
+            other_idx = [i for i, label in enumerate(labels) if label != "pointcloud"]
+            vmin, vmax = float(values.min()), float(values.max())
+            fig = plt.figure(figsize=(13.0, max(5.0, 0.34 * max(1, len(other_idx)))))
+            gs = fig.add_gridspec(1, 2, width_ratios=[1.6, 1.0])
+            ax_pcd = fig.add_subplot(gs[0, 0])
+            if pcd_idx:
+                cols = 16
+                grid = np.full(int(np.ceil(len(pcd_idx) / cols)) * cols, np.nan)
+                grid[:len(pcd_idx)] = values[pcd_idx]
+                ax_pcd.imshow(grid.reshape(-1, cols), cmap="viridis", vmin=vmin, vmax=vmax, aspect="auto")
+            ax_pcd.set_title(f"pointcloud ({len(pcd_idx)} tokens)")
+            ax_pcd.set_xticks([])
+            ax_pcd.set_yticks([])
+            ax_oth = fig.add_subplot(gs[0, 1])
+            col = values[other_idx].reshape(len(other_idx), 1) if other_idx else np.zeros((1, 1))
+            im = ax_oth.imshow(col, cmap="viridis", vmin=vmin, vmax=vmax, aspect="auto")
+            ax_oth.set_xticks([])
+            ax_oth.set_yticks(range(len(other_idx)))
+            ax_oth.set_yticklabels([labels[i] for i in other_idx], fontsize=8)
+            mid = 0.5 * (vmin + vmax)
+            for row_idx, token_idx in enumerate(other_idx):
+                ax_oth.text(0, row_idx, f"{values[token_idx]:.3f}", ha="center", va="center", fontsize=7,
+                            color="white" if values[token_idx] < mid else "black")
+            fig.colorbar(im, ax=[ax_pcd, ax_oth], label=f"{query_name} query attention")
+            fig.suptitle(f"{query_name} observation attention (env {env_id}, step {step})")
+            fig.savefig(os.path.join(out_dir, f"attn_{query_name}_{tag}{step}.jpg"), dpi=100, format="jpg")
+            plt.close(fig)
+
+        if rows:
+            json_path = os.path.join(out_dir, f"attn_{query_name}_{tag.rstrip('_') or 'eval'}.json")
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(rows, f, indent=2)
+            print(f"[ATTN] saved {query_name} query maps and token weights to {json_path}")
+
+
+def _render_pointcloud_source_attention(attn_state, run_index=None):
+    """Plot temporal point-cloud attention split by depth-camera vs explicit robot-model points."""
+    rows = attn_state.get("source_snapshots", [])
+    if not rows:
+        return
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    out_dir = attn_state["out_dir"]
+    env_id = attn_state["env_id"]
+    tag = f"run{run_index}_" if run_index is not None else ""
+    names = ("action", "aux_handle", "door_joint")
+    fig, axes = plt.subplots(3, 1, figsize=(10, 9), sharex=True)
+    for ax, name in zip(axes, names):
+        steps = [int(step) for step, values in rows if name in values]
+        depth = [float(values[name]["depth_camera"]) for step, values in rows if name in values]
+        robot = [float(values[name]["robot_model"]) for step, values in rows if name in values]
+        ax.plot(steps, depth, marker="o", linewidth=2, label="Depth-camera cloud (door + visible robot)")
+        ax.plot(steps, robot, marker="o", linewidth=2, label="Explicit robot-model points")
+        ax.set_ylabel(f"{name}\nattention mass")
+        ax.set_ylim(bottom=0.0)
+        ax.grid(True, alpha=0.25)
+        ax.legend(loc="upper right", fontsize=8)
+    axes[-1].set_xlabel("Policy step")
+    fig.suptitle(f"Point-cloud attention over rollout — env {env_id}")
+    fig.tight_layout()
+    path = os.path.join(out_dir, f"attn_pointcloud_sources_{tag.rstrip('_') or 'eval'}.jpg")
+    fig.savefig(path, dpi=140)
+    plt.close(fig)
+    with open(os.path.splitext(path)[0] + ".json", "w", encoding="utf-8") as f:
+        json.dump([{"step": int(step), **values} for step, values in rows], f, indent=2)
+    print(f"[ATTN] saved temporal point-cloud source attention to {path}")
 
 
 def _save_replay_pt(replay_runs, joint_names, base_env, save_replay_arg):
@@ -1285,6 +1496,45 @@ def _append_viser_frame(recorder, viser_meta, base_env, dagger, student_output):
         "pointcloud_base_pos_w": (rb_base_pos - org).to(torch.float32).cpu().clone(),
         "pointcloud_base_quat_w": rb_base_quat.to(torch.float32).cpu().clone(),
     }
+    # Save the normalized policy action and the exact temporal proprioception tensor fed to
+    # the student on this frame: [history_time, feature] per field, including any lag/noise.
+    if isinstance(student_output, dict) and isinstance(student_output.get("action"), torch.Tensor):
+        action = student_output["action"]
+        if action.ndim >= 3:
+            action = action[env_id, 0]
+        elif action.ndim == 2:
+            action = action[env_id]
+        frame["policy_action"] = action.detach().to(torch.float32).cpu().reshape(-1).clone()
+
+    student_obs = getattr(dagger, "latest_eval_student_obs", None)
+    temporal_key = getattr(dagger, "proprio_temporal_obs_key", None)
+    if isinstance(student_obs, dict) and temporal_key in student_obs:
+        temporal_obs = student_obs[temporal_key]
+        if isinstance(temporal_obs, dict):
+            state_history = {}
+            for field_name, values in temporal_obs.items():
+                if isinstance(values, torch.Tensor) and values.ndim >= 3 and values.shape[0] > env_id:
+                    state_history[str(field_name)] = values[env_id].detach().to(torch.float32).cpu().clone()
+            # Older/shared temporal encoders expose one [batch, feature] observation key
+            # per field and timestamp instead of one [batch, time, feature] field tensor.
+            if not state_history:
+                field_obs_keys = getattr(dagger, "proprio_temporal_field_obs_keys", {})
+                for field_name in getattr(dagger, "proprio_temporal_fields", ()):
+                    obs_keys = field_obs_keys.get(field_name, ())
+                    samples = [
+                        temporal_obs[key][env_id].detach().to(torch.float32).cpu()
+                        for key in obs_keys
+                        if key in temporal_obs
+                        and isinstance(temporal_obs[key], torch.Tensor)
+                        and temporal_obs[key].ndim == 2
+                        and temporal_obs[key].shape[0] > env_id
+                    ]
+                    if samples:
+                        state_history[str(field_name)] = torch.stack(samples, dim=0).clone()
+            frame["robot_state_history"] = state_history
+            frame["robot_state_history_timestamps_ms"] = [
+                float(t) for t in getattr(dagger, "proprio_temporal_timestamps_ms", ())
+            ]
     # Preserve the exact camera pose used to render this observation.  This lets replay diagnostics
     # distinguish a genuinely moving world surface from a camera/world reprojection error.
     sampler_camera_pose = dagger._get_sampler_camera_pose()[env_id].detach().to(torch.float32).clone()
@@ -1446,6 +1696,16 @@ def main(env_cfg, agent_cfg: dict):
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     env_cfg.use_motion_ref = True
+    if args_cli.base_action_scale is not None:
+        if args_cli.base_action_scale <= 0.0:
+            raise ValueError("--base-action-scale must be positive")
+        env_cfg.base_action_scale = args_cli.base_action_scale
+        print(f"[INFO] Eval-only base_action_scale override: {env_cfg.base_action_scale}")
+    if args_cli.arm_action_scale is not None:
+        if args_cli.arm_action_scale <= 0.0:
+            raise ValueError("--arm-action-scale must be positive")
+        env_cfg.arm_action_scale = args_cli.arm_action_scale
+        print(f"[INFO] Eval-only arm_action_scale override: {env_cfg.arm_action_scale}")
 
     if args_cli.seed is not None:
         env_cfg.seed = args_cli.seed
@@ -1641,6 +1901,8 @@ def main(env_cfg, agent_cfg: dict):
             "format": top_token_str,
             "interval": max(1, int(args_cli.attn_interval)),
             "snapshots": [],  # (step, token_labels, token_attn, pcd) every `interval` steps
+            "query_snapshots": [],  # (step, token_labels, {query_name: token_attn})
+            "source_snapshots": [],  # (step, {query_name: {depth_camera, robot_model}})
             "out_dir": _attn_dir,
         }
         print(
@@ -1771,10 +2033,21 @@ def main(env_cfg, agent_cfg: dict):
                         attn_state["snapshots"].append(
                             (int(step), _attn["token_labels"], _attn["token_attn"], _attn["pcd"])
                         )
+                        attn_state["query_snapshots"].append(
+                            (int(step), _attn["token_labels"], _attn.get("query_attn", {}))
+                        )
+                        attn_state["source_snapshots"].append(
+                            (int(step), _attn.get("pcd_source_attn", {}))
+                        )
                         print(
                             f"[ATTN] step {int(step):04d} env {attn_state['env_id']} | top: "
                             + attn_state["format"](_attn["token_labels"], _attn["token_attn"], top_k=8)
                         )
+                        for _query_name, _query_weights in _attn.get("query_attn", {}).items():
+                            print(
+                                f"[ATTN][{_query_name}] step {int(step):04d} env {attn_state['env_id']} | top: "
+                                + attn_state["format"](_attn["token_labels"], _query_weights, top_k=8)
+                            )
                 mode_step_summary = None
                 mode_logits = None
                 current_contact = None
@@ -1919,7 +2192,11 @@ def main(env_cfg, agent_cfg: dict):
         # overwrite each other; the .pt files are re-written with every run completed so far.
         if attn_state is not None and attn_state["snapshots"]:
             _render_attention_jpgs(attn_state, run_index=run_index)
+            _render_query_attention_maps(attn_state, run_index=run_index)
+            _render_pointcloud_source_attention(attn_state, run_index=run_index)
             attn_state["snapshots"].clear()
+            attn_state["query_snapshots"].clear()
+            attn_state["source_snapshots"].clear()
         if args_cli.save_replay and replay_runs:
             _save_replay_pt(replay_runs, _replay_joint_names, base_env, args_cli.save_replay)
         if args_cli.viser and viser_recorders is not None:

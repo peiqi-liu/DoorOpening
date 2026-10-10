@@ -636,6 +636,15 @@ def main() -> None:
         prev_button = server.gui.add_button("Prev")
         next_button = server.gui.add_button("Next")
 
+    with server.gui.add_folder("Policy / Proprioception"):
+        server.gui.add_markdown(
+            "Per-frame policy action, measured joint position, and proprioceptive history "
+            "recorded from the student input. History rows are ordered oldest to newest."
+        )
+        action_status = server.gui.add_text("Policy action", initial_value="", disabled=True)
+        measured_q_status = server.gui.add_text("Measured q", initial_value="", disabled=True)
+        history_status = server.gui.add_text("History state", initial_value="", disabled=True)
+
     show_clouds = {}
     with server.gui.add_folder("Pointclouds"):
         for stream in streams:
@@ -716,6 +725,33 @@ def main() -> None:
 
     def _apply_frame(frame_idx: int) -> None:
         frame = frames[frame_idx]
+        action_vec = _to_numpy_vector(frame.get("policy_action"))
+        measured_q_vec = _to_numpy_vector(frame.get("compact_q"))
+        action_status.value = (
+            "n/a" if action_vec is None else np.array2string(action_vec, precision=3, suppress_small=True)
+        )
+        measured_q_status.value = (
+            "n/a" if measured_q_vec is None else np.array2string(measured_q_vec, precision=3, suppress_small=True)
+        )
+        history = frame.get("robot_state_history", {})
+        timestamps_ms = frame.get("robot_state_history_timestamps_ms", [])
+        history_rows = []
+        if isinstance(history, dict):
+            for field_name, values in history.items():
+                values_np = np.asarray(values, dtype=np.float32)
+                if values_np.ndim == 1:
+                    values_np = values_np[None, :]
+                for history_idx, row in enumerate(values_np):
+                    timestamp = (
+                        f"{float(timestamps_ms[history_idx]):g}ms"
+                        if history_idx < len(timestamps_ms)
+                        else f"t{history_idx}"
+                    )
+                    history_rows.append(
+                        f"{field_name}@{timestamp}="
+                        f"{np.array2string(row, precision=3, suppress_small=True)}"
+                    )
+        history_status.value = " | ".join(history_rows) if history_rows else "not recorded in this replay"
         for stream in streams:
             points = _frame_cloud_points(frame, stream, static_pointclouds)
             handle = cloud_handles[stream["name"]]

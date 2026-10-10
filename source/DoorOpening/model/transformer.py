@@ -73,8 +73,10 @@ class PointNetEncoder(nn.Module):
         # 3D center of each output token (the FPS-sampled group centroids), stashed for attention
         # visualization: [B, num_output_tokens, 3] in the encoder's input frame. Detached + cheap.
         self.last_sampled_xyz = None
+        self.last_input_xyz = None
 
     def forward(self, xyz: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+        self.last_input_xyz = xyz.detach()
         features = xyz.clone().transpose(1, 2).contiguous()
         xyz, features = self.SA_module(xyz, features)
         self.last_sampled_xyz = xyz.detach()

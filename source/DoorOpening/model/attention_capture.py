@@ -79,9 +79,21 @@ class AttentionCapture:
             return None
         # [L, B, Lq, Sk] -> mean over decoder layers -> [B, Lq, Sk]
         attn = torch.stack(layer_weights, dim=0).mean(dim=0)
-        qs, qe = int(model.action_query_start), int(model.action_query_end)
-        # action queries (chunk) -> mean over the chunk -> [B, Sk]
-        action_attn = attn[:, qs:qe, :].mean(dim=1)
+        query_ranges = {
+            "action": (int(model.action_query_start), int(model.action_query_end)),
+        }
+        if getattr(model, "aux_query_idx", None) is not None:
+            query_ranges["aux_handle"] = (int(model.aux_query_idx), int(model.aux_query_idx) + 1)
+        if getattr(model, "door_joint_query_idx", None) is not None:
+            query_ranges["door_joint"] = (
+                int(model.door_joint_query_idx),
+                int(model.door_joint_query_idx) + 1,
+            )
+        query_attn = {
+            name: attn[:, qs:qe, :].mean(dim=1)
+            for name, (qs, qe) in query_ranges.items()
+        }
+        action_attn = query_attn["action"]
         env_id = max(0, min(int(env_id), action_attn.shape[0] - 1))
         row = action_attn[env_id]  # [Sk]
 
@@ -91,6 +103,7 @@ class AttentionCapture:
         labels = self._build_token_labels(model, token_ranges, int(row.shape[0]))
 
         pcd = {}
+        pcd_source_attn = {}
         for key, xyz in model.get_last_pcd_token_xyz().items():
             sl = token_ranges.get(key)
             if sl is None:
@@ -99,11 +112,38 @@ class AttentionCapture:
             if attn_tok.shape[0] != xyz.shape[1]:
                 continue  # token-count mismatch guard
             pcd[key] = (xyz[env_id].detach().float().cpu(), attn_tok.detach().float().cpu())
+            # PointNet++ returns FPS token centers but not their original point indices.
+            # Assign each center to its nearest input point, then use the policy-cloud source
+            # IDs recorded by the dagger (0=depth camera, 1=explicit robot model).
+            encoder = model.encoders[key] if hasattr(model, "encoders") and key in model.encoders else None
+            input_xyz = getattr(encoder, "last_input_xyz", None)
+            if input_xyz is None and key == "local_pcd_t":
+                input_xyz = getattr(model, "last_pcd_input_xyz", None)
+            source_ids = getattr(model, "last_pcd_source_ids", None)
+            if input_xyz is not None and source_ids is not None:
+                inp = input_xyz[env_id].detach()
+                centers = xyz[env_id].detach()
+                sid = source_ids[env_id].detach()
+                nearest = torch.cdist(centers.float(), inp.float()).argmin(dim=1)
+                tok_source = sid[nearest]
+                q_source = {}
+                for qname, qweights in query_attn.items():
+                    qw = qweights[env_id][sl].detach().float()
+                    q_source[qname] = {
+                        "depth_camera": float(qw[tok_source == 0].sum().cpu()),
+                        "robot_model": float(qw[tok_source == 1].sum().cpu()),
+                    }
+                pcd_source_attn[key] = q_source
 
         return {
             "token_labels": labels,                       # list[str], one per memory token
             "token_attn": row.detach().float().cpu(),     # [Sk] attention per memory token
             "pcd": pcd,                                    # {key: (xyz[T,3], attn[T])} for pcd tokens
+            "pcd_source_attn": pcd_source_attn,
+            "query_attn": {
+                name: weights[env_id].detach().float().cpu()
+                for name, weights in query_attn.items()
+            },
         }
 
     @staticmethod

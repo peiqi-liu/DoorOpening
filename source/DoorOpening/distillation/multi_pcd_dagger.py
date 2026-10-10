@@ -4194,7 +4194,17 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
 
         if not pcd_parts:
             raise ValueError("Student config requested local_pcd_t but no local point counts were configured.")
-        return torch.cat(pcd_parts, dim=1)
+        policy_pcd = torch.cat(pcd_parts, dim=1)
+        robot_count = 0
+        if robot_pcd_base is not None and robot_pcd_base.numel() > 0 and self.robot_model_policy_points > 0:
+            robot_count = min(int(robot_pcd_base.shape[1]), int(self.robot_model_policy_points))
+        source_ids = torch.zeros(
+            (policy_pcd.shape[0], policy_pcd.shape[1]), dtype=torch.long, device=policy_pcd.device
+        )
+        if robot_count > 0:
+            source_ids[:, -robot_count:] = 1
+        self._last_policy_input_source_ids = source_ids
+        return policy_pcd
 
     def _get_global_batch_size(self, local_batch_size):
         batch_size = torch.tensor(int(local_batch_size), dtype=torch.int64, device=self.device)
@@ -4355,6 +4365,11 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         # Cache the latest policy-input cloud (base frame, [num_envs, N, 3]) so eval/replay can save
         # it into the compact .pt even when the full viser_raw path is not enabled.
         self._last_policy_input_pcd_base = obs.get("local_pcd_t")
+        if self._last_policy_input_pcd_base is not None:
+            # AttentionCapture uses these IDs to split PointNet token attention into the
+            # depth-camera portion and the explicitly appended robot-model portion.
+            self.student_model.last_pcd_source_ids = self._last_policy_input_source_ids
+            self.student_model.last_pcd_input_xyz = self._last_policy_input_pcd_base
 
         if self.viser_raw_enabled and has_pcd:
             self._viser_pending_debug_frame = {

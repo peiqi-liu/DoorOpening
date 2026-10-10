@@ -136,14 +136,14 @@ DEFAULT_RETURN_HANDLE_PROB = 0.3  # was 0.7, temp update
 #                  it stays put under the joint_2 sweep. Sized by radius and protrusion (length).
 # In both cases the handle stem starts at the OUTER face of the mount, so handle_stem_length is the
 # clear gap the fingers get above the mount.
-# REVERTED TO ON, weighted toward near-universal (was 0.0): a bare lever with literally zero mounting
+# REVERTED TO ON, weighted toward common plates (was 0.0): a bare lever with literally zero mounting
 # plate/rose is rare in reality -- almost every real handle has SOME backplate, even a thin flush one.
 # A 512-door audit previously found the plate cost a ~17-point success penalty at every handle height
 # (85.8% -> 69.6% below 0.95 m world, 61.3% -> 43.5% above), and that cost was NOT explained by the
 # finger-clearance the plate eats into (-0.082 on grasp failures, -0.001 on the rest) -- so the
 # regression is a training/reward gap to go fix, not evidence the plate itself is unrealistic. Pass
 # --handle-bump-prob 0.0 to go back to the old disabled behavior if that regression needs isolating.
-DEFAULT_HANDLE_BUMP_PROB = 0.9
+DEFAULT_HANDLE_BUMP_PROB = 0.8
 # "random" (was "box") so choose_mode() actually rolls box vs cylinder per variant instead of always
 # returning the fixed value verbatim -- with a literal "box"/"cylinder" every door got the same shape
 # and handle_bump_radius (the cylinder-only size) was sampled every time but never used. A round rose
@@ -407,7 +407,7 @@ def parse_args():
         type=float,
         default=DEFAULT_HANDLE_BUMP_PROB,
         help="Probability a variant gets a raised mount (bump) at the handle base that the lever "
-        "sits on (default 0.9 -- see DEFAULT_HANDLE_BUMP_PROB). When on, the plate SIZE still varies "
+        "sits on (default 0.8 -- see DEFAULT_HANDLE_BUMP_PROB). When on, the plate SIZE still varies "
         "down to nearly-flush, so the smallest plate is ~no plate. 0.0 disables it entirely; 1.0 "
         "forces a (possibly tiny) plate on all.",
     )
