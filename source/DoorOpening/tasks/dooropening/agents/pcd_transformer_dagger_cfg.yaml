@@ -187,17 +187,14 @@ dagger:
   aux_handle_input_mode: recurrent
   aux_feedback_to_policy: true  # Recurrent feedback: previous step's aux prediction is fed back as the next-step input.
   aux_handle_init_source: ground_truth  # First-step seed: feed the (noised/biased) sim handle pose only on the first step after each reset. Requires aux_feedback_to_policy: true.
-  # Two-term detector-error model on the aux handle pose (input only, never the aux target beyond what
-  # the bias bakes in). Both are redrawn/added to EVERY aux input the policy sees (reset seed + the
-  # recurrent fed-back prediction).
-  # BIAS: per-episode constant offset baked into the ground-truth handle (feeds target + seed together)
-  # so it PERSISTS all episode -- a real systematic per-door offset (off downward on one door, up/left
-  # on another). Sampled as a CUBE: each of x/y/z independently uniform in [-this, +this] (per-dim
-  # threshold in m, NOT a ball). 0.0 disables it.
-  aux_handle_gt_bias_m: 0.05
+  # The auxiliary target is the true handle pose. Input perturbations model detector error.
+  # BIAS: per-episode constant offset on the first input seed only. Each x/y/z coordinate
+  # is sampled independently from [-this, +this] m. The recurrent prediction receives
+  # fresh noise, but no new bias. 0.0 disables this bias.
+  aux_handle_gt_bias_m: 0.0
   # NOISE: fresh per-step isotropic (ball) jitter, random direction x magnitude in [0, this] (m), added
   # to every aux input -- frame-to-frame detector noise. 0.0 disables it.
-  aux_handle_noise_m: 0.1
+  aux_handle_noise_m: 0.05
   # Two visible handle endpoints: smaller than aux noise/bias, but still substantial for SAM3
   # endpoint uncertainty. Noise is per point/per observation; bias is per point/per episode.
   initial_handle_points_noise_m: 0.05
@@ -233,13 +230,14 @@ dagger:
   # noise/frame-convention issues but loses stall/slip feedback.
   # MUST match door_policy.yaml's policy.base_vel_source on the deploy side; this is a trained input.
   base_vel_source: "measured"
-  scene_robot_num_points: 30000  # GT robot/model points concatenated into the renderable scene cloud.
-  append_robot_model_to_policy_cloud: true
-  robot_model_policy_points: 1000  # Robot model points appended to the policy input after the depth/lidar crops.
+  scene_robot_num_points: 30000  # Full-robot points for simulated depth rendering.
+  scene_robot_link_names: null  # All supported robot links, including base and wheels.
+  append_robot_model_to_policy_cloud: false
+  robot_model_policy_points: 0  # Robot model points disabled for this experiment.
   robot_pointcloud_filter:
     # Robot self-points are stripped from the LIDAR cloud only. The depth camera is a real sensor that
     # sees the robot's own hand, so the depth cloud keeps its self-points (see _sample_scene_obs_pointcloud_base).
-    enabled: true
+    enabled: false
     sdf_cutoff: 0.02
     max_points_per_process: 5000
   depth_cam_render:
