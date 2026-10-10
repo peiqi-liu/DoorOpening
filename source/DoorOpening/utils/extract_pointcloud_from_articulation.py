@@ -1015,7 +1015,7 @@ def resolve_mesh_path(urdf_path: str, mesh_filename: str):
         return urdf_dir / mesh_filename
 
 class FrankaGripperSampler:
-    def __init__(self, urdf_path, device = "cuda", num_points=4096):
+    def __init__(self, urdf_path, device = "cuda", num_points=4096, link_names=None):
         self.device = device
         self.urdf_path = urdf_path
         self.robot = TorchURDF.load(urdf_path, lazy_load_meshes=True, device=device)
@@ -1034,7 +1034,12 @@ class FrankaGripperSampler:
         # Load all links with supported visual geometry.  Scratch doors can use URDF
         # box visuals for solid panel/frame bodies; the old first-visual mesh filter
         # silently dropped those links from the point cloud.
-        self.links = [l for l in self.robot.links if any(self._visual_is_supported(v) for v in l.visuals)]
+        selected_links = None if link_names is None else set(link_names)
+        self.links = [
+            l for l in self.robot.links
+            if (selected_links is None or l.name in selected_links)
+            and any(self._visual_is_supported(v) for v in l.visuals)
+        ]
         self.hand_links = [l for l in self.links if "panda" not in l.name]
         self.points = self._build_link_point_samples(num_points)
 

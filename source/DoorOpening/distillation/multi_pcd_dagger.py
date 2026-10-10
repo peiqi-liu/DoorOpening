@@ -860,8 +860,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                     "dagger.aux_handle_init_source='ground_truth' requires aux_feedback_to_policy=true; "
                     "otherwise the policy never sees the seeded handle pose."
                 )
-        # Two-term detector-error model on the aux handle pose. Applied to the INPUT the policy sees,
-        # never used to un-bias the aux regression target beyond what the bias already bakes in.
+        # Input perturbations model handle detection error; the auxiliary regression target is clean.
         #
         # NOISE (aux_handle_noise_m): fresh per-step isotropic (ball) jitter added to EVERY aux input --
         # the reset seed AND the recurrent fed-back prediction. Random direction x magnitude in
@@ -870,11 +869,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             self.runtime_cfg.get("aux_handle_noise_m", 0.0),
             "aux_handle_noise_m",
         )
-        # BIAS (aux_handle_gt_bias_m): per-episode constant offset added to the GROUND-TRUTH handle, so
-        # it feeds BOTH the aux target and the seed and therefore PERSISTS on every input for the whole
-        # episode (a real systematic per-door offset, redrawn per reset -- off downward on one door,
-        # up/sideways on another). Sampled as an axis-aligned CUBE: each of x/y/z is independent uniform
-        # in [-bound, +bound] (per-dimension threshold, NOT a ball). 0.0 disables it.
+        # BIAS (aux_handle_gt_bias_m): per-episode offset on the first input seed,
+        # independently uniform in [-bound, +bound] for each coordinate. The target stays clean.
         self.aux_handle_gt_bias_m = self._parse_aux_handle_offset_bound(
             self.runtime_cfg.get("aux_handle_gt_bias_m", 0.0),
             "aux_handle_gt_bias_m",
@@ -2754,12 +2750,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
     def _get_handle_position_base(self):
         getter = getattr(self.ov_env, "get_handle_position_in_base_frame", None)
         if callable(getter):
-            handle_pos = getter()
-            # Add the per-episode systematic handle bias so it flows into BOTH the aux target and the
-            # policy input seed (constant within an episode -> persists; see aux_handle_gt_bias).
-            if self.aux_handle_gt_bias is not None:
-                handle_pos = handle_pos + self.aux_handle_gt_bias
-            return handle_pos
+            return getter()
         raise RuntimeError(
             "Expected environment to expose get_handle_position_in_base_frame() "
             "for aux handle position prediction."
@@ -2875,10 +2866,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         return (torch.rand(shape, dtype=dtype, device=self.device) * 2.0 - 1.0) * float(bound)
 
     def _resample_aux_handle_gt_bias(self, env_ids=None):
-        # Per-episode SYSTEMATIC ground-truth handle bias, redrawn for the resetting envs as a CUBE
-        # (each of x/y/z uniform in [-aux_handle_gt_bias_m, +aux_handle_gt_bias_m]). Held constant for
-        # the episode and added to the true handle for BOTH the aux target and the seed, so it persists
-        # (models SAM3 being consistently off in a per-door direction). Zeroed when the bias is off.
+        # Per-episode handle detection bias for the first input seed. The auxiliary target remains clean.
         if self.aux_handle_gt_bias is None:
             return
         if self.aux_handle_gt_bias_m is None:
@@ -2925,8 +2913,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
 
     def _apply_aux_handle_init_perturbation(self, handle_pos):
         # Add fresh per-call isotropic NOISE (aux_handle_noise_m) to a handle-pose input seed/anchor.
-        # The systematic BIAS is already baked into the ground-truth handle (aux_handle_gt_bias), so it
-        # is NOT re-added here. Used only for the policy INPUT, never for the regression target.
+        # The caller adds the episode bias to an input seed before this fresh noise.
+        # The auxiliary regression target remains unperturbed.
         if handle_pos is None or self.aux_handle_noise_m is None:
             return handle_pos
         noise = self._sample_isotropic_offset(
@@ -2942,6 +2930,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             aux_values = self._get_aux_state_values()
             if "aux_handle_pos" in aux_values:
                 aux_values = OrderedDict(aux_values)
+                if self.aux_handle_gt_bias is not None:
+                    aux_values["aux_handle_pos"] = aux_values["aux_handle_pos"] + self.aux_handle_gt_bias
                 aux_values["aux_handle_pos"] = self._apply_aux_handle_init_perturbation(
                     aux_values["aux_handle_pos"]
                 )
@@ -2963,6 +2953,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         ):
             value = self._get_aux_state_values().get("aux_handle_pos")
             if value is not None:
+                if self.aux_handle_gt_bias is not None:
+                    value = value + self.aux_handle_gt_bias
                 value = self._apply_aux_handle_init_perturbation(value)
                 return value.to(device=self.device, dtype=torch.float32)
         return torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
@@ -3133,10 +3125,15 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             self.scene_robot_pcd_num_points = self.scene_door_pcd_num_points
 
         self.scene_robot_pcd_num_points = int(self.scene_robot_pcd_num_points)
+        franka_scene_link_names = self.runtime_cfg.get("scene_robot_link_names")
+        # None restores the original sampler behavior: all supported robot links.
+        if franka_scene_link_names is not None and not franka_scene_link_names:
+            raise ValueError("scene_robot_link_names must contain at least one robot link.")
         self.robot_sampler = FrankaGripperSampler(
             glorbot_urdf_path,
             device=self.device,
             num_points=self.scene_robot_pcd_num_points,
+            link_names=franka_scene_link_names,
         )
         robot_sampler_joint_names = list(self.robot_sampler.robot.actuated_joint_names)
         robot_joint_ids, robot_joint_names = self.ov_env.robot.find_joints(robot_sampler_joint_names)
@@ -3626,6 +3623,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         }
 
     def _sample_robot_pointcloud_world_sampler(self):
+        if self.scene_robot_pcd_num_points <= 0:
+            return torch.zeros((self.num_envs, 0, 3), dtype=torch.float32, device=self.device)
         return compose_cached_link_pointcloud_world(
             link_points_by_name=self.robot_link_pointclouds,
             link_pos_w_by_name={
