@@ -259,10 +259,15 @@ class LoggingMixin:
             if self.rollout_progress_prediction_enabled:
                 print("Rollout Progress Target Mean:", self.latest_rollout_progress_target_mean)
             if self.observation_lag_enabled:
-                print("Obs Lag Enabled:", bool(self.latest_obs_lag_enabled))
-                print("Obs Lag Mean (ms):", self.latest_obs_lag_mean_ms)
-                print("Obs Lag Min (ms):", self.latest_obs_lag_min_ms)
-                print("Obs Lag Max (ms):", self.latest_obs_lag_max_ms)
+                if self.observation_lag_mode == "camera_timing":
+                    print("Camera Capture Age Mean (ms):", float(self.latest_camera_capture_age_ms.mean()))
+                    if self.latest_camera_capture_gap_ms is not None:
+                        print("Selected Cloud Gap Mean (ms):", float(self.latest_camera_capture_gap_ms.mean()))
+                else:
+                    print("Obs Lag Enabled:", bool(self.latest_obs_lag_enabled))
+                    print("Obs Lag Mean (ms):", self.latest_obs_lag_mean_ms)
+                    print("Obs Lag Min (ms):", self.latest_obs_lag_min_ms)
+                    print("Obs Lag Max (ms):", self.latest_obs_lag_max_ms)
             if self.push_pull_condition_enabled:
                 print("Push/Pull Condition Source:", self.latest_push_pull_condition_source)
                 print("Fraction Push:", self.latest_fraction_push)
@@ -359,12 +364,20 @@ class LoggingMixin:
         if self.rollout_progress_prediction_enabled and self.latest_rollout_progress_target_mean is not None:
             metrics["stats/rollout_progress_target_mean"] = self.latest_rollout_progress_target_mean
         if self.observation_lag_enabled:
-            metrics["timestamp/obs_lag_enabled"] = self.latest_obs_lag_enabled
-            metrics["timestamp/obs_lag_mean_ms"] = self.latest_obs_lag_mean_ms
-            metrics["timestamp/obs_lag_min_ms"] = self.latest_obs_lag_min_ms
-            metrics["timestamp/obs_lag_max_ms"] = self.latest_obs_lag_max_ms
-            for timestamp_ms, mean_age_ms in self.latest_obs_lag_effective_age_ms_by_timestamp.items():
-                metrics[f"timestamp/obs_lag_effective_age_{timestamp_ms}ms"] = mean_age_ms
+            if self.observation_lag_mode == "camera_timing":
+                metrics["timestamp/camera_capture_age_mean_ms"] = float(self.latest_camera_capture_age_ms.mean())
+                metrics["timestamp/camera_capture_variation_mean_ms"] = (
+                    self.camera_nominal_age_ms - metrics["timestamp/camera_capture_age_mean_ms"]
+                )
+                if self.latest_camera_capture_gap_ms is not None:
+                    metrics["timestamp/selected_cloud_gap_mean_ms"] = float(self.latest_camera_capture_gap_ms.mean())
+            else:
+                metrics["timestamp/obs_lag_enabled"] = self.latest_obs_lag_enabled
+                metrics["timestamp/obs_lag_mean_ms"] = self.latest_obs_lag_mean_ms
+                metrics["timestamp/obs_lag_min_ms"] = self.latest_obs_lag_min_ms
+                metrics["timestamp/obs_lag_max_ms"] = self.latest_obs_lag_max_ms
+                for timestamp_ms, mean_age_ms in self.latest_obs_lag_effective_age_ms_by_timestamp.items():
+                    metrics[f"timestamp/obs_lag_effective_age_{timestamp_ms}ms"] = mean_age_ms
         metrics["stats/temporal_aux_handle_enabled"] = float(self.temporal_aux_handle_enabled)
         metrics["stats/temporal_push_pull_belief_enabled"] = float(self.temporal_push_pull_belief_enabled)
         metrics["stats/push_pull_belief_hist_entropy_now"] = self.latest_push_pull_belief_hist_entropy_now

@@ -345,6 +345,7 @@ import DoorOpening.tasks  # noqa: F401
 from DoorOpening.assets.cache_utils import preconvert_shared_urdf_assets
 from DoorOpening.assets.door.multi_door_cfg import ALL_DOOR_CONFIGS as MULTI_DOOR_CONFIGS
 from DoorOpening.assets.door.multi_door_cfg import DOOR_FAMILY_NAMES, asset_family_ids, asset_paths
+from DoorOpening.distillation.camera_capture_timing import interpolate_uniform_history
 from DoorOpening.distillation.multi_pcd_dagger import Dagger
 from DoorOpening.tasks.dooropening.multi_dooropening_env import DOOR_LATCH_HINGE_THRESHOLD_RAD, compute_tracking_error
 
@@ -1452,6 +1453,20 @@ def _append_viser_frame(recorder, viser_meta, base_env, dagger, student_output):
     base_body_idx = base_env._robot_base_body_link_idx
     rb_base_pos = base_env.robot.data.body_pos_w[env_id, base_body_idx].detach()
     rb_base_quat = base_env.robot.data.body_quat_w[env_id, base_body_idx].detach()
+    capture_pose = getattr(dagger, "latest_camera_pose_snapshot", None)
+    if capture_pose is not None:
+        # The meshes and local-cloud frame in this replay must describe the sensor's
+        # capture time, not the later command time. Keep command-time joints separately.
+        command_q = q.clone()
+        command_dj = base_env.door.data.joint_pos[env_id].detach().cpu().clone()
+        age_s = dagger.latest_camera_capture_age_ms / 1000.0
+        capture_target = interpolate_uniform_history(dagger.temporal_target_history, age_s, dagger.temporal_dt_s)
+        q = capture_pose["robot_joint_pos"][env_id, viser_meta["compact_idx"]].detach().cpu().clone()
+        target_full = torch.zeros_like(capture_pose["robot_joint_pos"])
+        target_full[:, dagger.student_joint_ids] = capture_target
+        tgt = target_full[env_id, viser_meta["compact_idx"]].detach().cpu().clone()
+        rb_base_pos = capture_pose["robot_pos_w"][env_id, base_body_idx].detach()
+        rb_base_quat = capture_pose["robot_quat_w"][env_id, base_body_idx].detach()
 
     def _base_to_world(points_base):
         """Rotate+translate base-body-frame points [N, 3] into env-relative world coords."""
@@ -1483,7 +1498,10 @@ def _append_viser_frame(recorder, viser_meta, base_env, dagger, student_output):
         return torch.where(padding.unsqueeze(-1), torch.full_like(world, float("nan")), world)
 
     # ACTUAL sim door joints for this frame (NOT predicted); the replay poses the door URDF with these.
-    dj = base_env.door.data.joint_pos[env_id].detach()
+    dj = (
+        base_env.door.data.joint_pos[env_id].detach()
+        if capture_pose is None else capture_pose["door_joint_pos"][env_id].detach()
+    )
     frame = {
         "compact_q": q,
         "compact_target": tgt,
@@ -1496,6 +1514,11 @@ def _append_viser_frame(recorder, viser_meta, base_env, dagger, student_output):
         "pointcloud_base_pos_w": (rb_base_pos - org).to(torch.float32).cpu().clone(),
         "pointcloud_base_quat_w": rb_base_quat.to(torch.float32).cpu().clone(),
     }
+    if capture_pose is not None:
+        frame["camera_capture_time_s"] = float(dagger.camera_capture_time_s[env_id])
+        frame["camera_capture_age_ms"] = float(dagger.latest_camera_capture_age_ms[env_id])
+        frame["command_robot_joint_pos"] = command_q
+        frame["command_door_joint_pos"] = command_dj
     # Save the normalized policy action and the exact temporal proprioception tensor fed to
     # the student on this frame: [history_time, feature] per field, including any lag/noise.
     if isinstance(student_output, dict) and isinstance(student_output.get("action"), torch.Tensor):
@@ -1537,7 +1560,7 @@ def _append_viser_frame(recorder, viser_meta, base_env, dagger, student_output):
             ]
     # Preserve the exact camera pose used to render this observation.  This lets replay diagnostics
     # distinguish a genuinely moving world surface from a camera/world reprojection error.
-    sampler_camera_pose = dagger._get_sampler_camera_pose()[env_id].detach().to(torch.float32).clone()
+    sampler_camera_pose = dagger._get_sampler_camera_pose(pose=capture_pose)[env_id].detach().to(torch.float32).clone()
     sampler_camera_pose[:3] -= org.to(torch.float32)
     frame["sampler_camera_pose_env_xyzw"] = sampler_camera_pose.cpu()
     # Policy-input point cloud (the local_pcd_t the student consumes), cached on the dagger in

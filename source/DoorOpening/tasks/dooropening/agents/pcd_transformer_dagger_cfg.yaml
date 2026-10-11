@@ -86,7 +86,7 @@ push_pull_condition_perturb:
   wrong_class_confidence_range: [0.85, 0.95]
 
 observation_lag:
-  enabled: true
+  enabled: false  # Legacy independent proprioception jitter; superseded by camera_timing.
   max_jitter_ms: 150
   mode: symmetric
   apply_to_proprio: true
@@ -94,6 +94,17 @@ observation_lag:
   per_env: true
   per_timestamp: true
   clamp_to_available_history: true
+
+camera_timing:
+  enabled: true
+  # Signed variation around the nominal selected cloud, NOT an extra independent lag.
+  # Continuously sample a per-inference variation in (-67, +67) ms, rather
+  # than quantizing source times to a 33 ms grid. The nominal source is the
+  # PREVIOUS 15 Hz policy boundary. By the next inference, even a +67 ms
+  # variation is available, and the resulting action applies after inference.
+  # Depth, joints, base velocity and PD target share the selected source time.
+  nominal_age_ms: 67
+  variation_ms: 67
 
 pcd_encoders_cfg:
   local_pcd_t:

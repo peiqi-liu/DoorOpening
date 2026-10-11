@@ -225,6 +225,7 @@ from DoorOpening.distillation.pcd_dagger import Dagger
 from DoorOpening.assets.cache_utils import preconvert_shared_urdf_assets
 
 import DoorOpening.tasks # noqa: F401
+from DoorOpening.distillation.action_latency import set_distillation_action_latency
 
 
 @hydra_task_config(args_cli.task, "rl_games_cfg_entry_point")
@@ -246,6 +247,7 @@ def main(env_cfg, agent_cfg: dict):
         )
 
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+    set_distillation_action_latency(env_cfg, latency_range=(1, 2))
 
     # parse configuration
     # env_cfg = parse_env_cfg(

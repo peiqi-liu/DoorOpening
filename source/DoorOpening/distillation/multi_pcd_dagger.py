@@ -67,6 +67,7 @@ from DoorOpening.utils.viser_pt import (
 from DoorOpening.distillation._dagger_viser import ViserDebugMixin
 from DoorOpening.distillation._dagger_checkpoint import CheckpointMixin
 from DoorOpening.distillation._dagger_logging import LoggingMixin
+from DoorOpening.distillation.camera_capture_timing import interpolate_uniform_history, sample_capture_time
 
 
 def clip_teacher_obs(obs: torch.Tensor, clip_obs: float) -> torch.Tensor:
@@ -404,6 +405,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
 
         self.temporal_obs_cfg = {}
         self.observation_lag_cfg = {}
+        self.camera_timing_cfg = {}
         self.temporal_derived_state_specs = OrderedDict()
         self.temporal_history_s = 0.0
         self.temporal_obs_delay_range_s = (0.0, 0.0)
@@ -437,6 +439,21 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.observation_lag_clamp_to_available_history = True
         self.observation_lag_max_jitter_ms = 0
         self.observation_lag_mode = "symmetric"
+        self.camera_nominal_age_ms = 67.0
+        self.camera_timing_variation_ms = 67.0
+        self.camera_capture_time_s = None
+        self.camera_reused_capture = None
+        self.camera_cached_depth_pcd_base = None
+        self.camera_cached_depth_pcd_world = None
+        self.camera_episode_start_s = None
+        self.camera_robot_pos_history = None
+        self.camera_robot_quat_history = None
+        self.camera_robot_joint_history = None
+        self.camera_door_pos_history = None
+        self.camera_door_quat_history = None
+        self.camera_door_joint_history = None
+        self.latest_camera_capture_age_ms = None
+        self.latest_camera_capture_gap_ms = None
         self.latest_obs_lag_enabled = 0.0
         self.latest_obs_lag_mean_ms = 0.0
         self.latest_obs_lag_min_ms = 0.0
@@ -615,6 +632,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         )
         self.temporal_obs_cfg = dict(student_cfg_data.pop("temporal_obs", {}) or {})
         self.observation_lag_cfg = dict(student_cfg_data.pop("observation_lag", {}) or {})
+        self.camera_timing_cfg = dict(student_cfg_data.pop("camera_timing", {}) or {})
         self.push_pull_condition_perturb_cfg = dict(student_cfg_data.pop("push_pull_condition_perturb", {}) or {})
         self.temporal_history_s = float(self.temporal_obs_cfg.get("history_s", 0.0))
         self.temporal_obs_delay_range_s = self.temporal_obs_cfg.get("obs_delay_s", [0.0, 0.0])
@@ -1040,12 +1058,25 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         if self.observation_lag_max_jitter_ms < 0:
             raise ValueError("observation_lag.max_jitter_ms must be non-negative.")
         if self.observation_lag_mode != "symmetric":
-            raise ValueError("observation_lag.mode must be 'symmetric'.")
+            raise ValueError("observation_lag.mode must be 'symmetric'; use camera_timing for capture variation.")
         if self.observation_lag_apply_to_pointcloud:
-            raise NotImplementedError(
-                "observation_lag.apply_to_pointcloud=true is not implemented in this patch. "
-                "Set apply_to_pointcloud=false."
-            )
+            raise NotImplementedError("Use camera_timing to vary depth and proprioception together.")
+
+        timing_cfg = dict(self.camera_timing_cfg or {})
+        if timing_cfg.get("enabled", False):
+            if self.observation_lag_enabled:
+                raise ValueError("Disable legacy observation_lag when camera_timing is enabled.")
+            self.observation_lag_mode = "camera_timing"
+            self.observation_lag_enabled = True
+            self.observation_lag_apply_to_proprio = True
+            self.observation_lag_apply_to_pointcloud = True
+            self.camera_nominal_age_ms = float(timing_cfg.get("nominal_age_ms", 67.0))
+            self.camera_timing_variation_ms = float(timing_cfg.get("variation_ms", 67.0))
+            if self.camera_nominal_age_ms < 0 or self.camera_timing_variation_ms < 0 or self.camera_timing_variation_ms > self.camera_nominal_age_ms:
+                raise ValueError("Invalid camera_timing nominal age or variation range.")
+            if self.pointcloud_source not in {"depth", "sampler"}:
+                raise ValueError("camera_timing currently supports the custom depth source only.")
+            self.max_temporal_history_s += (self.camera_nominal_age_ms + self.camera_timing_variation_ms) / 1000.0
         self._reset_observation_lag_stats()
 
     def _init_push_pull_condition_runtime_state(self, student_yaml_runtime_cfg):
@@ -1896,6 +1927,20 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             dtype=torch.float32,
             device=self.device,
         )
+        if self.observation_lag_mode == "camera_timing" and self.observation_lag_enabled:
+            self.camera_episode_start_s = torch.full((self.num_envs,), self.temporal_current_time_s, device=self.device)
+            for name, value in (
+                ("camera_robot_pos_history", self.ov_env.robot.data.body_pos_w),
+                ("camera_robot_quat_history", self.ov_env.robot.data.body_quat_w),
+                ("camera_robot_joint_history", self.ov_env.robot.data.joint_pos),
+                ("camera_door_pos_history", self.ov_env.door.data.body_pos_w),
+                ("camera_door_quat_history", self.ov_env.door.data.body_quat_w),
+                ("camera_door_joint_history", self.ov_env.door.data.joint_pos),
+            ):
+                setattr(self, name, torch.zeros(
+                    (self.num_envs, self.temporal_history_len, *value.shape[1:]),
+                    dtype=value.dtype, device=self.device,
+                ))
         self.temporal_target_history = torch.zeros(
             (self.num_envs, self.temporal_history_len, self.num_actions),
             dtype=torch.float32,
@@ -1952,7 +1997,74 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
     def _is_observation_lag_active(self):
         if not self.observation_lag_enabled or not self.observation_lag_apply_to_proprio:
             return False
-        return not self.play_policy
+        return self.observation_lag_mode == "camera_timing" or not self.play_policy
+
+    def _capture_camera_pose_history(self, *, reset=False, env_ids=None):
+        if self.camera_robot_pos_history is None:
+            return
+        for history_name, live_value in (
+            ("camera_robot_pos_history", self.ov_env.robot.data.body_pos_w),
+            ("camera_robot_quat_history", self.ov_env.robot.data.body_quat_w),
+            ("camera_robot_joint_history", self.ov_env.robot.data.joint_pos),
+            ("camera_door_pos_history", self.ov_env.door.data.body_pos_w),
+            ("camera_door_quat_history", self.ov_env.door.data.body_quat_w),
+            ("camera_door_joint_history", self.ov_env.door.data.joint_pos),
+        ):
+            history = getattr(self, history_name)
+            value = live_value.detach()
+            if reset:
+                if env_ids is None:
+                    history[:] = value.unsqueeze(1).expand_as(history)
+                else:
+                    history[env_ids] = value[env_ids].unsqueeze(1).expand(-1, self.temporal_history_len, *value.shape[1:])
+            elif env_ids is None:
+                history[:, 1:] = history[:, :-1].clone()
+                history[:, 0] = value
+            else:
+                history[env_ids, 1:] = history[env_ids, :-1].clone()
+                history[env_ids, 0] = value[env_ids]
+        if reset:
+            if env_ids is None:
+                self.camera_episode_start_s[:] = self._get_current_time_s()
+                self.camera_capture_time_s = None
+                self.camera_cached_depth_pcd_base = None
+                self.camera_cached_depth_pcd_world = None
+            else:
+                self.camera_episode_start_s[env_ids] = self._get_current_time_s()
+                if self.camera_capture_time_s is not None:
+                    self.camera_capture_time_s[env_ids] = float("nan")
+                if self.camera_cached_depth_pcd_base is not None:
+                    self.camera_cached_depth_pcd_base[env_ids] = float("nan")
+                    self.camera_cached_depth_pcd_world[env_ids] = float("nan")
+
+    def _select_camera_capture_snapshot(self):
+        previous_time = self.camera_capture_time_s
+        capture_time, _ = sample_capture_time(
+            self._get_current_time_s(), self.camera_episode_start_s, previous_time,
+            nominal_age_ms=self.camera_nominal_age_ms,
+            variation_ms=self.camera_timing_variation_ms,
+        )
+        self.camera_capture_time_s = capture_time
+        self.camera_reused_capture = (
+            torch.zeros_like(capture_time, dtype=torch.bool)
+            if previous_time is None else (capture_time - previous_time).abs() < 1.0e-5
+        )
+        age_s = (self._get_current_time_s() - capture_time).clamp_min(0.0)
+        self.latest_camera_capture_age_ms = age_s * 1000.0
+        self.latest_camera_capture_gap_ms = (
+            None if previous_time is None else torch.where(
+                torch.isfinite(previous_time), (capture_time - previous_time).clamp_min(0.0) * 1000.0,
+                torch.zeros_like(capture_time),
+            )
+        )
+        return {
+            "robot_pos_w": interpolate_uniform_history(self.camera_robot_pos_history, age_s, self.temporal_dt_s),
+            "robot_quat_w": interpolate_uniform_history(self.camera_robot_quat_history, age_s, self.temporal_dt_s, quaternion=True),
+            "robot_joint_pos": interpolate_uniform_history(self.camera_robot_joint_history, age_s, self.temporal_dt_s),
+            "door_pos_w": interpolate_uniform_history(self.camera_door_pos_history, age_s, self.temporal_dt_s),
+            "door_quat_w": interpolate_uniform_history(self.camera_door_quat_history, age_s, self.temporal_dt_s, quaternion=True),
+            "door_joint_pos": interpolate_uniform_history(self.camera_door_joint_history, age_s, self.temporal_dt_s),
+        }
 
     def _merge_unique_offsets_s(self, *offset_sequences):
         merged = OrderedDict()
@@ -2057,7 +2169,28 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 self.temporal_push_pull_belief_history,
                 2,
             )
-        if apply_observation_lag:
+        if apply_observation_lag and self.observation_lag_mode == "camera_timing":
+            if self.camera_capture_time_s is None:
+                raise RuntimeError("Camera capture time must be selected before sampling proprioception.")
+            base_age_s = (self._get_current_time_s() - self.camera_capture_time_s).clamp_min(0.0)
+            effective_age_s = base_age_s.unsqueeze(1) + torch.as_tensor(
+                offsets_s, dtype=torch.float32, device=self.device
+            ).unsqueeze(0)
+            effective_age_s = effective_age_s.clamp(0.0, (self.temporal_history_len - 1) * self.temporal_dt_s)
+            effective_age_ms = effective_age_s * 1000.0
+            def sample(history):
+                return torch.stack(
+                    [interpolate_uniform_history(history, effective_age_s[:, i], self.temporal_dt_s)
+                     for i in range(len(offsets_s))], dim=1
+                )
+            q_samples_full = sample(self.temporal_q_history)
+            target_samples = sample(self.temporal_target_history)
+            base_vel_samples = sample(self.temporal_base_vel_history)
+            base_translation_samples = sample(self.temporal_base_translation_history)
+            aux_handle_samples = sample(self.temporal_aux_handle_history) if include_aux_handle else None
+            initial_handle_samples = sample(self.temporal_initial_handle_history) if include_initial_handle else None
+            push_pull_belief_samples = sample(self.temporal_push_pull_belief_history) if include_push_pull_belief else None
+        elif apply_observation_lag:
             effective_steps, effective_age_ms = self._sample_observation_lag_steps(offsets_s)
             q_samples_full = self._gather_temporal_values(self.temporal_q_history, effective_steps)
             target_samples = self._gather_temporal_values(self.temporal_target_history, effective_steps)
@@ -2289,6 +2422,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         if push_pull_belief is None:
             push_pull_belief = self._get_temporal_push_pull_belief_for_history()
         initial_handle_points = self._get_noisy_initial_handle_points_base().detach()
+        self._capture_camera_pose_history(env_ids=env_ids)
 
         if env_ids is None:
             if self.temporal_history_len > 1:
@@ -2355,6 +2489,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         aux_handle = self._build_seed_temporal_aux_handle()
         initial_handle = self._get_noisy_initial_handle_points_base().detach()
         push_pull_belief = self._build_initial_temporal_push_pull_belief()
+        self._capture_camera_pose_history(reset=True, env_ids=env_ids)
         self._validate_temporal_history_buffer_shape("temporal_aux_handle_history", self.temporal_aux_handle_history, 3)
         self._validate_temporal_history_buffer_shape(
             "temporal_initial_handle_history", self.temporal_initial_handle_history, 6
@@ -3460,9 +3595,11 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             **fov_kwargs,
         )
 
-    def _get_sampler_camera_pose(self):
-        camera_link_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_camera_body_idx]
-        camera_link_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_camera_body_idx]
+    def _get_sampler_camera_pose(self, pose=None):
+        robot_pos = self.ov_env.robot.data.body_pos_w if pose is None else pose["robot_pos_w"]
+        robot_quat = self.ov_env.robot.data.body_quat_w if pose is None else pose["robot_quat_w"]
+        camera_link_pos_w = robot_pos[:, self.robot_camera_body_idx]
+        camera_link_quat_w = robot_quat[:, self.robot_camera_body_idx]
         # Apply the same camera mount offset as the real CameraCfg sensor (the -45deg roll that
         # compensates for the 45deg-tilted realsense bracket). Composed in the link's local frame
         # (world = link ⊗ offset), matching how IsaacLab mounts the camera prim on x5_camera_link.
@@ -3622,26 +3759,30 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             ),
         }
 
-    def _sample_robot_pointcloud_world_sampler(self):
+    def _sample_robot_pointcloud_world_sampler(self, pose=None):
         if self.scene_robot_pcd_num_points <= 0:
             return torch.zeros((self.num_envs, 0, 3), dtype=torch.float32, device=self.device)
+        robot_pos = self.ov_env.robot.data.body_pos_w if pose is None else pose["robot_pos_w"]
+        robot_quat = self.ov_env.robot.data.body_quat_w if pose is None else pose["robot_quat_w"]
         return compose_cached_link_pointcloud_world(
             link_points_by_name=self.robot_link_pointclouds,
             link_pos_w_by_name={
-                link_name: self.ov_env.robot.data.body_pos_w[:, body_idx]
+                link_name: robot_pos[:, body_idx]
                 for link_name, body_idx in self.robot_sampler_body_indices.items()
             },
             link_quat_w_by_name={
-                link_name: self.ov_env.robot.data.body_quat_w[:, body_idx]
+                link_name: robot_quat[:, body_idx]
                 for link_name, body_idx in self.robot_sampler_body_indices.items()
             },
             num_points=self.scene_robot_pcd_num_points,
         )
 
-    def _sample_robot_pointcloud_base_sampler(self):
-        robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
-        robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
-        robot_pcd_world = self._sample_robot_pointcloud_world_sampler()
+    def _sample_robot_pointcloud_base_sampler(self, pose=None):
+        robot_pos = self.ov_env.robot.data.body_pos_w if pose is None else pose["robot_pos_w"]
+        robot_quat = self.ov_env.robot.data.body_quat_w if pose is None else pose["robot_quat_w"]
+        robot_base_pos_w = robot_pos[:, self.robot_base_body_idx]
+        robot_base_quat_w = robot_quat[:, self.robot_base_body_idx]
+        robot_pcd_world = self._sample_robot_pointcloud_world_sampler(pose=pose)
         return world_to_local(robot_pcd_world, robot_base_pos_w, robot_base_quat_w)
 
     def _get_robot_filter_joint_pos_base_frame(self):
@@ -3674,9 +3815,11 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         # follow its own config regardless of whether we are training or replaying.
         return self.door_hole_aug_enabled
 
-    def _get_link1_pose_world(self):
-        link1_pos_w = self.ov_env.door.data.body_pos_w[:, self.door_hole_link1_body_idx]
-        link1_quat_w = self.ov_env.door.data.body_quat_w[:, self.door_hole_link1_body_idx]
+    def _get_link1_pose_world(self, pose=None):
+        door_pos = self.ov_env.door.data.body_pos_w if pose is None else pose["door_pos_w"]
+        door_quat = self.ov_env.door.data.body_quat_w if pose is None else pose["door_quat_w"]
+        link1_pos_w = door_pos[:, self.door_hole_link1_body_idx]
+        link1_quat_w = door_quat[:, self.door_hole_link1_body_idx]
         return torch.cat([link1_pos_w, link1_quat_w], dim=-1)
 
     def _sample_door_hole_aug_metadata(self, link1_pose_world):
@@ -3777,14 +3920,14 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 self._door_hole_aug_metadata[key][env_ids] = value[env_ids]
         self._update_door_hole_aug_stats()
 
-    def _sample_door_reflection_pointcloud_world(self, hole_metadata, robot_pcd_world):
+    def _sample_door_reflection_pointcloud_world(self, hole_metadata, robot_pcd_world, pose=None):
         # Reflect the current robot cloud across the door's front/window plane. NaN entries and points
         # outside the sampled opening are ignored by the renderer.
         if hole_metadata is None or "reflection_enabled" not in hole_metadata:
             return torch.zeros((self.num_envs, 0, 3), dtype=torch.float32, device=self.device)
         if robot_pcd_world is None or robot_pcd_world.shape[1] == 0:
             return torch.zeros((self.num_envs, 0, 3), dtype=torch.float32, device=self.device)
-        link1_pose_world = self._get_link1_pose_world()
+        link1_pose_world = self._get_link1_pose_world(pose=pose)
         return reflect_robot_points_in_window(
             robot_points_world=robot_pcd_world,
             link1_pose_world=link1_pose_world,
@@ -3810,7 +3953,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         )
         return filtered_points
 
-    def _sample_wall_pointcloud_world(self, num_points=None):
+    def _sample_wall_pointcloud_world(self, num_points=None, pose=None):
         if not self.wall_distractors_enabled:
             return torch.zeros((self.num_envs, 0, 3), dtype=torch.float32, device=self.device)
 
@@ -3828,18 +3971,22 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             return self._wall_distractor_world_points
         # Keep the dynamic/unusual-size path equivalent to the original implementation.
         wall_points_base = self._sample_wall_pointcloud_local(num_points=num_points)
-        door_base_pos_w = self.ov_env.door.data.body_pos_w[:, self.door_base_body_idx]
-        door_base_quat_w = self.ov_env.door.data.body_quat_w[:, self.door_base_body_idx]
+        door_pos = self.ov_env.door.data.body_pos_w if pose is None else pose["door_pos_w"]
+        door_quat = self.ov_env.door.data.body_quat_w if pose is None else pose["door_quat_w"]
+        door_base_pos_w = door_pos[:, self.door_base_body_idx]
+        door_base_quat_w = door_quat[:, self.door_base_body_idx]
         quat = door_base_quat_w.unsqueeze(1).expand(-1, wall_points_base.shape[1], -1)
         return quat_apply(quat, wall_points_base) + door_base_pos_w.unsqueeze(1)
 
-    def _sample_cached_door_pointcloud_world(self, hole_metadata=None):
+    def _sample_cached_door_pointcloud_world(self, hole_metadata=None, pose=None):
         door_pcd_world = torch.zeros(
             (self.num_envs, self.scene_door_pcd_num_points, 3),
             dtype=torch.float32,
             device=self.device,
         )
-        link1_pose_world_all = self._get_link1_pose_world() if hole_metadata is not None else None
+        door_pos = self.ov_env.door.data.body_pos_w if pose is None else pose["door_pos_w"]
+        door_quat = self.ov_env.door.data.body_quat_w if pose is None else pose["door_quat_w"]
+        link1_pose_world_all = self._get_link1_pose_world(pose=pose) if hole_metadata is not None else None
         for asset_idx, link_points_by_name in self.door_link_pointclouds.items():
             env_ids = self.door_sampler_env_ids.get(asset_idx)
             if env_ids is None:
@@ -3847,12 +3994,12 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             if env_ids.numel() == 0:
                 continue
             link_pos_w_by_name = {
-                link_name: self.ov_env.door.data.body_pos_w[env_ids, self.door_link_body_indices[link_name]]
+                link_name: door_pos[env_ids, self.door_link_body_indices[link_name]]
                 for link_name in ("link_1", "link_2")
                 if link_name in self.door_link_body_indices
             }
             link_quat_w_by_name = {
-                link_name: self.ov_env.door.data.body_quat_w[env_ids, self.door_link_body_indices[link_name]]
+                link_name: door_quat[env_ids, self.door_link_body_indices[link_name]]
                 for link_name in ("link_1", "link_2")
                 if link_name in self.door_link_body_indices
             }
@@ -3869,8 +4016,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             if frame_points_base is not None:
                 frame_visible = self.env_door_frame_visible[env_ids]
                 if bool(frame_visible.any()):
-                    base_pos_w = self.ov_env.door.data.body_pos_w[env_ids, self.door_base_body_idx]
-                    base_quat_w = self.ov_env.door.data.body_quat_w[env_ids, self.door_base_body_idx]
+                    base_pos_w = door_pos[env_ids, self.door_base_body_idx]
+                    base_quat_w = door_quat[env_ids, self.door_base_body_idx]
                     asset_pcd_world_with_frame = compose_cached_link_pointcloud_world(
                         link_points_by_name={**link_points_by_name, "link_0": frame_points_base},
                         link_pos_w_by_name={**link_pos_w_by_name, "link_0": base_pos_w},
@@ -3911,10 +4058,10 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             door_pcd_world[env_ids] = asset_pcd_world
         return door_pcd_world
 
-    def _sample_scene_pointcloud_world_cached(self, hole_metadata=None):
-        door_pcd_world = self._sample_cached_door_pointcloud_world(hole_metadata=hole_metadata)
-        robot_pcd_world = self._sample_robot_pointcloud_world_sampler()
-        wall_pcd_world = self._sample_wall_pointcloud_world()
+    def _sample_scene_pointcloud_world_cached(self, hole_metadata=None, pose=None):
+        door_pcd_world = self._sample_cached_door_pointcloud_world(hole_metadata=hole_metadata, pose=pose)
+        robot_pcd_world = self._sample_robot_pointcloud_world_sampler(pose=pose)
+        wall_pcd_world = self._sample_wall_pointcloud_world(pose=pose)
         # Keep the sampled ground-truth wall geometry available to evaluation replay capture.
         # It is stored once per Viser recording, rather than repeated in every frame.
         self._last_ground_truth_wall_points_world = wall_pcd_world
@@ -3925,7 +4072,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             scene_parts.append(wall_pcd_world)
         # Reflected robot points are part of the static scene side of the combined render, so they
         # occlude/render like geometry behind the glass. NaN entries are ignored by the renderer.
-        reflection_pcd_world = self._sample_door_reflection_pointcloud_world(hole_metadata, robot_pcd_world)
+        reflection_pcd_world = self._sample_door_reflection_pointcloud_world(hole_metadata, robot_pcd_world, pose=pose)
         if reflection_pcd_world.shape[1] > 0:
             scene_parts.append(reflection_pcd_world)
         door_walls_pcd_world = torch.cat(scene_parts, dim=1)
@@ -3994,11 +4141,13 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
     def _sample_scene_obs_pointcloud_base_sampler(self):
         return self._sample_scene_obs_pointcloud_base_depth()
 
-    def _sample_scene_obs_pointcloud_base_depth(self):
-        robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
-        robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
+    def _sample_scene_obs_pointcloud_base_depth(self, pose=None):
+        robot_pos = self.ov_env.robot.data.body_pos_w if pose is None else pose["robot_pos_w"]
+        robot_quat = self.ov_env.robot.data.body_quat_w if pose is None else pose["robot_quat_w"]
+        robot_base_pos_w = robot_pos[:, self.robot_base_body_idx]
+        robot_base_quat_w = robot_quat[:, self.robot_base_body_idx]
         door_walls_pcd_world, robot_pcd_world = self._sample_scene_pointcloud_world_cached(
-            hole_metadata=self._door_hole_aug_metadata
+            hole_metadata=self._door_hole_aug_metadata, pose=pose
         )
         if self.viser_raw_enabled:
             # Keep only the selected family envs on CPU so Viser debug does not retain an
@@ -4007,13 +4156,20 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 torch.cat([door_walls_pcd_world, robot_pcd_world], dim=1)
             )
         rendered_pcd_world = self._render_depth_scene_single_pass(
-            door_walls_pcd_world, robot_pcd_world, self._get_sampler_camera_pose()
+            door_walls_pcd_world, robot_pcd_world, self._get_sampler_camera_pose(pose=pose)
         )
+        if pose is not None and self.camera_cached_depth_pcd_world is not None:
+            reuse = self.camera_reused_capture.view(-1, 1, 1)
+            rendered_pcd_world = torch.where(reuse, self.camera_cached_depth_pcd_world, rendered_pcd_world)
         # Retain the exact world-frame render for evaluation/Viser. The policy receives the
         # robot-base-frame copy below, but replaying that copy requires applying a second pose
         # transform and can obscure frame mismatches in the saved visualization.
         self._last_rendered_depth_pcd_world = rendered_pcd_world
-        return world_to_local(rendered_pcd_world, robot_base_pos_w, robot_base_quat_w)
+        rendered_pcd_base = world_to_local(rendered_pcd_world, robot_base_pos_w, robot_base_quat_w)
+        if pose is not None:
+            self.camera_cached_depth_pcd_world = rendered_pcd_world.detach().clone()
+            self.camera_cached_depth_pcd_base = rendered_pcd_base.detach().clone()
+        return rendered_pcd_base
 
     def _sample_scene_obs_pointcloud_base_lidar(self):
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
@@ -4054,7 +4210,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         )
         return depth_pcd_base, lidar_pcd_base
 
-    def _sample_scene_obs_pointcloud_base(self):
+    def _sample_scene_obs_pointcloud_base(self, pose=None):
         self._viser_cached_ground_truth_pcd_world = None
         self._viser_cached_sensor_obs_pcd_base = OrderedDict()
         # The depth camera is a real sensor: it SEES the robot's own hand, so the depth cloud is NOT
@@ -4070,7 +4226,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         else:
             self._update_door_hole_aug_stats()
         if self.pointcloud_source in {"sampler", "depth"}:
-            depth_pcd_base = self._sample_scene_obs_pointcloud_base_depth()  # robot NOT filtered from depth
+            depth_pcd_base = self._sample_scene_obs_pointcloud_base_depth(pose=pose)  # robot NOT filtered from depth
             self._last_rendered_depth_pcd_base = depth_pcd_base
             self._viser_cached_sensor_obs_pcd_base["robot_depth_cam_obs"] = depth_pcd_base
             scene_obs_pcd_sources = [depth_pcd_base]
@@ -4212,13 +4368,21 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         return int(batch_size.item())
 
     def _build_student_obs(self, iteration=None):
+        camera_pose_snapshot = (
+            self._select_camera_capture_snapshot()
+            if self.observation_lag_enabled and self.observation_lag_mode == "camera_timing"
+            else None
+        )
+        self.latest_camera_pose_snapshot = camera_pose_snapshot
         q_pos = self._get_student_proprio_vector()
         base_vel = self._get_student_base_velocity_vector()
         base_translation = self._get_student_base_translation_vector()
         keyframe_pose_base = self._get_student_keyframe_pose_base()
-        robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
-        robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
-        palm_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_palm_body_idx].unsqueeze(1)
+        robot_pos = self.ov_env.robot.data.body_pos_w if camera_pose_snapshot is None else camera_pose_snapshot["robot_pos_w"]
+        robot_quat = self.ov_env.robot.data.body_quat_w if camera_pose_snapshot is None else camera_pose_snapshot["robot_quat_w"]
+        robot_base_pos_w = robot_pos[:, self.robot_base_body_idx]
+        robot_base_quat_w = robot_quat[:, self.robot_base_body_idx]
+        palm_pos_w = robot_pos[:, self.robot_palm_body_idx].unsqueeze(1)
 
         self.latest_student_proprio_vector = q_pos.detach().clone()
 
@@ -4227,9 +4391,10 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         has_pcd = bool(self.pcd_encoders_keys)
         if has_pcd:
             palm_pos_base = world_to_local(palm_pos_w, robot_base_pos_w, robot_base_quat_w).squeeze(1)
-            scene_obs_pcd_sources = self._sample_scene_obs_pointcloud_base()
+            scene_obs_pcd_sources = self._sample_scene_obs_pointcloud_base(pose=camera_pose_snapshot)
             robot_pcd_base = (
-                self._sample_robot_pointcloud_base_sampler() if self.append_robot_model_to_policy_cloud else None
+                self._sample_robot_pointcloud_base_sampler(pose=camera_pose_snapshot)
+                if self.append_robot_model_to_policy_cloud else None
             )
         else:
             palm_pos_base = None

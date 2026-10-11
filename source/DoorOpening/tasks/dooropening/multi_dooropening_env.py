@@ -431,10 +431,8 @@ class DooropeningEnv(DirectRLEnv):
                 "arm_joint_pos_bias",
             ]
         )
-        # Action latency: the PD target applied on a step is the one computed `_action_latency_buf`
-        # env/control steps earlier. The per-env latency (in steps) is sampled at reset and ramps
-        # from 1 up to the ADR max. The history ring stores the most recent past targets, with
-        # index 0 = the target from the previous step (lag 1) and the last index = the oldest (lag max).
+        # Action latency: the PD target applied on a step is selected from the action queue.
+        # Distillation may temporarily allow latency 0; normal task defaults remain 1..3.
         self._max_action_latency = max(
             1, int(round(float(self.cfg.adr_custom_cfg_dict["action_latency"]["latency_steps"][1])))
         )
@@ -676,7 +674,7 @@ class DooropeningEnv(DirectRLEnv):
         pinned to the starting value.
         """
         latency_range = self.cfg.adr_custom_cfg_dict["action_latency"]["latency_steps"]
-        min_lag = max(1, int(round(float(latency_range[0]))))
+        min_lag = max(0, int(round(float(latency_range[0]))))
         current_max = self._current_custom_param("action_latency", "latency_steps")
         max_lag = max(min_lag, int(round(current_max)))
         max_lag = min(max_lag, self._max_action_latency)
@@ -1241,9 +1239,11 @@ class DooropeningEnv(DirectRLEnv):
         out, the freshly computed ``new_targets`` is pushed to the front of the history and the oldest
         entry is dropped.
         """
+        zero_latency = self._action_latency_buf == 0
         lag_idx = (self._action_latency_buf - 1).clamp(0, self._max_action_latency - 1)
         env_idx = torch.arange(self.num_envs, device=self.device)
         applied = self._action_target_history[env_idx, lag_idx]
+        applied = torch.where(zero_latency.unsqueeze(-1), new_targets, applied)
         self._action_target_history = torch.cat(
             [new_targets.unsqueeze(1), self._action_target_history[:, :-1]], dim=1
         )
