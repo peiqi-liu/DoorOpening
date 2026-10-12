@@ -203,9 +203,10 @@ FRANKA_DEFAULT_JOINT_POS = [
 ]
 
 DOOR_OPEN_LIMIT_RAD = 1.57
-# Each generated door has its own mechanical stop, sampled over the measured 29..64 degree span.
-# Simulation randomizes only the gap from this asset stop down to the unlatching threshold.
-HANDLE_HARD_STOP_RANGE_RAD = (math.radians(29.0), math.radians(64.0))
+# Episode-level stop-to-threshold margin is randomized over [0.01, 0.12] rad. Since
+# threshold = hard_stop - margin, these asset hard-stop bounds keep every resulting
+# threshold within 30..64 degrees even at the margin extremes.
+HANDLE_HARD_STOP_RANGE_RAD = (math.radians(30.0) + 0.12, math.radians(64.0) + 0.01)
 ROOT_JOINT_RPY = [math.pi / 2.0, 0.0, -math.pi / 2.0]
 # With the fixed root rotation above, link_1 local -z points toward the
 # default front view used by scripts/test_door.py, while +z points to the back.
@@ -352,7 +353,10 @@ def parse_args():
         nargs=2,
         metavar=("MIN_RAD", "MAX_RAD"),
         default=HANDLE_HARD_STOP_RANGE_RAD,
-        help="Per-door joint_2 hard-stop range in radians (defaults to the measured 29..64 degree span).",
+        help=(
+            "Per-door joint_2 hard-stop range in radians (default preserves a 30..64 degree "
+            "derived threshold envelope with the configured 0.01..0.12 rad margin)."
+        ),
     )
     parser.add_argument(
         "--handle-lever-thickness-range",
