@@ -496,7 +496,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     # Each door URDF supplies its own joint_2 hard stop. Randomize only the gap below that stop
     # to obtain the per-episode unlatching threshold (about 1..10 degrees).
-    door_handle_limit_margin_range_rad: tuple[float, float] | None = (0.02, 0.18)
+    door_handle_limit_margin_range_rad: tuple[float, float] | None = (0.01, 0.12)
     # Optional eval-only door solver override, also applied before articulation conversion.
     door_eval_solver_position_iterations: int | None = None
 
