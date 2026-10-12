@@ -630,7 +630,9 @@ def collocate_and_playback(robot_traj, door_traj, key_idx_in_key_indices, length
 
     # clamp door values
     door_traj[:, 0] = door_traj[:, 0].clamp(min=0.0, max=1.5)
-    door_traj[:, 1] = door_traj[:, 1].clamp(min=0.0, max=1.0)
+    # The handle's upper bound comes from this door's URDF and can be greater than 1.0 rad.
+    # Preserve the planner's per-asset hard-stop target instead of applying a shared clamp.
+    door_traj[:, 1] = door_traj[:, 1].clamp_min(0.0)
     # MotionLib recomputes reference velocities from positions and sim_dt on load.
     robot_traj_d = torch.zeros_like(robot_traj)
     door_traj_d = torch.zeros_like(door_traj)
@@ -734,6 +736,8 @@ def play_trajectories_in_viser(
     # Playback loop
     # -------------------------
     t_idx = 0
+    hold_seconds = max(0.0, float(os.environ.get("DOOROPENING_VISER_HOLD_SECONDS", "0")))
+    hold_deadline = time.monotonic() + hold_seconds if hold_seconds > 0.0 else None
 
 
     # timestamp = time.time()
@@ -769,7 +773,10 @@ def play_trajectories_in_viser(
             # t_idx = (t_idx + 1) % T
             t_idx += 1
             if t_idx == T:
-                break
+                if hold_deadline is not None and time.monotonic() < hold_deadline:
+                    t_idx = 0
+                else:
+                    break
 
         time.sleep(1.0 / (hz * speed_slider.value))
     server.stop()
