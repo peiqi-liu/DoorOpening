@@ -203,21 +203,9 @@ FRANKA_DEFAULT_JOINT_POS = [
 ]
 
 DOOR_OPEN_LIMIT_RAD = 1.57
-# Lever (joint_2) HARD STOP, i.e. how far the handle can rotate before it bottoms out. Lowered
-# 1.57 -> 0.95 rad (90 deg -> 54 deg) to model a real lockcase: a lever turns only until the latch
-# follower bottoms out, a little past full latch retraction, and then it is a rigid mechanical stop.
-# At 1.57 the lever kept winding ~41 deg PAST the unlatch threshold under load, so a pulling gripper
-# just rotated the handle out from under its own grasp instead of getting a reaction point; on a real
-# door the stop is what lets you transfer the pull through the handle rather than through grip
-# friction alone.
-#
-# The floor on this value is the unlatch threshold: door_latch_threshold_range_rad (env cfg) now
-# randomizes it up to 0.95 rad, so the stop MUST stay above 0.95 or some doors could never unlatch --
-# a loaded PD settles slightly short of the stop, so equaling the threshold left zero margin. 1.05
-# restores the original 0.10 rad (5.7 deg) margin (same ratio as the old 0.95-stop/0.85-threshold
-# pair), keeping the invariant that pressing the lever to its stop unlatches EVERY door regardless
-# of the sampled threshold.
-HANDLE_OPEN_LIMIT_RAD = 0.98  # was 1.0; tight 0.03 margin above the 0.95 unlatch threshold, and the planner presses exactly to this value
+# Each generated door has its own mechanical stop, sampled over the measured 29..64 degree span.
+# Simulation randomizes only the gap from this asset stop down to the unlatching threshold.
+HANDLE_HARD_STOP_RANGE_RAD = (math.radians(29.0), math.radians(64.0))
 ROOT_JOINT_RPY = [math.pi / 2.0, 0.0, -math.pi / 2.0]
 # With the fixed root rotation above, link_1 local -z points toward the
 # default front view used by scripts/test_door.py, while +z points to the back.
@@ -357,6 +345,14 @@ def parse_args():
         nargs=2,
         metavar=("MIN_M", "MAX_M"),
         default=DEFAULT_HANDLE_RADIUS_RANGE_M,
+    )
+    parser.add_argument(
+        "--handle-hard-stop-range-rad",
+        type=float,
+        nargs=2,
+        metavar=("MIN_RAD", "MAX_RAD"),
+        default=HANDLE_HARD_STOP_RANGE_RAD,
+        help="Per-door joint_2 hard-stop range in radians (defaults to the measured 29..64 degree span).",
     )
     parser.add_argument(
         "--handle-lever-thickness-range",
@@ -1233,6 +1229,7 @@ def build_urdf_tree(
     board_min,
     board_max,
     frame_boxes,
+    handle_hard_stop_rad,
     solid_panel_visual=False,
     solid_frame_visual=False,
 ):
@@ -1315,7 +1312,7 @@ def build_urdf_tree(
     ET.SubElement(joint_2, "axis", {"xyz": format_vector(handle_spec["joint_axis_link1"])})
     ET.SubElement(joint_2, "parent", {"link": "link_1"})
     ET.SubElement(joint_2, "child", {"link": "link_2"})
-    ET.SubElement(joint_2, "limit", {"lower": "0", "upper": f"{HANDLE_OPEN_LIMIT_RAD:.12f}"})
+    ET.SubElement(joint_2, "limit", {"lower": "0", "upper": f"{handle_hard_stop_rad:.12f}"})
     return robot
 
 
@@ -1342,7 +1339,18 @@ def validate_variant(variant_dir, root):
         raise ValueError("link_2 should keep multiple simple collision primitives")
 
 
-def write_variant_meta(meta_path, variant_name, spec, board_min, board_max, handle_spec, door_axis, collisions, initial_state):
+def write_variant_meta(
+    meta_path,
+    variant_name,
+    spec,
+    board_min,
+    board_max,
+    handle_spec,
+    handle_hard_stop_rad,
+    door_axis,
+    collisions,
+    initial_state,
+):
     if spec["handle_side"] == "max":
         actual_edge_distance = board_max[0] - handle_spec["joint_origin_link1"][0]
     else:
@@ -1417,6 +1425,7 @@ def write_variant_meta(meta_path, variant_name, spec, board_min, board_max, hand
             "joint_1_axis": door_axis,
         },
         "handle": {
+            "joint_2_hard_stop_rad": handle_hard_stop_rad,
             "type": handle_spec["type"],
             "mesh": f"texture_dae/handle_{handle_spec['type']}.obj",
             "joint_origin_link1": handle_spec["joint_origin_link1"],
@@ -1457,6 +1466,15 @@ def build_direction_pair_key(variant_name):
 
 def generate_variants(args):
     rng = random.Random(args.seed)
+    # Keep hard-stop draws independent from the geometry RNG so changing this option does not
+    # reshuffle door dimensions, handle geometry, or initial states.
+    hard_stop_rng = random.Random(args.seed ^ 0x48415244)
+    hard_stop_low, hard_stop_high = map(float, args.handle_hard_stop_range_rad)
+    if hard_stop_low <= 0.0 or hard_stop_high < hard_stop_low:
+        raise ValueError(
+            "--handle-hard-stop-range-rad requires 0 < MIN_RAD <= MAX_RAD, "
+            f"got {(hard_stop_low, hard_stop_high)}."
+        )
     output_dir = args.output_dir.resolve()
     prepare_output_dir(output_dir, args.overwrite)
 
@@ -1478,6 +1496,7 @@ def generate_variants(args):
         door_axis = build_door_axis(spec)
         joint_1_origin = build_joint_1_origin(spec)
         initial_state = sample_initial_state(rng, variant_name, args)
+        handle_hard_stop_rad = hard_stop_rng.uniform(hard_stop_low, hard_stop_high)
 
         plate_box = None
         if handle_spec.get("plate_min_link1") is not None and handle_spec.get("plate_max_link1") is not None:
@@ -1501,6 +1520,7 @@ def generate_variants(args):
             board_min=board_min,
             board_max=board_max,
             frame_boxes=frame_boxes,
+            handle_hard_stop_rad=handle_hard_stop_rad,
             solid_panel_visual=args.solid_panel_visual,
             solid_frame_visual=args.solid_frame_visual,
         )
@@ -1513,6 +1533,7 @@ def generate_variants(args):
             board_min=board_min,
             board_max=board_max,
             handle_spec=handle_spec,
+            handle_hard_stop_rad=handle_hard_stop_rad,
             door_axis=door_axis,
             collisions=collisions,
             initial_state=initial_state,
@@ -1526,6 +1547,7 @@ def generate_variants(args):
             print(
                 f"[debug] {variant_name}: hinge={spec['hinge_side']} open={spec['opening_direction']} "
                 f"handle_side={spec['handle_side']} handle={handle_spec['type']} "
+                f"hard_stop={handle_hard_stop_rad:.4f}rad "
                 f"board=({spec['panel_width_m']:.3f}, {spec['panel_height_m']:.3f}, {spec['panel_thickness_m']:.3f})"
             )
         generated.append(variant_dir)

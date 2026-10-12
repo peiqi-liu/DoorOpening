@@ -1,4 +1,5 @@
 import math
+import xml.etree.ElementTree as ET
 from typing import Literal
 
 import torch
@@ -33,6 +34,20 @@ LEFT_PULL_IK_ANCHOR_JOINT_POS = {
     **FRANKA_DEFAULT_JOINT_POS,
     "panda_joint2": 0.15 * math.pi,
 }
+
+
+def _read_handle_hard_stop_rad(door_urdf_path: str) -> float:
+    """Read this asset's joint_2 upper limit for its reference unlatch target."""
+    root = ET.parse(door_urdf_path).getroot()
+    joint = next((item for item in root.findall("joint") if item.get("name") == "joint_2"), None)
+    limit = None if joint is None else joint.find("limit")
+    upper = None if limit is None else limit.get("upper")
+    if upper is None:
+        raise ValueError(f"Door URDF {door_urdf_path!r} has no finite joint_2 upper hard stop.")
+    hard_stop = float(upper)
+    if not math.isfinite(hard_stop) or hard_stop <= 0.0:
+        raise ValueError(f"Door URDF {door_urdf_path!r} has invalid joint_2 upper limit {upper!r}.")
+    return hard_stop
 
 
 # The Franka gripper is ONE commanded DOF, at this index of FULL_JOINT_NAMES -- NOT the 16-joint
@@ -300,11 +315,9 @@ def state_machine_offline_right_pull_door(
     # -------------------------
     # Step 3: Rotate hinge (unlatch)
     # -------------------------
-    # Target the lever's HARD STOP (HANDLE_OPEN_LIMIT_RAD = 0.95 rad in the door generator), not
-    # past it: the reference presses the handle firmly against its mechanical stop, which is both
-    # what a person does and what gives the pull a rigid reaction point. Must stay above the
-    # highest randomized unlatch threshold (0.85 rad) so every door actually unlatches.
-    unlatch_hinge_angle = 0.95
+    # Press this asset's own mechanical stop, not a shared angle: the unlatch threshold in sim is
+    # sampled below this URDF limit by the configured stop-to-threshold gap.
+    unlatch_hinge_angle = _read_handle_hard_stop_rad(door_urdf_path)
     unlatch_palm_y_delta = 0.0
     unlatch_palm_z_delta = -0.08
     unlatch_rot_roll = math.pi
@@ -891,11 +904,9 @@ def state_machine_offline_left_pull_door(
     # -------------------------
     # Step 3: Rotate hinge (unlatch)
     # -------------------------
-    # Target the lever's HARD STOP (HANDLE_OPEN_LIMIT_RAD = 0.95 rad in the door generator), not
-    # past it: the reference presses the handle firmly against its mechanical stop, which is both
-    # what a person does and what gives the pull a rigid reaction point. Must stay above the
-    # highest randomized unlatch threshold (0.85 rad) so every door actually unlatches.
-    unlatch_hinge_angle = 0.95
+    # Press this asset's own mechanical stop, not a shared angle: the unlatch threshold in sim is
+    # sampled below this URDF limit by the configured stop-to-threshold gap.
+    unlatch_hinge_angle = _read_handle_hard_stop_rad(door_urdf_path)
     unlatch_palm_y_delta = 0.005
     unlatch_palm_z_delta = -0.08
 

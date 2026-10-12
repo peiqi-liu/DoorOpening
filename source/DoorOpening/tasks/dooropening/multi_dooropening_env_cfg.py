@@ -494,19 +494,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # back down 75 -> 70 Nm.
     door_panel_effort_limit_range_nm = (3.0, 70.0)  # was (3.0, 75.0), temp update
 
-    # Handle (joint_2) unlatch threshold is sampled per environment/episode over the measured
-    # door range with a small upper-side margin: 28..57 deg.
-    door_latch_hinge_threshold_range_rad: tuple[float, float] | None = (0.49, 1.00)
-    # Optional absolute upper mechanical stop for eval. If set, this takes precedence over
-    # door_handle_limit_margin_range_rad.
-    door_handle_upper_stop_rad: float | None = None
-    # Randomized mechanical stop margin above each episode's sampled unlatch threshold (1..10 deg).
+    # Each door URDF supplies its own joint_2 hard stop. Randomize only the gap below that stop
+    # to obtain the per-episode unlatching threshold (about 1..10 degrees).
     door_handle_limit_margin_range_rad: tuple[float, float] | None = (0.02, 0.18)
-    # Measured maximum hard stop across the test doors (64 deg); sampled threshold + margin is capped here.
-    door_handle_max_stop_rad: float = 1.12
-    # Optional eval-only per-asset URDF paths. Applied after multi-door rank configuration and
-    # before Articulation construction, so imported joint limits are baked into PhysX.
-    door_eval_asset_urdf_overrides: tuple[str, ...] | None = None
     # Optional eval-only door solver override, also applied before articulation conversion.
     door_eval_solver_position_iterations: int | None = None
 

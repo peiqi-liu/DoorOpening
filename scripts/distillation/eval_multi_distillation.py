@@ -8,13 +8,11 @@ as timed out and frozen there.
 
 import argparse
 import json
-import math
 import os
 import pathlib
 import sys
 import time
 import types
-import xml.etree.ElementTree as ET
 
 import yaml
 from isaaclab.app import AppLauncher
@@ -70,51 +68,6 @@ def _resolve_teacher_cfg_path(path_value):
         / "rl_games_ppo_cfg.yaml"
     )
     return _resolve_repo_path(path_value, default_path)
-
-
-def _prepare_eval_hardstop_urdfs(door_cfg, output_dir, stop_deg):
-    """Create eval-local URDF copies so the handle stop exists before PhysX builds constraints."""
-    if stop_deg is None:
-        return []
-    spawn_cfg = getattr(door_cfg, "spawn", None)
-    asset_cfgs = list(getattr(spawn_cfg, "assets_cfg", None) or [])
-    if not asset_cfgs:
-        raise RuntimeError("Cannot create hard-stop URDF copies: no multi-door URDF configs found.")
-    stop_rad = math.radians(float(stop_deg))
-    # Keep both URDF and converter-cache paths absolute. The imported USD uses relative
-    # sublayers (e.g. @configuration/mobility_physics.usd@), which otherwise resolve against
-    # the process cwd and produce an incomplete articulation when output_dir is relative.
-    output_root = pathlib.Path(output_dir).expanduser().resolve() / "door_hardstop_assets"
-    output_root.mkdir(parents=True, exist_ok=True)
-    overrides = []
-    for asset_idx, asset_cfg in enumerate(asset_cfgs):
-        source_urdf = pathlib.Path(str(asset_cfg.asset_path)).resolve()
-        asset_dir = output_root / f"asset_{asset_idx:03d}_{source_urdf.parent.name}"
-        asset_dir.mkdir(parents=True, exist_ok=True)
-        for child in source_urdf.parent.iterdir():
-            if child == source_urdf:
-                continue
-            link = asset_dir / child.name
-            if not link.exists() and not link.is_symlink():
-                link.symlink_to(child.resolve(), target_is_directory=child.is_dir())
-
-        tree = ET.parse(source_urdf)
-        handle_joint = next(
-            (joint for joint in tree.getroot().iter("joint") if joint.get("name") == "joint_2"),
-            None,
-        )
-        if handle_joint is None or handle_joint.find("limit") is None:
-            raise RuntimeError(f"No revolute joint_2 limit found in {source_urdf}.")
-        handle_joint.find("limit").set("upper", f"{stop_rad:.12g}")
-        override_urdf = asset_dir / source_urdf.name
-        tree.write(override_urdf, encoding="utf-8", xml_declaration=True)
-
-        # Isolate converted USDs from the original cached asset, whose limit is still the source URDF's.
-        asset_cfg.asset_path = str(override_urdf)
-        asset_cfg.usd_dir = str(asset_dir / "usd_cache")
-        asset_cfg.force_usd_conversion = True
-        overrides.append((str(source_urdf), str(override_urdf), stop_rad))
-    return overrides
 
 
 def _load_student_dagger_defaults(student_cfg_path):
@@ -241,20 +194,6 @@ parser.add_argument(
     default=None,
     metavar=("MIN", "MAX"),
     help="Eval-only handle joint upper stop margin above each episode's unlatch threshold.",
-)
-parser.add_argument(
-    "--door-unlatch-threshold-range-deg",
-    type=float,
-    nargs=2,
-    default=None,
-    metavar=("MIN", "MAX"),
-    help="Eval-only uniform range for the handle unlatching threshold, in degrees.",
-)
-parser.add_argument(
-    "--door-handle-upper-stop-deg",
-    type=float,
-    default=None,
-    help="Eval-only absolute upper hard stop for the handle hinge, in degrees.",
 )
 parser.add_argument(
     "--door-solver-position-iterations",
@@ -1996,28 +1935,6 @@ def main(env_cfg, agent_cfg: dict):
             raise ValueError("--door-solver-position-iterations must be >= 1.")
         env_cfg.door_eval_solver_position_iterations = iterations
         print(f"[INFO] Eval-only door PhysX position iterations: {iterations}")
-    if args_cli.door_unlatch_threshold_range_deg is not None:
-        low_deg, high_deg = map(float, args_cli.door_unlatch_threshold_range_deg)
-        if low_deg < 0.0 or high_deg < low_deg:
-            raise ValueError("--door-unlatch-threshold-range-deg requires 0 <= MIN <= MAX.")
-        env_cfg.door_latch_hinge_threshold_range_rad = (
-            math.radians(low_deg),
-            math.radians(high_deg),
-        )
-        print(
-            "[INFO] Eval-only unlatching threshold range: "
-            f"Uniform({low_deg:.1f}, {high_deg:.1f}) deg"
-        )
-    if args_cli.door_handle_upper_stop_deg is not None:
-        stop_deg = float(args_cli.door_handle_upper_stop_deg)
-        if stop_deg < 0.0:
-            raise ValueError("--door-handle-upper-stop-deg requires a non-negative value.")
-        if args_cli.door_unlatch_threshold_range_deg is not None and stop_deg < high_deg:
-            raise ValueError("Hard stop must be >= the maximum unlatching threshold.")
-        if args_cli.door_handle_limit_margin_range_rad is not None:
-            raise ValueError("Choose either an absolute hard stop or a stop margin, not both.")
-        env_cfg.door_handle_upper_stop_rad = math.radians(stop_deg)
-        print(f"[INFO] Eval-only absolute handle upper hard stop: {stop_deg:.1f} deg")
     if args_cli.door_handle_limit_margin_range_rad is not None:
         low, high = map(float, args_cli.door_handle_limit_margin_range_rad)
         if low < 0.0 or high < low:
@@ -2137,20 +2054,6 @@ def main(env_cfg, agent_cfg: dict):
     os.makedirs(nn_dir, exist_ok=True)
     os.makedirs(summaries_dir, exist_ok=True)
     print(f"[INFO] Eval output directory: {experiment_dir}")
-    hardstop_urdf_overrides = _prepare_eval_hardstop_urdfs(
-        env_cfg.door_cfg,
-        experiment_dir,
-        args_cli.door_handle_upper_stop_deg,
-    )
-    if hardstop_urdf_overrides:
-        env_cfg.door_eval_asset_urdf_overrides = tuple(
-            override_urdf for _, override_urdf, _ in hardstop_urdf_overrides
-        )
-    for source_urdf, override_urdf, stop_rad in hardstop_urdf_overrides:
-        print(
-            "[HANDLE-USD-ASSET-OVERRIDE] "
-            f"source={source_urdf} override={override_urdf} upper={stop_rad:.6f} rad"
-        )
     print(f"[INFO] pointcloud_source={pointcloud_source}, render_mode={env_cfg.pointcloud_render_mode}")
     print(
         "[INFO] Wall renderer config: "
