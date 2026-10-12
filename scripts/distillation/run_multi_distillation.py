@@ -166,6 +166,11 @@ parser.add_argument("--teacher-partnetv8", "--teacher_partnetv8", dest="teacher_
 # parser.add_argument("--data_aug", action="store_true", default=False, help="Whether to use data augmentation for student")
 parser.add_argument("--student_cfg", type=str, default=None, help="Student config YAML to use.")
 parser.add_argument("--student_ckpt", type=str, default=None, help="Student checkpoint to resume from.")
+parser.add_argument(
+    "--door-joint-diagnostic-only",
+    action="store_true",
+    help="Train the door-joint readout from detached student actions; its loss cannot update the policy.",
+)
 parser.add_argument("--teacher_cfg", type=str, default=None, help="Teacher RL-Games config YAML to use.")
 parser.add_argument("--wandb-project-name", type=str, default=None, help="the wandb's project name")
 parser.add_argument("--wandb-entity", type=str, default=None, help="the entity (team) of wandb's project")
@@ -604,6 +609,7 @@ def main(env_cfg, agent_cfg: dict):
         "student": {
             "cfg": student_cfg,
             "ckpt": student_ckpt,
+            "door_joint_diagnostic_only": bool(args_cli.door_joint_diagnostic_only),
             # "data_aug": args_cli.data_aug,
         },
         "teacher": teacher_config,

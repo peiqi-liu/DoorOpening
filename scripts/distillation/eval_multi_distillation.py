@@ -8,11 +8,13 @@ as timed out and frozen there.
 
 import argparse
 import json
+import math
 import os
 import pathlib
 import sys
 import time
 import types
+import xml.etree.ElementTree as ET
 
 import yaml
 from isaaclab.app import AppLauncher
@@ -68,6 +70,51 @@ def _resolve_teacher_cfg_path(path_value):
         / "rl_games_ppo_cfg.yaml"
     )
     return _resolve_repo_path(path_value, default_path)
+
+
+def _prepare_eval_hardstop_urdfs(door_cfg, output_dir, stop_deg):
+    """Create eval-local URDF copies so the handle stop exists before PhysX builds constraints."""
+    if stop_deg is None:
+        return []
+    spawn_cfg = getattr(door_cfg, "spawn", None)
+    asset_cfgs = list(getattr(spawn_cfg, "assets_cfg", None) or [])
+    if not asset_cfgs:
+        raise RuntimeError("Cannot create hard-stop URDF copies: no multi-door URDF configs found.")
+    stop_rad = math.radians(float(stop_deg))
+    # Keep both URDF and converter-cache paths absolute. The imported USD uses relative
+    # sublayers (e.g. @configuration/mobility_physics.usd@), which otherwise resolve against
+    # the process cwd and produce an incomplete articulation when output_dir is relative.
+    output_root = pathlib.Path(output_dir).expanduser().resolve() / "door_hardstop_assets"
+    output_root.mkdir(parents=True, exist_ok=True)
+    overrides = []
+    for asset_idx, asset_cfg in enumerate(asset_cfgs):
+        source_urdf = pathlib.Path(str(asset_cfg.asset_path)).resolve()
+        asset_dir = output_root / f"asset_{asset_idx:03d}_{source_urdf.parent.name}"
+        asset_dir.mkdir(parents=True, exist_ok=True)
+        for child in source_urdf.parent.iterdir():
+            if child == source_urdf:
+                continue
+            link = asset_dir / child.name
+            if not link.exists() and not link.is_symlink():
+                link.symlink_to(child.resolve(), target_is_directory=child.is_dir())
+
+        tree = ET.parse(source_urdf)
+        handle_joint = next(
+            (joint for joint in tree.getroot().iter("joint") if joint.get("name") == "joint_2"),
+            None,
+        )
+        if handle_joint is None or handle_joint.find("limit") is None:
+            raise RuntimeError(f"No revolute joint_2 limit found in {source_urdf}.")
+        handle_joint.find("limit").set("upper", f"{stop_rad:.12g}")
+        override_urdf = asset_dir / source_urdf.name
+        tree.write(override_urdf, encoding="utf-8", xml_declaration=True)
+
+        # Isolate converted USDs from the original cached asset, whose limit is still the source URDF's.
+        asset_cfg.asset_path = str(override_urdf)
+        asset_cfg.usd_dir = str(asset_dir / "usd_cache")
+        asset_cfg.force_usd_conversion = True
+        overrides.append((str(source_urdf), str(override_urdf), stop_rad))
+    return overrides
 
 
 def _load_student_dagger_defaults(student_cfg_path):
@@ -155,6 +202,66 @@ parser.add_argument("--video_folder", type=str, default=None, help="Optional fol
 parser.add_argument("--num_envs", type=int, default=64, help="Number of environments to evaluate.")
 parser.add_argument("--task", type=str, default="DooropeningMulti", help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment.")
+parser.add_argument(
+    "--panel-stiffness-range-nm-per-rad",
+    type=float,
+    nargs=2,
+    default=None,
+    metavar=("MIN", "MAX"),
+    help="Eval-only full-ADR sampling range for door-panel stiffness in Nm/rad.",
+)
+parser.add_argument(
+    "--panel-effort-limit-range-nm",
+    type=float,
+    nargs=2,
+    default=None,
+    metavar=("MIN", "MAX"),
+    help="Eval-only full-ADR sampling range for the door-panel effort limit in Nm.",
+)
+parser.add_argument(
+    "--handle-stiffness-range-nm-per-rad",
+    type=float,
+    nargs=2,
+    default=None,
+    metavar=("MIN", "MAX"),
+    help="Eval-only full-ADR sampling range for handle joint_2 stiffness in Nm/rad.",
+)
+parser.add_argument(
+    "--handle-effort-limit-range-nm",
+    type=float,
+    nargs=2,
+    default=None,
+    metavar=("MIN", "MAX"),
+    help="Eval-only full-ADR sampling range for handle joint_2 effort limit in Nm.",
+)
+parser.add_argument(
+    "--door-handle-limit-margin-range-rad",
+    type=float,
+    nargs=2,
+    default=None,
+    metavar=("MIN", "MAX"),
+    help="Eval-only handle joint upper stop margin above each episode's unlatch threshold.",
+)
+parser.add_argument(
+    "--door-unlatch-threshold-range-deg",
+    type=float,
+    nargs=2,
+    default=None,
+    metavar=("MIN", "MAX"),
+    help="Eval-only uniform range for the handle unlatching threshold, in degrees.",
+)
+parser.add_argument(
+    "--door-handle-upper-stop-deg",
+    type=float,
+    default=None,
+    help="Eval-only absolute upper hard stop for the handle hinge, in degrees.",
+)
+parser.add_argument(
+    "--door-solver-position-iterations",
+    type=int,
+    default=None,
+    help="Eval-only PhysX position-solver iteration count for door articulation assets.",
+)
 parser.add_argument("--student_cfg", type=str, default=None, help="Student config YAML to use.")
 parser.add_argument("--student_ckpt", type=str, default=None, help="Student checkpoint to evaluate.")
 parser.add_argument("--use_teacher", action="store_true", default=False, help="Roll out teacher actions instead of student actions.")
@@ -346,7 +453,7 @@ from DoorOpening.assets.cache_utils import preconvert_shared_urdf_assets
 from DoorOpening.assets.door.multi_door_cfg import ALL_DOOR_CONFIGS as MULTI_DOOR_CONFIGS
 from DoorOpening.assets.door.multi_door_cfg import DOOR_FAMILY_NAMES, asset_family_ids, asset_paths
 from DoorOpening.distillation.multi_pcd_dagger import Dagger
-from DoorOpening.tasks.dooropening.multi_dooropening_env import DOOR_LATCH_HINGE_THRESHOLD_RAD, compute_tracking_error
+from DoorOpening.tasks.dooropening.multi_dooropening_env import compute_tracking_error
 
 
 DIRECTION_NAME_TO_ID = {"pull": 0, "push": 1}
@@ -932,9 +1039,12 @@ def _render_attention_jpgs(attn_state, run_index=None):
         )
         vmin, vmax = float(attn_np.min()), float(attn_np.max())
         pcd_idx = [i for i, lb in enumerate(labels) if lb == "pointcloud"]
-        other_idx = [i for i, lb in enumerate(labels) if lb != "pointcloud"]
-        q_arm_idx = [i for i, lb in enumerate(labels) if isinstance(lb, str) and lb.startswith("q_arm ")]
-        base_vel_idx = [i for i, lb in enumerate(labels) if isinstance(lb, str) and lb.startswith("base_vel ")]
+        # Only report the four state terms that are part of this experiment.  Condition
+        # tokens and any legacy/unused fields are deliberately excluded from the summary.
+        is_requested_state = lambda lb: str(lb) in {"aux_handle_pos", "target_err_arm", "q_arm", "base_vel"} or str(lb).startswith(("aux_handle_pos ", "target_err_arm ", "q_arm ", "base_vel "))
+        other_idx = [i for i, lb in enumerate(labels) if lb != "pointcloud" and is_requested_state(lb)]
+        q_arm_idx = [i for i, lb in enumerate(labels) if isinstance(lb, str) and (lb == "q_arm" or lb.startswith("q_arm "))]
+        base_vel_idx = [i for i, lb in enumerate(labels) if isinstance(lb, str) and (lb == "base_vel" or lb.startswith("base_vel "))]
         q_arm_mass = float(attn_np[q_arm_idx].sum()) if q_arm_idx else 0.0
         base_vel_mass = float(attn_np[base_vel_idx].sum()) if base_vel_idx else 0.0
         pointcloud_mass = float(attn_np[pcd_idx].sum()) if pcd_idx else 0.0
@@ -944,7 +1054,8 @@ def _render_attention_jpgs(attn_state, run_index=None):
                 "pointcloud": pointcloud_mass,
                 "q_arm_history": q_arm_mass,
                 "base_vel_history": base_vel_mass,
-                "other_state_tokens": max(0.0, 1.0 - pointcloud_mass - q_arm_mass - base_vel_mass),
+                "aux_handle_pos": float(attn_np[[i for i, lb in enumerate(labels) if str(lb).startswith("aux_handle_pos")]].sum()) if any(str(lb).startswith("aux_handle_pos") for lb in labels) else 0.0,
+                "tracking_error": float(attn_np[[i for i, lb in enumerate(labels) if str(lb).startswith("target_err_arm")]].sum()) if any(str(lb).startswith("target_err_arm") for lb in labels) else 0.0,
                 "pointcloud_token_count": len(pcd_idx),
             }
         )
@@ -974,7 +1085,7 @@ def _render_attention_jpgs(attn_state, run_index=None):
         ax_oth.set_xticks([])
         ax_oth.set_yticks(range(len(other_idx)))
         ax_oth.set_yticklabels([labels[i] for i in other_idx], fontsize=8)
-        ax_oth.set_title("proprioception / state / conditions")
+        ax_oth.set_title("requested state terms only")
         mid = 0.5 * (vmin + vmax)
         for r, i in enumerate(other_idx):
             ax_oth.text(0, r, f"{attn_np[i]:.3f}", ha="center", va="center", fontsize=7,
@@ -993,9 +1104,10 @@ def _render_attention_jpgs(attn_state, run_index=None):
         fig, ax = plt.subplots(figsize=(9.5, 4.8))
         for key, label, color in (
             ("pointcloud", "Point cloud (sum of all tokens)", "#e69f00"),
-            ("q_arm_history", "Arm proprioception history", "#0072b2"),
-            ("base_vel_history", "Base-velocity history", "#009e73"),
-            ("other_state_tokens", "Other state / condition tokens", "#7f7f7f"),
+            ("aux_handle_pos", "Aux handle position", "#d55e00"),
+            ("tracking_error", "Tracking error", "#cc79a7"),
+            ("q_arm_history", "Franka joint", "#0072b2"),
+            ("base_vel_history", "Measured base velocity", "#009e73"),
         ):
             values = [row[key] for row in mass_rows]
             ax.plot(steps, values, marker="o", linewidth=2, label=label, color=color)
@@ -1028,7 +1140,7 @@ def _render_attention_jpgs(attn_state, run_index=None):
         for row in raw_token_rows:
             for token in row["tokens"]:
                 label = token["label"]
-                if label != "pointcloud" and label not in all_labels:
+                if label != "pointcloud" and label not in all_labels and is_requested_state(label):
                     all_labels.append(label)
         history_fig, history_ax = plt.subplots(figsize=(12.0, 6.5))
         steps = [row["step"] for row in raw_token_rows]
@@ -1080,7 +1192,7 @@ def _render_query_attention_maps(attn_state, run_index=None):
     out_dir = attn_state["out_dir"]
     env_id = attn_state["env_id"]
     tag = f"run{run_index}_" if run_index is not None else ""
-    for query_name in ("action", "aux_handle", "door_joint"):
+    for query_name in ("action", "base", "franka", "aux_handle", "door_joint"):
         rows = []
         for step, labels, query_weights in snapshots:
             if query_name not in query_weights:
@@ -1130,8 +1242,8 @@ def _render_query_attention_maps(attn_state, run_index=None):
 
 
 def _render_pointcloud_source_attention(attn_state, run_index=None):
-    """Plot temporal point-cloud attention split by depth-camera vs explicit robot-model points."""
-    rows = attn_state.get("source_snapshots", [])
+    """Plot temporal point-cloud attention split into handle, panel, and wall regions."""
+    rows = attn_state.get("region_snapshots", [])
     if not rows:
         return
     import matplotlib
@@ -1140,14 +1252,12 @@ def _render_pointcloud_source_attention(attn_state, run_index=None):
     out_dir = attn_state["out_dir"]
     env_id = attn_state["env_id"]
     tag = f"run{run_index}_" if run_index is not None else ""
-    names = ("action", "aux_handle", "door_joint")
-    fig, axes = plt.subplots(3, 1, figsize=(10, 9), sharex=True)
+    names = ("action", "base", "franka", "aux_handle", "door_joint")
+    fig, axes = plt.subplots(len(names), 1, figsize=(10, 2.8 * len(names)), sharex=True)
     for ax, name in zip(axes, names):
         steps = [int(step) for step, values in rows if name in values]
-        depth = [float(values[name]["depth_camera"]) for step, values in rows if name in values]
-        robot = [float(values[name]["robot_model"]) for step, values in rows if name in values]
-        ax.plot(steps, depth, marker="o", linewidth=2, label="Depth-camera cloud (door + visible robot)")
-        ax.plot(steps, robot, marker="o", linewidth=2, label="Explicit robot-model points")
+        for key, label, color in (("handle", "Door handle", "#d55e00"), ("panel", "Door panel", "#0072b2"), ("wall", "Wall distractors", "#009e73")):
+            ax.plot(steps, [float(values[name][key]) for step, values in rows if name in values], marker="o", linewidth=2, label=label, color=color)
         ax.set_ylabel(f"{name}\nattention mass")
         ax.set_ylim(bottom=0.0)
         ax.grid(True, alpha=0.25)
@@ -1155,12 +1265,161 @@ def _render_pointcloud_source_attention(attn_state, run_index=None):
     axes[-1].set_xlabel("Policy step")
     fig.suptitle(f"Point-cloud attention over rollout — env {env_id}")
     fig.tight_layout()
-    path = os.path.join(out_dir, f"attn_pointcloud_sources_{tag.rstrip('_') or 'eval'}.jpg")
+    path = os.path.join(out_dir, f"attn_pointcloud_regions_{tag.rstrip('_') or 'eval'}.jpg")
     fig.savefig(path, dpi=140)
     plt.close(fig)
     with open(os.path.splitext(path)[0] + ".json", "w", encoding="utf-8") as f:
         json.dump([{"step": int(step), **values} for step, values in rows], f, indent=2)
     print(f"[ATTN] saved temporal point-cloud source attention to {path}")
+
+
+def _render_joint_output_attributions(attn_state, run_index=None):
+    """Save shared raw attention and separate output-specific gradient x activation maps."""
+    rows = attn_state.get("output_attribution_snapshots", [])
+    queries = attn_state.get("query_snapshots", [])
+    regions = attn_state.get("region_snapshots", [])
+    if not rows or not queries or not regions:
+        return
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    out_dir = attn_state["out_dir"]
+    env_id = attn_state["env_id"]
+    tag = f"run{run_index}_" if run_index is not None else ""
+    names = [
+        "Door handle points", "Door panel points", "Wall points", "Other cloud tokens",
+        "Franka joint position", "Base velocity", "Arm target error", "Aux handle position",
+        "Other state tokens",
+    ]
+    keys = ["handle", "panel", "wall", "other_cloud", "franka", "base_vel", "target_err_arm", "aux_handle_pos", "other_state"]
+    colors = ["#e69f00", "#56b4e9", "#009e73", "#999999", "#cc79a7", "#0072b2", "#d55e00", "#666666", "#8c564b"]
+
+    # Raw attention is one shared door-joint query. Aggregate its per-token attention
+    # into the same point-cloud and state groups used for the two output-specific maps.
+    region_by_step = {int(s): v.get("door_joint", {}) for s, v in regions}
+    shared_rows = []
+    for step, labels, query_weights in queries:
+        if "door_joint" not in query_weights or int(step) not in region_by_step:
+            continue
+        w = query_weights["door_joint"].detach().float().cpu()
+        rr = region_by_step[int(step)]
+        cloud = sum(float(w[i]) for i, label in enumerate(labels) if label == "pointcloud")
+        vals = {
+            "handle": float(rr.get("handle", 0.0)),
+            "panel": float(rr.get("panel", 0.0)),
+            "wall": float(rr.get("wall", 0.0)),
+        }
+        vals["other_cloud"] = max(0.0, cloud - vals["handle"] - vals["panel"] - vals["wall"])
+        for idx, label in enumerate(labels):
+            if label == "pointcloud":
+                continue
+            if label.startswith("q_arm"):
+                key = "franka"
+            elif label.startswith("base_vel"):
+                key = "base_vel"
+            elif label.startswith("target_err_arm"):
+                key = "target_err_arm"
+            elif label.startswith("aux_handle_pos"):
+                key = "aux_handle_pos"
+            else:
+                key = "other_state"
+            vals[key] = vals.get(key, 0.0) + float(w[idx])
+        shared_rows.append((int(step), vals))
+
+    joint_rows = {
+        "handle": [(int(s), values["handle"]) for s, values in rows],
+        "panel": [(int(s), values["panel"]) for s, values in rows],
+    }
+    plot_specs = [
+        ("shared_attention", "Shared door-joint query attention", shared_rows, True),
+        ("handle_output_attribution", "Handle-joint output attribution (gradient × activation)", joint_rows["handle"], False),
+        ("panel_output_attribution", "Panel-joint output attribution (gradient × activation)", joint_rows["panel"], False),
+    ]
+    for suffix, title, series_rows, is_shared in plot_specs:
+        if not series_rows:
+            continue
+        plot_steps = [s for s, _ in series_rows]
+        series = {key: [float(values.get(key, 0.0)) * 100.0 for _, values in series_rows] for key in keys}
+        fig, ax = plt.subplots(figsize=(15.5, 7.2))
+        ax.stackplot(plot_steps, *[series[k] for k in keys], labels=names, colors=colors, alpha=0.94)
+        ax.set_xlim(min(plot_steps), max(plot_steps))
+        ax.set_ylim(0, 100)
+        ax.set_xlabel("Policy step")
+        ax.set_ylabel("Normalized token score (%)" if not is_shared else "Door-joint query attention (%)")
+        suffix_note = "" if is_shared else "\nPer-output sensitivity, not a distinct transformer attention query"
+        ax.set_title(f"{title} — env {env_id}{suffix_note}")
+        ax.grid(True, axis="y", alpha=0.2)
+        ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.13), ncol=3, frameon=True, fontsize=9)
+        fig.subplots_adjust(bottom=0.23, top=0.88, left=0.08, right=0.98)
+        path = os.path.join(out_dir, f"door_joint_{suffix}_{tag.rstrip('_') or 'eval'}.png")
+        fig.savefig(path, dpi=160, bbox_inches="tight")
+        plt.close(fig)
+        print(f"[ATTN] saved joint output attribution figure to {path}")
+
+
+def _classify_pointcloud_attention(attn, dagger, env_id):
+    """Classify PointNet centers by nearest transformed handle, panel, or wall surface."""
+    result = {}
+    try:
+        device = dagger.device
+
+        def quat_apply_wxyz(quat, points):
+            qv = quat[1:].expand_as(points)
+            uv = torch.cross(qv, points, dim=-1)
+            uuv = torch.cross(qv, uv, dim=-1)
+            return points + 2.0 * (quat[0] * uv + uuv)
+
+        robot_body_idx = int(dagger.robot_base_body_idx)
+        base_pos_w = dagger.ov_env.robot.data.body_pos_w[env_id, robot_body_idx]
+        base_quat_w = dagger.ov_env.robot.data.body_quat_w[env_id, robot_body_idx]
+        quat_inv = torch.cat((base_quat_w[:1], -base_quat_w[1:]))
+
+        def world_to_base(points_world):
+            return quat_apply_wxyz(quat_inv, points_world - base_pos_w)
+
+        asset_idx = int(dagger.env_asset_idx[env_id].detach().cpu().item())
+        link_cache = dagger.door_link_pointclouds.get(asset_idx, {})
+
+        def posed_link_base(link_name):
+            points_local = link_cache.get(link_name)
+            if points_local is None or points_local.numel() == 0:
+                return torch.zeros((0, 3), dtype=torch.float32, device=device)
+            body_idx = int(dagger.door_link_body_indices[link_name])
+            pos_w = dagger.ov_env.door.data.body_pos_w[env_id, body_idx]
+            quat_w = dagger.ov_env.door.data.body_quat_w[env_id, body_idx]
+            return world_to_base(quat_apply_wxyz(quat_w, points_local.to(device)) + pos_w)
+
+        surfaces = [(0, posed_link_base("link_2")), (1, posed_link_base("link_1"))]
+        wall_world = getattr(dagger, "_wall_distractor_world_points", None)
+        if wall_world is not None and wall_world.numel():
+            wall = wall_world[env_id]
+            if wall.shape[0] > 12000:
+                wall = wall[torch.linspace(0, wall.shape[0] - 1, 12000, device=device).long()]
+            surfaces.append((2, world_to_base(wall)))
+
+        for key, (xyz, _weights) in attn.get("pcd", {}).items():
+            centers = xyz.to(device=device, dtype=torch.float32)
+            class_dists, class_ids = [], []
+            for region_id, points in surfaces:
+                if points.numel() == 0:
+                    continue
+                if points.shape[0] > 12000:
+                    points = points[torch.linspace(0, points.shape[0] - 1, 12000, device=device).long()]
+                distances = torch.cdist(centers.unsqueeze(0), points.unsqueeze(0)).squeeze(0)
+                class_dists.append(distances.min(dim=1).values)
+                class_ids.append(region_id)
+            if not class_dists:
+                continue
+            nearest_dist, nearest_idx = torch.stack(class_dists, dim=1).min(dim=1)
+            region = torch.tensor(class_ids, dtype=torch.long, device=device)[nearest_idx]
+            # Exclude centers that do not match any of the three requested physical surfaces.
+            region[nearest_dist > 0.12] = -1
+            result[key] = {"region": region.detach().cpu()}
+        return result
+    except Exception as exc:  # noqa: BLE001
+        print(f"[ATTN] point-cloud region classification unavailable: {exc}")
+        return {}
 
 
 def _save_replay_pt(replay_runs, joint_names, base_env, save_replay_arg):
@@ -1171,7 +1430,20 @@ def _save_replay_pt(replay_runs, joint_names, base_env, save_replay_arg):
     replay_path = str(replay_path)
     os.makedirs(os.path.dirname(replay_path) or ".", exist_ok=True)
     torch.save(
-        {"runs": replay_runs, "joint_names": joint_names, "num_envs": int(base_env.num_envs)},
+        {
+            "runs": replay_runs,
+            "joint_names": joint_names,
+            "num_envs": int(base_env.num_envs),
+            "base_velocity_schema": {
+                "frame": "robot",
+                "components": ["vx", "vy", "yaw_rate"],
+                "units": ["m/s", "m/s", "rad/s"],
+                "measured_source": "simulated base joint velocities rotated into robot frame, before env.step",
+                "policy_input_source": "velocity vector returned to the student policy (may include configured noise)",
+                "commanded_source": "clamped student base action multiplied by env base_action_scale",
+            },
+            "control_frequency_hz": float(1.0 / max(float(getattr(base_env, "step_dt", 1.0 / 15.0)), 1e-8)),
+        },
         replay_path,
     )
     print(f"[INFO] Replay saved to {replay_path} ({len(replay_runs)} run(s) so far).")
@@ -1296,9 +1568,7 @@ def _door_param_snapshot(base_env, env_id):
         "handle_stiffness_nm_per_rad": float(base_env._door_nominal_joint_stiffness[env_id, hinge_idx]),
         "handle_damping_nms_per_rad": float(base_env._door_nominal_joint_damping[env_id, hinge_idx]),
         "handle_effort_limit_nm": float(base_env._door_handle_effort_limits[env_id, 0]),
-        # Fixed across all envs now (DOOR_LATCH_HINGE_THRESHOLD_RAD in multi_dooropening_env.py),
-        # not sampled per-env, so there is no per-env value to read here anymore.
-        "latch_threshold_rad": float(DOOR_LATCH_HINGE_THRESHOLD_RAD),
+        "latch_threshold_rad": float(base_env._door_latch_hinge_threshold_rad[env_id]),
         "panel_mass_kg": None,
         "panel_friction_static": None,
         "handle_friction_static": None,
@@ -1488,6 +1758,12 @@ def _append_viser_frame(recorder, viser_meta, base_env, dagger, student_output):
         "compact_q": q,
         "compact_target": tgt,
         "door_joint_pos": dj.cpu().clone(),
+        "door_joint_pos_limits": base_env.door.data.joint_pos_limits[env_id].detach().cpu().clone(),
+        "door_unlatch_threshold_rad": base_env._door_latch_hinge_threshold_rad[env_id]
+        .detach()
+        .to(torch.float32)
+        .cpu()
+        .clone(),
         # URDF root (`base_link`) pose; base_x/base_y/base_rotation are replayed from compact_q.
         "robot_base_pos_w": (rb_root[:3] - org).cpu().clone(),
         "robot_base_quat_w": rb_root[3:7].cpu().clone(),
@@ -1505,6 +1781,24 @@ def _append_viser_frame(recorder, viser_meta, base_env, dagger, student_output):
         elif action.ndim == 2:
             action = action[env_id]
         frame["policy_action"] = action.detach().to(torch.float32).cpu().reshape(-1).clone()
+    # Capture the live PhysX limits once per Viser stream as well as the IsaacLab-side limit buffer
+    # above. This verifies that a dynamic limit override reached the simulation backend.
+    if not recorder["frames"]:
+        physx_joint_limits = base_env.door.root_physx_view.get_dof_limits()
+        frame["door_joint_pos_limits_physx"] = (
+            physx_joint_limits[env_id].detach().to(torch.float32).cpu().clone()
+        )
+    # Save the auxiliary door-joint head output beside the raw action for temporal
+    # correlation analysis. The model predicts [hinge, latch] in radians.
+    if isinstance(student_output, dict) and isinstance(student_output.get("door_joint"), torch.Tensor):
+        door_joint_prediction = student_output["door_joint"]
+        if door_joint_prediction.ndim >= 3:
+            door_joint_prediction = door_joint_prediction[env_id, 0]
+        elif door_joint_prediction.ndim == 2:
+            door_joint_prediction = door_joint_prediction[env_id]
+        frame["door_joint_prediction"] = (
+            door_joint_prediction.detach().to(torch.float32).cpu().reshape(-1).clone()
+        )
 
     student_obs = getattr(dagger, "latest_eval_student_obs", None)
     temporal_key = getattr(dagger, "proprio_temporal_obs_key", None)
@@ -1696,6 +1990,74 @@ def main(env_cfg, agent_cfg: dict):
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     env_cfg.use_motion_ref = True
+    if args_cli.door_solver_position_iterations is not None:
+        iterations = int(args_cli.door_solver_position_iterations)
+        if iterations < 1:
+            raise ValueError("--door-solver-position-iterations must be >= 1.")
+        env_cfg.door_eval_solver_position_iterations = iterations
+        print(f"[INFO] Eval-only door PhysX position iterations: {iterations}")
+    if args_cli.door_unlatch_threshold_range_deg is not None:
+        low_deg, high_deg = map(float, args_cli.door_unlatch_threshold_range_deg)
+        if low_deg < 0.0 or high_deg < low_deg:
+            raise ValueError("--door-unlatch-threshold-range-deg requires 0 <= MIN <= MAX.")
+        env_cfg.door_latch_hinge_threshold_range_rad = (
+            math.radians(low_deg),
+            math.radians(high_deg),
+        )
+        print(
+            "[INFO] Eval-only unlatching threshold range: "
+            f"Uniform({low_deg:.1f}, {high_deg:.1f}) deg"
+        )
+    if args_cli.door_handle_upper_stop_deg is not None:
+        stop_deg = float(args_cli.door_handle_upper_stop_deg)
+        if stop_deg < 0.0:
+            raise ValueError("--door-handle-upper-stop-deg requires a non-negative value.")
+        if args_cli.door_unlatch_threshold_range_deg is not None and stop_deg < high_deg:
+            raise ValueError("Hard stop must be >= the maximum unlatching threshold.")
+        if args_cli.door_handle_limit_margin_range_rad is not None:
+            raise ValueError("Choose either an absolute hard stop or a stop margin, not both.")
+        env_cfg.door_handle_upper_stop_rad = math.radians(stop_deg)
+        print(f"[INFO] Eval-only absolute handle upper hard stop: {stop_deg:.1f} deg")
+    if args_cli.door_handle_limit_margin_range_rad is not None:
+        low, high = map(float, args_cli.door_handle_limit_margin_range_rad)
+        if low < 0.0 or high < low:
+            raise ValueError("--door-handle-limit-margin-range-rad requires 0 <= MIN <= MAX.")
+        env_cfg.door_handle_limit_margin_range_rad = (low, high)
+        print(
+            "[INFO] Eval-only handle joint upper stop margin above unlatch threshold: "
+            f"Uniform({low:.3f}, {high:.3f}) rad"
+        )
+    if args_cli.panel_stiffness_range_nm_per_rad is not None:
+        low, high = map(float, args_cli.panel_stiffness_range_nm_per_rad)
+        if low <= 0.0 or high < low:
+            raise ValueError("--panel-stiffness-range-nm-per-rad requires 0 < MIN <= MAX.")
+        env_cfg.adr_cfg_dict["door_board_joint_stiffness_and_damping"][
+            "stiffness_distribution_params"
+        ] = (low, high)
+        print(f"[INFO] Eval-only full-ADR panel stiffness range: ({low}, {high}) Nm/rad")
+    if args_cli.panel_effort_limit_range_nm is not None:
+        low, high = map(float, args_cli.panel_effort_limit_range_nm)
+        if low < 0.0 or high < low:
+            raise ValueError("--panel-effort-limit-range-nm requires 0 <= MIN <= MAX.")
+        env_cfg.door_panel_effort_limit_range_nm = (low, high)
+        print(f"[INFO] Eval-only full-ADR panel effort-limit range: ({low}, {high}) Nm")
+    if args_cli.handle_stiffness_range_nm_per_rad is not None:
+        low, high = map(float, args_cli.handle_stiffness_range_nm_per_rad)
+        if low <= 0.0 or high < low:
+            raise ValueError("--handle-stiffness-range-nm-per-rad requires 0 < MIN <= MAX.")
+        env_cfg.adr_cfg_dict["door_hinge_joint_stiffness_and_damping"][
+            "stiffness_distribution_params"
+        ] = (low, high)
+        print(f"[INFO] Eval-only full-ADR handle joint_2 stiffness range: ({low}, {high}) Nm/rad")
+    if args_cli.handle_effort_limit_range_nm is not None:
+        low, high = map(float, args_cli.handle_effort_limit_range_nm)
+        if low < 0.0 or high < low:
+            raise ValueError("--handle-effort-limit-range-nm requires 0 <= MIN <= MAX.")
+        env_cfg.door_handle_effort_limit_range_nm = (low, high)
+        env_cfg.adr_cfg_dict["door_hinge_joint_effort_limit"][
+            "effort_limit_distribution_params"
+        ] = (low, high)
+        print(f"[INFO] Eval-only full-ADR handle joint_2 effort-limit range: ({low}, {high}) Nm")
     if args_cli.base_action_scale is not None:
         if args_cli.base_action_scale <= 0.0:
             raise ValueError("--base-action-scale must be positive")
@@ -1775,6 +2137,20 @@ def main(env_cfg, agent_cfg: dict):
     os.makedirs(nn_dir, exist_ok=True)
     os.makedirs(summaries_dir, exist_ok=True)
     print(f"[INFO] Eval output directory: {experiment_dir}")
+    hardstop_urdf_overrides = _prepare_eval_hardstop_urdfs(
+        env_cfg.door_cfg,
+        experiment_dir,
+        args_cli.door_handle_upper_stop_deg,
+    )
+    if hardstop_urdf_overrides:
+        env_cfg.door_eval_asset_urdf_overrides = tuple(
+            override_urdf for _, override_urdf, _ in hardstop_urdf_overrides
+        )
+    for source_urdf, override_urdf, stop_rad in hardstop_urdf_overrides:
+        print(
+            "[HANDLE-USD-ASSET-OVERRIDE] "
+            f"source={source_urdf} override={override_urdf} upper={stop_rad:.6f} rad"
+        )
     print(f"[INFO] pointcloud_source={pointcloud_source}, render_mode={env_cfg.pointcloud_render_mode}")
     print(
         "[INFO] Wall renderer config: "
@@ -1790,7 +2166,7 @@ def main(env_cfg, agent_cfg: dict):
     dagger_runtime_cfg["viser"] = {"raw": {"enabled": False}}
 
     preconvert_shared_urdf_assets(
-        door_configs=MULTI_DOOR_CONFIGS,
+        door_configs=env_cfg.door_cfg,
         timeout_s=float(args_cli.asset_preconvert_timeout_s),
         poll_interval_s=float(args_cli.asset_preconvert_poll_interval_s),
         verbose=True,
@@ -1798,6 +2174,30 @@ def main(env_cfg, agent_cfg: dict):
 
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
     base_env = _get_base_env(env)
+    if args_cli.door_solver_position_iterations is not None:
+        # The tensor ArticulationView does not expose solver iteration setters. Author the
+        # PhysX articulation-root attributes before the first env.reset()/physics step instead.
+        import omni.usd
+        from pxr import PhysxSchema
+
+        iterations = int(args_cli.door_solver_position_iterations)
+        stage = omni.usd.get_context().get_stage()
+        live_counts = []
+        for env_id in range(base_env.num_envs):
+            door_prefix = f"/World/envs/env_{env_id}/Door/"
+            articulation_prims = [
+                prim
+                for prim in stage.Traverse()
+                if str(prim.GetPath()).startswith(door_prefix)
+                and prim.HasAPI(PhysxSchema.PhysxArticulationAPI)
+            ]
+            if not articulation_prims:
+                raise RuntimeError(f"No PhysX articulation root found below {door_prefix}.")
+            for prim in articulation_prims:
+                api = PhysxSchema.PhysxArticulationAPI.Get(stage, prim.GetPath())
+                api.CreateSolverPositionIterationCountAttr().Set(iterations)
+                live_counts.append(api.GetSolverPositionIterationCountAttr().Get())
+        print(f"[DOOR-SOLVER] requested={iterations} live={live_counts}")
     if base_env.ref_motion_lib is None:
         raise RuntimeError("Eval requires env_cfg.use_motion_ref=True and a valid traj.pkl for each door asset.")
     base_env.ref_motion_lib.reset_from_start = True
@@ -1902,9 +2302,21 @@ def main(env_cfg, agent_cfg: dict):
             "interval": max(1, int(args_cli.attn_interval)),
             "snapshots": [],  # (step, token_labels, token_attn, pcd) every `interval` steps
             "query_snapshots": [],  # (step, token_labels, {query_name: token_attn})
-            "source_snapshots": [],  # (step, {query_name: {depth_camera, robot_model}})
+            "region_snapshots": [],  # (step, {query_name: {handle, panel, wall}})
+            # Per-output gradient x activation scores on encoder memory. Raw attention is shared.
+            "memory": {},
+            "output_attribution_snapshots": [],
+            # Gradient x activation is costlier than raw attention; sample it sparsely.
+            "output_attribution_interval": max(50, int(args_cli.attn_interval)),
             "out_dir": _attn_dir,
         }
+        _encoder = getattr(dagger.student_model, "encoder", None)
+        if _encoder is not None:
+            def _retain_encoder_memory(_module, _inputs, _output):
+                if torch.is_grad_enabled() and isinstance(_output, torch.Tensor):
+                    _output.retain_grad()
+                    attn_state["memory"]["tensor"] = _output
+            attn_state["memory_hook"] = _encoder.register_forward_hook(_retain_encoder_memory)
         print(
             f"[INFO] --attn-viz: capturing student action-query attention for env {_attn_env_id} "
             f"(attn_<step>.jpg every {attn_state['interval']} steps) -> {_attn_dir}"
@@ -1993,6 +2405,9 @@ def main(env_cfg, agent_cfg: dict):
             _run_actions: list = []
             _run_applied_targets: list = []
             _run_active: list = []
+            _run_base_velocity_measured_robot: list = []
+            _run_base_velocity_policy_input_robot: list = []
+            _run_base_velocity_commanded_robot: list = []
 
         active = torch.ones(base_env.num_envs, dtype=torch.bool, device=base_env.device)
         timed_out = torch.zeros_like(active)
@@ -2023,22 +2438,111 @@ def main(env_cfg, agent_cfg: dict):
                         dagger._build_student_obs(iteration=step)
                     actions, student_output = _build_teacher_actions(dagger, obs)
                 else:
-                    actions, student_output = _build_student_actions(dagger, iteration=step)
+                    _capture_joint_attribution = (
+                        attn_state is not None
+                        and int(step) % attn_state["output_attribution_interval"] == 0
+                        and bool(getattr(dagger.student_model, "door_joint_prediction_enabled", False))
+                    )
+                    if _capture_joint_attribution:
+                        with torch.enable_grad():
+                            actions, student_output = _build_student_actions(dagger, iteration=step)
+                    else:
+                        actions, student_output = _build_student_actions(dagger, iteration=step)
 
                 if attn_state is not None:
                     # Pop the attention captured by the forward inside _build_student_actions above.
                     # pop() every step to drain the captured weights; only store/print at the interval.
                     _attn = attn_state["capture"].pop(dagger.student_model, env_id=attn_state["env_id"])
                     if _attn is not None and int(step) % attn_state["interval"] == 0:
+                        _memory = attn_state["memory"].get("tensor")
+                        _joint_pred = student_output.get("door_joint") if isinstance(student_output, dict) else None
+                        if (
+                            _capture_joint_attribution
+                            and isinstance(_memory, torch.Tensor)
+                            and isinstance(_joint_pred, torch.Tensor)
+                            and _joint_pred.shape[-1] >= 2
+                        ):
+                            _attr_env = attn_state["env_id"]
+                            _attr_rows = []
+                            with torch.enable_grad():
+                                for _joint_idx, _joint_name in ((0, "handle"), (1, "panel")):
+                                    _scalar = (
+                                        _joint_pred[_attr_env, 0, _joint_idx]
+                                        if _joint_pred.ndim >= 3
+                                        else _joint_pred[_attr_env, _joint_idx]
+                                    )
+                                    _grad = torch.autograd.grad(
+                                        _scalar,
+                                        _memory,
+                                        retain_graph=(_joint_idx == 0),
+                                        allow_unused=True,
+                                    )[0]
+                                    if _grad is None:
+                                        _scores = torch.zeros(_memory.shape[1], device=_memory.device)
+                                    else:
+                                        _scores = (_grad[_attr_env] * _memory[_attr_env]).abs().sum(dim=-1)
+                                        _scores = _scores / _scores.sum().clamp_min(1e-12)
+                                    _attr_rows.append((_joint_name, _scores.detach().float().cpu().tolist()))
+                            attn_state["memory"]["pending_rows"] = _attr_rows
+                        region_masks = _classify_pointcloud_attention(_attn, dagger, attn_state["env_id"])
+                        _attr_rows = attn_state["memory"].pop("pending_rows", None)
+                        if _attr_rows is not None:
+                            _pcd_positions = [i for i, lb in enumerate(_attn["token_labels"]) if lb == "pointcloud"]
+                            _grouped = {}
+                            for _joint_name, _scores_list in _attr_rows:
+                                _scores = torch.as_tensor(_scores_list, dtype=torch.float32)
+                                _groups = {"handle": 0.0, "panel": 0.0, "wall": 0.0, "other_cloud": 0.0}
+                                _offset = 0
+                                for _key, (_xyz, _weights) in _attn.get("pcd", {}).items():
+                                    _n = int(_xyz.shape[0])
+                                    _inds = _pcd_positions[_offset:_offset + _n]
+                                    _local = _scores[_inds]
+                                    _masks = region_masks.get(_key, {}).get("region", torch.full((_n,), -1, dtype=torch.long))
+                                    for _rid, _rname in ((0, "handle"), (1, "panel"), (2, "wall")):
+                                        _groups[_rname] += float(_local[_masks == _rid].sum())
+                                    _groups["other_cloud"] += float(_local[~((_masks == 0) | (_masks == 1) | (_masks == 2))].sum())
+                                    _offset += _n
+                                for _i, _label in enumerate(_attn["token_labels"]):
+                                    if _label == "pointcloud":
+                                        continue
+                                    if _label.startswith("q_arm"):
+                                        _name = "franka"
+                                    elif _label.startswith("base_vel"):
+                                        _name = "base_vel"
+                                    elif _label.startswith("target_err_arm"):
+                                        _name = "target_err_arm"
+                                    elif _label.startswith("aux_handle_pos"):
+                                        _name = "aux_handle_pos"
+                                    else:
+                                        _name = "other_state"
+                                    _groups[_name] = _groups.get(_name, 0.0) + float(_scores[_i])
+                                _grouped[_joint_name] = _groups
+                            attn_state["output_attribution_snapshots"].append((int(step), _grouped))
+                            attn_state["memory"].pop("tensor", None)
+                        region_mass = {}
+                        pcd_positions = [i for i, lb in enumerate(_attn["token_labels"]) if lb == "pointcloud"]
+                        for qname, qweights in _attn.get("query_attn", {}).items():
+                            vals = {"handle": 0.0, "panel": 0.0, "wall": 0.0}
+                            offset = 0
+                            for key, (_xyz, _aw) in _attn.get("pcd", {}).items():
+                                n = int(_xyz.shape[0])
+                                if offset + n > len(pcd_positions):
+                                    break
+                                inds = pcd_positions[offset:offset + n]
+                                w = qweights[inds].float()
+                                masks = region_masks.get(key, {})
+                                vals["handle"] += float(w[masks.get("region", torch.ones(n, dtype=torch.long)) == 0].sum())
+                                vals["panel"] += float(w[masks.get("region", torch.ones(n, dtype=torch.long)) == 1].sum())
+                                vals["wall"] += float(w[masks.get("region", torch.ones(n, dtype=torch.long)) == 2].sum())
+                                offset += n
+                            region_mass[qname] = vals
                         attn_state["snapshots"].append(
                             (int(step), _attn["token_labels"], _attn["token_attn"], _attn["pcd"])
                         )
                         attn_state["query_snapshots"].append(
                             (int(step), _attn["token_labels"], _attn.get("query_attn", {}))
                         )
-                        attn_state["source_snapshots"].append(
-                            (int(step), _attn.get("pcd_source_attn", {}))
-                        )
+                        attn_state["region_snapshots"].append((int(step), region_mass))
                         print(
                             f"[ATTN] step {int(step):04d} env {attn_state['env_id']} | top: "
                             + attn_state["format"](_attn["token_labels"], _attn["token_attn"], top_k=8)
@@ -2083,6 +2587,18 @@ def main(env_cfg, agent_cfg: dict):
                     _run_joint_vel.append(base_env.robot.data.joint_vel.detach().cpu().clone())
                     _run_actions.append(replay_actions.detach().cpu().clone())
                     _run_active.append(active.detach().cpu().clone())
+                    # Store base velocity explicitly in the deployment-facing robot frame
+                    # [vx, vy, yaw_rate]. Keep the true simulated measurement separate from
+                    # the possibly-noisy velocity actually presented to the policy.
+                    base_joint_vel = base_env.robot.data.joint_vel[:, base_env._robot_base_dof_idx]
+                    measured_base_vel_robot = dagger._env_base_vector_to_robot_frame(base_joint_vel)
+                    policy_base_vel_robot = dagger._get_student_base_velocity_vector()
+                    commanded_base_vel_robot = replay_actions[:, :3].clamp(-1.0, 1.0) * float(
+                        base_env.cfg.base_action_scale
+                    )
+                    _run_base_velocity_measured_robot.append(measured_base_vel_robot.detach().cpu().clone())
+                    _run_base_velocity_policy_input_robot.append(policy_base_vel_robot.detach().cpu().clone())
+                    _run_base_velocity_commanded_robot.append(commanded_base_vel_robot.detach().cpu().clone())
                 obs, _, _, _, _ = env.step(actions)
                 frozen_state.restore()
                 if replay_runs is not None:
@@ -2165,6 +2681,9 @@ def main(env_cfg, agent_cfg: dict):
                 "actions": torch.stack(_run_actions),           # [T, num_envs, action_dim]
                 "applied_targets": torch.stack(_run_applied_targets),  # [T, num_envs, num_dof]
                 "active_mask": torch.stack(_run_active),        # [T, num_envs] bool
+                "base_velocity_measured_robot": torch.stack(_run_base_velocity_measured_robot),
+                "base_velocity_policy_input_robot": torch.stack(_run_base_velocity_policy_input_robot),
+                "base_velocity_commanded_robot": torch.stack(_run_base_velocity_commanded_robot),
             })
 
         active_count = int(active.sum().detach().cpu().item())
@@ -2194,9 +2713,11 @@ def main(env_cfg, agent_cfg: dict):
             _render_attention_jpgs(attn_state, run_index=run_index)
             _render_query_attention_maps(attn_state, run_index=run_index)
             _render_pointcloud_source_attention(attn_state, run_index=run_index)
+            _render_joint_output_attributions(attn_state, run_index=run_index)
             attn_state["snapshots"].clear()
             attn_state["query_snapshots"].clear()
-            attn_state["source_snapshots"].clear()
+            attn_state["region_snapshots"].clear()
+            attn_state["output_attribution_snapshots"].clear()
         if args_cli.save_replay and replay_runs:
             _save_replay_pt(replay_runs, _replay_joint_names, base_env, args_cli.save_replay)
         if args_cli.viser and viser_recorders is not None:
@@ -2229,6 +2750,8 @@ def main(env_cfg, agent_cfg: dict):
     if attn_state is not None:
         # Final-run snapshots were already rendered + cleared per-run; just detach the capture hook.
         attn_state["capture"].remove()
+        if attn_state.get("memory_hook") is not None:
+            attn_state["memory_hook"].remove()
 
     dagger._close_viser_debug_tools()
     env.close()

@@ -68,7 +68,23 @@ class CheckpointMixin:
         weights = torch.load(ckpt, map_location="cpu")
         state_dict, _ = self._extract_model_state(weights)
         state_dict = strip_prefix_from_state_dict(state_dict)
+        diagnostic_action_input = (
+            getattr(self.student_model, "door_joint_prediction_enabled", False)
+            and getattr(self.student_model, "door_joint_prediction_input_source", "") == "detached_action"
+        )
+        if diagnostic_action_input:
+            # The old joint head consumed a transformer hidden token (H dims); this mode consumes
+            # the detached policy action (action_dim dims). Keep the trained policy, but start this
+            # newly-defined diagnostic readout from a clean initialization.
+            model_state = self.student_model.state_dict()
+            state_dict = {
+                key: value for key, value in state_dict.items()
+                if key not in {"door_joint_head.weight", "door_joint_head.bias"}
+                and (key not in model_state or model_state[key].shape == value.shape)
+            }
         self.student_model.load_state_dict(state_dict, strict=False)
+        if diagnostic_action_input:
+            self.student_model.door_joint_head.reset_parameters()
         if isinstance(weights, dict):
             if "frame" in weights:
                 self.frame = int(weights["frame"])
@@ -117,6 +133,14 @@ class CheckpointMixin:
                         f"Warning: checkpoint '{ckpt}' has no optimizer state; "
                         "optimizer starts fresh (Adam moments reset)."
                     )
+                if diagnostic_action_input:
+                    for parameter in self.student_model.door_joint_head.parameters():
+                        self.optimizer.state.pop(parameter, None)
+                    if self.rank == 0:
+                        print(
+                            "Reset door-joint diagnostic head and its optimizer state; "
+                            "head reads detached current student action only."
+                        )
                 self._restore_lr_scheduler_state(weights)
 
         print(f"Loaded student checkpoint: {ckpt}")

@@ -58,13 +58,8 @@ SELF_COLLISION_SENSOR_NAMES = (
     "contact_forces_self_collision_hand",
 )
 
-# Handle (joint_2) unlatch angle threshold: FIXED, not per-env/ADR-randomized. Replaces the old
-# door_latch_threshold_start_range_rad/door_latch_threshold_range_rad sampling -- every door now
-# requires the same near-complete press before the panel unlocks. Matches the offline pull
-# planners' own unlatch_hinge_angle press target (0.95 rad), which is itself already backed off
-# from the mechanical hard stop (HANDLE_OPEN_LIMIT_RAD = 1.05 rad in
-# generate_randomized_doors_scratch.py).
-DOOR_LATCH_HINGE_THRESHOLD_RAD = 0.95  # back to 0.95; hard stop moved to 0.98 (tight 0.03 margin above)
+# Handle (joint_2) unlatch threshold is sampled independently per environment and episode.
+DOOR_LATCH_HINGE_THRESHOLD_RANGE_RAD = (0.49, 1.00)  # rounded up from 28..57 deg
 
 
 class DooropeningEnv(DirectRLEnv):
@@ -587,6 +582,40 @@ class DooropeningEnv(DirectRLEnv):
 
     def _setup_scene(self):
         configure_multi_door_assets_for_rank(self.cfg.door_cfg, int(self.cfg.scene.num_envs))
+        eval_urdf_overrides = getattr(self.cfg, "door_eval_asset_urdf_overrides", None)
+        if eval_urdf_overrides is not None:
+            spawn_cfg = getattr(self.cfg.door_cfg, "spawn", None)
+            asset_cfgs = list(getattr(spawn_cfg, "assets_cfg", None) or [])
+            override_paths = list(eval_urdf_overrides)
+            if len(override_paths) != len(asset_cfgs):
+                raise ValueError(
+                    "door_eval_asset_urdf_overrides must have one path per configured door asset: "
+                    f"got {len(override_paths)} paths for {len(asset_cfgs)} assets."
+                )
+            for asset_cfg, override_path in zip(asset_cfgs, override_paths):
+                asset_cfg.asset_path = str(override_path)
+                asset_cfg.usd_dir = str(Path(override_path).parent / "usd_cache")
+                asset_cfg.force_usd_conversion = True
+            print(
+                "[DOOR-EVAL-URDF-OVERRIDE] applied before articulation creation: "
+                f"{override_paths}"
+            )
+        eval_solver_iterations = getattr(self.cfg, "door_eval_solver_position_iterations", None)
+        if eval_solver_iterations is not None:
+            eval_solver_iterations = int(eval_solver_iterations)
+            if eval_solver_iterations < 1:
+                raise ValueError("door_eval_solver_position_iterations must be >= 1.")
+            spawn_cfg = getattr(self.cfg.door_cfg, "spawn", None)
+            asset_cfgs = list(getattr(spawn_cfg, "assets_cfg", None) or [])
+            for asset_cfg in asset_cfgs:
+                for props_name in ("rigid_props", "articulation_props"):
+                    props = getattr(asset_cfg, props_name, None)
+                    if props is not None:
+                        props.solver_position_iteration_count = eval_solver_iterations
+            print(
+                "[DOOR-EVAL-SOLVER-OVERRIDE] applied before articulation creation: "
+                f"position_iterations={eval_solver_iterations} assets={len(asset_cfgs)}"
+            )
         self.robot = Articulation(self.cfg.robot_cfg)
         # Make the robot's per-link `collisions` scopes renderable by the collider debug viz
         # (green overlay); the converter marks them instanceable and the GUI skips instanced
@@ -1316,9 +1345,8 @@ class DooropeningEnv(DirectRLEnv):
             # Per-env panel-swing restoring-torque cap (sampled at reset, ADR-ramped) so the high
             # stiffness doesn't make the door impossibly heavy at large angles; latch lock stays 1e6.
             unlocked_panel_effort_limit=self._door_panel_effort_limits,
-            # Fixed handle unlatch threshold (see DOOR_LATCH_HINGE_THRESHOLD_RAD): every door now
-            # requires the same near-complete press, no per-env/ADR randomization.
-            hinge_range=DOOR_LATCH_HINGE_THRESHOLD_RAD,
+            # Per-environment handle threshold, resampled on reset.
+            hinge_range=self._door_latch_hinge_threshold_rad,
         )
         # applied_robot_dof_targets already carries the lag-filtered target from _pre_physics_step.
         # Add per-substep controller noise on top without polluting the lag history.
@@ -2395,6 +2423,106 @@ class DooropeningEnv(DirectRLEnv):
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
+
+        # Sample once per episode so each environment has an independent unlatch threshold.
+        if not hasattr(self, "_door_latch_hinge_threshold_rad"):
+            self._door_latch_hinge_threshold_rad = torch.empty(
+                self.num_envs, device=self.device, dtype=torch.float32
+            )
+        threshold_range = getattr(self.cfg, "door_latch_hinge_threshold_range_rad", None)
+        low, high = (
+            DOOR_LATCH_HINGE_THRESHOLD_RANGE_RAD
+            if threshold_range is None
+            else tuple(map(float, threshold_range))
+        )
+        if low < 0.0 or high < low:
+            raise ValueError(
+                "door_latch_hinge_threshold_range_rad must satisfy 0 <= min <= max, "
+                f"got {(low, high)!r}."
+            )
+        handle_limit_margin_range = getattr(self.cfg, "door_handle_limit_margin_range_rad", None)
+        max_handle_stop = float(getattr(self.cfg, "door_handle_max_stop_rad", float("inf")))
+        randomize_stop = (
+            handle_limit_margin_range is not None
+            and getattr(self.cfg, "door_handle_upper_stop_rad", None) is None
+        )
+        if randomize_stop:
+            margin_low, margin_high = map(float, handle_limit_margin_range)
+            if margin_low < 0.0 or margin_high < margin_low:
+                raise ValueError(
+                    "door_handle_limit_margin_range_rad must satisfy 0 <= min <= max, "
+                    f"got {handle_limit_margin_range!r}."
+                )
+            # Keep every randomized threshold/margin pair physically feasible while preserving
+            # the requested threshold range wherever possible. The margin is sampled conditionally
+            # below so the resulting hard stop never exceeds the measured 64 deg maximum.
+            high = min(high, max_handle_stop - margin_low)
+            if high < low:
+                raise ValueError(
+                    "Unlatching-threshold range is incompatible with the hard-stop cap and "
+                    f"minimum margin: threshold_min={low:.4f}, stop_cap={max_handle_stop:.4f}, "
+                    f"margin_min={margin_low:.4f} rad."
+                )
+        self._door_latch_hinge_threshold_rad[env_ids] = low + (high - low) * torch.rand(
+            len(env_ids), device=self.device
+        )
+        handle_upper_stop = getattr(self.cfg, "door_handle_upper_stop_rad", None)
+        if handle_upper_stop is not None:
+            handle_upper_stop = float(handle_upper_stop)
+            if handle_upper_stop < high:
+                raise ValueError(
+                    "door_handle_upper_stop_rad must be >= the maximum unlatching threshold, "
+                    f"got stop={handle_upper_stop:.4f}, threshold_max={high:.4f} rad."
+                )
+            handle_joint_idx = self._door_hinge_joint_idx
+            handle_limits = self.door.data.joint_pos_limits[
+                env_ids, handle_joint_idx
+            ].clone().unsqueeze(1)
+            handle_limits[:, 0, 1] = handle_upper_stop
+            self.door.write_joint_position_limit_to_sim(
+                handle_limits,
+                joint_ids=[handle_joint_idx],
+                env_ids=env_ids,
+                warn_limit_violation=False,
+            )
+            # Verify both IsaacLab's cached limit and the live PhysX articulation view. This
+            # eval-only check distinguishes an unapplied override from limit-solver overshoot.
+            physx_limits = self.door.root_physx_view.get_dof_limits()
+            physx_env_ids = torch.as_tensor(env_ids, device=physx_limits.device, dtype=torch.long)
+            live_upper = physx_limits[physx_env_ids, handle_joint_idx, 1].detach().cpu().tolist()
+            print(
+                "[HANDLE-LIMIT] "
+                f"env_ids={physx_env_ids.detach().cpu().tolist()} "
+                f"requested_upper={handle_upper_stop:.6f} rad "
+                f"cached_upper={handle_limits[:, 0, 1].detach().cpu().tolist()} "
+                f"physx_upper={live_upper}"
+            )
+        elif randomize_stop:
+            margin_low, margin_high = map(float, handle_limit_margin_range)
+            threshold = self._door_latch_hinge_threshold_rad[env_ids]
+            available_margin_high = torch.minimum(
+                torch.full_like(threshold, margin_high), max_handle_stop - threshold
+            )
+            if torch.any(available_margin_high < margin_low):
+                raise ValueError(
+                    "Sampled unlatching threshold leaves less than the configured minimum "
+                    "hard-stop margin."
+                )
+            margin = margin_low + (available_margin_high - margin_low) * torch.rand(
+                len(env_ids), device=self.device
+            )
+            handle_joint_idx = self._door_hinge_joint_idx
+            sampled_limit = threshold + margin
+            handle_limits = self.door.data.joint_pos_limits[
+                env_ids, handle_joint_idx
+            ].clone().unsqueeze(1)
+            handle_limits[:, 0, 1] = sampled_limit
+            self.door.write_joint_position_limit_to_sim(
+                handle_limits,
+                joint_ids=[handle_joint_idx],
+                env_ids=env_ids,
+                warn_limit_violation=False,
+            )
 
         self._update_adr_ranges()
         if not self.use_motion_ref:

@@ -517,6 +517,19 @@ class PCDTransformer(BaseModel):
         self.door_joint_prediction_enabled = bool(self.door_joint_prediction_cfg.get("enabled", False))
         self.door_joint_output_dim = int(self.door_joint_prediction_cfg.get("output_dim", 2))
         self.door_joint_prediction_weight = float(self.door_joint_prediction_cfg.get("weight", 0.0))
+        self.door_joint_prediction_input_source = str(
+            self.door_joint_prediction_cfg.get("input_source", "dedicated_query")
+        ).lower()
+        if self.door_joint_prediction_input_source not in {"dedicated_query", "detached_action"}:
+            raise ValueError(
+                "door_joint_prediction.input_source must be 'dedicated_query' or 'detached_action', "
+                f"got '{self.door_joint_prediction_input_source}'."
+            )
+        self.door_joint_head_input_dim = (
+            int(action_dim)
+            if self.door_joint_prediction_input_source == "detached_action"
+            else hidden_dim
+        )
         if self.door_joint_prediction_enabled and self.door_joint_output_dim <= 0:
             raise ValueError("door_joint_prediction.output_dim must be positive when door joint prediction is enabled.")
         self.rollout_progress_prediction_cfg = rollout_progress_prediction or {}
@@ -605,16 +618,20 @@ class PCDTransformer(BaseModel):
         self.mode_query_idx = next_query_idx if self.mode_prediction_enabled else None
         if self.mode_prediction_enabled:
             next_query_idx += 1
-        self.door_joint_query_idx = next_query_idx if self.door_joint_prediction_enabled else None
-        if self.door_joint_prediction_enabled:
+        self.door_joint_query_idx = (
+            next_query_idx
+            if self.door_joint_prediction_enabled and self.door_joint_prediction_input_source == "dedicated_query"
+            else None
+        )
+        if self.door_joint_query_idx is not None:
             next_query_idx += 1
-        # Progress and door joints describe the same task phase, so when the door-joint readout is
-        # enabled they share its isolated decoder query and use independent linear heads. Besides
+        # Progress and door joints describe the same task phase, so when a dedicated door-joint
+        # query exists they share that isolated decoder query and use independent linear heads. Besides
         # being a useful shared representation, this avoids changing query-token shape when adding
         # progress supervision to an existing door-joint checkpoint.
         self.rollout_progress_query_idx = None
         self.rollout_progress_uses_door_joint_query = (
-            self.rollout_progress_prediction_enabled and self.door_joint_prediction_enabled
+            self.rollout_progress_prediction_enabled and self.door_joint_query_idx is not None
         )
         if self.rollout_progress_uses_door_joint_query:
             self.rollout_progress_query_idx = self.door_joint_query_idx
@@ -655,7 +672,7 @@ class PCDTransformer(BaseModel):
             nn.init.zeros_(self.mode_head.weight)
             nn.init.zeros_(self.mode_head.bias)
         if self.door_joint_prediction_enabled:
-            self.door_joint_head = nn.Linear(hidden_dim, self.door_joint_output_dim)
+            self.door_joint_head = nn.Linear(self.door_joint_head_input_dim, self.door_joint_output_dim)
         if self.rollout_progress_prediction_enabled:
             self.rollout_progress_head = nn.Linear(hidden_dim, 1)
 
@@ -1009,7 +1026,7 @@ class PCDTransformer(BaseModel):
             tgt_mask[self.mode_query_idx, :] = True
             tgt_mask[self.mode_query_idx, self.mode_query_idx] = False
 
-        if self.door_joint_prediction_enabled:
+        if self.door_joint_query_idx is not None:
             # Door joint prediction is also a readout-only branch with no influence on action decoding.
             tgt_mask[self.action_query_start:self.action_query_end, self.door_joint_query_idx] = True
             tgt_mask[self.door_joint_query_idx, :] = True
@@ -1119,9 +1136,6 @@ class PCDTransformer(BaseModel):
         if self.mode_prediction_enabled:
             output_mode = output[:, self.mode_query_idx, :]  # (B, H)
             pred["mode_logits"] = self.mode_head(output_mode)
-        if self.door_joint_prediction_enabled:
-            output_door_joint = output[:, self.door_joint_query_idx, :]  # (B, H)
-            pred["door_joint"] = self.door_joint_head(output_door_joint)
         if self.rollout_progress_prediction_enabled:
             output_rollout_progress = output[:, self.rollout_progress_query_idx, :]  # (B, H)
             pred["rollout_progress"] = torch.sigmoid(self.rollout_progress_head(output_rollout_progress))
@@ -1133,6 +1147,14 @@ class PCDTransformer(BaseModel):
             output_action = output[:, self.action_query_start:self.action_query_end, :]  # (B, chunk_size, H)
 
         pred["action"] = self.action_head(output_action)  # (B, chunk_size, 7)
+        if self.door_joint_prediction_enabled:
+            if self.door_joint_prediction_input_source == "detached_action":
+                # Diagnostic-only path: the head observes the current policy action, but joint
+                # prediction loss cannot alter the action head or any shared policy parameters.
+                output_door_joint = pred["action"][:, 0, :].detach()
+            else:
+                output_door_joint = output[:, self.door_joint_query_idx, :]  # (B, H)
+            pred["door_joint"] = self.door_joint_head(output_door_joint)
 
         # If target is provided, compute loss and return it
         if target is not None:

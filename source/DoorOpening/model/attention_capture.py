@@ -93,6 +93,13 @@ class AttentionCapture:
             name: attn[:, qs:qe, :].mean(dim=1)
             for name, (qs, qe) in query_ranges.items()
         }
+        # The model uses one shared action decoder query for the complete action
+        # vector.  Export explicit base/Franka aliases so downstream plots can
+        # compare them; they are intentionally identical until the architecture
+        # is changed to use separate action queries.
+        if "action" in query_attn:
+            query_attn["base"] = query_attn["action"]
+            query_attn["franka"] = query_attn["action"]
         action_attn = query_attn["action"]
         env_id = max(0, min(int(env_id), action_attn.shape[0] - 1))
         row = action_attn[env_id]  # [Sk]

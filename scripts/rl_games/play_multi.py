@@ -8,6 +8,7 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import csv
 import math
 import pathlib
 import sys
@@ -87,6 +88,26 @@ parser.add_argument(
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment.")
 parser.add_argument("--max_steps", type=int, default=2000, help="Stop after this many env steps. Use 0 to run forever.")
 parser.add_argument("--print_interval", type=int, default=100, help="Print rollout stats every N env steps.")
+parser.add_argument(
+    "--drift-monitor-interval",
+    type=int,
+    default=20,
+    help="Print per-env robot/door tracking drift against reference every N steps; 0 disables.",
+)
+parser.add_argument(
+    "--door-handle-limit-margin-range-rad",
+    type=float,
+    nargs=2,
+    default=None,
+    metavar=("MIN", "MAX"),
+    help="Randomize the handle joint upper stop by this margin above each episode's unlatch threshold.",
+)
+parser.add_argument(
+    "--door-joint-trace-csv",
+    type=str,
+    default=None,
+    help="Optional CSV output recording panel (joint_1) and handle (joint_2) positions each step.",
+)
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
 parser.add_argument(
     "--train_mode",
@@ -411,6 +432,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env_cfg.adr_reset_progress_total = dagger_runtime_cfg["adr_reset_progress_total"]
     else:
         env_cfg.adr_reset_progress_total = 0.5 * float(env_cfg.reset_progress_total)
+    if args_cli.door_handle_limit_margin_range_rad is not None:
+        margin_range = tuple(float(value) for value in args_cli.door_handle_limit_margin_range_rad)
+        if margin_range[0] < 0.0 or margin_range[1] < margin_range[0]:
+            raise ValueError(
+                "--door-handle-limit-margin-range-rad requires 0 <= MIN <= MAX; "
+                f"got {margin_range}."
+            )
+        env_cfg.door_handle_limit_margin_range_rad = margin_range
+        print(
+            "Randomized handle joint upper stop: unlatch threshold + "
+            f"Uniform({margin_range[0]:.3f}, {margin_range[1]:.3f}) rad"
+        )
     pointcloud_source = str(dagger_runtime_cfg.get("pointcloud_source", "both")).lower()
     env_cfg.pointcloud_render_mode = "none"
     env_cfg.enable_pointcloud_camera = False
@@ -451,8 +484,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     dt = env.unwrapped.step_dt
     obs, _ = env.reset()
     prev_actions = base_env.applied_robot_dof_targets.detach().clone().to(device=device)
+    handle_joint_idx = int(base_env._door_hinge_joint_idx)
+    sampled_thresholds = base_env._door_latch_hinge_threshold_rad.detach().cpu()
+    sampled_stops = base_env.door.data.joint_pos_limits[:, handle_joint_idx, 1].detach().cpu()
+    print(
+        "[INFO] Sampled handle unlatch thresholds/stops by env: "
+        + ", ".join(
+            f"env{i}={sampled_thresholds[i]:.3f}/{sampled_stops[i]:.3f}rad"
+            for i in range(env.unwrapped.num_envs)
+        )
+    )
 
     timestep = 0
+    door_joint_trace = []
     local_reached_success = torch.zeros(env.unwrapped.num_envs, dtype=torch.bool, device=device)
     completed_successes_by_family = {family_name: [] for family_name in DOOR_FAMILY_NAMES}
     if hasattr(base_env, "env_asset_indices"):
@@ -495,6 +539,48 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             dones = (terminated | truncated).to(device=device)
             prev_actions = base_env.applied_robot_dof_targets.detach().clone().to(device=device)
 
+            if args_cli.door_joint_trace_csv:
+                door_joint_pos = base_env.door.data.joint_pos.detach().cpu()
+                panel_joint_idx = int(base_env._door_board_joint_idx)
+                handle_joint_idx = int(base_env._door_hinge_joint_idx)
+                for env_idx in range(env.unwrapped.num_envs):
+                    asset_idx = int(env_asset_indices_policy[env_idx].item())
+                    door_joint_trace.append(
+                        {
+                            "step": timestep + 1,
+                            "time_s": (timestep + 1) * float(dt),
+                            "env": env_idx,
+                            "asset": pathlib.Path(asset_paths[asset_idx]).parent.name,
+                            "panel_joint_1_rad": float(door_joint_pos[env_idx, panel_joint_idx]),
+                            "handle_joint_2_rad": float(door_joint_pos[env_idx, handle_joint_idx]),
+                            "unlatch_threshold_rad": float(sampled_thresholds[env_idx]),
+                            "handle_upper_limit_rad": float(sampled_stops[env_idx]),
+                        }
+                    )
+
+            drift_interval = int(args_cli.drift_monitor_interval)
+            if drift_interval > 0 and (timestep + 1) % drift_interval == 0:
+                extras = base_env.extras
+                pos_err = extras.get("fail/key_body_pos_err")
+                quat_err = extras.get("fail/key_body_quat_err")
+                door_err = extras.get("fail/door_err")
+                if pos_err is not None and quat_err is not None and door_err is not None:
+                    pos_thr = math.sqrt(float(extras["fail/reset_key_body_pos_delta"]))
+                    quat_thr = math.sqrt(float(extras["fail/reset_key_body_quat_delta"]))
+                    door_thr = math.sqrt(float(extras["fail/reset_door_joint_pos_delta"]))
+                    pos_err = pos_err.detach().clamp_min(0).sqrt().cpu()
+                    quat_err = quat_err.detach().clamp_min(0).sqrt().cpu()
+                    door_err = door_err.detach().clamp_min(0).sqrt().cpu()
+                    print(
+                        f"[DRIFT] step={timestep + 1} "
+                        + " | ".join(
+                            f"env{i} pos={pos_err[i]:.3f}/{pos_thr:.3f}m "
+                            f"ori={quat_err[i]:.3f}/{quat_thr:.3f}rad "
+                            f"door={door_err[i]:.3f}/{door_thr:.3f}rad"
+                            for i in range(env.unwrapped.num_envs)
+                        )
+                    )
+
             done_env_ids = torch.nonzero(dones, as_tuple=False).squeeze(-1)
             if done_env_ids.numel() > 0:
                 timeout_success = torch.zeros_like(local_reached_success[done_env_ids])
@@ -522,6 +608,24 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     print(f"[RESULT] steps={timestep} completed_success={_format_completed_rates(completed_successes_by_family)}")
     print(f"[RESULT] asset_success={_format_asset_rates(completed_successes_by_asset, limit=64)}")
+    if args_cli.door_joint_trace_csv:
+        trace_path = pathlib.Path(args_cli.door_joint_trace_csv).expanduser().resolve()
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+        fieldnames = [
+            "step",
+            "time_s",
+            "env",
+            "asset",
+            "panel_joint_1_rad",
+            "handle_joint_2_rad",
+            "unlatch_threshold_rad",
+            "handle_upper_limit_rad",
+        ]
+        with trace_path.open("w", newline="", encoding="utf-8") as trace_file:
+            writer = csv.DictWriter(trace_file, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(door_joint_trace)
+        print(f"[RESULT] door_joint_trace_csv={trace_path} rows={len(door_joint_trace)}")
     env.close()
 
 
