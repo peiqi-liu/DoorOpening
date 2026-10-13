@@ -380,6 +380,67 @@ def setup_doors(
 ALL_DOOR_CONFIGS = setup_doors()
 
 
+def set_door_latch_state(
+    door: Articulation,
+    env_ids: torch.Tensor,
+    locked: torch.Tensor,
+    nominal_joint_stiffness: torch.Tensor | None = None,
+    nominal_joint_damping: torch.Tensor | None = None,
+    unlocked_panel_effort_limit: torch.Tensor | None = None,
+    locked_stiffness: float = 1e6,
+    locked_damping: float = 1e5,
+    locked_panel_effort_limit: float = 1e6,
+):
+    """Apply latch drive settings only to the specified environments.
+
+    Latch state transitions are handled by the environment. This helper performs simulator writes
+    for reset environments or environments that have just crossed their fixed unlatch threshold.
+    """
+    if env_ids.numel() == 0:
+        return
+
+    joint_idx, joint_names = door.find_joints(["joint_1"])
+    j1 = joint_idx[joint_names.index("joint_1")]
+    if nominal_joint_stiffness is None:
+        nominal_joint_stiffness = door.data.default_joint_stiffness
+    if nominal_joint_damping is None:
+        nominal_joint_damping = door.data.default_joint_damping
+
+    for state, stiffness_value, damping_value in (
+        (True, locked_stiffness, locked_damping),
+        (False, None, None),
+    ):
+        group_mask = locked == state
+        group_ids = env_ids[group_mask]
+        if group_ids.numel() == 0:
+            continue
+
+        stiffness = door.data.joint_stiffness[group_ids].clone()
+        damping = door.data.joint_damping[group_ids].clone()
+        if state:
+            stiffness[:, j1] = stiffness_value
+            damping[:, j1] = damping_value
+        else:
+            stiffness[:, j1] = nominal_joint_stiffness[group_ids, j1]
+            damping[:, j1] = nominal_joint_damping[group_ids, j1]
+        door.write_joint_stiffness_to_sim(stiffness, env_ids=group_ids)
+        door.write_joint_damping_to_sim(damping, env_ids=group_ids)
+
+        if unlocked_panel_effort_limit is not None:
+            if state:
+                panel_effort = torch.full(
+                    (group_ids.numel(), 1), locked_panel_effort_limit,
+                    device=door.data.joint_pos.device, dtype=torch.float32,
+                )
+            else:
+                panel_effort = unlocked_panel_effort_limit[group_ids].to(
+                    device=door.data.joint_pos.device, dtype=torch.float32
+                )
+            door.write_joint_effort_limit_to_sim(
+                panel_effort, joint_ids=[j1], env_ids=group_ids
+            )
+
+
 def edit_door_articulation(
     door: Articulation,
     nominal_joint_stiffness: torch.Tensor | None = None,

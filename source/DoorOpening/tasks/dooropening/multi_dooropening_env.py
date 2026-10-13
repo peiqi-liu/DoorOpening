@@ -19,7 +19,7 @@ from DoorOpening.assets.door.multi_door_cfg import (
     closed_handle_offsets_base,
     closed_handle_points_base,
     configure_multi_door_assets_for_rank,
-    edit_door_articulation,
+    set_door_latch_state,
     get_multi_door_asset_start_index,
     get_multi_door_env_asset_indices,
     handle_offsets,
@@ -435,14 +435,18 @@ class DooropeningEnv(DirectRLEnv):
         )
         self._door_nominal_joint_stiffness = self.door.data.joint_stiffness.clone()
         self._door_nominal_joint_damping = self.door.data.joint_damping.clone()
+        # Latch is one-way within an episode: start from the reset pose, then unlock once the
+        # fixed per-episode handle threshold is crossed. Simulator drive settings are written only
+        # at reset and on that transition, not on every physics substep.
+        self._door_latch_is_locked = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
         self._door_handle_effort_limits = torch.full(
             (self.num_envs, 1),
             float(self.cfg.door_handle_effort_limit_sim),
             device=self.device,
         )
-        # Per-env panel-swing (joint_1) effort-limit cap, sampled at reset and read every step by
-        # edit_door_articulation (which caps the unlatched restoring torque and switches to 1e6 while
-        # latched). Seeded to the ADR-start upper bound; overwritten on the first reset.
+        # Per-env panel-swing (joint_1) effort-limit cap, sampled at reset and applied when latch
+        # state is initialized or transitions to unlocked. Seeded to the ADR-start upper bound;
+        # overwritten on the first reset.
         self._door_panel_effort_limits = torch.full(
             (self.num_envs, 1),
             float(self.cfg.door_panel_effort_limit_start_range_nm[1]),
@@ -717,6 +721,38 @@ class DooropeningEnv(DirectRLEnv):
             env_ids=env_ids,
         )
 
+    def _apply_door_latch_settings(self, env_ids: torch.Tensor):
+        set_door_latch_state(
+            self.door,
+            env_ids=env_ids,
+            locked=self._door_latch_is_locked[env_ids],
+            nominal_joint_stiffness=self._door_nominal_joint_stiffness,
+            nominal_joint_damping=self._door_nominal_joint_damping,
+            unlocked_panel_effort_limit=self._door_panel_effort_limits,
+        )
+
+    def _reset_door_latch(self, env_ids: torch.Tensor, door_joint_pos: torch.Tensor):
+        """Initialize latch state from each reset pose and apply its drive settings once."""
+        panel_closed = door_joint_pos[:, self._door_board_joint_idx].abs() < 0.05
+        handle_below_threshold = (
+            door_joint_pos[:, self._door_hinge_joint_idx].abs()
+            < self._door_latch_hinge_threshold_rad[env_ids]
+        )
+        self._door_latch_is_locked[env_ids] = panel_closed & handle_below_threshold
+        self._apply_door_latch_settings(env_ids)
+
+    def _update_door_latch(self):
+        """Unlock environments once when their handle crosses its episode-fixed threshold."""
+        crossed = self._door_latch_is_locked & (
+            self.door.data.joint_pos[:, self._door_hinge_joint_idx].abs()
+            >= self._door_latch_hinge_threshold_rad
+        )
+        unlocked_ids = torch.nonzero(crossed, as_tuple=False).flatten()
+        if unlocked_ids.numel() == 0:
+            return
+        self._door_latch_is_locked[unlocked_ids] = False
+        self._apply_door_latch_settings(unlocked_ids)
+
     def _current_door_panel_effort_limit_range(self) -> tuple[float, float]:
         start_range = self.cfg.door_panel_effort_limit_start_range_nm
         if not self._adr_enabled:
@@ -727,7 +763,7 @@ class DooropeningEnv(DirectRLEnv):
         return float(interpolated[0]), float(interpolated[1])
 
     def _sample_door_panel_effort_limits(self, env_ids: torch.Tensor):
-        # No separate _apply: the sampled buffer is read every step by edit_door_articulation.
+        # The sampled cap is applied to simulator state by _reset_door_latch and on latch transition.
         effort_min, effort_max = self._current_door_panel_effort_limit_range()
         if effort_max < effort_min:
             raise ValueError(
@@ -938,7 +974,7 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["dr_sample/door_board_friction_mean"] = board_applied_friction.mean().item()
         self.extras["dr_sample/door_board_friction_min"] = board_applied_friction.min().item()
         self.extras["dr_sample/door_board_friction_max"] = board_applied_friction.max().item()
-        # Per-env panel effort-limit cap actually handed to edit_door_articulation each step.
+        # Per-env panel effort-limit cap applied at reset/unlatch.
         self.extras["dr_sample/door_panel_effort_limit_mean"] = self._door_panel_effort_limits.mean().item()
         self.extras["dr_sample/door_panel_effort_limit_min"] = self._door_panel_effort_limits.min().item()
         self.extras["dr_sample/door_panel_effort_limit_max"] = self._door_panel_effort_limits.max().item()
@@ -1316,16 +1352,7 @@ class DooropeningEnv(DirectRLEnv):
         # door_pos[:] = self.ref_motion_lib.get_door_joint_pos()
         # self.door.write_joint_position_to_sim(door_pos)
 
-        edit_door_articulation(
-            self.door,
-            nominal_joint_stiffness=self._door_nominal_joint_stiffness,
-            nominal_joint_damping=self._door_nominal_joint_damping,
-            # Per-env panel-swing restoring-torque cap (sampled at reset, ADR-ramped) so the high
-            # stiffness doesn't make the door impossibly heavy at large angles; latch lock stays 1e6.
-            unlocked_panel_effort_limit=self._door_panel_effort_limits,
-            # Per-environment handle threshold, resampled on reset.
-            hinge_range=self._door_latch_hinge_threshold_rad,
-        )
+        self._update_door_latch()
         # applied_robot_dof_targets already carries the lag-filtered target from _pre_physics_step.
         # Add per-substep controller noise on top without polluting the lag history.
         applied_targets = self.applied_robot_dof_targets.clone()
@@ -2475,6 +2502,7 @@ class DooropeningEnv(DirectRLEnv):
             self._apply_door_handle_effort_limits(env_ids)
             self._sample_door_panel_effort_limits(env_ids)
             self._refresh_nominal_door_joint_gains(env_ids)
+            self._reset_door_latch(env_ids, door_joint_pos)
             return
 
         reset_frame_idx, self.prob_get_first_key_frame = self.ref_motion_lib.reset(
@@ -2536,6 +2564,7 @@ class DooropeningEnv(DirectRLEnv):
         self._apply_door_handle_effort_limits(env_ids)
         self._sample_door_panel_effort_limits(env_ids)
         self._refresh_nominal_door_joint_gains(env_ids)
+        self._reset_door_latch(env_ids, door_joint_pos)
 
     def close(self):
         return super().close()

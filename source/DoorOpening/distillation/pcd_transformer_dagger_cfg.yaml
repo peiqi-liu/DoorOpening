@@ -237,8 +237,8 @@ dagger:
     # Match scripts/tools/render_depth_roundtrip_viser.py: concatenate door, walls, and robot,
     # rasterize one shared z-buffer, min-pool depth, drop edges/jitter, then back-project.
     num_points: 12000
-    width_px: 240
-    height_px: 180
+    width_px: 120
+    height_px: 80
     # Depth-camera field of view (degrees). Omit / null -> D435 physical defaults (85 x 58). Lowering
     # fov_y_deg narrows the VERTICAL angle at the same resolution, cropping top/bottom points to match a
     # real camera that effectively sees less vertically than 58 deg. Set to reduce the vertical FOV;
@@ -248,11 +248,16 @@ dagger:
     clip_mode: "post"
     use_compile: true
     # Values shared with the Viser mock's depth_cfg processing path.
-    blur_kernel_px: 7
+    blur_kernel_px: 5
     # Axial noise is applied to all finite pixels after the combined-depth blur and edge drop.
     axial_jitter_std_m: 0.005
     # Drop pixels across depth discontinuities after blur, before axial jitter.
-    edge_drop_m: 0.05
+    edge_drop_m: 0.01
+    # Preserve thin handles as in the Viser preview: render link_2 separately from the background min filter.
+    handle_layer:
+      enabled: true
+      inflate_px: 0
+      occlusion_inflate_px: 0
   lidar_render:
     num_points: 9000
     num_azimuth: 128

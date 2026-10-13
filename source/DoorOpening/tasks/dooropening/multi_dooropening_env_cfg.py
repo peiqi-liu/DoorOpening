@@ -477,8 +477,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     door_handle_effort_limit_range_nm = (1.0, 3.0)
     door_handle_effort_limit_sim = door_handle_effort_limit_range_nm[0]
 
-    # Panel-swing (joint_1) effort-limit CAP applied while unlatched (edit_door_articulation switches it
-    # to 1e6 while latched so the latch still holds). It caps the high-stiffness restoring torque so the
+    # Panel-swing (joint_1) effort-limit CAP applied while unlatched (the latch-state transition switches
+    # it to 1e6 while latched so the latch still holds). It caps the high-stiffness restoring torque so the
     # door plateaus at a constant "heaviness" in Nm instead of growing unbounded with opening angle. The
     # cap is sampled per-env at reset (uniformly, see _sample_door_panel_effort_limits) and ADR-ramped
     # from a narrow start band out to the full outer range, so heavy/light doors spread out only as the

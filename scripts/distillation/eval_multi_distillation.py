@@ -1195,7 +1195,7 @@ def _render_pointcloud_source_attention(attn_state, run_index=None):
     fig, axes = plt.subplots(len(names), 1, figsize=(10, 2.8 * len(names)), sharex=True)
     for ax, name in zip(axes, names):
         steps = [int(step) for step, values in rows if name in values]
-        for key, label, color in (("handle", "Door handle", "#d55e00"), ("panel", "Door panel", "#0072b2"), ("wall", "Wall distractors", "#009e73")):
+        for key, label, color in (("handle", "Door handle", "#d55e00"), ("panel", "Door panel", "#0072b2"), ("wall", "Wall distractors", "#009e73"), ("robot", "Robot", "#cc79a7")):
             ax.plot(steps, [float(values[name][key]) for step, values in rows if name in values], marker="o", linewidth=2, label=label, color=color)
         ax.set_ylabel(f"{name}\nattention mass")
         ax.set_ylim(bottom=0.0)
@@ -1210,10 +1210,32 @@ def _render_pointcloud_source_attention(attn_state, run_index=None):
     with open(os.path.splitext(path)[0] + ".json", "w", encoding="utf-8") as f:
         json.dump([{"step": int(step), **values} for step, values in rows], f, indent=2)
     print(f"[ATTN] saved temporal point-cloud source attention to {path}")
+    count_rows = attn_state.get("point_count_snapshots", [])
+    if count_rows:
+        count_path = os.path.join(out_dir, f"pointcloud_point_counts_{tag.rstrip('_') or 'eval'}.json")
+        with open(count_path, "w", encoding="utf-8") as f:
+            json.dump([{"step": int(step), **counts} for step, counts in count_rows], f, indent=2)
+        fig, ax = plt.subplots(figsize=(12, 4.5))
+        steps = [int(step) for step, _ in count_rows]
+        count_keys = ("handle", "panel", "wall", "robot", "unassigned")
+        count_names = ("Door handle", "Door panel", "Wall distractors", "Robot", "Unassigned")
+        count_colors = ("#d55e00", "#0072b2", "#009e73", "#cc79a7", "#999999")
+        ax.stackplot(steps, *[[counts.get(k, 0) for _, counts in count_rows] for k in count_keys],
+                     labels=count_names, colors=count_colors, alpha=0.9)
+        ax.set_xlabel("Policy step")
+        ax.set_ylabel("Policy-input point count")
+        ax.set_title(f"Raw policy point-cloud composition — env {env_id}\nnearest GT surface within 12 cm; unassigned shown separately")
+        ax.grid(True, axis="y", alpha=0.2)
+        ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=5, fontsize=9)
+        fig.tight_layout()
+        count_plot = os.path.join(out_dir, f"pointcloud_point_counts_{tag.rstrip('_') or 'eval'}.png")
+        fig.savefig(count_plot, dpi=160, bbox_inches="tight")
+        plt.close(fig)
+        print(f"[ATTN] saved raw policy-cloud point counts to {count_plot}")
 
 
 def _render_joint_output_attributions(attn_state, run_index=None):
-    """Save shared raw attention and separate output-specific gradient x activation maps."""
+    """Save shared attention and per-output gradient x activation token attributions."""
     rows = attn_state.get("output_attribution_snapshots", [])
     queries = attn_state.get("query_snapshots", [])
     regions = attn_state.get("region_snapshots", [])
@@ -1227,12 +1249,12 @@ def _render_joint_output_attributions(attn_state, run_index=None):
     env_id = attn_state["env_id"]
     tag = f"run{run_index}_" if run_index is not None else ""
     names = [
-        "Door handle points", "Door panel points", "Wall points", "Other cloud tokens",
+        "Door handle points", "Door panel points", "Wall points", "Robot points", "Other cloud tokens",
         "Franka joint position", "Base velocity", "Arm target error", "Aux handle position",
         "Other state tokens",
     ]
-    keys = ["handle", "panel", "wall", "other_cloud", "franka", "base_vel", "target_err_arm", "aux_handle_pos", "other_state"]
-    colors = ["#e69f00", "#56b4e9", "#009e73", "#999999", "#cc79a7", "#0072b2", "#d55e00", "#666666", "#8c564b"]
+    keys = ["handle", "panel", "wall", "robot", "other_cloud", "franka", "base_vel", "target_err_arm", "aux_handle_pos", "other_state"]
+    colors = ["#e69f00", "#56b4e9", "#009e73", "#cc79a7", "#999999", "#0072b2", "#d55e00", "#666666", "#8c564b", "#7f3c8d"]
 
     # Raw attention is one shared door-joint query. Aggregate its per-token attention
     # into the same point-cloud and state groups used for the two output-specific maps.
@@ -1248,8 +1270,9 @@ def _render_joint_output_attributions(attn_state, run_index=None):
             "handle": float(rr.get("handle", 0.0)),
             "panel": float(rr.get("panel", 0.0)),
             "wall": float(rr.get("wall", 0.0)),
+            "robot": float(rr.get("robot", 0.0)),
         }
-        vals["other_cloud"] = max(0.0, cloud - vals["handle"] - vals["panel"] - vals["wall"])
+        vals["other_cloud"] = max(0.0, cloud - vals["handle"] - vals["panel"] - vals["wall"] - vals["robot"])
         for idx, label in enumerate(labels):
             if label == "pointcloud":
                 continue
@@ -1266,39 +1289,48 @@ def _render_joint_output_attributions(attn_state, run_index=None):
             vals[key] = vals.get(key, 0.0) + float(w[idx])
         shared_rows.append((int(step), vals))
 
-    joint_rows = {
-        "handle": [(int(s), values["handle"]) for s, values in rows],
-        "panel": [(int(s), values["panel"]) for s, values in rows],
-    }
-    plot_specs = [
-        ("shared_attention", "Shared door-joint query attention", shared_rows, True),
-        ("handle_output_attribution", "Handle-joint output attribution (gradient × activation)", joint_rows["handle"], False),
-        ("panel_output_attribution", "Panel-joint output attribution (gradient × activation)", joint_rows["panel"], False),
-    ]
+    output_rows = {}
+    for step, values in rows:
+        for output_name, groups in values.items():
+            output_rows.setdefault(output_name, []).append((int(step), groups))
+    attribution_json = os.path.join(out_dir, f"output_token_attributions_{tag.rstrip('_') or 'eval'}.json")
+    with open(attribution_json, "w", encoding="utf-8") as f:
+        json.dump(
+            [{"step": int(step), "outputs": values} for step, values in rows],
+            f,
+            indent=2,
+        )
+    print(f"[ATTN] saved per-output token attributions to {attribution_json}")
+
+    plot_specs = [("shared_attention", "Shared door-joint query attention", shared_rows, True)]
+    plot_specs.extend(
+        (f"{name}_output_attribution", f"{name.replace('_', ' ').title()} output attribution", series, False)
+        for name, series in output_rows.items()
+    )
     for suffix, title, series_rows, is_shared in plot_specs:
         if not series_rows:
             continue
         plot_steps = [s for s, _ in series_rows]
         series = {key: [float(values.get(key, 0.0)) * 100.0 for _, values in series_rows] for key in keys}
-        fig, ax = plt.subplots(figsize=(15.5, 7.2))
+        fig, ax = plt.subplots(figsize=(15.5, 6.2))
         ax.stackplot(plot_steps, *[series[k] for k in keys], labels=names, colors=colors, alpha=0.94)
         ax.set_xlim(min(plot_steps), max(plot_steps))
         ax.set_ylim(0, 100)
         ax.set_xlabel("Policy step")
-        ax.set_ylabel("Normalized token score (%)" if not is_shared else "Door-joint query attention (%)")
-        suffix_note = "" if is_shared else "\nPer-output sensitivity, not a distinct transformer attention query"
+        ax.set_ylabel("Attention mass (%)" if is_shared else "Normalized |gradient × activation| (%)")
+        suffix_note = "" if is_shared else "\nOutput-specific encoder-token attribution; not attention mass or causal proof"
         ax.set_title(f"{title} — env {env_id}{suffix_note}")
         ax.grid(True, axis="y", alpha=0.2)
         ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.13), ncol=3, frameon=True, fontsize=9)
-        fig.subplots_adjust(bottom=0.23, top=0.88, left=0.08, right=0.98)
-        path = os.path.join(out_dir, f"door_joint_{suffix}_{tag.rstrip('_') or 'eval'}.png")
+        fig.subplots_adjust(bottom=0.23, top=0.86, left=0.08, right=0.98)
+        path = os.path.join(out_dir, f"output_{suffix}_{tag.rstrip('_') or 'eval'}.png")
         fig.savefig(path, dpi=160, bbox_inches="tight")
         plt.close(fig)
-        print(f"[ATTN] saved joint output attribution figure to {path}")
+        print(f"[ATTN] saved output attribution figure to {path}")
 
 
 def _classify_pointcloud_attention(attn, dagger, env_id):
-    """Classify PointNet centers by nearest transformed handle, panel, or wall surface."""
+    """Assign raw policy-cloud points and PointNet centers to nearest scene surfaces."""
     result = {}
     try:
         device = dagger.device
@@ -1336,24 +1368,85 @@ def _classify_pointcloud_attention(attn, dagger, env_id):
             if wall.shape[0] > 12000:
                 wall = wall[torch.linspace(0, wall.shape[0] - 1, 12000, device=device).long()]
             surfaces.append((2, world_to_base(wall)))
+        # The depth camera sees the robot itself. Include that geometry explicitly so robot
+        # points cannot silently be credited to a nearby wall or door surface.
+        robot_world = dagger._sample_robot_pointcloud_world_sampler()[env_id]
+        surfaces.append((3, world_to_base(robot_world)))
 
-        for key, (xyz, _weights) in attn.get("pcd", {}).items():
-            centers = xyz.to(device=device, dtype=torch.float32)
+        def point_surface_distances(points):
             class_dists, class_ids = [], []
-            for region_id, points in surfaces:
-                if points.numel() == 0:
+            for region_id, surface in surfaces:
+                if surface.numel() == 0:
                     continue
-                if points.shape[0] > 12000:
-                    points = points[torch.linspace(0, points.shape[0] - 1, 12000, device=device).long()]
-                distances = torch.cdist(centers.unsqueeze(0), points.unsqueeze(0)).squeeze(0)
+                # Randomized wall meshes may contain NaN padding. cdist propagates any NaN
+                # row through min(), which previously made every token look like the wall.
+                surface = surface[torch.isfinite(surface).all(dim=1)]
+                if surface.numel() == 0:
+                    continue
+                if surface.shape[0] > 12000:
+                    idx = torch.linspace(0, surface.shape[0] - 1, 12000, device=device).long()
+                    surface = surface[idx]
+                distances = torch.cdist(points.unsqueeze(0), surface.unsqueeze(0)).squeeze(0)
                 class_dists.append(distances.min(dim=1).values)
                 class_ids.append(region_id)
             if not class_dists:
-                continue
-            nearest_dist, nearest_idx = torch.stack(class_dists, dim=1).min(dim=1)
-            region = torch.tensor(class_ids, dtype=torch.long, device=device)[nearest_idx]
-            # Exclude centers that do not match any of the three requested physical surfaces.
-            region[nearest_dist > 0.12] = -1
+                return torch.empty((points.shape[0], 0), device=device), class_ids
+            return torch.stack(class_dists, dim=1), class_ids
+
+        def label_points(points):
+            distances, class_ids = point_surface_distances(points)
+            if not class_ids:
+                return torch.full((points.shape[0],), -1, dtype=torch.long, device=device)
+            nearest_dist, nearest_idx = distances.min(dim=1)
+            labels = torch.tensor(class_ids, dtype=torch.long, device=device)[nearest_idx]
+            labels[nearest_dist > 0.12] = -1
+            return labels
+
+        # Count actual policy-input points, not latent token centers. This is an approximate
+        # physical-source breakdown (nearest GT surface within 12 cm); unassigned remains explicit.
+        input_pcd = getattr(dagger, "_last_policy_input_pcd_base", None)
+        if input_pcd is not None and input_pcd.shape[0] > env_id:
+            input_xyz = input_pcd[env_id, ..., :3].to(device=device, dtype=torch.float32)
+            finite = torch.isfinite(input_xyz).all(dim=-1)
+            raw_distances, class_ids = point_surface_distances(input_xyz[finite])
+            nearest_dist, nearest_idx = raw_distances.min(dim=1)
+            raw_labels = torch.tensor(class_ids, dtype=torch.long, device=device)[nearest_idx]
+            raw_labels[nearest_dist > 0.12] = -1
+            result["__point_counts__"] = torch.bincount(
+                raw_labels[raw_labels >= 0], minlength=4
+            ).detach().cpu()
+            result["__point_counts__"] = result["__point_counts__"].tolist()
+            diagnostics = {}
+            for cutoff in (0.01, 0.03, 0.06, 0.12):
+                accepted = nearest_dist <= cutoff
+                histogram = torch.bincount(
+                    torch.tensor(class_ids, dtype=torch.long, device=device)[nearest_idx[accepted]],
+                    minlength=4,
+                ) if bool(accepted.any()) else torch.zeros(4, dtype=torch.long, device=device)
+                diagnostics[f"nearest_within_{int(cutoff * 100):02d}cm"] = {
+                    name: int(histogram[i].detach().cpu()) for i, name in enumerate(("handle", "panel", "wall", "robot"))
+                }
+            diagnostics["nearest_distance_median"] = float(nearest_dist.median().detach().cpu())
+            diagnostics["nearest_distance_p90"] = float(torch.quantile(nearest_dist, 0.9).detach().cpu())
+            source_names = ("handle", "panel", "wall", "robot")
+            diagnostics["median_distance_by_source_m"] = {
+                source_names[region_id]: float(raw_distances[:, i].median().detach().cpu())
+                for i, region_id in enumerate(class_ids)
+                if region_id < len(source_names)
+            }
+            result["__point_counts__"] = {
+                "handle": int(result["__point_counts__"][0]),
+                "panel": int(result["__point_counts__"][1]),
+                "wall": int(result["__point_counts__"][2]),
+                "robot": int(result["__point_counts__"][3]),
+                "unassigned": int((raw_labels < 0).sum().detach().cpu()),
+                "total": int(finite.sum().detach().cpu()),
+                "distance_diagnostics": diagnostics,
+            }
+
+        for key, (xyz, _weights) in attn.get("pcd", {}).items():
+            centers = xyz.to(device=device, dtype=torch.float32)
+            region = label_points(centers)
             result[key] = {"region": region.detach().cpu()}
         return result
     except Exception as exc:  # noqa: BLE001
@@ -2206,11 +2299,13 @@ def main(env_cfg, agent_cfg: dict):
             "snapshots": [],  # (step, token_labels, token_attn, pcd) every `interval` steps
             "query_snapshots": [],  # (step, token_labels, {query_name: token_attn})
             "region_snapshots": [],  # (step, {query_name: {handle, panel, wall}})
+            "point_count_snapshots": [],  # (step, raw policy-cloud points by nearest GT source)
             # Per-output gradient x activation scores on encoder memory. Raw attention is shared.
             "memory": {},
             "output_attribution_snapshots": [],
-            # Gradient x activation is costlier than raw attention; sample it sparsely.
-            "output_attribution_interval": max(50, int(args_cli.attn_interval)),
+            # Output-specific gradients are more expensive than attention; still sample densely
+            # enough to compare against the per-10-step attention/command traces.
+            "output_attribution_interval": max(20, int(args_cli.attn_interval)),
             "out_dir": _attn_dir,
         }
         _encoder = getattr(dagger.student_model, "encoder", None)
@@ -2341,12 +2436,11 @@ def main(env_cfg, agent_cfg: dict):
                         dagger._build_student_obs(iteration=step)
                     actions, student_output = _build_teacher_actions(dagger, obs)
                 else:
-                    _capture_joint_attribution = (
+                    _capture_output_attribution = (
                         attn_state is not None
                         and int(step) % attn_state["output_attribution_interval"] == 0
-                        and bool(getattr(dagger.student_model, "door_joint_prediction_enabled", False))
                     )
-                    if _capture_joint_attribution:
+                    if _capture_output_attribution:
                         with torch.enable_grad():
                             actions, student_output = _build_student_actions(dagger, iteration=step)
                     else:
@@ -2358,26 +2452,43 @@ def main(env_cfg, agent_cfg: dict):
                     _attn = attn_state["capture"].pop(dagger.student_model, env_id=attn_state["env_id"])
                     if _attn is not None and int(step) % attn_state["interval"] == 0:
                         _memory = attn_state["memory"].get("tensor")
-                        _joint_pred = student_output.get("door_joint") if isinstance(student_output, dict) else None
-                        if (
-                            _capture_joint_attribution
-                            and isinstance(_memory, torch.Tensor)
-                            and isinstance(_joint_pred, torch.Tensor)
-                            and _joint_pred.shape[-1] >= 2
-                        ):
+                        if _capture_output_attribution and isinstance(_memory, torch.Tensor):
                             _attr_env = attn_state["env_id"]
-                            _attr_rows = []
                             with torch.enable_grad():
-                                for _joint_idx, _joint_name in ((0, "handle"), (1, "panel")):
-                                    _scalar = (
-                                        _joint_pred[_attr_env, 0, _joint_idx]
-                                        if _joint_pred.ndim >= 3
-                                        else _joint_pred[_attr_env, _joint_idx]
-                                    )
+                                _objectives = []
+                                _aux_pred = student_output.get("aux") if isinstance(student_output, dict) else None
+                                _action_pred = student_output.get("action") if isinstance(student_output, dict) else None
+                                _joint_pred = student_output.get("door_joint") if isinstance(student_output, dict) else None
+                                if isinstance(_aux_pred, torch.Tensor):
+                                    _aux_value = _aux_pred[_attr_env, 0] if _aux_pred.ndim >= 3 else _aux_pred[_attr_env]
+                                    _objectives.append(("aux_handle_position_norm", torch.linalg.vector_norm(_aux_value)))
+                                if isinstance(_action_pred, torch.Tensor):
+                                    _action_value = _action_pred[_attr_env, 0] if _action_pred.ndim >= 3 else _action_pred[_attr_env]
+                                    if _action_value.numel() >= 10:
+                                        _base_scale = float(base_env.cfg.base_action_scale)
+                                        _arm_scale = float(base_env.cfg.arm_action_scale)
+                                        _frame_dt = float(getattr(base_env, "step_dt", 1.0 / 15.0))
+                                        _base_command = _action_value[:3].clamp(-1.0, 1.0) * _base_scale
+                                        _arm_target_delta = (
+                                            _action_value[3:10].clamp(-1.0, 1.0) * _arm_scale * _frame_dt
+                                        )
+                                        _objectives.append(("base_translation_speed_command", torch.linalg.vector_norm(_base_command[:2])))
+                                        _objectives.append(("base_yaw_rate_command_abs", _base_command[2].abs()))
+                                        _objectives.append(("franka_target_delta_norm", torch.linalg.vector_norm(_arm_target_delta)))
+                                if isinstance(_joint_pred, torch.Tensor) and _joint_pred.shape[-1] >= 2:
+                                    for _joint_idx, _joint_name in ((0, "door_handle_joint"), (1, "door_panel_joint")):
+                                        _joint_value = (
+                                            _joint_pred[_attr_env, 0, _joint_idx]
+                                            if _joint_pred.ndim >= 3
+                                            else _joint_pred[_attr_env, _joint_idx]
+                                        )
+                                        _objectives.append((_joint_name, _joint_value))
+                                _attr_rows = []
+                                for _objective_idx, (_objective_name, _scalar) in enumerate(_objectives):
                                     _grad = torch.autograd.grad(
                                         _scalar,
                                         _memory,
-                                        retain_graph=(_joint_idx == 0),
+                                        retain_graph=(_objective_idx < len(_objectives) - 1),
                                         allow_unused=True,
                                     )[0]
                                     if _grad is None:
@@ -2385,25 +2496,28 @@ def main(env_cfg, agent_cfg: dict):
                                     else:
                                         _scores = (_grad[_attr_env] * _memory[_attr_env]).abs().sum(dim=-1)
                                         _scores = _scores / _scores.sum().clamp_min(1e-12)
-                                    _attr_rows.append((_joint_name, _scores.detach().float().cpu().tolist()))
+                                    _attr_rows.append((_objective_name, _scores.detach().float().cpu().tolist()))
                             attn_state["memory"]["pending_rows"] = _attr_rows
                         region_masks = _classify_pointcloud_attention(_attn, dagger, attn_state["env_id"])
+                        point_counts = region_masks.pop("__point_counts__", None)
+                        if point_counts is not None:
+                            attn_state["point_count_snapshots"].append((int(step), point_counts))
                         _attr_rows = attn_state["memory"].pop("pending_rows", None)
                         if _attr_rows is not None:
                             _pcd_positions = [i for i, lb in enumerate(_attn["token_labels"]) if lb == "pointcloud"]
                             _grouped = {}
-                            for _joint_name, _scores_list in _attr_rows:
+                            for _output_name, _scores_list in _attr_rows:
                                 _scores = torch.as_tensor(_scores_list, dtype=torch.float32)
-                                _groups = {"handle": 0.0, "panel": 0.0, "wall": 0.0, "other_cloud": 0.0}
+                                _groups = {"handle": 0.0, "panel": 0.0, "wall": 0.0, "robot": 0.0, "other_cloud": 0.0}
                                 _offset = 0
                                 for _key, (_xyz, _weights) in _attn.get("pcd", {}).items():
                                     _n = int(_xyz.shape[0])
                                     _inds = _pcd_positions[_offset:_offset + _n]
                                     _local = _scores[_inds]
                                     _masks = region_masks.get(_key, {}).get("region", torch.full((_n,), -1, dtype=torch.long))
-                                    for _rid, _rname in ((0, "handle"), (1, "panel"), (2, "wall")):
+                                    for _rid, _rname in ((0, "handle"), (1, "panel"), (2, "wall"), (3, "robot")):
                                         _groups[_rname] += float(_local[_masks == _rid].sum())
-                                    _groups["other_cloud"] += float(_local[~((_masks == 0) | (_masks == 1) | (_masks == 2))].sum())
+                                    _groups["other_cloud"] += float(_local[~((_masks == 0) | (_masks == 1) | (_masks == 2) | (_masks == 3))].sum())
                                     _offset += _n
                                 for _i, _label in enumerate(_attn["token_labels"]):
                                     if _label == "pointcloud":
@@ -2419,13 +2533,13 @@ def main(env_cfg, agent_cfg: dict):
                                     else:
                                         _name = "other_state"
                                     _groups[_name] = _groups.get(_name, 0.0) + float(_scores[_i])
-                                _grouped[_joint_name] = _groups
+                                _grouped[_output_name] = _groups
                             attn_state["output_attribution_snapshots"].append((int(step), _grouped))
                             attn_state["memory"].pop("tensor", None)
                         region_mass = {}
                         pcd_positions = [i for i, lb in enumerate(_attn["token_labels"]) if lb == "pointcloud"]
                         for qname, qweights in _attn.get("query_attn", {}).items():
-                            vals = {"handle": 0.0, "panel": 0.0, "wall": 0.0}
+                            vals = {"handle": 0.0, "panel": 0.0, "wall": 0.0, "robot": 0.0}
                             offset = 0
                             for key, (_xyz, _aw) in _attn.get("pcd", {}).items():
                                 n = int(_xyz.shape[0])
@@ -2437,6 +2551,7 @@ def main(env_cfg, agent_cfg: dict):
                                 vals["handle"] += float(w[masks.get("region", torch.ones(n, dtype=torch.long)) == 0].sum())
                                 vals["panel"] += float(w[masks.get("region", torch.ones(n, dtype=torch.long)) == 1].sum())
                                 vals["wall"] += float(w[masks.get("region", torch.ones(n, dtype=torch.long)) == 2].sum())
+                                vals["robot"] += float(w[masks.get("region", torch.ones(n, dtype=torch.long)) == 3].sum())
                                 offset += n
                             region_mass[qname] = vals
                         attn_state["snapshots"].append(
@@ -2621,6 +2736,7 @@ def main(env_cfg, agent_cfg: dict):
             attn_state["query_snapshots"].clear()
             attn_state["region_snapshots"].clear()
             attn_state["output_attribution_snapshots"].clear()
+            attn_state["point_count_snapshots"].clear()
         if args_cli.save_replay and replay_runs:
             _save_replay_pt(replay_runs, _replay_joint_names, base_env, args_cli.save_replay)
         if args_cli.viser and viser_recorders is not None:

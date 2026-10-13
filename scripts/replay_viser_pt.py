@@ -80,6 +80,10 @@ def _parse_args() -> argparse.Namespace:
         help="Playback speed in frames per second. Defaults to recorded metadata when available.",
     )
     parser.add_argument("--point-size", type=float, default=0.004, help="Rendered point size.")
+    parser.add_argument(
+        "--camera-offset", type=float, nargs=3, default=(1.5, -1.5, 1.0), metavar=("X", "Y", "Z"),
+        help="Initial camera position offset from the first cloud's center, in world meters.",
+    )
     parser.add_argument("--start-paused", action="store_true", help="Load the replay without auto-playing.")
     parser.add_argument("--no-grid", action="store_true", help="Hide the ground grid.")
     parser.add_argument(
@@ -545,7 +549,7 @@ def main() -> None:
     if center is not None:
         server.initial_camera.look_at = tuple(float(x) for x in center)
         server.initial_camera.position = tuple(
-            float(x) for x in (center + np.array([1.5, -1.5, 1.0], dtype=np.float32))
+            float(x) for x in (center + np.asarray(args.camera_offset, dtype=np.float32))
         )
 
     cloud_handles = {}

@@ -38,6 +38,7 @@ from DoorOpening.utils.camera_utils import (
     crop_local_pcd,
     drop_depth_edges,
     rasterize_depth_zbuffer_from_pose,
+    render_depth_with_handle_layer,
     simulate_lidar_render_from_pose,
 )
 from DoorOpening.utils.door_window_dropout import (
@@ -311,6 +312,12 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.depth_cam_render_axial_jitter_std_m = float(
             self.depth_cam_render_cfg.get("axial_jitter_std_m", 0.0)
         )
+        self.depth_cam_handle_layer_cfg = dict(self.depth_cam_render_cfg.get("handle_layer", {}))
+        self.depth_cam_handle_layer_enabled = bool(self.depth_cam_handle_layer_cfg.get("enabled", False))
+        self.depth_cam_handle_inflate_px = int(self.depth_cam_handle_layer_cfg.get("inflate_px", 0))
+        self.depth_cam_handle_occlusion_px = int(self.depth_cam_handle_layer_cfg.get("occlusion_inflate_px", 0))
+        if self.depth_cam_handle_inflate_px < 0 or self.depth_cam_handle_occlusion_px < 0:
+            raise ValueError("depth_cam_render.handle_layer inflate_px values must be nonnegative")
         if self.depth_cam_render_width_px < 0 or self.depth_cam_render_height_px < 0:
             raise ValueError("depth_cam_render width_px and height_px must be non-negative")
         if (self.depth_cam_render_width_px == 0) != (self.depth_cam_render_height_px == 0):
@@ -3915,8 +3922,135 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             door_pcd_world[env_ids] = asset_pcd_world
         return door_pcd_world
 
-    def _sample_scene_pointcloud_world_cached(self, hole_metadata=None):
-        door_pcd_world = self._sample_cached_door_pointcloud_world(hole_metadata=hole_metadata)
+    def _sample_cached_door_pointcloud_world_split_handle(self, hole_metadata=None):
+        """Return the same sampled door cloud split into background and semantic link_2 points.
+
+        The combined cloud uses the same deterministic linspace resampling as
+        ``compose_cached_link_pointcloud_world(..., num_points=scene_door_pcd_num_points)``.
+        Keeping that shared sample index makes this a semantic split of the existing door
+        cloud, rather than increasing handle density or changing the panel sampling.
+        """
+        background = torch.full(
+            (self.num_envs, self.scene_door_pcd_num_points, 3),
+            float("nan"), dtype=torch.float32, device=self.device,
+        )
+        handle = torch.full_like(background, float("nan"))
+        hole_dropped_counts = (
+            torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+            if hole_metadata is not None else None
+        )
+        link1_pose_world_all = self._get_link1_pose_world() if hole_metadata is not None else None
+
+        for asset_idx, link_points_by_name in self.door_link_pointclouds.items():
+            env_ids = self.door_sampler_env_ids.get(asset_idx)
+            if env_ids is None:
+                env_ids = torch.nonzero(self.env_asset_idx == asset_idx, as_tuple=False).squeeze(-1)
+            if env_ids.numel() == 0:
+                continue
+
+            link_names = [name for name in ("link_1", "link_2")
+                          if name in link_points_by_name and link_points_by_name[name].numel() > 0
+                          and name in self.door_link_body_indices]
+            frame_points = self.door_frame_points_base.get(int(asset_idx)) if self.door_frame_aug_enabled else None
+            has_frame = frame_points is not None and frame_points.numel() > 0
+            frame_visible = self.env_door_frame_visible[env_ids] if has_frame else torch.zeros(
+                env_ids.shape[0], dtype=torch.bool, device=self.device
+            )
+
+            # Preserve the old behavior exactly: frame-visible envs sample from panel + handle +
+            # frame; other envs sample only panel + handle. The frame points are appended last.
+            for include_frame in (False, True):
+                local_rows = torch.nonzero(frame_visible == include_frame, as_tuple=False).squeeze(-1)
+                if local_rows.numel() == 0:
+                    continue
+                ids = env_ids[local_rows]
+                parts = []
+                part_lengths = {}
+                for name in link_names:
+                    points = link_points_by_name[name]
+                    body_idx = self.door_link_body_indices[name]
+                    pos = self.ov_env.door.data.body_pos_w[ids, body_idx]
+                    quat = self.ov_env.door.data.body_quat_w[ids, body_idx]
+                    world = compose_cached_link_pointcloud_world(
+                        {name: points}, {name: pos}, {name: quat}, num_points=None
+                    )
+                    parts.append(world)
+                    part_lengths[name] = world.shape[1]
+
+                if include_frame:
+                    base_pos = self.ov_env.door.data.body_pos_w[ids, self.door_base_body_idx]
+                    base_quat = self.ov_env.door.data.body_quat_w[ids, self.door_base_body_idx]
+                    frame_world = compose_cached_link_pointcloud_world(
+                        {"link_0": frame_points}, {"link_0": base_pos}, {"link_0": base_quat}, num_points=None
+                    )
+                    parts.append(frame_world)
+
+                if not parts:
+                    continue
+                full = torch.cat(parts, dim=1)
+                count = full.shape[1]
+                if count == 0:
+                    continue
+                sample_idx = torch.linspace(
+                    0, count - 1, steps=self.scene_door_pcd_num_points,
+                    device=self.device, dtype=torch.float32,
+                ).round().to(dtype=torch.long)
+                sampled = full[:, sample_idx]
+                panel_count = part_lengths.get("link_1", 0)
+                handle_end = panel_count + part_lengths.get("link_2", 0)
+                is_handle = (sample_idx >= panel_count) & (sample_idx < handle_end)
+
+                # Apply episode handle dropout and panel-window dropout to the exact sampled points,
+                # then separate the semantic handle samples from the filtered background input.
+                if (self.door_handle_dropout_enabled and asset_idx in self.door_handle_bbox_link2
+                        and "link_2" in self.door_link_body_indices):
+                    drop = self.env_door_handle_hidden[ids]
+                    if self.door_handle_dropout_frame_prob > 0.0:
+                        drop = drop | (
+                            torch.rand(ids.shape[0], device=self.device) < self.door_handle_dropout_frame_prob
+                        )
+                    if bool(drop.any()):
+                        hidx = self.door_link_body_indices["link_2"]
+                        hpos = self.ov_env.door.data.body_pos_w[ids, hidx]
+                        hquat = self.ov_env.door.data.body_quat_w[ids, hidx]
+                        pts_l2 = world_to_local(sampled, hpos, hquat)
+                        bmin, bmax = self.door_handle_bbox_link2[asset_idx]
+                        margin = 0.01
+                        in_xy = (
+                            (pts_l2[..., 0] >= bmin[0] - margin) & (pts_l2[..., 0] <= bmax[0] + margin)
+                            & (pts_l2[..., 1] >= bmin[1] - margin) & (pts_l2[..., 1] <= bmax[1] + margin)
+                        )
+                        protruding = pts_l2[..., 2].abs() > 0.01
+                        sampled = sampled.masked_fill((drop[:, None] & in_xy & protruding)[..., None], float("nan"))
+
+                if hole_metadata is not None:
+                    sampled, sub_hole_metadata = apply_window_dropout_to_door_points(
+                        sampled,
+                        link1_pose_world=link1_pose_world_all[ids],
+                        board_bbox_link1=self.env_board_bboxes_link1[ids],
+                        hole_metadata={key: value[ids] for key, value in hole_metadata.items()},
+                        surface_eps=self.door_hole_aug_surface_eps_m,
+                    )
+                    hole_dropped_counts[ids] = sub_hole_metadata["num_dropped_points"].to(dtype=torch.float32)
+
+                handle_mask = is_handle.view(1, -1, 1)
+                background[ids] = sampled.masked_fill(handle_mask, float("nan"))
+                handle[ids] = sampled.masked_fill(~handle_mask, float("nan"))
+
+        if hole_dropped_counts is not None:
+            self.latest_door_hole_aug_stats["door_hole_aug/dropped_points_mean"] = float(
+                hole_dropped_counts.mean().detach().cpu()
+            )
+        return background, handle
+
+    def _sample_scene_pointcloud_world_cached(self, hole_metadata=None, separate_handle=False):
+        if separate_handle and self.depth_cam_handle_layer_enabled:
+            door_pcd_world, handle_pcd_world = self._sample_cached_door_pointcloud_world_split_handle(
+                hole_metadata=hole_metadata
+            )
+        else:
+            door_pcd_world = self._sample_cached_door_pointcloud_world(hole_metadata=hole_metadata)
+            handle_pcd_world = None
         robot_pcd_world = self._sample_robot_pointcloud_world_sampler()
         wall_pcd_world = self._sample_wall_pointcloud_world()
         # Keep the sampled ground-truth wall geometry available to evaluation replay capture.
@@ -3933,6 +4067,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         if reflection_pcd_world.shape[1] > 0:
             scene_parts.append(reflection_pcd_world)
         door_walls_pcd_world = torch.cat(scene_parts, dim=1)
+        if separate_handle:
+            return door_walls_pcd_world, robot_pcd_world, handle_pcd_world
         return door_walls_pcd_world, robot_pcd_world
 
     def _render_lidar_scene_pointcloud_base(
@@ -3970,19 +4106,35 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         finite = torch.isfinite(depth)
         return torch.where(finite, depth + torch.randn_like(depth) * float(std_m), depth)
 
-    def _render_depth_scene_single_pass(self, door_walls_pcd_world, robot_pcd_world, camera_pose):
-        """Match render_depth_roundtrip_viser's combined-cloud depth round-trip exactly."""
+    def _render_depth_scene_single_pass(self, door_walls_pcd_world, robot_pcd_world, camera_pose, handle_pcd_world=None):
+        """Render the scene depth; optionally keep semantic handle returns out of min pooling."""
         render_pcd_world = torch.cat((door_walls_pcd_world, robot_pcd_world), dim=1)
-        depth, intr = rasterize_depth_zbuffer_from_pose(
-            render_pcd_world,
-            camera_pose,
-            self.sampler_camera_spec,
-            inflate_px=self.depth_cam_render_inflate_px,
-            clip_mode=self.depth_cam_render_clip_mode,
-        )
-        if self.depth_cam_render_blur_kernel_px > 1:
-            depth = _dilate_depth_min_pool(depth, self.depth_cam_render_blur_kernel_px // 2)
-        depth = drop_depth_edges(depth, self.depth_cam_render_edge_drop_m)
+        if self.depth_cam_handle_layer_enabled:
+            if handle_pcd_world is None:
+                raise RuntimeError("handle-layer depth rendering requires a separate link_2 point cloud")
+            depth, intr, _ = render_depth_with_handle_layer(
+                render_pcd_world,
+                handle_pcd_world,
+                camera_pose,
+                self.sampler_camera_spec,
+                inflate_px=self.depth_cam_render_inflate_px,
+                blur_kernel_px=self.depth_cam_render_blur_kernel_px,
+                handle_inflate_px=self.depth_cam_handle_inflate_px,
+                handle_occlusion_inflate_px=self.depth_cam_handle_occlusion_px,
+                edge_drop_m=self.depth_cam_render_edge_drop_m,
+                clip_mode=self.depth_cam_render_clip_mode,
+            )
+        else:
+            depth, intr = rasterize_depth_zbuffer_from_pose(
+                render_pcd_world,
+                camera_pose,
+                self.sampler_camera_spec,
+                inflate_px=self.depth_cam_render_inflate_px,
+                clip_mode=self.depth_cam_render_clip_mode,
+            )
+            if self.depth_cam_render_blur_kernel_px > 1:
+                depth = _dilate_depth_min_pool(depth, self.depth_cam_render_blur_kernel_px // 2)
+            depth = drop_depth_edges(depth, self.depth_cam_render_edge_drop_m)
         depth = self._apply_axial_depth_jitter(depth, self.depth_cam_render_axial_jitter_std_m)
         pcd_world, _ = backproject_depth_to_world_from_pose(depth, camera_pose, intr)
         # Select a uniform random subset of finite depth returns without sorting the full point cloud.
@@ -4001,17 +4153,27 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
     def _sample_scene_obs_pointcloud_base_depth(self):
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
-        door_walls_pcd_world, robot_pcd_world = self._sample_scene_pointcloud_world_cached(
-            hole_metadata=self._door_hole_aug_metadata
+        sampled_scene = self._sample_scene_pointcloud_world_cached(
+            hole_metadata=self._door_hole_aug_metadata,
+            separate_handle=self.depth_cam_handle_layer_enabled,
         )
+        if self.depth_cam_handle_layer_enabled:
+            door_walls_pcd_world, robot_pcd_world, handle_pcd_world = sampled_scene
+        else:
+            door_walls_pcd_world, robot_pcd_world = sampled_scene
+            handle_pcd_world = None
         if self.viser_raw_enabled:
             # Keep only the selected family envs on CPU so Viser debug does not retain an
             # extra full batched scene pointcloud on GPU during training/debug runs.
             self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(
-                torch.cat([door_walls_pcd_world, robot_pcd_world], dim=1)
+                torch.cat(
+                    [door_walls_pcd_world]
+                    + ([handle_pcd_world] if handle_pcd_world is not None else [])
+                    + [robot_pcd_world], dim=1
+                )
             )
         rendered_pcd_world = self._render_depth_scene_single_pass(
-            door_walls_pcd_world, robot_pcd_world, self._get_sampler_camera_pose()
+            door_walls_pcd_world, robot_pcd_world, self._get_sampler_camera_pose(), handle_pcd_world
         )
         # Retain the exact world-frame render for evaluation/Viser. The policy receives the
         # robot-base-frame copy below, but replaying that copy requires applying a second pose
@@ -4038,15 +4200,25 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
     def _sample_scene_obs_pointcloud_base_both(self):
         robot_base_pos_w = self.ov_env.robot.data.body_pos_w[:, self.robot_base_body_idx]
         robot_base_quat_w = self.ov_env.robot.data.body_quat_w[:, self.robot_base_body_idx]
-        door_walls_pcd_world, robot_pcd_world = self._sample_scene_pointcloud_world_cached(
-            hole_metadata=self._door_hole_aug_metadata
+        sampled_scene = self._sample_scene_pointcloud_world_cached(
+            hole_metadata=self._door_hole_aug_metadata,
+            separate_handle=self.depth_cam_handle_layer_enabled,
         )
-        scene_full_pcd_world = torch.cat([door_walls_pcd_world, robot_pcd_world], dim=1)
+        if self.depth_cam_handle_layer_enabled:
+            door_walls_pcd_world, robot_pcd_world, handle_pcd_world = sampled_scene
+        else:
+            door_walls_pcd_world, robot_pcd_world = sampled_scene
+            handle_pcd_world = None
+        scene_full_pcd_world = torch.cat(
+            [door_walls_pcd_world]
+            + ([handle_pcd_world] if handle_pcd_world is not None else [])
+            + [robot_pcd_world], dim=1
+        )
         if self.viser_raw_enabled:
             self._viser_cached_ground_truth_pcd_world = self._select_viser_ground_truth_points(scene_full_pcd_world)
 
         rendered_depth_pcd_world = self._render_depth_scene_single_pass(
-            door_walls_pcd_world, robot_pcd_world, self._get_sampler_camera_pose()
+            door_walls_pcd_world, robot_pcd_world, self._get_sampler_camera_pose(), handle_pcd_world
         )
         self._last_rendered_depth_pcd_world = rendered_depth_pcd_world
         depth_pcd_base = world_to_local(rendered_depth_pcd_world, robot_base_pos_w, robot_base_quat_w)

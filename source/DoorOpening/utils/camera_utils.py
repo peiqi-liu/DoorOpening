@@ -543,6 +543,79 @@ def rasterize_depth_zbuffer_from_pose(
 
 
 @torch.no_grad()
+def render_depth_with_handle_layer(
+    background_pcd: torch.Tensor,
+    handle_pcd: torch.Tensor,
+    camera_pose: torch.Tensor,
+    cam_spec_dict: Dict,
+    *,
+    inflate_px: int = 0,
+    blur_kernel_px: int = 5,
+    handle_inflate_px: int = 0,
+    handle_occlusion_inflate_px: int = 0,
+    edge_drop_m: float = 0.0,
+    clip_mode: str = "post",
+):
+    """Render a thin handle independently of the scene's depth gap filling.
+
+    Both point sets have shape ``(B, N, 3)`` in world coordinates; either may
+    have zero points. ``background_pcd`` must exclude handle samples and contain
+    all other geometry that can occlude the handle. The background receives
+    ``inflate_px`` dilation followed by a nearest-depth (min) filter of
+    ``blur_kernel_px`` pixels. Despite the historical ``blur`` parameter name,
+    this is a min filter, not an arithmetic depth average. Even kernel sizes
+    round up to the next odd size; values <= 1 disable that filter.
+
+    Handle support only receives its own optional ``handle_inflate_px`` dilation
+    (zero by default). ``handle_occlusion_inflate_px`` independently expands the
+    projected handle's *shadow mask*: background returns are removed inside that
+    mask, while handle depths are written only at their raw projected pixels.
+    This models the panel being occluded behind a sparsely sampled handle without
+    growing the handle itself. A mask pixel is kept only where the handle is in
+    front of the filtered background. Ownership is resolved before edge-drop;
+    handle-winning pixels bypass edge-drop, and no global edge-drop follows the
+    composite. Ties belong to the background.
+    Empty rays outside the background fill support remain +inf.
+
+    Returns ``(depth, intrinsics, handle_wins)`` with depth and boolean ownership
+    shaped ``(B, H, W)`` and intrinsics in the rasterizer's ``(fx, fy, cx, cy)``
+    format. Depth jitter and policy point selection are left to the caller.
+    """
+    if (
+        background_pcd.ndim != 3
+        or handle_pcd.ndim != 3
+        or background_pcd.shape[-1] != 3
+        or handle_pcd.shape[-1] != 3
+        or background_pcd.shape[0] != handle_pcd.shape[0]
+    ):
+        raise ValueError("background_pcd and handle_pcd must have shapes (B, N, 3) with the same B")
+    if background_pcd.device != handle_pcd.device or background_pcd.dtype != handle_pcd.dtype:
+        raise ValueError("background_pcd and handle_pcd must have the same device and dtype")
+    if clip_mode not in ("pre", "post"):
+        raise ValueError("clip_mode must be 'pre' or 'post'")
+    if int(inflate_px) < 0 or int(handle_inflate_px) < 0 or int(handle_occlusion_inflate_px) < 0:
+        raise ValueError("inflate radii must be nonnegative")
+
+    background_depth, intr = rasterize_depth_zbuffer_from_pose(
+        background_pcd, camera_pose, cam_spec_dict, inflate_px=int(inflate_px), clip_mode=clip_mode
+    )
+    if int(blur_kernel_px) > 1:
+        background_depth = _dilate_depth_min_pool(background_depth, int(blur_kernel_px) // 2)
+    handle_depth, _ = rasterize_depth_zbuffer_from_pose(
+        handle_pcd, camera_pose, cam_spec_dict, inflate_px=int(handle_inflate_px), clip_mode=clip_mode
+    )
+    handle_wins = torch.isfinite(handle_depth) & (handle_depth < background_depth)
+    shadow_depth = torch.where(handle_wins, handle_depth, torch.full_like(handle_depth, float("inf")))
+    if int(handle_occlusion_inflate_px) > 0:
+        shadow_depth = _dilate_depth_min_pool(shadow_depth, int(handle_occlusion_inflate_px))
+    handle_shadow = torch.isfinite(shadow_depth) & (shadow_depth < background_depth)
+    background_depth = drop_depth_edges(background_depth, edge_drop_m)
+    background_depth = torch.where(handle_shadow, torch.full_like(background_depth, float("inf")), background_depth)
+    depth = torch.where(handle_wins, handle_depth, background_depth)
+    return depth, intr, handle_wins
+
+
+@torch.no_grad()
 def rasterize_axis_aligned_boxes_depth_from_pose(
     boxes_min_world: torch.Tensor,
     boxes_max_world: torch.Tensor,

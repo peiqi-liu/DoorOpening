@@ -241,11 +241,11 @@ dagger:
     sdf_cutoff: 0.02
     max_points_per_process: 5000
   depth_cam_render:
-    # Match scripts/tools/render_depth_roundtrip_viser.py: concatenate door, walls, and robot,
-    # rasterize one shared z-buffer, min-pool depth, drop edges/jitter, then back-project.
+    # Render door, walls, and robot through one camera model, with link_2 optionally kept out
+    # of the background min filter so thin handles and their exact occlusion silhouettes persist.
     num_points: 12000
-    width_px: 240
-    height_px: 180
+    width_px: 120
+    height_px: 80
     # Depth-camera field of view (degrees). Omit / null -> D435 physical defaults (85 x 58). Lowering
     # fov_y_deg narrows the VERTICAL angle at the same resolution, cropping top/bottom points to match a
     # real camera that effectively sees less vertically than 58 deg. Set to reduce the vertical FOV;
@@ -253,9 +253,15 @@ dagger:
     fov_y_deg: 50  # null -> D435 58 deg nominal. Set e.g. 45 to crop the vertical FOV (did not reproduce the real bug, so left off).
     inflate_px: 0
     clip_mode: "post"
-    blur_kernel_px: 7
-    edge_drop_m: 0.05
+    blur_kernel_px: 5
+    edge_drop_m: 0.01
     axial_jitter_std_m: 0.005
+    # Keep link_2 handle samples out of background min filtering so thin handles stay thin.
+    # The background panel is cleared only under the handle's own projected footprint.
+    handle_layer:
+      enabled: true
+      inflate_px: 0
+      occlusion_inflate_px: 0
   lidar_render:
     num_points: 9000
     num_azimuth: 128

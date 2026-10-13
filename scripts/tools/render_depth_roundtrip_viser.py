@@ -45,6 +45,7 @@ from DoorOpening.utils.camera_utils import (
     crop_local_pcd,
     drop_depth_edges,
     rasterize_depth_zbuffer_from_pose,
+    render_depth_with_handle_layer,
 )
 from DoorOpening.utils.door_window_dropout import (
     apply_window_dropout_to_door_points,
@@ -118,7 +119,9 @@ def load_door_asset(urdf_path, num_points, device):
     """
     sampler = FrankaGripperSampler(str(urdf_path), device=device, num_points=int(num_points))
     zero_joints = torch.zeros((1, len(sampler.robot.actuated_joint_names)), device=device, dtype=torch.float32)
-    panel_handle_pts = sampler.sample_link_set(zero_joints, ["link_1", "link_2"])  # (1, N, 3) base frame
+    panel_pts = sampler.sample_link_set(zero_joints, ["link_1"])
+    handle_pts = sampler.sample_link_set(zero_joints, ["link_2"])
+    panel_handle_pts = torch.cat([panel_pts, handle_pts], dim=1)
     frame_local = sampler.points.get("link_0")
     if frame_local is not None and frame_local.shape[1] > 0:
         frame_pts = sampler.sample_link_set(zero_joints, ["link_0"])  # (1, Nf, 3) base frame
@@ -142,7 +145,7 @@ def load_door_asset(urdf_path, num_points, device):
         kp.get("link_1_pose_base", [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]), dtype=torch.float32, device=device
     )  # (7,) [pos, quat_wxyz]
     handle_center = np.asarray(kp.get("link_2_center_base", [0.0, 0.0, 0.0]), dtype=np.float64)  # base frame
-    return bbox, panel_bbox, panel_bbox_link1, link1_pose_base, panel_handle_pts, frame_pts, handle_center
+    return bbox, panel_bbox, panel_bbox_link1, link1_pose_base, panel_handle_pts, panel_pts, handle_pts, frame_pts, handle_center
 
 
 def load_robot_asset(num_points, device, franka_q=None):
@@ -310,11 +313,32 @@ def _axial_jitter(depth, std_m):
 
 
 def render_dex_style_depth(scene_cloud, robot_cloud, camera_pose, camera_spec, depth_cfg,
-                           depth_filter="min_pool", blur_sigma_px=1.5):
+                           depth_filter="min_pool", blur_sigma_px=1.5, handle_cloud=None):
     """Rasterize door, walls, and robot together once, then back-project."""
     inflate = int(depth_cfg.get("inflate_px", 0))
     clip_mode = str(depth_cfg.get("clip_mode", "post"))
     render_cloud = torch.cat((scene_cloud, robot_cloud), dim=1) if robot_cloud is not None else scene_cloud
+    handle_layer_cfg = dict(depth_cfg.get("handle_layer", {}))
+    if bool(handle_layer_cfg.get("enabled", False)):
+        if handle_cloud is None:
+            raise ValueError("handle_layer.enabled requires a separate link_2 point cloud")
+        depth, intr, _ = render_depth_with_handle_layer(
+            render_cloud, handle_cloud, camera_pose, camera_spec,
+            inflate_px=inflate, blur_kernel_px=int(depth_cfg.get("blur_kernel_px", 0)),
+            handle_inflate_px=int(handle_layer_cfg.get("inflate_px", 0)),
+            handle_occlusion_inflate_px=int(handle_layer_cfg.get("occlusion_inflate_px", 0)),
+            edge_drop_m=float(depth_cfg.get("edge_drop_m", 0.0)), clip_mode=clip_mode,
+        )
+        depth = _axial_jitter(depth, depth_cfg.get("axial_jitter_std_m", 0.0))
+        world, valid = backproject_depth_to_world_from_pose(depth, camera_pose, intr)
+        clouds = []
+        point_cap = depth_cfg.get("num_points")
+        for batch_idx in range(world.shape[0]):
+            points = world[batch_idx][valid[batch_idx] & torch.isfinite(world[batch_idx]).all(dim=-1)]
+            if point_cap is not None and points.shape[0] > int(point_cap):
+                points = points[torch.randperm(points.shape[0], device=points.device)[:int(point_cap)]]
+            clouds.append(points)
+        return clouds, int(valid.shape[-2] * valid.shape[-1])
     # All geometry competes in one z-buffer. There is no separate robot pass or
     # second, dilated occluder pass in this low-cost rendering mode.
     depth, intr = rasterize_depth_zbuffer_from_pose(
@@ -335,7 +359,16 @@ def render_dex_style_depth(scene_cloud, robot_cloud, camera_pose, camera_spec, d
     depth = drop_depth_edges(depth, float(depth_cfg.get("edge_drop_m", 0.0)))
     depth = _axial_jitter(depth, depth_cfg.get("axial_jitter_std_m", 0.0))
     world, valid = backproject_depth_to_world_from_pose(depth, camera_pose, intr)
-    return [world[b][valid[b] & torch.isfinite(world[b]).all(dim=-1)] for b in range(world.shape[0])], int(valid.shape[-2] * valid.shape[-1])
+    clouds = []
+    point_cap = depth_cfg.get("num_points")
+    for batch_idx in range(world.shape[0]):
+        points = world[batch_idx][valid[batch_idx] & torch.isfinite(world[batch_idx]).all(dim=-1)]
+        # DAgger uniformly samples the rendered depth cloud before the policy crop.
+        # Keep all returns when the image has fewer valid pixels than the configured cap.
+        if point_cap is not None and points.shape[0] > int(point_cap):
+            points = points[torch.randperm(points.shape[0], device=points.device)[:int(point_cap)]]
+        clouds.append(points)
+    return clouds, int(valid.shape[-2] * valid.shape[-1])
 
 
 # --------------------------------------------------------------------------------------
@@ -399,6 +432,16 @@ def parse_args():
     p.add_argument("--edge-drop-m", type=float, default=None,
                    help="Drop SCENE pixels on a depth discontinuity > this (m) to remove the blur's "
                    "flying-pixel smears on wall/door edges. Default: cfg dagger.depth_cam_render.edge_drop_m.")
+    p.add_argument("--handle-layer", action=argparse.BooleanOptionalAction, default=None,
+                   help="Render link_2 separately so background min filtering cannot widen it.")
+    p.add_argument("--handle-inflate-px", type=int, default=None,
+                   help="Optional pixel dilation for the separately rendered handle (default 0).")
+    p.add_argument("--handle-occlusion-px", type=int, default=None,
+                   help="Expand the handle's panel-shadow mask by this many pixels without expanding handle points.")
+    p.add_argument("--force-window-hole", action="store_true",
+                   help="Use a window hole on every generated frame for controlled glass/handle comparisons.")
+    p.add_argument("--no-window-hole", action="store_true",
+                   help="Disable panel window dropout for handle-shadow comparisons.")
     p.add_argument("--batch-size", type=int, default=32, help="Configs rendered per GPU launch (higher = faster, more VRAM).")
     p.add_argument("--max-points", type=int, default=8000, help="Per-cloud point cap for viser display.")
     p.add_argument("--compare-policy-prefilter", action="store_true",
@@ -607,6 +650,14 @@ def main():
     frame_cfg = dict(cfg.get("dagger", {}).get("door_frame_aug", {}))
     hole_cfg = dict(cfg.get("dagger", {}).get("door_hole_aug", {}))
     depth_cfg = dict(cfg.get("dagger", {}).get("depth_cam_render", {}))
+    handle_layer_cfg = dict(depth_cfg.get("handle_layer", {}))
+    if args.handle_layer is not None:
+        handle_layer_cfg["enabled"] = bool(args.handle_layer)
+    if args.handle_inflate_px is not None:
+        handle_layer_cfg["inflate_px"] = int(args.handle_inflate_px)
+    if args.handle_occlusion_px is not None:
+        handle_layer_cfg["occlusion_inflate_px"] = int(args.handle_occlusion_px)
+    depth_cfg["handle_layer"] = handle_layer_cfg
     # Use the same camera resolution/noise values as training unless explicitly overridden.
     args.cam_width_px = int(args.cam_width_px or depth_cfg.get("width_px", 320))
     args.cam_height_px = int(args.cam_height_px or depth_cfg.get("height_px", 240))
@@ -647,11 +698,12 @@ def main():
     # The source-aware mock renderer reads these resolved values from the depth cfg.
     # Propagate the already-supported CLI overrides so replay experiments really apply.
     depth_cfg["blur_kernel_px"] = blur_kernel_px
+    depth_cfg["inflate_px"] = inflate_px
     depth_cfg["blur_sigma_px"] = blur_sigma_px
     depth_cfg["edge_drop_m"] = edge_drop_m
 
     # --- GT door geometry (door-base frame at world origin) ---
-    board_bbox, panel_bbox, panel_bbox_link1, link1_pose_base, board_gt, frame_gt, handle_center = load_door_asset(
+    board_bbox, panel_bbox, panel_bbox_link1, link1_pose_base, board_gt, panel_gt, handle_gt, frame_gt, handle_center = load_door_asset(
         args.door, board_num_points, device
     )
 
@@ -674,6 +726,8 @@ def main():
         return pts @ R_door.T
 
     board_gt_world = door_to_world(board_gt)
+    panel_gt_world = door_to_world(panel_gt)
+    handle_gt_world = door_to_world(handle_gt)
     frame_gt_world = door_to_world(frame_gt)
 
     # link_1 (panel) pose in WORLD = door-yaw rotation (origin, no translation) composed with the
@@ -714,6 +768,12 @@ def main():
     # behaviour (the hole no longer jitters step-to-step). ---
     hole_aug_enabled = bool(hole_cfg.get("enabled", False))
     hole_env_prob = float(hole_cfg.get("env_prob", 0.35))
+    if args.force_window_hole:
+        hole_aug_enabled = True
+        hole_env_prob = 1.0
+    if args.no_window_hole:
+        hole_aug_enabled = False
+        hole_env_prob = 0.0
     hole_width_range = tuple(float(v) for v in hole_cfg.get("width_range_m", [0.12, 1.60]))
     hole_height_range = tuple(float(v) for v in hole_cfg.get("height_range_m", [0.18, 2.20]))
     hole_center_height_range = tuple(float(v) for v in hole_cfg.get("center_height_range_m", [0.10, 1.90]))
@@ -731,12 +791,12 @@ def main():
     # once camera_pose is known (below); read late by make_holed_door at render time.
     reflection_front_sign = None
 
-    def make_holed_door(panel_handle_world):
-        """One window hole per config: drop panel+handle points inside it (NaN, fixed N) and, when glass
+    def make_holed_door(panel_world):
+        """One window hole per config: drop panel points inside it (NaN, fixed N) and, when glass
         reflection is on, also return a sparse world veil of reflection points over the SAME window.
         Returns (holed (1, N, 3), reflection_world (1, P, 3) or None)."""
         if not hole_aug_enabled:
-            return panel_handle_world, None
+            return panel_world, None
         metadata = sample_random_window_hole_metadata(
             link1_pose_world=link1_pose_world,
             board_bbox_link1=panel_bbox_link1[0],
@@ -747,7 +807,7 @@ def main():
             side_margin_range=hole_side_margin_range,
         )
         dropped, _ = apply_window_dropout_to_door_points(
-            points_world=panel_handle_world[0],
+            points_world=panel_world[0],
             link1_pose_world=link1_pose_world,
             board_bbox_link1=panel_bbox_link1[0],
             hole_metadata=metadata,
@@ -914,36 +974,45 @@ def main():
         # The robot is kept SEPARATE (crisp pass) so blur/jitter never touch it. The occluder cloud
         # (door + walls, NO robot) drives the anti-penetration second pass; the robot stays out of it so
         # its thin links aren't dilated away (matches training).
-        scene_clouds, gt_clouds = [], []
+        scene_clouds, handle_clouds, gt_clouds = [], [], []
         for _ in idxs:
             # One window hole per config (per rollout), drawn once and baked into the panel cloud (NaN);
             # its glass reflection veil (if on) is a sparse world cloud over the same window. The veil
             # joins the scene AND the occluder set (matching multi_pcd_dagger: a dark glass door reflects
             # instead of showing through, so the reflection surface occludes the room behind it).
-            holed_board, reflection_world = make_holed_door(board_gt_world)
+            holed_board, reflection_world = make_holed_door(panel_gt_world)
             door_parts = [holed_board]
             if reflection_world is not None:
                 door_parts.append(reflection_world)
             if frame_aug_enabled and torch.rand((), device=device).item() < frame_env_prob:
                 door_parts.append(frame_gt_world)
-            door_cloud = torch.cat(door_parts, dim=1)
+            background_door_cloud = torch.cat(door_parts, dim=1)
+            # Keep the semantic link_2 samples out of the background min filter.
+            n_handle = min(handle_gt_world.shape[1], max(1, scene_door_num_points // 8))
+            n_background = max(1, scene_door_num_points - n_handle)
+            bg_idx = torch.linspace(0, background_door_cloud.shape[1] - 1, n_background, device=device).round().long()
+            h_idx = torch.linspace(0, handle_gt_world.shape[1] - 1, n_handle, device=device).round().long()
+            background_door_cloud = background_door_cloud[:, bg_idx]
+            handle_cloud = handle_gt_world[:, h_idx]
             # Source composes fixed per-link caches and then takes exactly scene_door_num_points.
             # Repeating the standalone cache here preserves the visible geometry / dropout pattern
             # while reproducing that fixed source boundary for the source-aware split.
-            if door_cloud.shape[1] != scene_door_num_points:
-                index = torch.linspace(0, door_cloud.shape[1] - 1, scene_door_num_points, device=device).round().long()
-                door_cloud = door_cloud[:, index]
             if walls_on:
                 wall_local = sample_walls()
                 wall_cloud = door_to_world(wall_local)
             else:
                 wall_cloud = torch.full((1, 0, 3), float("nan"), device=device)
-            scene = torch.cat([door_cloud, wall_cloud], dim=1)
+            scene = torch.cat([background_door_cloud, wall_cloud], dim=1)
+            if not handle_layer_cfg.get("enabled", False):
+                scene = torch.cat([scene, handle_cloud], dim=1)
             scene_clouds.append(scene)
-            gt_clouds.append(torch.cat([scene, robot_world], dim=1) if robot_world is not None else scene)
+            handle_clouds.append(handle_cloud)
+            gt_scene = torch.cat([scene, handle_cloud], dim=1) if handle_layer_cfg.get("enabled", False) else scene
+            gt_clouds.append(torch.cat([gt_scene, robot_world], dim=1) if robot_world is not None else gt_scene)
         # Config-local augments vary valid point counts; NaN padding keeps one batched render.
         scene_clouds = pad_cloud_batch(scene_clouds)
         robot_b = robot_world.expand(len(idxs), -1, -1) if robot_world is not None else None
+        handle_b = pad_cloud_batch(handle_clouds)
         cam_b = camera_pose.expand(len(idxs), -1)
 
         # Exclude one-time CUDA/context initialization from the comparison. Warm both full and
@@ -968,9 +1037,23 @@ def main():
         rep_list, n_px = render_dex_style_depth(
             scene_clouds, robot_b, cam_b, cam_spec, depth_cfg,
             depth_filter=depth_filter, blur_sigma_px=blur_sigma_px,
+            handle_cloud=handle_b if handle_layer_cfg.get("enabled", False) else None,
         )
         sync_render_device()
         full_render_ms = (time.perf_counter() - full_start) * 1000.0
+
+        # Matched legacy render for a direct policy-input comparison. It sees the same points,
+        # camera, window, robot, walls, min filter and edge threshold; only handle ownership differs.
+        baseline_cfg = dict(depth_cfg)
+        baseline_cfg["handle_layer"] = {**handle_layer_cfg, "enabled": False}
+        baseline_scene = pad_cloud_batch([
+            torch.cat([scene_clouds[i:i + 1], handle_b[i:i + 1]], dim=1)
+            for i in range(len(idxs))
+        ])
+        baseline_rep_list, _ = render_dex_style_depth(
+            baseline_scene, robot_b, cam_b, cam_spec, baseline_cfg,
+            depth_filter="min_pool", blur_sigma_px=blur_sigma_px,
+        )
 
         prefiltered_rep_list = None
         prefiltered_scene_counts = []
@@ -1003,6 +1086,7 @@ def main():
                     "ground_truth": pack(drop_invalid_rows(gt_clouds[j]), args.max_points),
                     "reprojected": pack(rep_list[j], args.max_points),
                     "policy_input": pack(policy_input_from_world(rep_list[j]), args.max_points),
+                    "baseline_policy_input": pack(policy_input_from_world(baseline_rep_list[j]), args.max_points),
                     # Keep the robot as a separately toggleable layer.  It is also
                     # included in ground_truth and the ray cast above; this stream is
                     # purely for inspecting exactly which geometry self-occludes.
@@ -1027,6 +1111,8 @@ def main():
         "format": "dooropening_viser_replay_v1",
         "pointcloud_frame": "world",
         "pointcloud_source": "single_zbuffer_scene_plus_robot",
+        "handle_layer": handle_layer_cfg,
+        "comparison": "legacy combined min filter vs raw handle depth plus an independently dilated panel-shadow mask",
         "depth_filter": depth_filter,
         "robot_base_pos_w": base_pos.tolist() if robot_world is not None else None,
         "franka_joint_pos": (args.franka_joints if args.franka_joints is not None else FRANKA_READY_JOINT_POS)
@@ -1035,7 +1121,8 @@ def main():
             {"name": "ground_truth", "label": "GT (door + walls [+ robot])", "color": (120, 120, 120), "point_size_scale": 1.0},
             *([{"name": "robot", "label": "Robot (ray-cast geometry)", "color": (255, 140, 0), "point_size_scale": 1.4}] if args.robot else []),
             {"name": "reprojected", "label": "Single-pass depth (combined scene + robot)", "color": (79, 195, 247), "point_size_scale": 1.4},
-            {"name": "policy_input", "label": "Policy input (cropped)", "color": (124, 240, 130), "point_size_scale": 1.8},
+            {"name": "policy_input", "label": f"Policy input (handle shadow +{int(handle_layer_cfg.get('occlusion_inflate_px', 0))} px)", "color": (124, 240, 130), "point_size_scale": 1.8},
+            {"name": "baseline_policy_input", "label": "Baseline policy input (combined min filter)", "color": (255, 90, 90), "point_size_scale": 1.8},
             *([{"name": "prefiltered_reprojected", "label": "Early policy-volume render", "color": (240, 100, 220), "point_size_scale": 1.4},
                {"name": "prefiltered_policy_input", "label": "Early-render policy input", "color": (255, 220, 80), "point_size_scale": 1.8}]
               if args.compare_policy_prefilter else []),
