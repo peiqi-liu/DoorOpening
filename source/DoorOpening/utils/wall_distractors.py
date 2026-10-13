@@ -471,10 +471,10 @@ def sample_wall_points_local(
         left_hlo, left_hhi = sample_side_height()
         right_hlo, right_hhi = sample_side_height()
         box_specs = (
-            (False, left_seam, left_hlo, left_hhi, False),  # left-back
-            (False, left_seam, left_hlo, left_hhi, True),   # left-front
-            (True, right_seam, right_hlo, right_hhi, False),  # right-back
-            (True, right_seam, right_hlo, right_hhi, True),   # right-front
+            (False, left_seam, False, left_hlo, left_hhi),  # left-back
+            (False, left_seam, True, left_hlo, left_hhi),   # left-front
+            (True, right_seam, False, right_hlo, right_hhi),  # right-back
+            (True, right_seam, True, right_hlo, right_hhi),   # right-front
         )
         variants = [
             sample_box_column(box_index, *box_spec)
