@@ -314,6 +314,8 @@ dagger:
     # exactly at the door plane; kept as a config key (rather than removed) so sample_seam/
     # rand_range don't need a special zero-width-range code path.
     center_offset_m: [-0.25, 0.25]
+    flush_depth_offset_prob: 0.5  # Each of the 4 box columns independently shifts away from the flush plane with this probability.
+    flush_depth_gap_m: [0.4, 0.8]  # Per-column nearest-face offset from the flush-wall center; face jitter can reduce the visible gap by up to 0.1 m.
     # BOX side-wall vertical extent [bottom, max-top] (m). Each box draws its own top in [bottom, max-top].
     # Kept LOW on purpose: with the policy z-crop [0.55, 1.5], a box whose top < 0.55 vanishes from the
     # policy input entirely, so many boxes are "not there" after processing while others (top up to 1.8)

@@ -65,6 +65,11 @@ class WallDistractorParams:
     # glass-frame case).
     detached_within_flush_frac_min: float
     detached_within_flush_frac_max: float
+    # Minimum air gap, along the door-thickness axis, from the flush slab's center
+    # to the nearest face of each detached box wall. Applied only when flush is present.
+    flush_depth_gap_min_m: float
+    flush_depth_gap_max_m: float
+    flush_depth_offset_prob: float
 
     @classmethod
     def from_cfg(cls, cfg: dict, scene_door_num_points: int) -> "WallDistractorParams":
@@ -128,6 +133,12 @@ class WallDistractorParams:
         )
         detached_within_flush_frac_min = min(1.0, max(0.0, detached_within_flush_frac_min))
         detached_within_flush_frac_max = min(1.0, max(detached_within_flush_frac_min, detached_within_flush_frac_max))
+        flush_depth_gap_min_m, flush_depth_gap_max_m = map(
+            float, cfg.get("flush_depth_gap_m", [0.4, 0.8])
+        )
+        flush_depth_gap_min_m = max(0.0, flush_depth_gap_min_m)
+        flush_depth_gap_max_m = max(flush_depth_gap_min_m, flush_depth_gap_max_m)
+        flush_depth_offset_prob = min(1.0, max(0.0, float(cfg.get("flush_depth_offset_prob", 0.5))))
         return cls(
             enabled=enabled,
             num_points=num_points,
@@ -156,6 +167,9 @@ class WallDistractorParams:
             flush_height_max_m=flush_height_max_m,
             detached_within_flush_frac_min=detached_within_flush_frac_min,
             detached_within_flush_frac_max=detached_within_flush_frac_max,
+            flush_depth_gap_min_m=flush_depth_gap_min_m,
+            flush_depth_gap_max_m=flush_depth_gap_max_m,
+            flush_depth_offset_prob=flush_depth_offset_prob,
         )
 
 
@@ -369,6 +383,15 @@ def sample_wall_points_local(
     else:
         flush_present = torch.zeros((env_count,), dtype=torch.bool, device=device)
         flush_extent = torch.zeros((env_count,), device=device, dtype=torch.float32)
+    # Each box column gets its own Bernoulli decision and depth gap. Sampling one value per
+    # environment would move all four boxes together and remove the intended independent variation.
+    box_count = 4
+    flush_depth_offset_active = flush_present[:, None] & (
+        torch.rand((env_count, box_count), device=device) < params.flush_depth_offset_prob
+    )
+    flush_depth_gap = rand_range(
+        params.flush_depth_gap_min_m, params.flush_depth_gap_max_m, (env_count, box_count)
+    )
     # Offset from the panel edge to the detached box wall, when flush is present: a FRACTION of the
     # flush wall's OWN extent, so the box interrupts the flush drywall somewhere WITHIN its span (the
     # flush wall hasn't visually finished yet when the box shows up) rather than only standing beyond
@@ -417,12 +440,20 @@ def sample_wall_points_local(
                 hhi = height_max
             return hlo, hhi
 
-        def sample_box_column(attach_on_right, seam, is_front, hlo, hhi):
+        def sample_box_column(box_index, attach_on_right, seam, is_front, hlo, hhi):
             depth = thickness_extent + rand_range(params.depth_min_m, params.depth_max_m, (env_count,))
+            offset_active = flush_depth_offset_active[:, box_index]
+            depth_gap = flush_depth_gap[:, box_index]
             if is_front:
-                cmin_s, cmax_s = seam, seam + depth
+                offset_min = f_thick_center + depth_gap
+                offset_max = offset_min + depth
+                cmin_s = torch.where(offset_active, offset_min, seam)
+                cmax_s = torch.where(offset_active, offset_max, seam + depth)
             else:
-                cmin_s, cmax_s = seam - depth, seam
+                offset_max = f_thick_center - depth_gap
+                offset_min = offset_max - depth
+                cmin_s = torch.where(offset_active, offset_min, seam - depth)
+                cmax_s = torch.where(offset_active, offset_max, seam)
             edge_gap = rand_range(params.gap_min_m, params.gap_max_m, (env_count,)) + detached_offset
             column_width = sample_column_width()
             if attach_on_right:
@@ -439,13 +470,15 @@ def sample_wall_points_local(
         right_seam = sample_seam()
         left_hlo, left_hhi = sample_side_height()
         right_hlo, right_hhi = sample_side_height()
+        box_specs = (
+            (False, left_seam, left_hlo, left_hhi, False),  # left-back
+            (False, left_seam, left_hlo, left_hhi, True),   # left-front
+            (True, right_seam, right_hlo, right_hhi, False),  # right-back
+            (True, right_seam, right_hlo, right_hhi, True),   # right-front
+        )
         variants = [
-            sample_box_column(attach_on_right, seam, is_front, hlo, hhi)
-            for attach_on_right, seam, (hlo, hhi) in (
-                (False, left_seam, (left_hlo, left_hhi)),
-                (True, right_seam, (right_hlo, right_hhi)),
-            )
-            for is_front in (False, True)
+            sample_box_column(box_index, *box_spec)
+            for box_index, box_spec in enumerate(box_specs)
         ]  # order [left-back, left-front, right-back, right-front]
         box_pts = _sample_columns_ordered(
             *[torch.stack([v[i] for v in variants], dim=1) for i in range(6)],
