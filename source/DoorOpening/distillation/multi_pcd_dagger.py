@@ -2054,7 +2054,10 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         offsets_s = tuple(float(offset_s) for offset_s in offsets_s)
         offset_to_index = {offset_s: idx for idx, offset_s in enumerate(offsets_s)}
         include_aux_handle = self.temporal_aux_handle_enabled
-        include_initial_handle = self.proprio_temporal_field_state_keys.get("initial_handle_points") == "initial_handle_points"
+        include_initial_handle = (
+            self.proprio_temporal_field_state_keys.get("initial_handle_points") == "initial_handle_points"
+            or self.proprio_temporal_field_state_keys.get("initial_handle_pos") == "initial_handle_pos"
+        )
         include_push_pull_belief = self.temporal_push_pull_belief_enabled
         if include_aux_handle:
             self._validate_temporal_history_buffer_shape("temporal_aux_handle_history", self.temporal_aux_handle_history, 3)
@@ -2673,6 +2676,11 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             value = self._get_temporal_sample_from_cache(sample_cache, "aux_handle_pos", timestamp_s)
         elif actual_state_key == "initial_handle_points":
             value = self._get_temporal_sample_from_cache(sample_cache, "initial_handle_points", timestamp_s)
+        elif actual_state_key == "initial_handle_pos":
+            initial_handle_points = self._get_temporal_sample_from_cache(
+                sample_cache, "initial_handle_points", timestamp_s
+            )
+            value = initial_handle_points.reshape(initial_handle_points.shape[0], 2, 3).mean(dim=1)
         elif field_name == "push_pull_belief" or actual_state_key == self.push_pull_condition_obs_key:
             value = self._get_temporal_sample_from_cache(sample_cache, "push_pull_belief", timestamp_s)
         else:
@@ -4500,6 +4508,9 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 obs[key] = keyframe_pose_base
             elif key == "initial_handle_points":
                 obs[key] = self._get_noisy_initial_handle_points_base()
+            elif key == "initial_handle_pos":
+                initial_handle_points = self._get_noisy_initial_handle_points_base()
+                obs[key] = initial_handle_points.reshape(self.num_envs, 2, 3).mean(dim=1)
             elif key in self.temporal_derived_state_specs:
                 obs[key] = temporal_state_values[key]
             elif key in self.aux_state_specs:
