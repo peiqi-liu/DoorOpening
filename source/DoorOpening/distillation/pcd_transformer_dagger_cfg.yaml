@@ -64,14 +64,11 @@ temporal_state_encoders:
   fields:
     - q_arm
     - base_vel
-    - initial_handle_pos
     # - push_pull_belief
     # - target_err_hand
     # - base_vel
     # aux_handle_pos is intentionally NOT in the temporal stack: it is a standalone, recurrent
     # handle-pose input seeded from ground truth on reset (see dagger.aux_handle_input_mode).
-    # initial_handle_pos is the reset-time handle midpoint, re-expressed in the base frame at
-    # each history timestamp.
   hidden_dims: [128, 256]
   output_dim: 256
   activation: elu
@@ -112,12 +109,6 @@ state_encoders_cfg:
     dropout: 0.0
     use_state: false
   aux_handle_pos:
-    input_dim: 3
-    hidden_dims: [128, 256]
-    dropout: 0.0
-    use_state: true
-  initial_handle_pos:
-    # Initial handle measurement captured at reset and re-expressed in the current base frame.
     input_dim: 3
     hidden_dims: [128, 256]
     dropout: 0.0
