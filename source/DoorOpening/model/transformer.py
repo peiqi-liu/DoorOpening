@@ -518,7 +518,7 @@ class PCDTransformer(BaseModel):
         self.door_joint_output_dim = int(self.door_joint_prediction_cfg.get("output_dim", 2))
         self.door_joint_prediction_weight = float(self.door_joint_prediction_cfg.get("weight", 0.0))
         self.door_joint_prediction_input_source = str(
-            self.door_joint_prediction_cfg.get("input_source", "dedicated_query")
+            self.door_joint_prediction_cfg.get("input_source", "detached_action")
         ).lower()
         if self.door_joint_prediction_input_source not in {"dedicated_query", "detached_action"}:
             raise ValueError(

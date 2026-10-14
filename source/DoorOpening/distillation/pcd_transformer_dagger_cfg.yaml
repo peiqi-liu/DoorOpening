@@ -14,6 +14,8 @@ mode_prediction:
   return_latent: true
 door_joint_prediction:
   enabled: true
+  # Diagnostic head only: its loss updates the readout, not the policy/action network.
+  input_source: detached_action
   output_dim: 2  # Must equal the number of dagger.door_joint_training.joints below.
   weight: 0.01
 rollout_progress_prediction:

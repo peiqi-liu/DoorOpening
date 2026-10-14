@@ -607,10 +607,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         student_cfg_data = self.load_yaml(cfg_path) or {}
         if not isinstance(student_cfg_data, dict):
             raise ValueError(f"Student config at '{cfg_path}' must be a YAML mapping.")
-        if bool(self.student_cfg.get("door_joint_diagnostic_only", False)):
-            door_joint_cfg = dict(student_cfg_data.get("door_joint_prediction", {}) or {})
-            door_joint_cfg["input_source"] = "detached_action"
-            student_cfg_data["door_joint_prediction"] = door_joint_cfg
         # Snapshot the untouched file contents before the .pop() calls below strip keys out of
         # student_cfg_data for internal bookkeeping -- this is what gets embedded in the checkpoint
         # sidecar YAML so a saved checkpoint can be traced back to the exact model config that trained it.
