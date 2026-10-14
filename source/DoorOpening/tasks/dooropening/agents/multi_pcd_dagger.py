@@ -76,40 +76,6 @@ def clip_teacher_obs(obs: torch.Tensor, clip_obs: float) -> torch.Tensor:
     return obs
 
 
-def _read_door_underside_gap_m(asset_path):
-    """CLEAR underside gap (m) between the handle's mounting surface and the lever bar's near face.
-
-    This is the standoff that decides whether a depth camera can separate the lever from what is behind
-    it, so it drives the per-door handle-dropout probability (see door_handle_dropout). Prefers the
-    PLATE-referenced gap when the door has an escutcheon/bump (the lever's real standoff is measured from
-    the plate face, not the recessed panel), else the panel-referenced one; if the variant metadata
-    predates both keys, derive it from the handle_main_lever collision primitive the same way
-    scripts/tools/compare_min_gap_doors_viser.py does. Returns None when the asset exposes none of these.
-    """
-    meta_path = Path(asset_path).resolve().parent / "variant_meta.json"
-    try:
-        with open(meta_path) as meta_file:
-            handle = json.load(meta_file).get("handle")
-    except (OSError, ValueError):
-        return None
-    if not handle:
-        return None
-    for key in ("plate_underside_gap_m", "panel_underside_gap_m"):
-        value = handle.get(key)
-        if value is not None:
-            return float(value)
-    lever = next(
-        (prim for prim in handle.get("collision_primitives", []) if prim.get("name") == "handle_main_lever"),
-        None,
-    )
-    if lever is None:
-        return None
-    try:
-        return float(lever["origin_xyz"][2]) - float(lever["size"][2]) / 2.0
-    except (KeyError, IndexError, TypeError, ValueError):
-        return None
-
-
 class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
     def __init__(self, env, config, summaries_dir, nn_dir):
         self.world_size = int(os.environ.get("WORLD_SIZE", "1"))
@@ -176,68 +142,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.play_policy = bool(self.config.get("play_policy", False))
         self.runtime_cfg = self.config.get("dagger", {})
         self.wall_distractor_cfg = dict(self.runtime_cfg.get("wall_distractors", {}))
-        # Handle-visibility dropout: the protruding handle (link_2) points are removed from the rendered
-        # door cloud so the panel reads flat. Keeps the aux head able to track the handle from the visible
-        # PANEL (+seed) when the sensor cannot resolve the lever. This is a BACKUP skill -- the primary
-        # objective is still reading the handle out of the point cloud -- so the hidden fraction is kept
-        # low. Two components; the handle is hidden this frame if EITHER fires.
-        #   EPISODE -- drawn once per env at reset, held for the WHOLE rollout, with a per-door probability
-        #     driven by the handle's CLEAR UNDERSIDE GAP (the standoff between the mounting surface and the
-        #     lever's near face; see _read_door_underside_gap_m). Invisibility is a property of the DOOR: a
-        #     lever hugging the panel blurs into it and stays invisible for the entire approach, while a
-        #     lever standing well off the surface is essentially always resolvable. So the probability
-        #     ramps from episode_prob_at_min_gap at gap <= gap_range_m[0] down to episode_prob_at_max_gap
-        #     at gap >= gap_range_m[1] (linear in between). Drop gap_range_m to fall back to a flat
-        #     per-env episode_prob for every door.
-        #   FRAME (door_handle_dropout.frame_prob, legacy key door_handle_dropout_prob) -- redrawn every
-        #     step, i.e. the handle flickers in and out. Only models genuinely transient dropouts (glare,
-        #     one bad frame). Off by default: per-frame IID flicker lets the policy simply average the
-        #     handle back over a couple of frames, which is the exact crutch the episode component removes.
-        self.door_handle_dropout_cfg = dict(self.runtime_cfg.get("door_handle_dropout", {}))
-        legacy_frame_prob = self.runtime_cfg.get("door_handle_dropout_prob", 0.0)
-        self.door_handle_dropout_frame_prob = float(
-            self.door_handle_dropout_cfg.get("frame_prob", legacy_frame_prob)
-        )
-        self.door_handle_dropout_episode_prob = float(self.door_handle_dropout_cfg.get("episode_prob", 0.0))
-        gap_range = self.door_handle_dropout_cfg.get("gap_range_m")
-        self.door_handle_dropout_gap_range_m = None
-        self.door_handle_dropout_prob_at_min_gap = 0.0
-        self.door_handle_dropout_prob_at_max_gap = 0.0
-        # Doors whose metadata does not expose an underside gap (legacy asset families) fall back to this.
-        # Defaults to the large-gap probability, i.e. "assume a normal, clearly visible lever".
-        self.door_handle_dropout_missing_gap_prob = 0.0
-        episode_probs = [self.door_handle_dropout_episode_prob]
-        if gap_range is not None:
-            gap_lo, gap_hi = (float(v) for v in gap_range)
-            if not 0.0 <= gap_lo < gap_hi:
-                raise ValueError("door_handle_dropout.gap_range_m must be [lo, hi] with 0 <= lo < hi.")
-            self.door_handle_dropout_gap_range_m = (gap_lo, gap_hi)
-            self.door_handle_dropout_prob_at_min_gap = float(
-                self.door_handle_dropout_cfg.get("episode_prob_at_min_gap", 0.0)
-            )
-            self.door_handle_dropout_prob_at_max_gap = float(
-                self.door_handle_dropout_cfg.get("episode_prob_at_max_gap", 0.0)
-            )
-            self.door_handle_dropout_missing_gap_prob = float(
-                self.door_handle_dropout_cfg.get(
-                    "missing_gap_prob", self.door_handle_dropout_prob_at_max_gap
-                )
-            )
-            episode_probs = [
-                self.door_handle_dropout_prob_at_min_gap,
-                self.door_handle_dropout_prob_at_max_gap,
-                self.door_handle_dropout_missing_gap_prob,
-            ]
-        for name, value in (
-            ("frame_prob", self.door_handle_dropout_frame_prob),
-            ("episode_prob", self.door_handle_dropout_episode_prob),
-            ("episode_prob_at_min_gap", self.door_handle_dropout_prob_at_min_gap),
-            ("episode_prob_at_max_gap", self.door_handle_dropout_prob_at_max_gap),
-            ("missing_gap_prob", self.door_handle_dropout_missing_gap_prob),
-        ):
-            if not 0.0 <= value <= 1.0:
-                raise ValueError(f"door_handle_dropout.{name} must be in [0, 1].")
-        self.door_handle_dropout_enabled = self.door_handle_dropout_frame_prob > 0.0 or max(episode_probs) > 0.0
         self.door_hole_aug_cfg = dict(self.runtime_cfg.get("door_hole_aug", {}))
         self.door_frame_aug_cfg = dict(self.runtime_cfg.get("door_frame_aug", {}))
 
@@ -2578,6 +2482,11 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             value = full_value[:, self.action_component_history_indices["hand"]]
         elif actual_state_key == "aux_handle_pos":
             value = self._get_temporal_sample_from_cache(sample_cache, "aux_handle_pos", timestamp_s)
+        elif actual_state_key == "initial_handle_pos":
+            # This is the single reset-time handle anchor, expressed in the current base frame.
+            # It is episode-static in world coordinates; the two-anchor point representation is
+            # intentionally not used here.
+            value = self._get_initial_handle_position_base()
         elif field_name == "push_pull_belief" or actual_state_key == self.push_pull_condition_obs_key:
             value = self._get_temporal_sample_from_cache(sample_cache, "push_pull_belief", timestamp_s)
         else:
@@ -2957,10 +2866,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             )
             for idx in unique_asset_idx
         }
-        door_geometry_aug_cfg = self.runtime_cfg.get("door_geometry_aug", {})
-        for sampler in self.door_samplers.values():
-            sampler.configure_door_geometry_aug(door_geometry_aug_cfg, device=self.device)
-            sampler.set_door_geometry_aug_runtime_enabled(not self.play_policy)
         self.door_sampler_env_ids = {
             idx: torch.nonzero(self.env_asset_idx == int(idx), as_tuple=False).squeeze(-1)
             for idx in unique_asset_idx
@@ -2969,16 +2874,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             idx: build_first_visual_link_pointcloud_cache(sampler, link_names=("link_1", "link_2"), device=self.device)
             for idx, sampler in self.door_samplers.items()
         }
-        # Per-asset x/y bounding box of the handle (link_2) in its own local frame, for the
-        # handle-visibility dropout (see door_handle_dropout). z is the protrusion axis; we only drop
-        # the PROTRUDING handle (|z| above a small threshold), sparing the panel plane at z~0 so the region
-        # reads flat rather than as a hole.
-        self.door_handle_bbox_link2 = {}
-        for idx, links in self.door_link_pointclouds.items():
-            h = links.get("link_2")
-            if h is not None and h.numel() > 0:
-                self.door_handle_bbox_link2[idx] = (h.min(dim=0).values, h.max(dim=0).values)
-        self._init_door_handle_dropout_probs(unique_asset_idx)
         # --- Optional door-frame (link_0 = casing/jamb) augmentation -------------------------------
         # The frame is fused into the door base (merge_fixed_joints=True), so it is NOT a separate sim
         # body and is normally absent from the door point cloud (only link_1/link_2 are composed). When
@@ -3431,78 +3326,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             "door_frame_aug/env_fraction": float(self.env_door_frame_visible.to(torch.float32).mean().detach().cpu()),
         }
 
-    def _init_door_handle_dropout_probs(self, unique_asset_idx):
-        """Per-env P(handle hidden for the whole episode), from each door's underside gap.
-
-        A small clear gap means the lever sits nearly flush against its mounting surface, so the depth
-        sensor's blur/median smears the two together and the handle is unresolvable; a large gap means a
-        lever standing well proud of the panel, which is essentially always visible. The probability
-        therefore ramps DOWN with the gap (see door_handle_dropout in __init__). Held per env because the
-        env->asset assignment is fixed for the run.
-        """
-        # Per-env "this door's handle is invisible for the whole rollout" flag + its per-env probability.
-        self.env_door_handle_hidden = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self.env_door_handle_hidden_prob = torch.full(
-            (self.num_envs,), self.door_handle_dropout_episode_prob, dtype=torch.float32, device=self.device
-        )
-        self.latest_door_handle_dropout_stats = {}
-        self.door_asset_underside_gap_m = {}
-        if self.door_handle_dropout_gap_range_m is None:
-            return
-        gap_lo, gap_hi = self.door_handle_dropout_gap_range_m
-        prob_lo_gap = self.door_handle_dropout_prob_at_min_gap
-        prob_hi_gap = self.door_handle_dropout_prob_at_max_gap
-        num_missing = 0
-        for asset_idx in unique_asset_idx:
-            asset_idx = int(asset_idx)
-            gap = _read_door_underside_gap_m(door_asset_paths[asset_idx])
-            self.door_asset_underside_gap_m[asset_idx] = gap
-            if gap is None:
-                num_missing += 1
-                prob = self.door_handle_dropout_missing_gap_prob
-            else:
-                t = min(max((gap - gap_lo) / (gap_hi - gap_lo), 0.0), 1.0)
-                prob = prob_lo_gap + t * (prob_hi_gap - prob_lo_gap)
-            env_ids = self.door_sampler_env_ids.get(asset_idx)
-            if env_ids is None:
-                env_ids = torch.nonzero(self.env_asset_idx == asset_idx, as_tuple=False).squeeze(-1)
-            self.env_door_handle_hidden_prob[env_ids] = float(prob)
-        if num_missing and self.rank == 0:
-            print(
-                f"[WARN] door_handle_dropout: {num_missing}/{len(unique_asset_idx)} door assets expose no "
-                f"underside gap in variant_meta.json; using missing_gap_prob="
-                f"{self.door_handle_dropout_missing_gap_prob}."
-            )
-
-    def _resample_door_handle_visibility(self, env_ids=None):
-        """Redraw the per-env boolean deciding whether the handle is invisible for the WHOLE episode.
-
-        Drawn only at reset (never per step), so an env whose handle is hidden stays hidden until it
-        terminates -- matching the real failure mode, where invisibility comes from the handle being too
-        small/flush for the depth sensor to resolve and therefore persists for the entire approach.
-        """
-        if not bool((self.env_door_handle_hidden_prob > 0.0).any()):
-            return
-        if env_ids is None:
-            self.env_door_handle_hidden[:] = (
-                torch.rand(self.num_envs, device=self.device) < self.env_door_handle_hidden_prob
-            )
-        else:
-            env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
-            if env_ids.numel() == 0:
-                return
-            self.env_door_handle_hidden[env_ids] = (
-                torch.rand(env_ids.numel(), device=self.device) < self.env_door_handle_hidden_prob[env_ids]
-            )
-        self.latest_door_handle_dropout_stats = {
-            "door_handle_dropout/episode_hidden_fraction": float(
-                self.env_door_handle_hidden.to(torch.float32).mean().detach().cpu()
-            ),
-            "door_handle_dropout/episode_hidden_prob_mean": float(
-                self.env_door_handle_hidden_prob.mean().detach().cpu()
-            ),
-        }
-
     def _sample_robot_pointcloud_world_sampler(self):
         return compose_cached_link_pointcloud_world(
             link_points_by_name=self.robot_link_pointclouds,
@@ -3758,27 +3581,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                     asset_pcd_world = torch.where(
                         frame_visible.view(-1, 1, 1), asset_pcd_world_with_frame, asset_pcd_world
                     )
-            # Handle-visibility dropout: NaN the protruding handle points so the panel reads flat. An env
-            # is hidden this frame if its EPISODE flag is set (drawn once at reset, held all rollout --
-            # the "this handle is too small for the sensor" case) OR the per-frame flicker draw fires.
-            if self.door_handle_dropout_enabled and asset_idx in self.door_handle_bbox_link2 and "link_2" in link_pos_w_by_name:
-                drop = self.env_door_handle_hidden[env_ids]
-                if self.door_handle_dropout_frame_prob > 0.0:
-                    drop = drop | (
-                        torch.rand(env_ids.shape[0], device=self.device) < self.door_handle_dropout_frame_prob
-                    )
-                if bool(drop.any()):
-                    bmin, bmax = self.door_handle_bbox_link2[asset_idx]
-                    pts_l2 = world_to_local(asset_pcd_world, link_pos_w_by_name["link_2"], link_quat_w_by_name["link_2"])
-                    margin = 0.01
-                    in_xy = (
-                        (pts_l2[..., 0] >= bmin[0] - margin) & (pts_l2[..., 0] <= bmax[0] + margin)
-                        & (pts_l2[..., 1] >= bmin[1] - margin) & (pts_l2[..., 1] <= bmax[1] + margin)
-                    )
-                    protruding = pts_l2[..., 2].abs() > 0.01  # spare the panel plane (z~0), drop the standoff handle
-                    drop_mask = drop.view(-1, 1) & in_xy & protruding
-                    asset_pcd_world = asset_pcd_world.clone()
-                    asset_pcd_world[drop_mask] = float("nan")
             if hole_metadata is not None:
                 asset_pcd_world = self._apply_door_hole_aug_to_world(
                     asset_pcd_world,
@@ -4430,7 +4232,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             self.latest_aux_target_vector = None
             self._resample_wall_distractors()
             self._resample_door_frame_visibility()
-            self._resample_door_handle_visibility()
             self._resample_door_hole_aug()
             self.temporal_current_time_s = self._iteration_to_time_s(start_iteration)
             self._resample_aux_handle_gt_bias()
@@ -4555,7 +4356,6 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                     self.current_lengths[done_mask] = 0.0
                     self._resample_wall_distractors(done_mask)
                     self._resample_door_frame_visibility(done_mask)
-                    self._resample_door_handle_visibility(done_mask)
                     self._resample_door_hole_aug(done_mask)
                     # Redraw the systematic GT bias BEFORE seeding, since the seed reads the biased GT.
                     self._resample_aux_handle_gt_bias(done_mask)

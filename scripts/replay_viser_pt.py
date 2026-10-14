@@ -498,7 +498,7 @@ def main() -> None:
     except ImportError as exc:
         raise SystemExit("This script requires `viser`. Install it first with `pip install viser`.") from exc
 
-    payload = torch.load(recording, map_location="cpu", weights_only=False)
+    payload = torch.load(recording, map_location="cpu", weights_only=True)
     if not isinstance(payload, dict) or "frames" not in payload:
         raise SystemExit(f"Unexpected replay payload format in {recording}")
 

@@ -465,8 +465,13 @@ def _zbuffer_scatter_raw_depth(
     if clip_mode == "pre":
         inside = inside & (z >= near_m) & (z <= far_val)
 
-    iu = u_pix.floor().clamp(0, W - 1).long()
-    iv = v_pix.floor().clamp(0, H - 1).long()
+    # The validity mask below excludes non-finite projections, but scatter_reduce still
+    # requires every index to be in range even when its source depth is +inf. Map invalid
+    # projections to a harmless pixel before integer conversion; `inside` keeps them masked.
+    u_pix_for_index = torch.nan_to_num(u_pix, nan=0.0, posinf=0.0, neginf=0.0)
+    v_pix_for_index = torch.nan_to_num(v_pix, nan=0.0, posinf=0.0, neginf=0.0)
+    iu = u_pix_for_index.floor().clamp(0, W - 1).long()
+    iv = v_pix_for_index.floor().clamp(0, H - 1).long()
     pix = iv * W + iu
 
     if not hasattr(torch.Tensor, "scatter_reduce_"):

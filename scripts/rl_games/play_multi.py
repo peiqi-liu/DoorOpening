@@ -18,7 +18,7 @@ from isaaclab.app import AppLauncher
 
 SCRIPT_ROOT = pathlib.Path(__file__).resolve().parents[2]
 DEFAULT_STUDENT_CFG = (
-    SCRIPT_ROOT / "source" / "DoorOpening" / "tasks" / "dooropening" / "agents" / "pcd_transformer_dagger_cfg.yaml"
+    SCRIPT_ROOT / "source" / "DoorOpening" / "distillation" / "pcd_transformer_dagger_cfg.yaml"
 )
 
 

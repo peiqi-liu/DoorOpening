@@ -73,6 +73,10 @@ def _physx_kwargs():
         enable_ccd=True,
         bounce_threshold_velocity=0.2,
         gpu_max_rigid_patch_count=4 * 5 * 2**15,
+        # Keep PhysX's fixed GPU allocations modest enough for 400 parallel envs on
+        # 24 GiB cards. The heap grows on demand if a scene needs more.
+        gpu_found_lost_aggregate_pairs_capacity=2**23,
+        gpu_heap_capacity=2**24,
     )
     if "solve_articulation_contact_last" in inspect.signature(PhysxCfg.__init__).parameters:
         kwargs["solve_articulation_contact_last"] = True

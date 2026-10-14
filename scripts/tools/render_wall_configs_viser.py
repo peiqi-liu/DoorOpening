@@ -65,9 +65,7 @@ from mock_depth_compositing import composite_robot_scene_depth
 DEFAULT_STUDENT_CFG = (
     SOURCE_ROOT
     / "DoorOpening"
-    / "tasks"
-    / "dooropening"
-    / "agents"
+    / "distillation"
     / "pcd_transformer_dagger_cfg.yaml"
 )
 DEFAULT_DOOR_URDF = (

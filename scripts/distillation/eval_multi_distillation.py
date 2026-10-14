@@ -23,9 +23,7 @@ DEFAULT_STUDENT_CFG = (
     SCRIPT_ROOT
     / "source"
     / "DoorOpening"
-    / "tasks"
-    / "dooropening"
-    / "agents"
+    / "distillation"
     / "pcd_transformer_dagger_cfg.yaml"
 )
 
@@ -201,7 +199,6 @@ parser.add_argument(
     default=None,
     help="Eval-only PhysX position-solver iteration count for door articulation assets.",
 )
-parser.add_argument("--student_cfg", type=str, default=None, help="Student config YAML to use.")
 parser.add_argument("--student_ckpt", type=str, default=None, help="Student checkpoint to evaluate.")
 parser.add_argument("--use_teacher", action="store_true", default=False, help="Roll out teacher actions instead of student actions.")
 parser.add_argument("--teacher", type=str, default=None, help="Single teacher checkpoint to evaluate.")
@@ -354,7 +351,7 @@ parser.add_argument(
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 
-student_cfg_path = _resolve_repo_path(args_cli.student_cfg, DEFAULT_STUDENT_CFG)
+student_cfg_path = str(DEFAULT_STUDENT_CFG)
 student_dagger_defaults = _load_student_dagger_defaults(student_cfg_path)
 selected_door_families = _normalize_family_selection(
     args_cli.door_families if args_cli.door_families is not None else student_dagger_defaults.get("door_families")

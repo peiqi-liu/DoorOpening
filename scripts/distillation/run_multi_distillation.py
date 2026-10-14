@@ -26,16 +26,7 @@ import yaml
 from isaaclab.app import AppLauncher
 
 SCRIPT_ROOT = pathlib.Path(__file__).resolve().parents[2]
-DEFAULT_STUDENT_CFG = SCRIPT_ROOT / "source" / "DoorOpening" / "tasks" / "dooropening" / "agents" / "pcd_transformer_dagger_cfg.yaml"
-
-
-def _resolve_student_cfg_path(path_value, default_path):
-    if path_value is None:
-        return str(default_path)
-    path = pathlib.Path(path_value)
-    if path.is_absolute():
-        return str(path)
-    return str(SCRIPT_ROOT / path_value)
+DEFAULT_STUDENT_CFG = SCRIPT_ROOT / "source" / "DoorOpening" / "distillation" / "pcd_transformer_dagger_cfg.yaml"
 
 
 def _load_student_dagger_defaults(student_cfg_path):
@@ -164,7 +155,6 @@ parser.add_argument("--teacher-partnetv6", "--teacher_partnetv6", dest="teacher_
 parser.add_argument("--teacher-partnetv7", "--teacher_partnetv7", dest="teacher_partnetv7", type=str, default=None, help="Teacher checkpoint for PartNetv7.")
 parser.add_argument("--teacher-partnetv8", "--teacher_partnetv8", dest="teacher_partnetv8", type=str, default=None, help="Teacher checkpoint for PartNetv8.")
 # parser.add_argument("--data_aug", action="store_true", default=False, help="Whether to use data augmentation for student")
-parser.add_argument("--student_cfg", type=str, default=None, help="Student config YAML to use.")
 parser.add_argument("--student_ckpt", type=str, default=None, help="Student checkpoint to resume from.")
 parser.add_argument("--teacher_cfg", type=str, default=None, help="Teacher RL-Games config YAML to use.")
 parser.add_argument("--wandb-project-name", type=str, default=None, help="the wandb's project name")
@@ -222,7 +212,7 @@ parser.add_argument(
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
-student_cfg_path = _resolve_student_cfg_path(args_cli.student_cfg, DEFAULT_STUDENT_CFG)
+student_cfg_path = str(DEFAULT_STUDENT_CFG)
 student_dagger_defaults = _load_student_dagger_defaults(student_cfg_path)
 selected_door_families = _normalize_family_selection(
     args_cli.door_families if args_cli.door_families is not None else student_dagger_defaults.get("door_families")
@@ -428,10 +418,7 @@ def main(env_cfg, agent_cfg: dict):
         )
         return None, teacher_ckpt
 
-    student_cfg = resolve_path(
-        args_cli.student_cfg,
-        os.path.join(agent_cfg_folder, "pcd_transformer_dagger_cfg.yaml"),
-    )
+    student_cfg = str(DEFAULT_STUDENT_CFG)
     student_dagger_cfg = _load_student_dagger_defaults(student_cfg)
 
     teacher_cfg = resolve_path(

@@ -4,8 +4,12 @@ dropout: 0.0
 
 normalize_state: True
 normalize_action: True
+# The environment interprets these normalized 11-D outputs as incremental commands: base channels
+# are velocities, while arm/gripper channels integrate into PD targets each dt. This model-side
+# decoder must pass the predicted command through unchanged; delta/relative would additionally
+# combine it with current_angles before the environment applies its own integration.
 action_space: "absolute"
-action_dim: 11  # base(3) + franka arm(7) + gripper(1); must equal the env action_space
+action_dim: 11  # Match teacher/environment: base(3) + Franka arm(7) + gripper(1).
 aux_weight: 0.1
 mode_prediction:
   enabled: false
@@ -51,7 +55,8 @@ left_right_condition:
   use_layer_norm: true
 
 scene_door_num_points: 30000  # GT door/model points cached in the scene before any sensor rendering.
-local_pcd_range: [1.2, 0.25, 0.25]
+# Crop radii in meters: [base, robot palm, auxiliary handle estimate].
+local_pcd_range: [1.2, 0.25, 0.15]
 x_direction_cutoff: -0.5
 
 temporal_obs:
@@ -94,7 +99,14 @@ observation_lag:
   per_timestamp: true
   clamp_to_available_history: true
 
-pcd_encoders_cfg: {}
+pcd_encoders_cfg:
+  local_pcd_t:
+    type: pointnet
+    num_output_tokens: 128
+    # Point budgets: [base crop, palm crop, auxiliary-handle-centered crop]. Robot model
+    # points are appended separately using dagger.robot_model_policy_points.
+    num_points: [2500, 0, 0]
+    use_pcd: true
 
 state_encoders_cfg:
   q_arm:
@@ -116,18 +128,21 @@ state_encoders_cfg:
     dropout: 0.0
     use_state: true
   keyframe_pose_base:
+    # Optional keyframe/anchor pose input (panda_link4 position + 6D orientation).
+    # Retained for reference only; disabled in this temporary run.
     # panda_link4: position 3 + 6D orientation.
     body_names: [panda_link4]
     input_dim: 9
     hidden_dims: [128, 256]
     dropout: 0.0
-    use_state: true
+    use_state: false
   push_pull_cond:
+    # Optional push/pull condition encoder; retained for reference only and disabled below.
     input_dim: 2
     hidden_dims: [64, 256]
     dropout: 0.0
     use_layer_norm: true
-    use_state: true
+    use_state: false
   base_vel:
     input_dim: 3
     hidden_dims: [128, 256]
@@ -161,10 +176,10 @@ dagger:
   min_learning_rate: 1.5e-5
   weight_decay: 1.0e-4
   grad_clip: 1.0
-  num_iters: 250000
+  num_iters: 240000
   lr_decay_iters: 70000
-  teacher_forcing_warmup_iters: 5000
-  teacher_forcing_transition_iters: 20000
+  teacher_forcing_warmup_iters: 15000
+  teacher_forcing_transition_iters: 15000
   teacher_forcing_min_beta: 0.0
   # Aux handle input mode:
   #   "recurrent"        -> policy input = previous step's aux prediction (fed back). The first step
@@ -186,26 +201,11 @@ dagger:
   # NOISE: fresh per-step isotropic (ball) jitter, random direction x magnitude in [0, this] (m), added
   # to every aux input -- frame-to-frame detector noise. 0.0 disables it.
   aux_handle_noise_m: 0.1
-  prediction_training:
-    loss_window_start: 40
-    loss_window_end: 100
-    outside_window_weight: 0.25
   door_joint_training:
     # Door joints the aux head regresses, in output order. "hinge" = joint_2 (door swing angle),
     # "latch" = joint_1 (handle/latch rotation). Targets are the raw joint angles in radians.
     joints: ["hinge", "latch"]
     loss_type: "mse"  # 'mse' or 'smooth_l1' regression on the raw joint angles (rad).
-  door_geometry_aug:
-    enabled: false
-    env_prob: 1.0
-    global_shift_std_m: [0.010, 0.010, 0.005]
-    global_shift_clip_m: [0.025, 0.025, 0.010]
-    handle_child_shift_std_m: [0.000, 0.012, 0.012]
-    handle_child_shift_clip_m: [0.000, 0.030, 0.030]
-    handle_scale_range: [0.97, 1.03]
-    panel_width_scale_range: [0.98, 1.02]
-    panel_width_axis: 1
-    panel_width_anchor: "origin"
   log_interval: 100
   save_interval: 5000
   reset_progress_total: 20000
@@ -218,8 +218,8 @@ dagger:
   # MUST match door_policy.yaml's policy.base_vel_source on the deploy side; this is a trained input.
   base_vel_source: "measured"
   scene_robot_num_points: 30000  # GT robot/model points concatenated into the renderable scene cloud.
-  append_robot_model_to_policy_cloud: true
-  robot_model_policy_points: 2000  # Robot model points appended to the policy input after the depth/lidar crops.
+  append_robot_model_to_policy_cloud: false
+  robot_model_policy_points: 0  # Do not append synthetic robot-model points to the policy cloud.
   robot_pointcloud_filter:
     # Robot self-points are stripped from the LIDAR cloud only. The depth camera is a real sensor that
     # sees the robot's own hand, so the depth cloud keeps its self-points (see _sample_scene_obs_pointcloud_base).
@@ -268,33 +268,6 @@ dagger:
   # the panel reads flat and the aux head must keep tracking the handle from the visible panel + seed.
   # This is a BACKUP skill only -- reading the handle straight out of the point cloud stays the primary
   # objective -- so the hidden fraction is kept moderate (~19% of episodes at these settings).
-  door_handle_dropout:
-    # PER-EPISODE, conditioned on the door's CLEAR UNDERSIDE GAP (standoff between the mounting surface
-    # and the lever's near face, read from variant_meta.json -> handle.{plate,panel}_underside_gap_m).
-    # Drawn once per env at reset and held for the WHOLE rollout: invisibility is a property of the DOOR,
-    # so a handle that is unresolvable on frame 0 stays unresolvable through the entire approach and the
-    # policy can never bank on it reappearing.
-    # A SMALL gap = lever nearly flush with the surface = the depth blur/median merges the two = likely
-    # invisible. A LARGE gap = lever standing well proud of the panel = essentially always resolvable.
-    # P ramps linearly from episode_prob_at_min_gap at gap <= gap_range_m[0] to episode_prob_at_max_gap
-    # at gap >= gap_range_m[1], clamped outside.
-    # The four trained *_plusplus families span gaps 0.040-0.085 m (median 0.064). Both ends of the ramp
-    # come from observed real-sensor behaviour: 40 mm is the "handle vanishes" regime (0.9 -- still a
-    # DRAW, never forced), and the lever is only reliably resolvable once the gap reaches 65 mm, so the
-    # floor is not reached before then. That leaves the whole lower half of the asset distribution (52%
-    # of doors are under 65 mm) on the ramp and the overall hidden rate at ~25% of episodes. That is the
-    # upper end of what this augmentation should cost: the handle stays visible in 3 of 4 episodes, so
-    # reading it from the cloud remains the dominant signal and tracking stays the backup.
-    # Remove gap_range_m to fall back to a flat `episode_prob`.
-    gap_range_m: [0.04, 0.065]
-    episode_prob_at_min_gap: 0.9
-    episode_prob_at_max_gap: 0.02  # "almost impossible" rather than exactly 0, so wide-gap doors still see a rare dropout.
-    missing_gap_prob: 0.02  # Legacy asset families whose variant_meta.json has no gap; defaults to episode_prob_at_max_gap.
-    # PER-FRAME flicker: redrawn every step, so the handle blinks in and out. OFF -- IID flicker lets the
-    # policy just average the handle back over a couple of frames, the exact crutch the episode component
-    # removes. Raise only to model genuinely transient dropouts (glare, one bad frame).
-    # Legacy key `door_handle_dropout_prob` (per-frame only) is still read as the default for this.
-    frame_prob: 0.0
   wall_distractors:
     enabled: true
     wall_num_points: 150000
@@ -375,8 +348,11 @@ dagger:
       initial_capture_frames: 200  # First real training frames; flush this first chunk immediately.
       initial_capture_interval: 1  # Capture every training iteration during the initial chunk.
       capture_interval: 2  # Save one frame, skip one frame, so each replay chunk spans more rollout time.
-      save_interval: 4000  # Fallback cadence when max_frames is disabled.
+      save_interval: 1000  # Fallback cadence when max_frames is disabled.
       max_points: 12000  # Match the configured policy point-cloud budget.
       max_frames: 2000  # Keep at most this many frames in each raw `.pt` file; set 0 to disable the cap.
   wandb:
-    enabled: false
+    enabled: true
+    project: dooropeningv22-distill
+    entity: peiqiliu
+    name: vision5_depth2500_no_robot_400gpu_fresh_20261014

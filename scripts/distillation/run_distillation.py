@@ -24,7 +24,7 @@ import yaml
 from isaaclab.app import AppLauncher
 
 SCRIPT_ROOT = pathlib.Path(__file__).resolve().parents[2]
-DEFAULT_STUDENT_CFG = SCRIPT_ROOT / "source" / "DoorOpening" / "tasks" / "dooropening" / "agents" / "pcd_transformer_dagger_cfg.yaml"
+DEFAULT_STUDENT_CFG = SCRIPT_ROOT / "source" / "DoorOpening" / "distillation" / "pcd_transformer_dagger_cfg.yaml"
 
 
 def _resolve_student_cfg_path(path_value):
@@ -285,7 +285,7 @@ def main(env_cfg, agent_cfg: dict):
 
     student_cfg = resolve_path(
         args_cli.student_cfg,
-        os.path.join(agent_cfg_folder, "pcd_transformer_dagger_cfg.yaml"),
+        str(DEFAULT_STUDENT_CFG),
     )
     student_dagger_cfg = _load_student_dagger_defaults(student_cfg)
 

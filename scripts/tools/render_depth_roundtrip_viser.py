@@ -61,7 +61,7 @@ from DoorOpening.utils.wall_distractors import (
 )
 
 DEFAULT_STUDENT_CFG = (
-    SOURCE_ROOT / "DoorOpening" / "tasks" / "dooropening" / "agents" / "pcd_transformer_dagger_cfg.yaml"
+    SOURCE_ROOT / "DoorOpening" / "distillation" / "pcd_transformer_dagger_cfg.yaml"
 )
 DEFAULT_DOOR_URDF = (
     SOURCE_ROOT / "DoorOpening" / "assets" / "door" / "v5_test" / "scratch_door__rnd_01" / "mobility.urdf"
