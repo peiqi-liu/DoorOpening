@@ -277,6 +277,10 @@ class Dagger:
             raise ValueError(f"Student config at '{cfg_path}' must be a YAML mapping.")
         student_cfg_data.pop("dagger", None)
         self.local_pcd_range = list(student_cfg_data.pop("local_pcd_range", [1.0, 0.35, 0.35]))
+        self.pcd_height_range_m = list(student_cfg_data.pop("pcd_height_range_m", [0.55, 1.5]))
+        if len(self.pcd_height_range_m) != 2:
+            raise ValueError("pcd_height_range_m must be [min_height_m, max_height_m].")
+        self.pcd_min_height_m, self.pcd_max_height_m = map(float, self.pcd_height_range_m)
         self.local_pcd_x_direction_cutoff = student_cfg_data.pop("x_direction_cutoff", -0.5)
         self.door_pcd_num_points = int(student_cfg_data.pop("door_pcd_num_points", 4096))
 
@@ -1587,6 +1591,8 @@ class Dagger:
                 is_cylindrical=True,
                 crop_center=self.zero_local_pcd_crop_center,
                 x_direction_cutoff=self.local_pcd_x_direction_cutoff,
+                max_height_m=self.pcd_max_height_m,
+                min_height_m=self.pcd_min_height_m,
                 log_name="base",
             )
             pcd_parts.append(base_crop)
@@ -1599,6 +1605,8 @@ class Dagger:
                 is_cylindrical=False,
                 crop_center=palm_pos_base,
                 x_direction_cutoff=None,
+                max_height_m=self.pcd_max_height_m,
+                min_height_m=self.pcd_min_height_m,
                 log_name="palm",
             )
             pcd_parts.append(palm_crop)

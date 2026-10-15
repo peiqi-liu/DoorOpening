@@ -668,11 +668,15 @@ def main():
     )
     depth_cfg["axial_jitter_std_m"] = axial_jitter_std_m
     # Policy-input crop knobs, read from the SAME student cfg multi_pcd_dagger uses (_build_local_pcd ->
-    # crop_local_pcd base cylindrical crop). Height bounds [0.55, 1.5] are crop_local_pcd's own defaults.
+    # crop_local_pcd base cylindrical crop).
     student_cfg = dict(cfg.get("student", {}))
     policy_crop_range_cfg = student_cfg.get("local_pcd_range", cfg.get("local_pcd_range", [1.0, 0.35, 0.35]))
     policy_crop_range = float(policy_crop_range_cfg[0])
     policy_x_cutoff = float(student_cfg.get("x_direction_cutoff", cfg.get("x_direction_cutoff", -0.5)))
+    policy_height_range = list(cfg.get("pcd_height_range_m", [0.55, 1.5]))
+    if len(policy_height_range) != 2:
+        raise ValueError("pcd_height_range_m must be [min_height_m, max_height_m].")
+    policy_min_height, policy_max_height = map(float, policy_height_range)
     local_pcd_cfg = dict(cfg.get("pcd_encoders_cfg", {}).get("local_pcd_t", {}))
     local_point_counts = list(local_pcd_cfg.get("num_points", [12000, 0, 0]))
     policy_base_points = int(local_point_counts[0]) if local_point_counts else 12000
@@ -919,7 +923,8 @@ def main():
                    if depth_filter == "gaussian" else f"min pooling ({blur_kernel_px}px window)")
     print(f"[INFO] depth filter   : {filter_info}")
     print(f"[INFO] edge drop      : {edge_drop_m} m  ({'ON -> scene edge smears dropped' if edge_drop_m>0 else 'off'})")
-    print(f"[INFO] policy input   : {policy_base_points} sampled base-crop points -> z[0.55,1.5], "
+    print(f"[INFO] policy input   : {policy_base_points} sampled base-crop points -> "
+          f"z[{policy_min_height:g},{policy_max_height:g}], "
           f"cyl r<{policy_crop_range}, x>{policy_x_cutoff} "
           f"(multi_pcd_dagger._build_local_pcd / crop_local_pcd)")
     print(f"[INFO] round-trip: GT points -> depth image -> points, {args.num_configs} configs")
@@ -927,7 +932,7 @@ def main():
     def policy_input_from_world(cloud_world):
         """Apply multi_pcd_dagger's EXACT policy-input crop to a world cloud, return the surviving points
         (world frame). Crop happens in the robot base frame (z = height above floor), so tall walls stay
-        and boxes whose top < 0.55 vanish -- what the policy actually receives."""
+        and boxes below the configured minimum height vanish -- what the policy actually receives."""
         if cloud_world is None or cloud_world.shape[0] == 0:
             return cloud_world
         base_pts = (cloud_world - base_pos_t) @ base_R_t  # world -> robot base frame
@@ -938,6 +943,8 @@ def main():
             is_cylindrical=True,
             crop_center=torch.zeros((1, 3), device=device, dtype=torch.float32),
             x_direction_cutoff=policy_x_cutoff,
+            min_height_m=policy_min_height,
+            max_height_m=policy_max_height,
             log_name="policy",
         )
         cropped = cropped[0]

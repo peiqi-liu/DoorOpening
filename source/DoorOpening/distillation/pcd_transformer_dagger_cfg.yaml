@@ -54,9 +54,10 @@ left_right_condition:
   dropout: 0.0
   use_layer_norm: true
 
-scene_door_num_points: 30000  # GT door/model points cached in the scene before any sensor rendering.
+scene_door_num_points: 60000  # GT door/model points cached in the scene before any sensor rendering.
 # Crop radii in meters: [base, robot palm, auxiliary handle estimate].
 local_pcd_range: [1.2, 0.25, 0.25]
+pcd_height_range_m: [0.55, 1.2]  # Keep points between these world-frame heights before local cropping.
 x_direction_cutoff: -0.5
 
 temporal_obs:
@@ -217,7 +218,7 @@ dagger:
   # noise/frame-convention issues but loses stall/slip feedback.
   # MUST match door_policy.yaml's policy.base_vel_source on the deploy side; this is a trained input.
   base_vel_source: "measured"
-  scene_robot_num_points: 30000  # GT robot/model points concatenated into the renderable scene cloud.
+  scene_robot_num_points: 60000  # GT robot/model points concatenated into the renderable scene cloud.
   append_robot_model_to_policy_cloud: false
   robot_model_policy_points: 0  # Do not append synthetic robot-model points to the policy cloud.
   robot_pointcloud_filter:
@@ -229,9 +230,9 @@ dagger:
   depth_cam_render:
     # Match scripts/tools/render_depth_roundtrip_viser.py: concatenate door, walls, and robot,
     # rasterize one shared z-buffer, min-pool depth, drop edges/jitter, then back-project.
-    num_points: 12000
-    width_px: 120
-    height_px: 80
+    num_points: 19200
+    width_px: 160
+    height_px: 120
     # Depth-camera field of view (degrees). Omit / null -> D435 physical defaults (85 x 58). Lowering
     # fov_y_deg narrows the VERTICAL angle at the same resolution, cropping top/bottom points to match a
     # real camera that effectively sees less vertically than 58 deg. Set to reduce the vertical FOV;

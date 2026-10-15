@@ -518,6 +518,10 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.student_model_cfg_raw = copy.deepcopy(student_cfg_data)
         student_yaml_runtime_cfg = dict(student_cfg_data.pop("dagger", {}) or {})
         self.local_pcd_range = list(student_cfg_data.pop("local_pcd_range", [1.0, 0.35, 0.35]))
+        self.pcd_height_range_m = list(student_cfg_data.pop("pcd_height_range_m", [0.55, 1.5]))
+        if len(self.pcd_height_range_m) != 2:
+            raise ValueError("pcd_height_range_m must be [min_height_m, max_height_m].")
+        self.pcd_min_height_m, self.pcd_max_height_m = map(float, self.pcd_height_range_m)
         self.local_pcd_x_direction_cutoff = student_cfg_data.pop("x_direction_cutoff", -0.5)
         self.scene_door_pcd_num_points = int(
             student_cfg_data.pop(
@@ -4048,6 +4052,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         is_cylindrical,
         crop_center,
         x_direction_cutoff,
+        max_height_m,
+        min_height_m,
         log_name,
     ):
         # Crop each sensor source independently with an equal slice of the point budget, then
@@ -4061,6 +4067,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 is_cylindrical=is_cylindrical,
                 crop_center=crop_center,
                 x_direction_cutoff=x_direction_cutoff,
+                max_height_m=max_height_m,
+                min_height_m=min_height_m,
                 log_name=log_name,
             )
             return crop
@@ -4076,6 +4084,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 is_cylindrical=is_cylindrical,
                 crop_center=crop_center,
                 x_direction_cutoff=x_direction_cutoff,
+                max_height_m=max_height_m,
+                min_height_m=min_height_m,
                 log_name=f"{log_name}_src{src_idx}",
             )
             crops.append(crop)
@@ -4103,6 +4113,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 is_cylindrical=True,
                 crop_center=self.zero_local_pcd_crop_center,
                 x_direction_cutoff=self.local_pcd_x_direction_cutoff,
+                max_height_m=self.pcd_max_height_m,
+                min_height_m=self.pcd_min_height_m,
                 log_name="base",
             )
             pcd_parts.append(base_crop)
@@ -4115,6 +4127,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 is_cylindrical=False,
                 crop_center=palm_pos_base,
                 x_direction_cutoff=None,
+                max_height_m=self.pcd_max_height_m,
+                min_height_m=self.pcd_min_height_m,
                 log_name="palm",
             )
             pcd_parts.append(palm_crop)
@@ -4131,6 +4145,8 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 is_cylindrical=False,
                 crop_center=aux_handle_pos_base,
                 x_direction_cutoff=None,
+                max_height_m=self.pcd_max_height_m,
+                min_height_m=self.pcd_min_height_m,
                 log_name="aux_handle",
             )
             pcd_parts.append(aux_handle_crop)
