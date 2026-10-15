@@ -236,7 +236,7 @@ dagger:
     # fov_y_deg narrows the VERTICAL angle at the same resolution, cropping top/bottom points to match a
     # real camera that effectively sees less vertically than 58 deg. Set to reduce the vertical FOV;
     # keep the deploy-time real camera crop (scripts/rl_games/play.py) in sync if this helps sim2real.
-    fov_y_deg: 50  # null -> D435 58 deg nominal. Set e.g. 45 to crop the vertical FOV (did not reproduce the real bug, so left off).
+    fov_y_deg: 58  # Match the D435 nominal vertical field of view.
     inflate_px: 0
     clip_mode: "post"
     use_compile: true
