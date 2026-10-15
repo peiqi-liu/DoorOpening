@@ -56,7 +56,7 @@ left_right_condition:
 
 scene_door_num_points: 30000  # GT door/model points cached in the scene before any sensor rendering.
 # Crop radii in meters: [base, robot palm, auxiliary handle estimate].
-local_pcd_range: [1.2, 0.25, 0.15]
+local_pcd_range: [1.2, 0.25, 0.25]
 x_direction_cutoff: -0.5
 
 temporal_obs:
@@ -65,7 +65,7 @@ temporal_obs:
   command_delay_s: [0.0, 0.0]
 
 temporal_state_encoders:
-  enabled: true
+  enabled: false
   timestamps_ms: [0, 300, 600, 900]
   # timestamps_ms: [0, 400, 800, 1200, 1600, 2000, 2400, 2800]
   fields:
@@ -163,8 +163,8 @@ state_encoders_cfg:
 
 transformer_cfg:
   type: "encoder_decoder"
-  encoder_layers: 4
-  decoder_layers: 4
+  encoder_layers: 6
+  decoder_layers: 6
   encoder_heads: 8
   decoder_heads: 8
   encoder_dim_feedforward: 1024
@@ -178,8 +178,8 @@ dagger:
   grad_clip: 1.0
   num_iters: 240000
   lr_decay_iters: 70000
-  teacher_forcing_warmup_iters: 15000
-  teacher_forcing_transition_iters: 15000
+  teacher_forcing_warmup_iters: 5000
+  teacher_forcing_transition_iters: 20000
   teacher_forcing_min_beta: 0.0
   # Aux handle input mode:
   #   "recurrent"        -> policy input = previous step's aux prediction (fed back). The first step
@@ -197,10 +197,10 @@ dagger:
   # so it PERSISTS all episode -- a real systematic per-door offset (off downward on one door, up/left
   # on another). Sampled as a CUBE: each of x/y/z independently uniform in [-this, +this] (per-dim
   # threshold in m, NOT a ball). 0.0 disables it.
-  aux_handle_gt_bias_m: 0.05
+  aux_handle_gt_bias_m: 0.0
   # NOISE: fresh per-step isotropic (ball) jitter, random direction x magnitude in [0, this] (m), added
   # to every aux input -- frame-to-frame detector noise. 0.0 disables it.
-  aux_handle_noise_m: 0.1
+  aux_handle_noise_m: 0.05
   door_joint_training:
     # Door joints the aux head regresses, in output order. "hinge" = joint_2 (door swing angle),
     # "latch" = joint_1 (handle/latch rotation). Targets are the raw joint angles in radians.
@@ -223,7 +223,7 @@ dagger:
   robot_pointcloud_filter:
     # Robot self-points are stripped from the LIDAR cloud only. The depth camera is a real sensor that
     # sees the robot's own hand, so the depth cloud keeps its self-points (see _sample_scene_obs_pointcloud_base).
-    enabled: true
+    # Filtering is always enabled in Python; this block only configures its distance cutoff and chunk size.
     sdf_cutoff: 0.02
     max_points_per_process: 5000
   depth_cam_render:

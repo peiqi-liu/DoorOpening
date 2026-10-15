@@ -200,6 +200,12 @@ parser.add_argument(
     help="Eval-only PhysX position-solver iteration count for door articulation assets.",
 )
 parser.add_argument("--student_ckpt", type=str, default=None, help="Student checkpoint to evaluate.")
+parser.add_argument(
+    "--student_cfg",
+    type=str,
+    default=None,
+    help="Student YAML config; defaults to the source distillation YAML.",
+)
 parser.add_argument("--use_teacher", action="store_true", default=False, help="Roll out teacher actions instead of student actions.")
 parser.add_argument("--teacher", type=str, default=None, help="Single teacher checkpoint to evaluate.")
 parser.add_argument("--teacher-partnetv5", "--teacher_partnetv5", dest="teacher_partnetv5", type=str, default=None, help="Teacher checkpoint for PartNetv5.")
@@ -268,6 +274,15 @@ parser.add_argument(
     type=float,
     default=None,
     help="Eval-only override for the environment base action scale.",
+)
+parser.add_argument(
+    "--aux-handle-gt-refresh-steps",
+    type=int,
+    default=0,
+    help=(
+        "Eval-only: overwrite the recurrent aux-handle input with the current ground-truth handle pose "
+        "every N policy steps; 0 disables periodic refresh."
+    ),
 )
 parser.add_argument(
     "--arm-action-scale",
@@ -351,7 +366,7 @@ parser.add_argument(
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 
-student_cfg_path = str(DEFAULT_STUDENT_CFG)
+student_cfg_path = _resolve_repo_path(args_cli.student_cfg, DEFAULT_STUDENT_CFG)
 student_dagger_defaults = _load_student_dagger_defaults(student_cfg_path)
 selected_door_families = _normalize_family_selection(
     args_cli.door_families if args_cli.door_families is not None else student_dagger_defaults.get("door_families")
@@ -928,6 +943,9 @@ def _disable_observation_lag_for_eval(dagger):
 
 
 def _build_student_actions(dagger, iteration):
+    gt_refresh_steps = int(getattr(dagger, "eval_aux_handle_gt_refresh_steps", 0))
+    if gt_refresh_steps > 0 and iteration > 0 and iteration % gt_refresh_steps == 0:
+        dagger.aux_buffer[:] = dagger._build_seed_aux_buffer_values()
     student_obs = dagger._build_student_obs(iteration=iteration)
     # _append_viser_frame serializes the exact history tensors used by this policy forward.
     dagger.latest_eval_student_obs = student_obs
@@ -2278,6 +2296,22 @@ def main(env_cfg, agent_cfg: dict):
     }
     dagger = Dagger(env, dagger_config, summaries_dir=summaries_dir, nn_dir=nn_dir)
     dagger.student_model_ddp.eval()
+    if args_cli.aux_handle_gt_refresh_steps < 0:
+        raise ValueError("--aux-handle-gt-refresh-steps must be >= 0.")
+    if args_cli.aux_handle_gt_refresh_steps > 0:
+        if not dagger.has_aux_input or not dagger.aux_feedback_to_policy:
+            raise ValueError(
+                "Periodic aux-handle GT refresh requires aux inputs and recurrent aux feedback to the policy."
+            )
+        if dagger.aux_handle_init_source != "ground_truth":
+            raise ValueError(
+                "Periodic aux-handle GT refresh requires dagger.aux_handle_init_source='ground_truth'."
+            )
+        dagger.eval_aux_handle_gt_refresh_steps = int(args_cli.aux_handle_gt_refresh_steps)
+        print(
+            "[INFO] Eval periodically refreshes the recurrent aux-handle input from ground truth "
+            f"every {dagger.eval_aux_handle_gt_refresh_steps} policy steps."
+        )
 
     # Attention visualization: hook the student decoder's action-query cross-attention. Aggregated
     # for the tracked env (--viser-env-id) each step -> per-modality attention (printed) + a saved log.

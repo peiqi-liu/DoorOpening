@@ -649,7 +649,6 @@ def main():
     robot_world = None               # (1, M, 3) world -- set per config
     robot_filter_joint_angles = None  # (1, num_joints) -- set per config
     robot_filter_cfg = dict(dagger_cfg.get("robot_pointcloud_filter", {}))
-    robot_filter_enabled = bool(robot_filter_cfg.get("enabled", True))
     robot_sdf_cutoff = float(robot_filter_cfg.get("sdf_cutoff", 0.02))
     robot_filter_max_pts = int(robot_filter_cfg.get("max_points_per_process", 5000))
     if args.robot:
@@ -673,12 +672,11 @@ def main():
         if "panda_finger_joint1" in collision_joint_names and "panda_finger_joint2" not in collision_joint_names:
             finger1_pos = collision_joint_names.index("panda_finger_joint1")
             collision_joint_names.insert(finger1_pos + 1, "panda_finger_joint2")
-        if robot_filter_enabled:
-            from DoorOpening.utils.glorbot_collision_checker import GlorbotCollisionChecker
+        from DoorOpening.utils.glorbot_collision_checker import GlorbotCollisionChecker
 
-            robot_collision_checker = GlorbotCollisionChecker(
-                str(GLORBOT_URDF), device, input_joint_names=collision_joint_names
-            )
+        robot_collision_checker = GlorbotCollisionChecker(
+            str(GLORBOT_URDF), device, input_joint_names=collision_joint_names
+        )
         cam_desc = "x5_camera_link (per-config base+arm pose, mount -45deg roll)"
     else:
         # Virtual look-at camera, shifted to the robot's right (real RealSense is right-mounted).

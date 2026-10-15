@@ -250,8 +250,9 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         # Lidar analog of depth_cam_render_occluder_inflate_px: bin radius for the second,
         # occluder-only pass. 0 disables it.
         self.lidar_render_occluder_fill_bins = int(self.lidar_render_cfg.get("occluder_fill_bins", 0))
+        # Deployment always removes robot self-points from LiDAR observations. This is not
+        # configurable; the depth-camera path intentionally keeps visible robot points.
         self.robot_pointcloud_filter_cfg = dict(self.runtime_cfg.get("robot_pointcloud_filter", {}))
-        self.robot_pointcloud_filter_enabled = bool(self.robot_pointcloud_filter_cfg.get("enabled", True))
         self.robot_pointcloud_sdf_cutoff = float(self.robot_pointcloud_filter_cfg.get("sdf_cutoff", 0.02))
         self.robot_pointcloud_filter_max_points_per_process = int(
             self.robot_pointcloud_filter_cfg.get("max_points_per_process", 5000)
@@ -3033,17 +3034,16 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             self.robot_sampler_body_indices[link_name] = int(body_ids[0])
         self.robot_collision_checker = None
         self.robot_collision_checker_base_joint_indices = []
-        if self.robot_pointcloud_filter_enabled:
-            self.robot_collision_checker = GlorbotCollisionChecker(
-                glorbot_urdf_path,
-                device=self.device,
-                input_joint_names=robot_sampler_joint_names,
-            )
-            self.robot_collision_checker_base_joint_indices = [
-                idx
-                for idx, joint_name in enumerate(robot_sampler_joint_names)
-                if joint_name in {"base_x_joint", "base_y_joint", "base_rotation_joint"}
-            ]
+        self.robot_collision_checker = GlorbotCollisionChecker(
+            glorbot_urdf_path,
+            device=self.device,
+            input_joint_names=robot_sampler_joint_names,
+        )
+        self.robot_collision_checker_base_joint_indices = [
+            idx
+            for idx, joint_name in enumerate(robot_sampler_joint_names)
+            if joint_name in {"base_x_joint", "base_y_joint", "base_rotation_joint"}
+        ]
 
         self.robot_base_body_idx = int(self.ov_env._robot_base_body_link_idx)
         self.robot_palm_body_idx = int(self.ov_env._robot_key_body_idx[self.ov_env._robot_palm_id_in_key_body_idx])
@@ -3473,8 +3473,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
 
     def _filter_robot_points_base(self, pointcloud_base):
         if (
-            not self.robot_pointcloud_filter_enabled
-            or self.robot_collision_checker is None
+            self.robot_collision_checker is None
             or pointcloud_base is None
             or pointcloud_base.numel() == 0
         ):
