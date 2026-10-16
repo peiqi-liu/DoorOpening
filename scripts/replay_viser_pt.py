@@ -346,6 +346,7 @@ def _add_stream(streams: dict[str, dict], name: str, raw_spec: object | None = N
         "key": str(spec.get("key", f"{name}_points_world")),
         "color": _coerce_color(spec.get("color", spec.get("colors")), default_color),
         "point_size_scale": float(spec.get("point_size_scale", 1.0)),
+        "importance_key": spec.get("importance_key"),
     }
 
 
@@ -513,6 +514,59 @@ def main() -> None:
     hidden_clouds = set(args.hide_clouds)
     if args.no_policy_input:
         hidden_clouds.add("policy_input")
+    # Use one scale for the whole replay so a color has the same meaning at
+    # every timestamp. Clip the rare brightest points at the 99th percentile.
+    importance_vmax_by_stream = {}
+    for stream in streams:
+        importance_key = stream.get("importance_key")
+        if not importance_key:
+            continue
+        values_over_time = [
+            np.asarray(frame[importance_key], dtype=np.float32).reshape(-1)
+            for frame in frames
+            if frame.get(importance_key) is not None
+        ]
+        finite_values = [values[np.isfinite(values)] for values in values_over_time]
+        finite_values = [values for values in finite_values if values.size]
+        if finite_values:
+            importance_vmax_by_stream[stream["name"]] = max(
+                float(np.percentile(np.concatenate(finite_values), 99.0)), 1e-8
+            )
+
+    # Evaluations can store the most recent attribution on frames between
+    # attribution passes. Keep rendering that attribution's source cloud until
+    # a new score snapshot arrives, rather than painting it onto later resamples.
+    aligned_importance_snapshots = {}
+    for stream in streams:
+        importance_key = stream.get("importance_key")
+        if not importance_key:
+            continue
+        previous_step = None
+        previous_scores = None
+        snapshot = None
+        for frame_idx, frame in enumerate(frames):
+            if frame.get(importance_key) is None:
+                continue
+            values = np.asarray(frame[importance_key], dtype=np.float32).reshape(-1)
+            raw_points = np.asarray(
+                frame.get(stream.get("key"), frame.get(f"{stream['name']}_points_world")),
+                dtype=np.float32,
+            ).reshape(-1, 3)
+            count = min(values.size, raw_points.shape[0])
+            valid = np.isfinite(raw_points[:count]).all(axis=-1) & np.isfinite(values[:count])
+            scores = values[:count][valid]
+            points = raw_points[:count][valid]
+            step = frame.get("policy_importance_step")
+            is_new_snapshot = (
+                step != previous_step
+                if step is not None
+                else previous_scores is None or not np.array_equal(scores, previous_scores)
+            )
+            if is_new_snapshot or snapshot is None:
+                snapshot = (points.copy(), scores.copy())
+            aligned_importance_snapshots[(stream["name"], frame_idx)] = snapshot
+            previous_step = step if step is not None else previous_step
+            previous_scores = scores.copy()
     has_aux_prediction = _has_aux_prediction(frames)
     has_aux_input = _has_aux_input(frames)
     has_door_joint_prediction = _has_door_joint_prediction(frames)
@@ -651,6 +705,14 @@ def main() -> None:
 
     show_clouds = {}
     with server.gui.add_folder("Pointclouds"):
+        if "policy_input" in cloud_handles and "policy_input" in importance_vmax_by_stream:
+            server.gui.add_markdown(
+                "**Policy point importance**  \n"
+                "🔵 Low → 🟦 Cyan → 🟡 Yellow → 🔴 High  \n"
+                "Blue points have lower policy importance; red points have higher importance. "
+                "The scale stays fixed across this replay, with the brightest 1% clipped to red. "
+                "Each score is shown on the point-cloud snapshot it was computed from."
+            )
         for stream in streams:
             show_clouds[stream["name"]] = server.gui.add_checkbox(
                 f"Show {stream['label']}",
@@ -758,8 +820,29 @@ def main() -> None:
         history_status.value = " | ".join(history_rows) if history_rows else "not recorded in this replay"
         for stream in streams:
             points = _frame_cloud_points(frame, stream, static_pointclouds)
+            importance_snapshot = aligned_importance_snapshots.get((stream["name"], frame_idx))
+            if importance_snapshot is not None:
+                points, _ = importance_snapshot
             handle = cloud_handles[stream["name"]]
             handle.points = points if show_clouds[stream["name"]].value else np.zeros((0, 3), dtype=np.float32)
+            importance_key = stream.get("importance_key")
+            importance = frame.get(importance_key) if importance_key else None
+            if importance_snapshot is not None:
+                _, values = importance_snapshot
+                if values.size == points.shape[0]:
+                    vmax = importance_vmax_by_stream.get(stream["name"], 1.0)
+                    t = np.clip(values / vmax, 0.0, 1.0)
+                    # Familiar heat scale: blue -> cyan -> yellow -> red.
+                    stops = np.asarray(
+                        [[36, 87, 255], [0, 216, 232], [255, 230, 0], [245, 34, 34]],
+                        dtype=np.float32,
+                    )
+                    segment = np.minimum((t * 3).astype(np.int32), 2)
+                    fraction = (t * 3 - segment)[:, None]
+                    colors = stops[segment] * (1.0 - fraction) + stops[segment + 1] * fraction
+                    handle.colors = colors.astype(np.uint8) if show_clouds[stream["name"]].value else np.zeros((0, 3), dtype=np.uint8)
+            elif stream.get("importance_key"):
+                handle.colors = stream["color"]
         if aux_handle is not None and show_aux is not None:
             # aux_prediction is in the measured robot-base frame, so use the measured pose.
             aux_points = _aux_prediction_world_points(frame, _measured_base_pose(frame, base_layout))

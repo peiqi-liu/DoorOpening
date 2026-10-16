@@ -143,7 +143,7 @@ parser.add_argument(
     default=False,
     help=(
         "Save replay_viser_pt.py-compatible .pt files (robot + door URDF meshes, joint angles, PD "
-        "targets, actual sim door joints, and the policy-input point cloud) for several randomly "
+        "targets, actual sim door joints, policy-input points, and pointwise attribution colors) for randomly "
         "selected eval envs, one file per env, into <experiment_dir>/viser. Play any of them with "
         "scripts/replay_viser_pt.py to see the real URDF meshes."
     ),
@@ -876,6 +876,12 @@ def _reset_dagger_rollout_state(dagger):
     dagger.latest_student_proprio_vector = None
     dagger.latest_aux_input_vector = None
     dagger.latest_aux_target_vector = None
+    dagger._last_policy_point_importance = None
+    dagger._last_policy_point_importance_env = -1
+    dagger._last_policy_importance_pcd_base = None
+    dagger._last_policy_point_importance_step = None
+    dagger._last_policy_importance_base_pos_w = None
+    dagger._last_policy_importance_base_quat_w = None
     dagger._resample_wall_distractors()
     # Per-rollout door augmentations are drawn once at reset (the training loop does this in run(); the
     # eval loop must too). Without this, _door_hole_aug_metadata stays None for the whole eval and the
@@ -1770,17 +1776,18 @@ def _append_viser_frame(recorder, viser_meta, base_env, dagger, student_output):
     rb_base_pos = base_env.robot.data.body_pos_w[env_id, base_body_idx].detach()
     rb_base_quat = base_env.robot.data.body_quat_w[env_id, base_body_idx].detach()
 
-    def _base_to_world(points_base):
+    def _base_to_world(points_base, base_pos_w=None, base_quat_w=None):
         """Rotate+translate base-body-frame points [N, 3] into env-relative world coords."""
         pts = points_base.detach().to(torch.float32)
-        bq = rb_base_quat.to(torch.float32)  # world wxyz
+        bq = (rb_base_quat if base_quat_w is None else base_quat_w).to(torch.float32)  # world wxyz
         axis = bq[1:].unsqueeze(0).expand(pts.shape[0], 3)
         uv = torch.cross(axis, pts, dim=-1)
         uuv = torch.cross(axis, uv, dim=-1)
         world = pts + 2.0 * (bq[0] * uv + uuv)
-        return world + (rb_base_pos - org).to(torch.float32).unsqueeze(0)
+        base_pos = rb_base_pos if base_pos_w is None else base_pos_w
+        return world + (base_pos - org).to(torch.float32).unsqueeze(0)
 
-    def _pointcloud_base_to_world(points_base):
+    def _pointcloud_base_to_world(points_base, base_pos_w=None, base_quat_w=None):
         """Transform a padded base-frame cloud without rendering its zero padding at the robot."""
         pts = points_base.detach().to(torch.float32)
         # local_pcd_t is fixed-size and uses exact zero rows for absent/cropped samples.
@@ -1796,7 +1803,7 @@ def _append_viser_frame(recorder, viser_meta, base_env, dagger, student_output):
             torch.isfinite(pts[:crop_point_count]).all(dim=-1)
             & (pts[:crop_point_count].abs().amax(dim=-1) == 0.0)
         )
-        world = _base_to_world(pts)
+        world = _base_to_world(pts, base_pos_w=base_pos_w, base_quat_w=base_quat_w)
         return torch.where(padding.unsqueeze(-1), torch.full_like(world, float("nan")), world)
 
     # ACTUAL sim door joints for this frame (NOT predicted); the replay poses the door URDF with these.
@@ -1886,7 +1893,26 @@ def _append_viser_frame(recorder, viser_meta, base_env, dagger, student_output):
     # displays it (the `_points_world` suffix marks an already-world cloud stream).
     pcd_base = getattr(dagger, "_last_policy_input_pcd_base", None)
     if pcd_base is not None and pcd_base.shape[0] > env_id:
-        frame["policy_input_points_world"] = _pointcloud_base_to_world(pcd_base[env_id, ..., :3]).cpu().clone()
+        point_importance = getattr(dagger, "_last_policy_point_importance", None)
+        importance_pcd_base = getattr(dagger, "_last_policy_importance_pcd_base", None)
+        has_matching_importance = (
+            point_importance is not None
+            and importance_pcd_base is not None
+            and getattr(dagger, "_last_policy_point_importance_env", -1) == env_id
+            and point_importance.numel() == importance_pcd_base.shape[0]
+        )
+        # Importance is computed sparsely for visualization. Keep its exact source
+        # cloud beside it on intervening frames; pairing cached scores with the
+        # freshly sampled cloud would color unrelated points when point order changes.
+        replay_pcd_base = importance_pcd_base if has_matching_importance else pcd_base[env_id]
+        importance_pos = getattr(dagger, "_last_policy_importance_base_pos_w", None) if has_matching_importance else None
+        importance_quat = getattr(dagger, "_last_policy_importance_base_quat_w", None) if has_matching_importance else None
+        frame["policy_input_points_world"] = _pointcloud_base_to_world(
+            replay_pcd_base[..., :3], base_pos_w=importance_pos, base_quat_w=importance_quat
+        ).cpu().clone()
+        if has_matching_importance:
+            frame["policy_point_importance"] = point_importance.clone()
+            frame["policy_importance_step"] = getattr(dagger, "_last_policy_point_importance_step", None)
     # RealSense-rendered depth-cam cloud (the raw render, robot hand included and self-occluding the
     # door -- this is BEFORE _filter_robot_points_base strips the robot's own points for the policy).
     # Both clouds live in the same base-body frame, so _base_to_world applies identically. NaN padding
@@ -1954,6 +1980,13 @@ def _save_viser_recorders(recorders, viser_meta, base_env, out_dir, run_index):
                 "door_root_pos": recorder["door_root_pos"],  # env-relative
                 "door_root_quat": recorder["door_root_quat"],
                 "pointcloud_streams": [
+                    {
+                        "name": "policy_input",
+                        "key": "policy_input_points_world",
+                        "label": "Policy input (importance heatmap)",
+                        "color": (80, 160, 255),
+                        "importance_key": "policy_point_importance",
+                    },
                     {
                         "name": "ground_truth_walls",
                         "key": "ground_truth_walls_points_world",
@@ -2316,7 +2349,7 @@ def main(env_cfg, agent_cfg: dict):
     # Attention visualization: hook the student decoder's action-query cross-attention. Aggregated
     # for the tracked env (--viser-env-id) each step -> per-modality attention (printed) + a saved log.
     attn_state = None
-    if args_cli.attn_viz:
+    if args_cli.attn_viz or args_cli.viser:
         from DoorOpening.model.attention_capture import AttentionCapture, top_token_str
 
         _attn_env_id = max(0, min(int(args_cli.viser_env_id), int(dagger.num_envs) - 1))
@@ -2346,10 +2379,7 @@ def main(env_cfg, agent_cfg: dict):
                     _output.retain_grad()
                     attn_state["memory"]["tensor"] = _output
             attn_state["memory_hook"] = _encoder.register_forward_hook(_retain_encoder_memory)
-        print(
-            f"[INFO] --attn-viz: capturing student action-query attention for env {_attn_env_id} "
-            f"(attn_<step>.jpg every {attn_state['interval']} steps) -> {_attn_dir}"
-        )
+        print(f"[INFO] Capturing student point attribution for env {_attn_env_id} -> {_attn_dir}")
     if dagger._has_teacher():
         for teacher_model in dagger._iter_teacher_models():
             teacher_model.eval()
@@ -2426,6 +2456,10 @@ def main(env_cfg, agent_cfg: dict):
             _reset_dagger_rollout_state(dagger)
         if args_cli.viser:
             viser_recorders = _select_viser_recorders(base_env)
+            if attn_state is not None:
+                # The pointwise overlay is captured for the first replay so its score stream
+                # always has a matching Viser recording.
+                attn_state["env_id"] = int(viser_recorders[0]["env_id"])
         if mode_tracker is not None:
             mode_tracker.reset_run()
         if replay_runs is not None:
@@ -2535,6 +2569,48 @@ def main(env_cfg, agent_cfg: dict):
                             attn_state["point_count_snapshots"].append((int(step), point_counts))
                         _attr_rows = attn_state["memory"].pop("pending_rows", None)
                         if _attr_rows is not None:
+                            # Lift encoder-token attribution back onto the exact policy
+                            # input points by nearest token center. Multiple output heads
+                            # are averaged so one heatmap summarizes the decision.
+                            if args_cli.viser and any(
+                                r["env_id"] == attn_state["env_id"] for r in (viser_recorders or [])
+                            ):
+                                _input = getattr(dagger, "_last_policy_input_pcd_base", None)
+                                if isinstance(_input, torch.Tensor) and _input.shape[0] > attn_state["env_id"]:
+                                    _env = attn_state["env_id"]
+                                    _input_xyz = _input[_env, ..., :3].detach().float()
+                                    _pcd_positions_local = [i for i, lb in enumerate(_attn["token_labels"]) if lb == "pointcloud"]
+                                    _combined = torch.zeros(len(_pcd_positions_local), dtype=torch.float32)
+                                    for _, _score_list in _attr_rows:
+                                        _combined += torch.as_tensor(_score_list, dtype=torch.float32)[_pcd_positions_local]
+                                    _combined /= max(1, len(_attr_rows))
+                                    _centers = []
+                                    _center_scores = []
+                                    _offset = 0
+                                    for _key, (_xyz, _) in _attn.get("pcd", {}).items():
+                                        _n = int(_xyz.shape[0])
+                                        _centers.append(_xyz.float())
+                                        _center_scores.append(_combined[_offset:_offset + _n])
+                                        _offset += _n
+                                    if _centers and sum(x.shape[0] for x in _centers) == _combined.numel():
+                                        _centers = torch.cat(_centers, dim=0).to(_input_xyz.device)
+                                        _center_scores = torch.cat(_center_scores).to(_input_xyz.device)
+                                        _valid = torch.isfinite(_input_xyz).all(dim=-1)
+                                        _point_scores = torch.zeros(_input_xyz.shape[0], dtype=torch.float32, device=_input_xyz.device)
+                                        if bool(_valid.any()):
+                                            _nearest = torch.cdist(_input_xyz[_valid].unsqueeze(0), _centers.unsqueeze(0)).squeeze(0).argmin(dim=1)
+                                            _point_scores[_valid] = _center_scores[_nearest]
+                                        dagger._last_policy_point_importance = _point_scores.detach().cpu()
+                                        dagger._last_policy_point_importance_env = int(_env)
+                                        dagger._last_policy_importance_pcd_base = _input[_env].detach().clone()
+                                        dagger._last_policy_point_importance_step = int(step)
+                                        _base_idx = base_env._robot_base_body_link_idx
+                                        dagger._last_policy_importance_base_pos_w = (
+                                            base_env.robot.data.body_pos_w[_env, _base_idx].detach().clone()
+                                        )
+                                        dagger._last_policy_importance_base_quat_w = (
+                                            base_env.robot.data.body_quat_w[_env, _base_idx].detach().clone()
+                                        )
                             _pcd_positions = [i for i, lb in enumerate(_attn["token_labels"]) if lb == "pointcloud"]
                             _grouped = {}
                             for _output_name, _scores_list in _attr_rows:
