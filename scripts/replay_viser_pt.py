@@ -842,7 +842,7 @@ def main() -> None:
                     colors = stops[segment] * (1.0 - fraction) + stops[segment + 1] * fraction
                     handle.colors = colors.astype(np.uint8) if show_clouds[stream["name"]].value else np.zeros((0, 3), dtype=np.uint8)
             elif stream.get("importance_key"):
-                handle.colors = stream["color"]
+                handle.colors = np.asarray(stream["color"], dtype=np.uint8)
         if aux_handle is not None and show_aux is not None:
             # aux_prediction is in the measured robot-base frame, so use the measured pose.
             aux_points = _aux_prediction_world_points(frame, _measured_base_pose(frame, base_layout))

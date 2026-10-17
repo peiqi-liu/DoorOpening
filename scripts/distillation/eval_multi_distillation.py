@@ -1020,6 +1020,11 @@ def _render_attention_jpgs(attn_state, run_index=None):
             }
         )
 
+        # Keep full-resolution attention data in JSON while limiting diagnostic JPGs.
+        # Framewise point importance is stored separately in the replay and is not sampled.
+        if len(snapshots) > 50 and int(step) % 25 != 0 and int(step) != int(snapshots[-1][0]):
+            continue
+
         n_other = max(1, len(other_idx))
         fig = plt.figure(figsize=(13.0, max(5.0, 0.34 * n_other)))
         gs = fig.add_gridspec(1, 2, width_ratios=[1.6, 1.0])
@@ -1165,6 +1170,8 @@ def _render_query_attention_maps(attn_state, run_index=None):
                     for i, label in enumerate(labels)
                 ],
             })
+            if len(snapshots) > 50 and int(step) % 25 != 0 and int(step) != int(snapshots[-1][0]):
+                continue
             pcd_idx = [i for i, label in enumerate(labels) if label == "pointcloud"]
             other_idx = [i for i, label in enumerate(labels) if label != "pointcloud"]
             vmin, vmax = float(values.min()), float(values.max())
@@ -1531,6 +1538,7 @@ def _viser_env_label(base_env, env_id):
 
 _VARIANT_META_CACHE = {}
 _DOOR_SHAPE_SLICES = {}
+_ROBOT_GRIPPER_SHAPE_SLICES = {}
 
 
 def _load_variant_meta(asset_idx):
@@ -1597,6 +1605,38 @@ def _door_material_shape_slices(base_env):
     return _DOOR_SHAPE_SLICES
 
 
+def _robot_gripper_material_shape_slices(base_env):
+    """Flat material-buffer slices for the gripper fingers and palm/hand."""
+    if not _ROBOT_GRIPPER_SHAPE_SLICES:
+        _ROBOT_GRIPPER_SHAPE_SLICES["__ok__"] = False
+        try:
+            robot = base_env.robot
+            view = robot.root_physx_view
+            link_paths = view.link_paths[0]
+            total = int(view.max_shapes)
+            counts = [
+                robot._physics_sim_view.create_rigid_body_view(link_path).max_shapes
+                for link_path in link_paths
+            ]
+            for name in ("panda_leftfinger", "panda_rightfinger", "panda_hand"):
+                body_ids, _ = robot.find_bodies(name)
+                if not len(body_ids):
+                    continue
+                body_id = int(body_ids[0])
+                start = sum(counts[:body_id])
+                end = total if body_id == len(link_paths) - 1 else start + counts[body_id]
+                _ROBOT_GRIPPER_SHAPE_SLICES[name] = (
+                    max(0, min(start, total)), max(0, min(end, total))
+                )
+            _ROBOT_GRIPPER_SHAPE_SLICES["__ok__"] = bool(
+                any(name in _ROBOT_GRIPPER_SHAPE_SLICES for name in
+                    ("panda_leftfinger", "panda_rightfinger", "panda_hand"))
+            )
+        except Exception as exc:
+            print(f"[WARN] Could not resolve gripper material shape slices (friction not reported): {exc}")
+    return _ROBOT_GRIPPER_SHAPE_SLICES
+
+
 def _door_param_snapshot(base_env, env_id):
     """Per-env door physics AS SAMPLED AT THIS RESET, plus the asset's static geometry.
 
@@ -1626,6 +1666,9 @@ def _door_param_snapshot(base_env, env_id):
         "panel_friction_static": None,
         "handle_friction_static": None,
         "handle_friction_dynamic": None,
+        "robot_gripper_friction_static": None,
+        "robot_gripper_friction_dynamic": None,
+        "robot_gripper_friction_by_body": {},
     }
 
     try:
@@ -1647,6 +1690,35 @@ def _door_param_snapshot(base_env, env_id):
                 snap["handle_friction_dynamic"] = float(materials[env_id, handle_start:handle_end, 1].mean())
         except Exception as exc:
             print(f"[WARN] Could not read door material properties for env {env_id}: {exc}")
+
+    gripper_slices = _robot_gripper_material_shape_slices(base_env)
+    if gripper_slices.get("__ok__"):
+        try:
+            materials = base_env.robot.root_physx_view.get_material_properties()
+            static_values = []
+            dynamic_values = []
+            for body_name in ("panda_leftfinger", "panda_rightfinger", "panda_hand"):
+                shape_slice = gripper_slices.get(body_name)
+                if shape_slice is None:
+                    continue
+                start, end = shape_slice
+                if end <= start:
+                    continue
+                body_materials = materials[env_id, start:end]
+                static_mean = float(body_materials[:, 0].mean())
+                dynamic_mean = float(body_materials[:, 1].mean())
+                snap["robot_gripper_friction_by_body"][body_name] = {
+                    "static": static_mean,
+                    "dynamic": dynamic_mean,
+                    "shape_count": int(end - start),
+                }
+                static_values.append(body_materials[:, 0].reshape(-1))
+                dynamic_values.append(body_materials[:, 1].reshape(-1))
+            if static_values:
+                snap["robot_gripper_friction_static"] = float(torch.cat(static_values).mean())
+                snap["robot_gripper_friction_dynamic"] = float(torch.cat(dynamic_values).mean())
+        except Exception as exc:
+            print(f"[WARN] Could not read gripper material properties for env {env_id}: {exc}")
 
     snap.update(_door_geometry(asset_idx))
     return snap
@@ -2359,7 +2431,11 @@ def main(env_cfg, agent_cfg: dict):
             "capture": AttentionCapture(dagger.student_model),
             "env_id": _attn_env_id,
             "format": top_token_str,
-            "interval": max(1, int(args_cli.attn_interval)),
+            # A Viser replay must pair every point-cloud frame with a fresh score map.
+            # Sparse attention snapshots are useful for diagnostics, but forward-filling
+            # their scores makes intermediate replay frames look framewise-scored when
+            # they are not. Keep the full attribution path on every eval frame with Viser.
+            "interval": 1 if args_cli.viser else max(1, int(args_cli.attn_interval)),
             "snapshots": [],  # (step, token_labels, token_attn, pcd) every `interval` steps
             "query_snapshots": [],  # (step, token_labels, {query_name: token_attn})
             "region_snapshots": [],  # (step, {query_name: {handle, panel, wall}})
@@ -2369,7 +2445,7 @@ def main(env_cfg, agent_cfg: dict):
             "output_attribution_snapshots": [],
             # Output-specific gradients are more expensive than attention; still sample densely
             # enough to compare against the per-10-step attention/command traces.
-            "output_attribution_interval": max(20, int(args_cli.attn_interval)),
+            "output_attribution_interval": 1 if args_cli.viser else max(20, int(args_cli.attn_interval)),
             "out_dir": _attn_dir,
         }
         _encoder = getattr(dagger.student_model, "encoder", None)
@@ -2457,9 +2533,18 @@ def main(env_cfg, agent_cfg: dict):
         if args_cli.viser:
             viser_recorders = _select_viser_recorders(base_env)
             if attn_state is not None:
-                # The pointwise overlay is captured for the first replay so its score stream
-                # always has a matching Viser recording.
-                attn_state["env_id"] = int(viser_recorders[0]["env_id"])
+                # Keep the user-selected Viser env as the attribution target. Recorder order is
+                # otherwise random, so using the first recorder here can silently attach scores
+                # to a different env (and leave the requested replay with default blue points).
+                target_env_id = max(0, min(int(args_cli.viser_env_id), int(dagger.num_envs) - 1))
+                target_recorder_idx = next(
+                    (i for i, recorder in enumerate(viser_recorders)
+                     if int(recorder["env_id"]) == target_env_id),
+                    None,
+                )
+                if target_recorder_idx is not None:
+                    viser_recorders.insert(0, viser_recorders.pop(target_recorder_idx))
+                attn_state["env_id"] = target_env_id
         if mode_tracker is not None:
             mode_tracker.reset_run()
         if replay_runs is not None:

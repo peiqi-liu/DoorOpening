@@ -263,36 +263,16 @@ class EventCfg:
         },
     )
 
-    # Gripper-finger-only friction. PhysX combines two materials with friction_combine_mode, which is
-    # "average" by default and is not overridden anywhere here -- so the contact coefficient at the
-    # grasp is the MEAN of the finger and handle materials, not the handle's. Only the two finger
-    # bodies receive the moderate/high-friction tape-like range (static 0.4..0.9,
-    # dynamic 0.3..0.6). The palm remains on the robot-wide/slippery material.
-    #
-    # Scoped only to the two finger bodies and defined AFTER robot_physics_material so it overwrites
-    # only their shapes (event terms run in definition order). The palm and arm links keep the
+    # Gripper friction: both fingers and the palm use the same tape-like range. Defined AFTER
+    # robot_physics_material so it overwrites only these three bodies; the arm links keep the
     # robot-wide material.
-    robot_finger_physics_material = EventTerm(
+    robot_gripper_physics_material = EventTerm(
         func=randomize_body_material_subset,
         mode="reset",
         params={
-            "asset_cfg": SceneEntityCfg("robot", body_names="panda_.*finger"),
+            "asset_cfg": SceneEntityCfg("robot", body_names="panda_(leftfinger|rightfinger|hand)"),
             "static_friction_range": (0.4, 0.9),
             "dynamic_friction_range": (0.3, 0.6),
-            "restitution_range": (0.0, 0.0),
-            "num_buckets": 250,
-        },
-    )
-
-    # Keep the palm slick so it does not become an unintended second grasping surface. The tape-like
-    # friction above applies only to the two finger links; this term deliberately targets panda_hand.
-    robot_palm_physics_material = EventTerm(
-        func=randomize_body_material_subset,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names="panda_hand"),
-            "static_friction_range": (0.0, 0.05),
-            "dynamic_friction_range": (0.0, 0.05),
             "restitution_range": (0.0, 0.0),
             "num_buckets": 250,
         },
@@ -498,8 +478,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # back down 75 -> 70 Nm.
     door_panel_effort_limit_range_nm = (3.0, 70.0)  # was (3.0, 75.0), temp update
 
-    # Each door URDF supplies its own joint_2 hard stop. Randomize only the gap below that stop
-    # to obtain the per-episode unlatching threshold (about 0.6..6.9 degrees).
+    # Each door URDF supplies its own positive joint_2 hard stop. DooropeningEnv mirrors that stop
+    # to negative travel; randomize the gap below the symmetric stop for an absolute-angle
+    # unlatching threshold (about 0.6..6.9 degrees in either direction).
     door_handle_limit_margin_range_rad: tuple[float, float] | None = (0.01, 0.12)
     # Optional eval-only door solver override, also applied before articulation conversion.
     door_eval_solver_position_iterations: int | None = None

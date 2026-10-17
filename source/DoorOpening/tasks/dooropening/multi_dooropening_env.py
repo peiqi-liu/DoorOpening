@@ -17,7 +17,6 @@ from DoorOpening.assets.door.multi_door_cfg import (
     asset_family_ids,
     board_offsets,
     closed_handle_offsets_base,
-    closed_handle_points_base,
     configure_multi_door_assets_for_rank,
     set_door_latch_state,
     get_multi_door_asset_start_index,
@@ -63,6 +62,21 @@ class DooropeningEnv(DirectRLEnv):
 
     def __init__(self, cfg: DooropeningEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
+        # Every DoorOpening workflow uses this environment (RL, distillation, and eval), so
+        # give every handle joint symmetric travel here instead of relying on an eval-only flag.
+        # Preserve each asset's authored positive stop and mirror it below zero.
+        handle_joint_ids, _ = self.door.find_joints(["joint_2"])
+        if len(handle_joint_ids) != 1:
+            raise RuntimeError(f"Expected exactly one door joint_2, found {len(handle_joint_ids)}.")
+        handle_joint_idx = int(handle_joint_ids[0])
+        handle_limits = self.door.data.joint_pos_limits[:, handle_joint_idx : handle_joint_idx + 1, :].clone()
+        handle_limits[..., 0] = -handle_limits[..., 1].abs()
+        self.door.write_joint_position_limit_to_sim(handle_limits, joint_ids=[handle_joint_idx])
+        print(
+            "[DOOR-LIMITS] symmetric handle joint_2 travel enabled for all envs: "
+            f"lower={handle_limits[:, 0, 0].detach().cpu().tolist()}, "
+            f"upper={handle_limits[:, 0, 1].detach().cpu().tolist()} rad"
+        )
         self._initialize_runtime_event_terms()
         self.early_stopping = True
 
@@ -321,9 +335,6 @@ class DooropeningEnv(DirectRLEnv):
         # from the URDF (fix_base => static geometry), so the closed-handle anchor needs no sim
         # capture; see get_closed_handle_position_in_base_frame().
         self.closed_handle_pos_door_base = closed_handle_offsets_base.to(
-            device=self.device, dtype=torch.float32
-        )[self.env_asset_indices]
-        self.closed_handle_points_door_base = closed_handle_points_base.to(
             device=self.device, dtype=torch.float32
         )[self.env_asset_indices]
         self.use_motion_ref = bool(getattr(self.cfg, "use_motion_ref", True))
@@ -1768,40 +1779,6 @@ class DooropeningEnv(DirectRLEnv):
 
         return handle_center_pos_base
 
-    def get_handle_anchor_points_in_base_frame(self) -> torch.Tensor:
-        """Return the two independent handle anchor points in the robot base frame.
-
-        The points are the two precomputed endpoints of the handle stick, kept as
-        separate 3D points rather than collapsed to a midpoint/axis representation.
-        Shape is (num_envs, 2, 3).
-        """
-        robot_base_pos_w = self.robot.data.body_pos_w[:, self._robot_base_body_link_idx]
-        robot_base_quat_w = self.robot.data.body_quat_w[:, self._robot_base_body_link_idx]
-
-        handle_body_local_idx = self.door_body_names.index("link_2")
-        handle_body_idx = int(self._door_body_idx[handle_body_local_idx])
-        handle_body_pos_w = self.door.data.body_pos_w[:, handle_body_idx]
-        handle_body_quat_w = self.door.data.body_quat_w[:, handle_body_idx]
-        offsets = self.handle_offsets.to(device=handle_body_pos_w.device, dtype=handle_body_pos_w.dtype)
-        handle_quat = handle_body_quat_w.unsqueeze(1).expand(-1, 2, -1)
-        handle_points_w = quat_apply(handle_quat.reshape(-1, 4), offsets.reshape(-1, 3)).reshape(
-            self.num_envs, 2, 3
-        ) + handle_body_pos_w.unsqueeze(1)
-        return world_to_local(handle_points_w, robot_base_pos_w, robot_base_quat_w)
-
-    def get_closed_handle_anchor_points_in_base_frame(self) -> torch.Tensor:
-        """Return the two handle endpoints at the closed-door pose in the current robot base frame."""
-        door_base_pos_w = self.door.data.body_pos_w[:, self._door_base_link_idx]
-        door_base_quat_w = self.door.data.body_quat_w[:, self._door_base_link_idx]
-        points_w = quat_apply(
-            door_base_quat_w.unsqueeze(1).expand(-1, 2, -1).reshape(-1, 4),
-            self.closed_handle_points_door_base.reshape(-1, 3),
-        ).reshape(self.num_envs, 2, 3) + door_base_pos_w.unsqueeze(1)
-
-        robot_base_pos_w = self.robot.data.body_pos_w[:, self._robot_base_body_link_idx]
-        robot_base_quat_w = self.robot.data.body_quat_w[:, self._robot_base_body_link_idx]
-        return world_to_local(points_w, robot_base_pos_w, robot_base_quat_w)
-
     def get_closed_handle_position_in_base_frame(self) -> torch.Tensor:
         """Closed-door (joints=0) handle position expressed in the CURRENT robot base frame.
 
@@ -2429,8 +2406,8 @@ class DooropeningEnv(DirectRLEnv):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
 
-        # Each asset URDF owns its mechanical hard stop. Randomize only the gap from that stop
-        # down to the unlatching threshold, independently per environment and episode.
+        # Each asset owns its positive mechanical hard stop; the shared environment mirrors it
+        # below zero. Randomize the gap from the symmetric stop to the magnitude threshold.
         if not hasattr(self, "_door_latch_hinge_threshold_rad"):
             self._door_latch_hinge_threshold_rad = torch.empty(
                 self.num_envs, device=self.device, dtype=torch.float32
@@ -2445,10 +2422,18 @@ class DooropeningEnv(DirectRLEnv):
                 f"got {gap_range!r}."
             )
         handle_joint_idx = int(self._door_hinge_joint_idx)
-        hard_stop = self.door.data.joint_pos_limits[env_ids, handle_joint_idx, 1]
+        handle_limits = self.door.data.joint_pos_limits[env_ids, handle_joint_idx]
+        negative_stop = handle_limits[:, 0].abs()
+        positive_stop = handle_limits[:, 1]
+        if not torch.allclose(negative_stop, positive_stop, rtol=1e-5, atol=1e-6):
+            raise RuntimeError(
+                "Door joint_2 limits must be symmetric after environment initialization; "
+                f"negative stops={negative_stop.tolist()}, positive stops={positive_stop.tolist()}."
+            )
+        hard_stop = torch.minimum(negative_stop, positive_stop)
         if torch.any(hard_stop < margin_low):
             raise ValueError(
-                "A door's URDF hard stop is smaller than the minimum stop-to-threshold gap: "
+                "A door's symmetric joint_2 stop is smaller than the minimum stop-to-threshold gap: "
                 f"min_stop={float(hard_stop.min().item()):.4f} rad, gap_min={margin_low:.4f} rad."
             )
         margin = margin_low + (margin_high - margin_low) * torch.rand(

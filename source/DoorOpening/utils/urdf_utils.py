@@ -238,11 +238,6 @@ def compute_exact_door_keypoints(urdf_path):
         handle_center_local = handle_endpoints.mean(axis=0)
         handle_center_base = transform_points(handle_center_local[None, :], base_to_handle_closed)[0]
         keypoints["link_2_center_base"] = handle_center_base.tolist()
-        handle_points_base = transform_points(
-            handle_endpoints,
-            base_to_handle_closed,
-        )
-        keypoints["link_2_points_base"] = handle_points_base.tolist()
 
     # --- Full door outer bbox (frame + board + handle) in the base frame at the closed pose. Used
     # for wall-distractor placement so walls sit outside the WHOLE door, not just the link_1 panel:

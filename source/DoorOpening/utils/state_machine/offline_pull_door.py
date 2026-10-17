@@ -966,11 +966,9 @@ def state_machine_offline_left_pull_door(
     pull_theta_stop = 1.25
     pull_theta_step = 0.10
 
-    # Base held a further 10 cm back through the pull sweep. This offset is measured from the
-    # handle, which travels TOWARD the robot as the panel swings, so the whole sweep is where the
-    # chassis is most crowded by the opening leaf. The palm offsets are handle-relative and
-    # unchanged, so the arm simply reaches 10 cm further forward.
-    pull_base_x_offset = 0.75  # was 0.65, temp update
+    # Handle-relative base standoff during the pull sweep; reduced by 5 cm
+    # so the base retreats less as the panel opens toward the robot.
+    pull_base_x_offset = 0.70
     # Constant lateral shift of the base held through the pull, in WORLD y (+y = the robot's right,
     # per this file's robot-faces--x convention). The base y was previously a pure function of theta
     # with no standing offset, so the chassis -- and the arx bolted to it -- tracked straight up the
@@ -1087,11 +1085,11 @@ def state_machine_offline_left_pull_door(
     # -------------------------
     _, _, robot_initial_yaw = euler_xyz_from_quat(base_target_rot)
 
-    # Absorbs the 10 cm the pull sweep just backed off (this delta is measured from the LAST pull
-    # base pose), so the blocking pose below lands exactly where it did before.
-    release_base_x_delta_1 = -0.22  # was -0.12, temp update
+    # Measured from the last pull pose. Compensate for its 5 cm smaller
+    # standoff to preserve the blocking pose's world x coordinate.
+    release_base_x_delta_1 = -0.17
     # Blocking pose Y: +y approaches the open leaf, -y backs away. Kept a margin off the leaf.
-    release_base_y = -0.20
+    release_base_y = -0.15  # 5 cm right (+world y) of the previous blocking pose
     release_palm_x_delta = 0.25
     release_palm_y_delta = 0.0
     release_base_x_delta_2 = -0.18
@@ -1110,12 +1108,15 @@ def state_machine_offline_left_pull_door(
     # with a base-yaw-rotated offset and a handle-relative lift. The old form aimed the hand 0.3 m
     # from the base axis, which IS the arx camera arm's volume (its links sit within |xy| = 0.282 at
     # z = 0.65..0.75), and the relative lift meant the height that separated them varied with handle
-    # height. 1.25 m is at the practical top of the arm's reach from the blocking base pose -- pushing
-    # it to 1.35 measured WORSE, because the target goes unreachable and the IK returns a stretched
-    # best-effort pose.
-    retreat_world_x = 0.30
+    # height. Raise the retreat target to 1.30 m; the following forward-left
+    # waypoint inherits this height. Reachability needs checking at this height.
+    # World +x is backward and -y is left in the nominal approach frame.
+    retreat_world_x = 0.15
     retreat_world_y = -0.30
-    retreat_palm_z = 1.25
+    retreat_palm_z = 1.30
+    # A separate waypoint turns the motion forward while continuing left.
+    forward_left_world_x = -0.15
+    forward_left_world_y = -0.18  # 3 cm farther left (world -y)
     # Larger x offset magnitude (was -0.3) so the arm reaches a bit further forward into the panel.
     # Contact point is now the panel CENTER (get_board_pos); only a small x offset so we push
     # near the center, not toward the hinge axis (short lever -> strong forces on the franka).
@@ -1181,7 +1182,7 @@ def state_machine_offline_left_pull_door(
     )
 
     # -------------------------
-    # Step 6: Retract the arm to the right side of the tilted base
+    # Step 6: Move back and left, then forward and farther left
     # -------------------------
     retreat_palm_pos = palm_target_pose[:, :3].clone()
     retreat_palm_pos[:, 0] += retreat_world_x
@@ -1209,6 +1210,31 @@ def state_machine_offline_left_pull_door(
         q_robot,
         q_door,
         mark_keyframe=True,
+    )
+
+    # Continue from the retreat with the base fixed and the same wrist orientation.
+    forward_left_palm_pos = retreat_palm_pos.clone()
+    forward_left_palm_pos[:, 0] += forward_left_world_x
+    forward_left_palm_pos[:, 1] += forward_left_world_y
+    forward_left_palm_pose = _make_pose(forward_left_palm_pos, default_palm_rot)
+    q_robot[:10] = solve_ik(
+        robot_urdf_path,
+        q_robot[:10],
+        palm_pose=forward_left_palm_pose,
+        base_pose=None,
+        robot_initial_pose=robot_initial_pose,
+        reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
+        num_attempts=1,
+    )[0]
+    _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
+    _append_state(
+        robot_traj,
+        door_traj,
+        key_idx_in_key_indices,
+        q_robot,
+        q_door,
+        # Intermediate waypoint: preserve the semantic keyframe layout.
+        mark_keyframe=False,
     )
 
     # -------------------------
