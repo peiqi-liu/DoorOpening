@@ -187,14 +187,14 @@ GLORBOT_CONFIG = ArticulationCfg(
         "base_translation": ImplicitActuatorCfg(
             joint_names_expr=["base_x_joint", "base_y_joint"],
             effort_limit_sim=130.0,
-            stiffness=80000,  # was 10000
-            damping=12000,
+            stiffness=0.0,
+            damping=200.0,
         ),
         "base_rotation": ImplicitActuatorCfg(
             joint_names_expr=["base_rotation_joint"],
             effort_limit_sim=45.0,
-            stiffness=11000,  # was 10000
-            damping=1200,
+            stiffness=0.0,
+            damping=20.0,
         ),
         # Per-joint Franka PD gains matched to the REAL-WORLD deploy controller (kp/kd used on
         # hardware), set per joint because the real values vary within each group. effort_limit_sim
