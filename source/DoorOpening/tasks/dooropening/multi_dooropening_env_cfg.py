@@ -54,10 +54,10 @@ def randomize_base_impedance_correlated(
     env,
     env_ids: torch.Tensor | None,
     asset_cfg: SceneEntityCfg,
-    translation_damping_range: tuple[float, float] = (100.0, 250.0),
+    translation_damping_range: tuple[float, float] = (100.0, 300.0),
     translation_k_over_d_range: tuple[float, float] = (1.1, 1.9),
     translation_stiffness_range: tuple[float, float] = (100.0, 500.0),
-    yaw_damping_range: tuple[float, float] = (5.0, 30.0),
+    yaw_damping_range: tuple[float, float] = (5.0, 40.0),
     yaw_k_over_d_range: tuple[float, float] = (1.3, 1.5),
     yaw_stiffness_range: tuple[float, float] = (5.0, 45.0),
 ):
@@ -218,6 +218,7 @@ def randomize_joint_effort_limits(
     effort_limit_distribution_params: tuple[float, float],
     operation: str = "abs",
     distribution: str = "uniform",
+    shared_across_joints: bool = False,
 ):
     """Randomize joint effort limits directly in PhysX for the selected articulation joints."""
 
@@ -250,7 +251,10 @@ def randomize_joint_effort_limits(
             "randomize_joint_effort_limits requires effort_limit_distribution_params[0] <= "
             f"effort_limit_distribution_params[1], got {(low, high)}."
         )
-    sampled_limits = low + (high - low) * torch.rand((len(env_ids), num_joints), device=asset.device)
+    sample_shape = (len(env_ids), 1 if shared_across_joints else num_joints)
+    sampled_limits = low + (high - low) * torch.rand(sample_shape, device=asset.device)
+    if shared_across_joints:
+        sampled_limits = sampled_limits.expand(-1, num_joints)
     asset.write_joint_effort_limit_to_sim(sampled_limits, joint_ids=joint_ids, env_ids=env_ids)
 
 
@@ -426,12 +430,30 @@ class EventCfg:
             "asset_cfg": SceneEntityCfg(
                 "robot", joint_names=["base_x_joint", "base_y_joint", "base_rotation_joint"]
             ),
-            "translation_damping_range": (100.0, 250.0),
+            "translation_damping_range": (100.0, 300.0),
             "translation_k_over_d_range": (1.1, 1.9),
             "translation_stiffness_range": (100.0, 500.0),
-            "yaw_damping_range": (5.0, 30.0),
+            "yaw_damping_range": (5.0, 40.0),
             "yaw_k_over_d_range": (1.3, 1.5),
             "yaw_stiffness_range": (5.0, 45.0),
+        },
+    )
+
+    base_translation_effort_limit = EventTerm(
+        func=randomize_joint_effort_limits,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["base_x_joint", "base_y_joint"]),
+            "effort_limit_distribution_params": (110.0, 160.0),
+            "shared_across_joints": True,
+        },
+    )
+    base_yaw_effort_limit = EventTerm(
+        func=randomize_joint_effort_limits,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["base_rotation_joint"]),
+            "effort_limit_distribution_params": (35.0, 55.0),
         },
     )
 
@@ -868,9 +890,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=False)
 
-    # Match the deployed physical velocity request: normalized policy action * 0.1.
-    # The former 4.0 scale compensated for the under-responsive position drive.
-    base_action_scale = 0.1
+    # Branch-specific training scale. The velocity target is subsequently limited
+    # by the deployed speed and acceleration envelopes.
+    base_action_scale = 1.0
     base_control_mode = "velocity"
     base_velocity_limit_xy = 0.2
     base_velocity_limit_yaw = 0.7
