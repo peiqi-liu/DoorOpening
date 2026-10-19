@@ -180,21 +180,19 @@ GLORBOT_CONFIG = ArticulationCfg(
         rot=ROBOT_INITIAL_ROT,
     ),
     actuators={
-        # Reset randomization replaces these fallback gains. In velocity control
-        # mode it sets base stiffness to zero, samples a velocity-servo damping
-        # gain, and sends a velocity target. Translation caps are forces (N);
-        # yaw caps are torques (Nm). Their current values remain provisional.
+        # Reset randomization replaces these position-drive fallback gains.
+        # Translation caps are forces (N); yaw caps are torques (Nm).
         "base_translation": ImplicitActuatorCfg(
             joint_names_expr=["base_x_joint", "base_y_joint"],
             effort_limit_sim=130.0,
-            stiffness=80000,  # was 10000
-            damping=12000,
+            stiffness=250.0,
+            damping=175.0,
         ),
         "base_rotation": ImplicitActuatorCfg(
             joint_names_expr=["base_rotation_joint"],
             effort_limit_sim=45.0,
-            stiffness=11000,  # was 10000
-            damping=1200,
+            stiffness=25.0,
+            damping=18.0,
         ),
         # Per-joint Franka PD gains matched to the REAL-WORLD deploy controller (kp/kd used on
         # hardware), set per joint because the real values vary within each group. effort_limit_sim

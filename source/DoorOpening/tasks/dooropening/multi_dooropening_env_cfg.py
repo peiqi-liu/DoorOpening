@@ -55,11 +55,11 @@ def randomize_base_impedance_correlated(
     env_ids: torch.Tensor | None,
     asset_cfg: SceneEntityCfg,
     translation_damping_range: tuple[float, float] = (100.0, 300.0),
-    translation_k_over_d_range: tuple[float, float] = (1.1, 1.9),
-    translation_stiffness_range: tuple[float, float] = (100.0, 500.0),
+    translation_k_over_d_range: tuple[float, float] = (1.1, 2.2),
+    translation_stiffness_range: tuple[float, float] = (100.0, 660.0),
     yaw_damping_range: tuple[float, float] = (5.0, 40.0),
-    yaw_k_over_d_range: tuple[float, float] = (1.3, 1.5),
-    yaw_stiffness_range: tuple[float, float] = (5.0, 45.0),
+    yaw_k_over_d_range: tuple[float, float] = (1.1, 2.2),
+    yaw_stiffness_range: tuple[float, float] = (5.0, 88.0),
 ):
     """Sample base velocity-servo gains, or legacy correlated position-drive gains.
 
@@ -420,9 +420,9 @@ class EventCfg:
         },
     )
 
-    # Velocity mode samples its speed-error gain and sets base position stiffness
-    # to zero. Position mode retains the old correlated K/D experiment. The 130 N
-    # translation and 45 Nm yaw caps remain provisional values in glorbot_cfg.
+    # Position mode samples correlated K/D gains. The reanchored target yields
+    # roughly 7–13% of a scale-1 action as realized free-space velocity.
+    # This is a simulation mapping, not an identified physical position spring.
     base_impedance_correlated = EventTerm(
         func=randomize_base_impedance_correlated,
         mode="reset",
@@ -431,11 +431,11 @@ class EventCfg:
                 "robot", joint_names=["base_x_joint", "base_y_joint", "base_rotation_joint"]
             ),
             "translation_damping_range": (100.0, 300.0),
-            "translation_k_over_d_range": (1.1, 1.9),
-            "translation_stiffness_range": (100.0, 500.0),
+            "translation_k_over_d_range": (1.1, 2.2),
+            "translation_stiffness_range": (100.0, 660.0),
             "yaw_damping_range": (5.0, 40.0),
-            "yaw_k_over_d_range": (1.3, 1.5),
-            "yaw_stiffness_range": (5.0, 45.0),
+            "yaw_k_over_d_range": (1.1, 2.2),
+            "yaw_stiffness_range": (5.0, 88.0),
         },
     )
 
@@ -893,7 +893,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # Branch-specific training scale. The velocity target is subsequently limited
     # by the deployed speed and acceleration envelopes.
     base_action_scale = 1.0
-    base_control_mode = "velocity"
+    base_control_mode = "position"
     base_velocity_limit_xy = 0.2
     base_velocity_limit_yaw = 0.7
     base_acceleration_limit_xy = 0.2
