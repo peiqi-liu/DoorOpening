@@ -276,6 +276,12 @@ parser.add_argument(
     help="Eval-only override for the environment base action scale.",
 )
 parser.add_argument(
+    "--base-control-mode",
+    choices=("position", "velocity"),
+    default=None,
+    help="Eval-only base actuator control mode; velocity uses the deployed speed and acceleration limits.",
+)
+parser.add_argument(
     "--aux-handle-gt-refresh-steps",
     type=int,
     default=0,
@@ -1494,6 +1500,9 @@ def _save_replay_pt(replay_runs, joint_names, base_env, save_replay_arg):
             "runs": replay_runs,
             "joint_names": joint_names,
             "num_envs": int(base_env.num_envs),
+            "base_impedance_randomization_samples": getattr(
+                base_env, "base_impedance_randomization_samples", {}
+            ),
             "base_velocity_schema": {
                 "frame": "robot",
                 "components": ["vx", "vy", "yaw_rate"],
@@ -1501,6 +1510,11 @@ def _save_replay_pt(replay_runs, joint_names, base_env, save_replay_arg):
                 "measured_source": "simulated base joint velocities rotated into robot frame, before env.step",
                 "policy_input_source": "velocity vector returned to the student policy (may include configured noise)",
                 "commanded_source": "clamped student base action multiplied by env base_action_scale",
+            },
+            "base_effort_schema": {
+                "components": ["base_x_force", "base_y_force", "base_yaw_torque"],
+                "units": ["N", "N", "N m"],
+                "source": "IsaacLab implicit-actuator applied_torque after env.step, last physics substep; clipped PD estimate, not a direct PhysX force measurement",
             },
             "control_frequency_hz": float(1.0 / max(float(getattr(base_env, "step_dt", 1.0 / 15.0)), 1e-8)),
         },
@@ -1898,6 +1912,16 @@ def _append_viser_frame(recorder, viser_meta, base_env, dagger, student_output):
         "pointcloud_base_pos_w": (rb_base_pos - org).to(torch.float32).cpu().clone(),
         "pointcloud_base_quat_w": rb_base_quat.to(torch.float32).cpu().clone(),
     }
+    # These filtered PhysX sensor values belong to this env's current observation pose.
+    # Save them per frame so a replay can identify which door the fingers touched;
+    # the periodic [CONTACT] log only reports mean/max across active envs.
+    for frame_key, sensor_attr in (
+        ("finger_panel_contact_force_norm_n", "finger_panel_contact_force_norm"),
+        ("gripper_handle_contact_force_norm_n", "finger_handle_contact_force_norm"),
+    ):
+        force = getattr(base_env, sensor_attr, None)
+        if isinstance(force, torch.Tensor) and force.shape[0] > env_id:
+            frame[frame_key] = float(force[env_id].detach().item())
     # Save the normalized policy action and the exact temporal proprioception tensor fed to
     # the student on this frame: [history_time, feature] per field, including any lag/noise.
     if isinstance(student_output, dict) and isinstance(student_output.get("action"), torch.Tensor):
@@ -2045,6 +2069,7 @@ def _save_viser_recorders(recorders, viser_meta, base_env, out_dir, run_index):
             {
                 "frames": recorder["frames"],
                 "door_params": recorder["door_params"],
+                "base_impedance": getattr(base_env, "base_impedance_randomization_samples", {}).get(env_id),
                 "compact_target_joint_names": viser_meta["compact_names"],
                 "frame_dt": viser_meta["frame_dt"],
                 "door_urdf_path": recorder["door_urdf_path"],
@@ -2193,6 +2218,9 @@ def main(env_cfg, agent_cfg: dict):
             raise ValueError("--base-action-scale must be positive")
         env_cfg.base_action_scale = args_cli.base_action_scale
         print(f"[INFO] Eval-only base_action_scale override: {env_cfg.base_action_scale}")
+    if args_cli.base_control_mode is not None:
+        env_cfg.base_control_mode = args_cli.base_control_mode
+        print(f"[INFO] Eval-only base_control_mode override: {env_cfg.base_control_mode}")
     if args_cli.arm_action_scale is not None:
         if args_cli.arm_action_scale <= 0.0:
             raise ValueError("--arm-action-scale must be positive")
@@ -2556,6 +2584,8 @@ def main(env_cfg, agent_cfg: dict):
             _run_base_velocity_measured_robot: list = []
             _run_base_velocity_policy_input_robot: list = []
             _run_base_velocity_commanded_robot: list = []
+            _run_base_effort_applied: list = []
+            _run_base_effort_computed: list = []
 
         active = torch.ones(base_env.num_envs, dtype=torch.bool, device=base_env.device)
         timed_out = torch.zeros_like(active)
@@ -2810,6 +2840,19 @@ def main(env_cfg, agent_cfg: dict):
                     _run_base_velocity_policy_input_robot.append(policy_base_vel_robot.detach().cpu().clone())
                     _run_base_velocity_commanded_robot.append(commanded_base_vel_robot.detach().cpu().clone())
                 obs, _, _, _, _ = env.step(actions)
+                if replay_runs is not None:
+                    # ImplicitActuator computes a clipped PD effort estimate; PhysX does
+                    # not expose the exact joint-drive effort. Sample the final physics
+                    # substep of this policy action, before restoring frozen env states.
+                    _base_effort_idx = torch.cat(
+                        (base_env._robot_base_xy_dof_idx, base_env._robot_base_rot_dof_idx)
+                    )
+                    _run_base_effort_applied.append(
+                        base_env.robot.data.applied_torque[:, _base_effort_idx].detach().cpu().clone()
+                    )
+                    _run_base_effort_computed.append(
+                        base_env.robot.data.computed_torque[:, _base_effort_idx].detach().cpu().clone()
+                    )
                 frozen_state.restore()
                 if replay_runs is not None:
                     _run_applied_targets.append(base_env.applied_robot_dof_targets.detach().cpu().clone())
@@ -2894,6 +2937,8 @@ def main(env_cfg, agent_cfg: dict):
                 "base_velocity_measured_robot": torch.stack(_run_base_velocity_measured_robot),
                 "base_velocity_policy_input_robot": torch.stack(_run_base_velocity_policy_input_robot),
                 "base_velocity_commanded_robot": torch.stack(_run_base_velocity_commanded_robot),
+                "base_effort_applied_estimate": torch.stack(_run_base_effort_applied),
+                "base_effort_computed_estimate": torch.stack(_run_base_effort_computed),
             })
 
         active_count = int(active.sum().detach().cpu().item())

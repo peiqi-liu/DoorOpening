@@ -444,6 +444,23 @@ class DooropeningEnv(DirectRLEnv):
         self._action_target_history = torch.zeros(
             (self.num_envs, self._max_action_latency, self.num_robot_actions), device=self.device
         )
+        self.base_control_mode = str(getattr(self.cfg, "base_control_mode", "position"))
+        if self.base_control_mode not in ("position", "velocity"):
+            raise ValueError(f"Unknown base_control_mode: {self.base_control_mode}")
+        self._base_velocity_history = torch.zeros(
+            (self.num_envs, self._max_action_latency, self.num_base_joints), device=self.device
+        )
+        self._base_velocity_target = torch.zeros((self.num_envs, self.num_base_joints), device=self.device)
+        # Base action and joint order are [yaw, x, y] in the environment frame.
+        self._base_velocity_limits = torch.tensor(
+            (self.cfg.base_velocity_limit_yaw, self.cfg.base_velocity_limit_xy, self.cfg.base_velocity_limit_xy),
+            device=self.device,
+        )
+        self._base_acceleration_limits = torch.tensor(
+            (self.cfg.base_acceleration_limit_yaw, self.cfg.base_acceleration_limit_xy,
+             self.cfg.base_acceleration_limit_xy),
+            device=self.device,
+        )
         self._door_nominal_joint_stiffness = self.door.data.joint_stiffness.clone()
         self._door_nominal_joint_damping = self.door.data.joint_damping.clone()
         # Latch is one-way within an episode: start from the reset pose, then unlock once the
@@ -1344,6 +1361,20 @@ class DooropeningEnv(DirectRLEnv):
         # EMA lag filter with a true delayed-action model of the real robot's control pipeline.
         self.applied_robot_dof_targets[:] = self._apply_action_latency(self.robot_dof_targets)
         self.applied_robot_dof_targets[:] = self._pin_arx_targets_to_fixed_pose(self.applied_robot_dof_targets)
+        if self.base_control_mode == "velocity":
+            desired = self.scaled_actions[:, :base_stop].clamp(
+                -self._base_velocity_limits, self._base_velocity_limits
+            )
+            lag_idx = (self._action_latency_buf - 1).clamp(0, self._max_action_latency - 1)
+            env_idx = torch.arange(self.num_envs, device=self.device)
+            delayed = self._base_velocity_history[env_idx, lag_idx]
+            self._base_velocity_history = torch.cat(
+                (desired.unsqueeze(1), self._base_velocity_history[:, :-1]), dim=1
+            )
+            max_change = self._base_acceleration_limits * self.dt
+            self._base_velocity_target += (delayed - self._base_velocity_target).clamp(
+                -max_change, max_change
+            )
         # Advance the reference once per RL/env step. IsaacLab will call _apply_action()
         # decimation times, so stepping here keeps replay duration tied to env dt instead
         # of being multiplied by decimation again.
@@ -1375,6 +1406,10 @@ class DooropeningEnv(DirectRLEnv):
         self._enforce_fixed_arx_joint_state()
         self._enforce_fixed_camera_joint_state()
         self.robot.set_joint_position_target(applied_targets, joint_ids=self._robot_dof_idx)
+        if self.base_control_mode == "velocity":
+            self.robot.set_joint_velocity_target(
+                self._base_velocity_target, joint_ids=self._robot_base_dof_idx
+            )
 
     def _build_observations(self) -> dict:
         self._get_intermediate_values()
@@ -2477,6 +2512,12 @@ class DooropeningEnv(DirectRLEnv):
             self.robot_dof_targets[env_ids, :] = self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]]
             self.applied_robot_dof_targets[env_ids, :] = self.robot_dof_targets[env_ids, :]
             self._action_target_history[env_ids] = self.robot_dof_targets[env_ids].unsqueeze(1)
+            self._base_velocity_history[env_ids] = 0.0
+            self._base_velocity_target[env_ids] = 0.0
+            if self.base_control_mode == "velocity":
+                self.robot.set_joint_velocity_target(
+                    self._base_velocity_target[env_ids], joint_ids=self._robot_base_dof_idx, env_ids=env_ids
+                )
             self._prev_action[env_ids] = 0.0
             self._prev_prev_action[env_ids] = 0.0
             self.episode_reached_last_frame[env_ids] = False
@@ -2541,6 +2582,12 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_dof_targets[env_ids, :] = self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]]
         self.applied_robot_dof_targets[env_ids, :] = self.robot_dof_targets[env_ids, :]
         self._action_target_history[env_ids] = self.robot_dof_targets[env_ids].unsqueeze(1)
+        self._base_velocity_history[env_ids] = 0.0
+        self._base_velocity_target[env_ids] = 0.0
+        if self.base_control_mode == "velocity":
+            self.robot.set_joint_velocity_target(
+                self._base_velocity_target[env_ids], joint_ids=self._robot_base_dof_idx, env_ids=env_ids
+            )
         self.episode_reached_last_frame[env_ids] = False
         self.episode_x5_collided[env_ids] = False
         self.episode_franka_box_collided[env_ids] = False

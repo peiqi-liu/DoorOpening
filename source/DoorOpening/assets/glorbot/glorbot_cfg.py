@@ -180,22 +180,19 @@ GLORBOT_CONFIG = ArticulationCfg(
         rot=ROBOT_INITIAL_ROT,
     ),
     actuators={
-        # Split translation/rotation into separate groups -- their gains are not the same physical
-        # quantity (prismatic N/m vs revolute N-m/rad), and both land overdamped where the dominant
-        # pole is -k/d, so a shared group gave translation (56.5 kg) and yaw (~3 kg-m^2) an identical
-        # 0.3 s lag. Rotation damping is 10x lower so yaw responds ~10x faster, as on the real base.
-        # Base gains taken from the gripper branch, which runs the same q_base + dt*scale*action
-        # command form. The target is re-anchored to the measured pose every step, so the PD error is
-        # pinned at dt*scale*action and the realized speed is (kp*dt/kd) * commanded.
+        # Reset randomization replaces these fallback gains. In velocity control
+        # mode it sets base stiffness to zero, samples a velocity-servo damping
+        # gain, and sends a velocity target. Translation caps are forces (N);
+        # yaw caps are torques (Nm). Their current values remain provisional.
         "base_translation": ImplicitActuatorCfg(
             joint_names_expr=["base_x_joint", "base_y_joint"],
-            effort_limit_sim=1000.0,
+            effort_limit_sim=130.0,
             stiffness=80000,  # was 10000
             damping=12000,
         ),
         "base_rotation": ImplicitActuatorCfg(
             joint_names_expr=["base_rotation_joint"],
-            effort_limit_sim=1000.0,
+            effort_limit_sim=45.0,
             stiffness=11000,  # was 10000
             damping=1200,
         ),

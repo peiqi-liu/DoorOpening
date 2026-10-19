@@ -168,6 +168,14 @@ DEFAULT_HANDLE_BUMP_WIDTH_RANGE_M = (0.050, 0.075)  # matched to real backplate 
 # 55-60 mm residential rose the old floor assumed as the smallest case.
 DEFAULT_HANDLE_BUMP_RADIUS_RANGE_M = (0.018, 0.035)  # was (0.022, 0.035), temp update
 
+# Shallow panel pockets near the handle. These are real geometry (visual and collision),
+# independent of the glass/window point-cloud augmentation used by DAgger.
+DEFAULT_HANDLE_RECESS_PROB = 0.50
+DEFAULT_HANDLE_RECESS_WIDTH_RANGE_M = (0.15, 0.24)
+DEFAULT_HANDLE_RECESS_HEIGHT_RANGE_M = (0.70, 0.95)
+DEFAULT_HANDLE_RECESS_DEPTH_RANGE_M = (0.008, 0.020)
+DEFAULT_HANDLE_RECESS_TIP_OFFSET_M = 0.030
+
 DEFAULT_NUM_VARIANTS = 512
 DEFAULT_DEBUG_FIRST_N = 0
 DEFAULT_START_BASE_SAMPLING = "paired"
@@ -451,6 +459,16 @@ def parse_args():
         help="Cylinder boss only: radius (meters); should be wider than the handle stem radius.",
     )
     parser.add_argument("--handle-num-segments", type=int, default=DEFAULT_HANDLE_NUM_SEGMENTS)
+    parser.add_argument("--handle-recess-prob", type=float, default=DEFAULT_HANDLE_RECESS_PROB,
+                        help="Probability of a physical recessed panel pocket centered near the handle.")
+    parser.add_argument("--handle-recess-count", type=int, default=None,
+                        help="Optional exact number of recessed variants in this batch; overrides probability sampling.")
+    parser.add_argument("--handle-recess-width-range", type=float, nargs=2, default=DEFAULT_HANDLE_RECESS_WIDTH_RANGE_M,
+                        metavar=("MIN_M", "MAX_M"))
+    parser.add_argument("--handle-recess-height-range", type=float, nargs=2, default=DEFAULT_HANDLE_RECESS_HEIGHT_RANGE_M,
+                        metavar=("MIN_M", "MAX_M"))
+    parser.add_argument("--handle-recess-depth-range", type=float, nargs=2, default=DEFAULT_HANDLE_RECESS_DEPTH_RANGE_M,
+                        metavar=("MIN_M", "MAX_M"))
     parser.add_argument("--debug-first-n", type=int, default=DEFAULT_DEBUG_FIRST_N)
     parser.add_argument(
         "--start-base-sampling",
@@ -817,6 +835,17 @@ def sample_variant_spec(rng, args):
     handle_bump_radius = sample_uniform(rng, args.handle_bump_radius_range)
     handle_bump_shape = choose_mode(rng, args.handle_bump_shape, options=("box", "cylinder"))
     handle_has_bump = rng.random() < args.handle_bump_prob
+    handle_has_recess = rng.random() < args.handle_recess_prob
+    handle_recess_width = sample_uniform(rng, args.handle_recess_width_range)
+    handle_recess_height = sample_uniform(rng, args.handle_recess_height_range)
+    handle_recess_depth = sample_uniform(rng, args.handle_recess_depth_range)
+    if not 0.0 <= args.handle_recess_prob <= 1.0:
+        raise ValueError("--handle-recess-prob must be in [0, 1].")
+    for label, bounds in (("width", args.handle_recess_width_range),
+                          ("height", args.handle_recess_height_range),
+                          ("depth", args.handle_recess_depth_range)):
+        if len(bounds) != 2 or bounds[0] < 0.0 or bounds[1] < bounds[0]:
+            raise ValueError(f"--handle-recess-{label}-range must satisfy 0 <= MIN <= MAX.")
 
     return {
         "panel_width_m": panel_width,
@@ -844,6 +873,10 @@ def sample_variant_spec(rng, args):
         "handle_bump_radius_m": handle_bump_radius,
         "handle_bump_shape": handle_bump_shape,
         "handle_has_bump": handle_has_bump,
+        "handle_has_recess": handle_has_recess,
+        "handle_recess_width_m": handle_recess_width,
+        "handle_recess_height_m": handle_recess_height,
+        "handle_recess_depth_m": handle_recess_depth,
     }
 
 
@@ -865,6 +898,75 @@ def build_board_bounds(spec):
         x0 = -width
         x1 = 0.0
     return [x0, y0, z0], [x1, y1, z1]
+
+
+def build_panel_boxes(spec, board_min, board_max, handle_spec):
+    """Return solid boxes forming a panel and an optional vertical inset below the lever tip."""
+    if not spec.get("handle_has_recess", False):
+        return [(board_min, board_max)]
+    x0, y0, z0 = board_min
+    x1, y1, z1 = board_max
+    sign = HANDLE_FACE_SIGN_LINK1
+    depth = min(float(spec["handle_recess_depth_m"]), (z1 - z0) * 0.8)
+    if depth <= 0.0:
+        return [(board_min, board_max)]
+    # Keep one tall vertical pocket beside the lever tip. It spans well below and
+    # above handle height, usually overlaps the lever endpoint, and biases 3 cm
+    # toward the tip so some samples sit just beyond it.
+    cx, handle_y = handle_spec["joint_origin_link1"][:2]
+    field_width = min(float(spec["handle_recess_width_m"]), (x1 - x0) - 0.06)
+    field_height = min(float(spec["handle_recess_height_m"]), (y1 - y0) - 0.16)
+    dx = float(handle_spec["lever_direction_link2"][0])
+    lever_tip_x = cx + dx * float(handle_spec["lever_length_m"])
+    plate_min = handle_spec.get("plate_min_link1")
+    plate_max = handle_spec.get("plate_max_link1")
+    clearance = 0.02
+    if dx >= 0.0:
+        rx0 = float(plate_max[0]) + clearance if plate_max is not None else lever_tip_x - 0.5 * field_width
+        rx1 = max(rx0 + field_width, lever_tip_x + clearance)
+    else:
+        rx1 = float(plate_min[0]) - clearance if plate_min is not None else lever_tip_x + 0.5 * field_width
+        rx0 = min(rx1 - field_width, lever_tip_x - clearance)
+    # Shift the pocket into the panel if an extreme handle sample puts it near an edge.
+    if rx0 < x0 + 0.03:
+        rx1 += (x0 + 0.03) - rx0
+        rx0 = x0 + 0.03
+    if rx1 > x1 - 0.03:
+        rx0 -= rx1 - (x1 - 0.03)
+        rx1 = x1 - 0.03
+    tip_offset = DEFAULT_HANDLE_RECESS_TIP_OFFSET_M if dx >= 0.0 else -DEFAULT_HANDLE_RECESS_TIP_OFFSET_M
+    rx0 += tip_offset
+    rx1 += tip_offset
+    # Keep the shifted recess inside the panel with a small perimeter margin.
+    if rx0 < x0 + 0.03:
+        rx1 += (x0 + 0.03) - rx0
+        rx0 = x0 + 0.03
+    if rx1 > x1 - 0.03:
+        rx0 -= rx1 - (x1 - 0.03)
+        rx1 = x1 - 0.03
+    # Center the tall pocket at the lever's height so it affects the grasp area,
+    # while extending substantially above and below it.
+    ry0 = max(y0 + 0.03, handle_y - 0.5 * field_height)
+    ry1 = min(y1 - 0.03, handle_y + 0.5 * field_height)
+    if rx1 <= rx0 or ry1 <= ry0:
+        return [(board_min, board_max)]
+    # Backing slab stops short of the handle-facing surface. Surrounding strips restore
+    # the panel face around the pocket while leaving an open, inset rectangle.
+    face = z1 if sign > 0 else z0
+    floor = face - sign * depth
+    # Retain only the backing skin behind the pocket; using the full panel depth
+    # here silently filled the recess in the collision geometry.
+    slab_bounds = ([x0, y0, z0] if sign > 0 else [x0, y0, floor],
+                   [x1, y1, floor] if sign > 0 else [x1, y1, z1])
+    boxes = [slab_bounds]
+    near_lo, near_hi = (floor, face) if sign > 0 else (face, floor)
+    boxes.extend([
+        ([x0, y0, near_lo], [x1, ry0, near_hi]),
+        ([x0, ry1, near_lo], [x1, y1, near_hi]),
+        ([x0, ry0, near_lo], [rx0, ry1, near_hi]),
+        ([rx1, ry0, near_lo], [x1, ry1, near_hi]),
+    ])
+    return [(lo, hi) for lo, hi in boxes if all(hi[i] - lo[i] > 1e-6 for i in range(3))]
 
 
 def build_frame_boxes(spec):
@@ -943,9 +1045,10 @@ def build_handle_spec(spec, board_min, board_max):
         joint_x = board_min[0] + edge_distance
         lever_direction_x = 1.0
 
-    # Keep the generated scratch handle on the back face of the door panel.
-    # Opening direction is still represented through joint_1, not by moving the
-    # single visible handle across the slab faces.
+    # Keep the handle on the approach side used by the default robot pose. The
+    # root pose in Isaac rotates the door by 180 degrees, so link-local +z is
+    # the robot-facing side in world coordinates. Opening direction is encoded
+    # through joint_1, not by moving the handle between slab faces.
     face_sign = HANDLE_FACE_SIGN_LINK1
     joint_origin_link1 = [
         joint_x,
@@ -1068,9 +1171,10 @@ def build_handle_spec(spec, board_min, board_max):
     }
 
 
-def write_board_mesh(mesh_path, board_min, board_max, plate_box=None):
+def write_board_mesh(mesh_path, board_min, board_max, plate_box=None, panel_boxes=None):
     builder = ObjMeshBuilder()
-    builder.add_box_bounds(board_min, board_max)
+    for box_min, box_max in (panel_boxes or [(board_min, board_max)]):
+        builder.add_box_bounds(box_min, box_max)
     if plate_box is not None:
         # Escutcheon plate is baked into the panel mesh so it is fixed to link_1 (visual + collision).
         plate_min, plate_max = plate_box
@@ -1232,6 +1336,7 @@ def build_urdf_tree(
     joint_1_origin,
     board_min,
     board_max,
+    panel_boxes,
     frame_boxes,
     handle_hard_stop_rad,
     solid_panel_visual=False,
@@ -1265,12 +1370,9 @@ def build_urdf_tree(
 
     link_1 = ET.SubElement(robot, "link", {"name": "link_1"})
     if solid_panel_visual:
-        add_box_visual(
-            link_1,
-            "solid_panel_visual",
-            midpoint(board_min, board_max),
-            [hi - lo for lo, hi in zip(board_min, board_max)],
-        )
+        for box_index, (panel_min, panel_max) in enumerate(panel_boxes):
+            add_box_visual(link_1, f"panel_piece_{box_index}", midpoint(panel_min, panel_max),
+                           [hi - lo for lo, hi in zip(panel_min, panel_max)])
         if handle_spec.get("plate_min_link1") is not None and handle_spec.get("plate_max_link1") is not None:
             add_mesh_body(link_1, "visual", "handle_plate_visual", "texture_dae/plate.obj")
     else:
@@ -1279,12 +1381,9 @@ def build_urdf_tree(
     # be imported as a thin/hollow shell by downstream URDF/USD conversion, which made the panel
     # unreliable as a blocking volume. Keep board.obj for visual detail, but make the panel body
     # itself an unambiguous filled primitive.
-    add_box_collision(
-        link_1,
-        "solid_panel",
-        midpoint(board_min, board_max),
-        [hi - lo for lo, hi in zip(board_min, board_max)],
-    )
+    for box_index, (panel_min, panel_max) in enumerate(panel_boxes):
+        add_box_collision(link_1, f"solid_panel_{box_index}", midpoint(panel_min, panel_max),
+                          [hi - lo for lo, hi in zip(panel_min, panel_max)])
     # Keep the escutcheon as a separate exact box collision because it is baked into the
     # visual mesh but is too small to rely on mesh decomposition for reliable contact.
     if handle_spec.get("plate_min_link1") is not None and handle_spec.get("plate_max_link1") is not None:
@@ -1335,7 +1434,7 @@ def validate_variant(variant_dir, root):
 
     if root.find(".//link[@name='link_1']/collision") is None:
         raise ValueError("link_1 collision must exist")
-    if root.find(".//link[@name='link_1']/collision[@name='solid_panel']") is None:
+    if root.find(".//link[@name='link_1']/collision[@name='solid_panel_0']") is None:
         raise ValueError("link_1 must contain an explicit solid_panel box collision")
     if root.find(".//link[@name='link_2']/visual") is None:
         raise ValueError("link_2 visual must exist")
@@ -1371,6 +1470,12 @@ def write_variant_meta(
         "handle_side": spec["handle_side"],
         "opening_direction": spec["opening_direction"],
         "handle_attachment_joint": "joint_2",
+        "handle_recess_enabled": bool(spec.get("handle_has_recess", False)),
+        "handle_recess_width_m": spec.get("handle_recess_width_m", 0.0),
+        "handle_recess_height_m": spec.get("handle_recess_height_m", 0.0),
+        "handle_recess_depth_m": spec.get("handle_recess_depth_m", 0.0),
+        "handle_recess_tip_offset_m": DEFAULT_HANDLE_RECESS_TIP_OFFSET_M
+        if spec.get("handle_has_recess", False) else 0.0,
         "board_min_x": board_min[0],
         "board_max_x": board_max[0],
         "board_min_y": board_min[1],
@@ -1486,8 +1591,17 @@ def generate_variants(args):
     return_handle_count = 0
     straight_handle_count = 0
 
+    recess_indices = None
+    if args.handle_recess_count is not None:
+        if not 0 <= args.handle_recess_count <= args.num_variants:
+            raise ValueError("--handle-recess-count must be between 0 and --num-variants.")
+        recess_rng = random.Random(args.seed ^ 0x52454345)
+        recess_indices = set(recess_rng.sample(range(args.num_variants), args.handle_recess_count))
+
     for variant_idx in range(args.num_variants):
         spec = sample_variant_spec(rng, args)
+        if recess_indices is not None:
+            spec["handle_has_recess"] = variant_idx in recess_indices
         variant_name = build_variant_name(args.asset_name_prefix, args.start_index + variant_idx)
         variant_dir = output_dir / variant_name
         texture_dir = variant_dir / "texture_dae"
@@ -1496,6 +1610,7 @@ def generate_variants(args):
         board_min, board_max = build_board_bounds(spec)
         frame_boxes = build_frame_boxes(spec)
         handle_spec = build_handle_spec(spec, board_min, board_max)
+        panel_boxes = build_panel_boxes(spec, board_min, board_max, handle_spec)
         collisions = build_handle_collision_primitives(handle_spec)
         door_axis = build_door_axis(spec)
         joint_1_origin = build_joint_1_origin(spec)
@@ -1505,7 +1620,8 @@ def generate_variants(args):
         plate_box = None
         if handle_spec.get("plate_min_link1") is not None and handle_spec.get("plate_max_link1") is not None:
             plate_box = (handle_spec["plate_min_link1"], handle_spec["plate_max_link1"])
-        write_board_mesh(texture_dir / "board.obj", board_min, board_max, plate_box=plate_box)
+        write_board_mesh(texture_dir / "board.obj", board_min, board_max, plate_box=plate_box,
+                         panel_boxes=panel_boxes)
         if args.solid_panel_visual and plate_box is not None:
             write_board_mesh(texture_dir / "plate.obj", plate_box[0], plate_box[1], plate_box=None)
         # The visual mesh keeps the escutcheon detail; link_1 also receives an explicit
@@ -1523,6 +1639,7 @@ def generate_variants(args):
             joint_1_origin=joint_1_origin,
             board_min=board_min,
             board_max=board_max,
+            panel_boxes=panel_boxes,
             frame_boxes=frame_boxes,
             handle_hard_stop_rad=handle_hard_stop_rad,
             solid_panel_visual=args.solid_panel_visual,

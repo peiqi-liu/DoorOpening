@@ -5,6 +5,8 @@
 
 import inspect
 
+import torch
+
 from DoorOpening.assets.door.multi_door_cfg import ALL_DOOR_CONFIGS
 from DoorOpening.assets.glorbot.glorbot_cfg import GLORBOT_CONFIG, GRIPPER_VELOCITY_LIMIT
 from DoorOpening.constants.env_constants import ROBOT_INITIAL_POS, ROBOT_INITIAL_ROT
@@ -45,7 +47,90 @@ from isaaclab.utils import configclass
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 
 from isaaclab.managers import EventTermCfg as EventTerm
-from isaaclab.managers import ManagerTermBase
+from isaaclab.managers import ManagerTermBase, SceneEntityCfg
+
+
+def randomize_base_impedance_correlated(
+    env,
+    env_ids: torch.Tensor | None,
+    asset_cfg: SceneEntityCfg,
+    translation_damping_range: tuple[float, float] = (100.0, 250.0),
+    translation_k_over_d_range: tuple[float, float] = (1.1, 1.9),
+    translation_stiffness_range: tuple[float, float] = (100.0, 500.0),
+    yaw_damping_range: tuple[float, float] = (5.0, 30.0),
+    yaw_k_over_d_range: tuple[float, float] = (1.3, 1.5),
+    yaw_stiffness_range: tuple[float, float] = (5.0, 45.0),
+):
+    """Sample base velocity-servo gains, or legacy correlated position-drive gains.
+
+    The recorded real-base speed ratio does not identify position stiffness or
+    damping. Velocity mode uses zero position stiffness and randomizes only the
+    speed-error gain; legacy position mode retains the prior K/D experiment.
+    """
+    asset = env.scene[asset_cfg.name]
+    if env_ids is None:
+        env_ids = torch.arange(env.scene.num_envs, device=asset.device, dtype=torch.long)
+    else:
+        env_ids = env_ids.to(device=asset.device, dtype=torch.long)
+    n = int(env_ids.numel())
+    base_joint_names = {"base_x_joint", "base_y_joint", "base_rotation_joint"}
+    target_joint_ids = set(int(i) for i in asset_cfg.joint_ids)
+
+    def uniform(bounds: tuple[float, float]) -> torch.Tensor:
+        low, high = (float(bounds[0]), float(bounds[1]))
+        return low + (high - low) * torch.rand(n, device=asset.device)
+
+    trans_d = uniform(translation_damping_range)
+    trans_ratio = uniform(translation_k_over_d_range)
+    trans_k = (trans_d * trans_ratio).clamp(*translation_stiffness_range)
+    yaw_d = uniform(yaw_damping_range)
+    yaw_ratio = uniform(yaw_k_over_d_range)
+    yaw_k = (yaw_d * yaw_ratio).clamp(*yaw_stiffness_range)
+    if getattr(env.cfg, "base_control_mode", "position") == "velocity":
+        # A velocity servo actively resists velocity error, including a zero-speed
+        # command. It has no base-coordinate position spring.
+        trans_k.zero_()
+        yaw_k.zero_()
+
+    for actuator in asset.actuators.values():
+        actuator_joint_ids = [int(i) for i in actuator.joint_indices]
+        stiffness = actuator.stiffness[env_ids].clone()
+        damping = actuator.damping[env_ids].clone()
+        changed = False
+        for local_idx, global_idx in enumerate(actuator_joint_ids):
+            if global_idx not in target_joint_ids:
+                continue
+            joint_name = asset.joint_names[global_idx]
+            if joint_name not in base_joint_names:
+                continue
+            if joint_name == "base_rotation_joint":
+                stiffness[:, local_idx] = yaw_k
+                damping[:, local_idx] = yaw_d
+            else:
+                stiffness[:, local_idx] = trans_k
+                damping[:, local_idx] = trans_d
+            changed = True
+        if not changed:
+            continue
+        actuator.stiffness[env_ids] = stiffness
+        actuator.damping[env_ids] = damping
+        asset.write_joint_stiffness_to_sim(stiffness, joint_ids=actuator.joint_indices, env_ids=env_ids)
+        asset.write_joint_damping_to_sim(damping, joint_ids=actuator.joint_indices, env_ids=env_ids)
+
+    # Keep sampled values available for evaluation metadata and interactive inspection.
+    if not hasattr(env, "base_impedance_randomization_samples"):
+        env.base_impedance_randomization_samples = {}
+    trans_k_cpu = trans_k.detach().cpu().tolist()
+    trans_d_cpu = trans_d.detach().cpu().tolist()
+    yaw_k_cpu = yaw_k.detach().cpu().tolist()
+    yaw_d_cpu = yaw_d.detach().cpu().tolist()
+    for row, env_id in enumerate(env_ids.tolist()):
+        env.base_impedance_randomization_samples[int(env_id)] = {
+            "translation_stiffness_N_per_m": trans_k_cpu[row],
+            "translation_damping_Ns_per_m": trans_d_cpu[row],
+            "yaw_stiffness_Nm_per_rad": yaw_k_cpu[row],
+            "yaw_damping_Nms_per_rad": yaw_d_cpu[row],
+        }
 from isaaclab.managers import SceneEntityCfg
 import isaaclab.utils.math as math_utils
 from isaaclab.envs.common import ViewerCfg
@@ -263,16 +348,15 @@ class EventCfg:
         },
     )
 
-    # Gripper friction: both fingers and the palm use the same tape-like range. Defined AFTER
-    # robot_physics_material so it overwrites only these three bodies; the arm links keep the
-    # robot-wide material.
+    # Keep the fingers and palm in the same friction range as the rest of the robot.
+    # This term runs after robot_physics_material and resamples only these three bodies.
     robot_gripper_physics_material = EventTerm(
         func=randomize_body_material_subset,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="panda_(leftfinger|rightfinger|hand)"),
-            "static_friction_range": (0.4, 0.9),
-            "dynamic_friction_range": (0.3, 0.6),
+            "static_friction_range": (0.8, 1.25),
+            "dynamic_friction_range": (0.9, 1.1),
             "restitution_range": (0.0, 0.0),
             "num_buckets": 250,
         },
@@ -329,6 +413,25 @@ class EventCfg:
             "stiffness_distribution_params": (1.0, 1.0),
             "damping_distribution_params": (1.0, 1.0),
             "operation": "scale",
+        },
+    )
+
+    # Velocity mode samples its speed-error gain and sets base position stiffness
+    # to zero. Position mode retains the old correlated K/D experiment. The 130 N
+    # translation and 45 Nm yaw caps remain provisional values in glorbot_cfg.
+    base_impedance_correlated = EventTerm(
+        func=randomize_base_impedance_correlated,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg(
+                "robot", joint_names=["base_x_joint", "base_y_joint", "base_rotation_joint"]
+            ),
+            "translation_damping_range": (100.0, 250.0),
+            "translation_k_over_d_range": (1.1, 1.9),
+            "translation_stiffness_range": (100.0, 500.0),
+            "yaw_damping_range": (5.0, 30.0),
+            "yaw_k_over_d_range": (1.3, 1.5),
+            "yaw_stiffness_range": (5.0, 45.0),
         },
     )
 
@@ -765,7 +868,14 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=False)
 
-    base_action_scale = 1.0
+    # Match the deployed physical velocity request: normalized policy action * 0.1.
+    # The former 4.0 scale compensated for the under-responsive position drive.
+    base_action_scale = 0.1
+    base_control_mode = "velocity"
+    base_velocity_limit_xy = 0.2
+    base_velocity_limit_yaw = 0.7
+    base_acceleration_limit_xy = 0.2
+    base_acceleration_limit_yaw = 0.79
     arm_action_scale = 0.6
     gripper_action_speed_headroom = 2.0
     finger_action_scale = gripper_action_speed_headroom * GRIPPER_VELOCITY_LIMIT

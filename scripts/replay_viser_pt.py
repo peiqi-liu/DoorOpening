@@ -454,6 +454,11 @@ def _has_door_joint_prediction(frames: list[dict]) -> bool:
     return any(_door_joint_prediction(frame) is not None for frame in frames)
 
 
+def _contact_force(frame: dict, key: str) -> float | None:
+    value = _to_numpy_vector(frame.get(key))
+    return None if value is None else float(value[0])
+
+
 def _positive_float(value: object) -> float | None:
     try:
         value = float(value)
@@ -570,11 +575,16 @@ def main() -> None:
     has_aux_prediction = _has_aux_prediction(frames)
     has_aux_input = _has_aux_input(frames)
     has_door_joint_prediction = _has_door_joint_prediction(frames)
+    has_contact_forces = any(
+        "finger_panel_contact_force_norm_n" in frame or "gripper_handle_contact_force_norm_n" in frame
+        for frame in frames
+    )
     has_compact_joint_state = any(
         _to_numpy_vector(frame.get("compact_q")) is not None
         or _to_numpy_vector(frame.get("compact_target")) is not None
         for frame in frames
     )
+    has_base_velocity = any("base_velocity_measured_robot" in frame for frame in frames)
 
     joint_sources = [] if args.no_robot else _available_joint_sources(frames)
     robot_requested = bool(joint_sources) and isinstance(payload.get("compact_target_joint_names"), (list, tuple))
@@ -699,9 +709,20 @@ def main() -> None:
             "Per-frame policy action, measured joint position, and proprioceptive history "
             "recorded from the student input. History rows are ordered oldest to newest."
         )
+        server.gui.add_markdown(
+            "Positive base x displacement moves the robot toward the door in this task."
+        )
+        base_motion_status = server.gui.add_text("Base x motion", initial_value="", disabled=True)
         action_status = server.gui.add_text("Policy action", initial_value="", disabled=True)
         measured_q_status = server.gui.add_text("Measured q", initial_value="", disabled=True)
         history_status = server.gui.add_text("History state", initial_value="", disabled=True)
+        base_velocity_status = None
+        if has_base_velocity:
+            base_velocity_status = {
+                "base_velocity_measured_robot": server.gui.add_text("Base velocity measured", initial_value="", disabled=True),
+                "base_velocity_policy_input_robot": server.gui.add_text("Base velocity policy input", initial_value="", disabled=True),
+                "base_velocity_commanded_robot": server.gui.add_text("Base velocity commanded", initial_value="", disabled=True),
+            }
 
     show_clouds = {}
     with server.gui.add_folder("Pointclouds"):
@@ -742,7 +763,18 @@ def main() -> None:
     if door_urdf is not None:
         with server.gui.add_folder("Door"):
             show_door = server.gui.add_checkbox("Show Door", initial_value=True)
+    panel_force_status = None
+    handle_force_status = None
+    if has_contact_forces:
+        with server.gui.add_folder("Contact forces"):
+            server.gui.add_markdown("Recorded per environment from the filtered PhysX contact sensors.")
+            panel_force_status = server.gui.add_text("Fingers ↔ panel", initial_value="", disabled=True)
+            handle_force_status = server.gui.add_text("Gripper ↔ handle", initial_value="", disabled=True)
     n_door = len(door_urdf.get_actuated_joint_names()) if door_urdf is not None else 0
+    compact_names = payload.get("compact_target_joint_names", ())
+    base_x_idx = compact_names.index("base_x_joint") if "base_x_joint" in compact_names else None
+    first_q = _to_numpy_vector(frames[0].get("compact_q"))
+    replay_dt = float(payload.get("frame_dt") or 1.0 / initial_fps)
 
     def _update_robot(frame: dict) -> None:
         if robot_urdf is None or robot_frame is None or show_robot is None:
@@ -793,12 +825,32 @@ def main() -> None:
         frame = frames[frame_idx]
         action_vec = _to_numpy_vector(frame.get("policy_action"))
         measured_q_vec = _to_numpy_vector(frame.get("compact_q"))
+        if base_x_idx is not None and first_q is not None and measured_q_vec is not None:
+            current_x = float(measured_q_vec[base_x_idx])
+            prior_q = _to_numpy_vector(frames[max(frame_idx - 1, 0)].get("compact_q"))
+            speed_x = (
+                (current_x - float(prior_q[base_x_idx])) / replay_dt
+                if frame_idx > 0 and prior_q is not None and replay_dt > 0.0
+                else 0.0
+            )
+            base_motion_status.value = (
+                f"toward door: {current_x - float(first_q[base_x_idx]):+.3f} m; "
+                f"speed: {speed_x:+.3f} m/s"
+            )
+        else:
+            base_motion_status.value = "n/a"
         action_status.value = (
             "n/a" if action_vec is None else np.array2string(action_vec, precision=3, suppress_small=True)
         )
         measured_q_status.value = (
             "n/a" if measured_q_vec is None else np.array2string(measured_q_vec, precision=3, suppress_small=True)
         )
+        if base_velocity_status is not None:
+            for key, status in base_velocity_status.items():
+                velocity = _to_numpy_vector(frame.get(key))
+                status.value = (
+                    "n/a" if velocity is None else np.array2string(velocity, precision=3, suppress_small=True)
+                )
         history = frame.get("robot_state_history", {})
         timestamps_ms = frame.get("robot_state_history_timestamps_ms", [])
         history_rows = []
@@ -863,6 +915,17 @@ def main() -> None:
                         np.array2string(door_joint_pred, precision=4, suppress_small=True),
                     )
                 )
+        if has_contact_forces:
+            panel_force = _contact_force(frame, "finger_panel_contact_force_norm_n")
+            handle_force = _contact_force(frame, "gripper_handle_contact_force_norm_n")
+            panel_text = "n/a" if panel_force is None else f"{panel_force:.3f} N"
+            handle_text = "n/a" if handle_force is None else f"{handle_force:.3f} N"
+            panel_force_status.value = panel_text
+            handle_force_status.value = handle_text
+            print(
+                f"[frame {frame_idx}] fingers<->panel force: {panel_text} | "
+                f"gripper<->handle force: {handle_text}"
+            )
         if has_compact_joint_state:
             # Print saved joint angles + PD targets per frame (in the payload's saved order, i.e.
             # [base_x, base_y, base_rotation, panda_1..7, finger_0..N]), like door_joint_prediction.
@@ -937,6 +1000,8 @@ def main() -> None:
         dj0 = _door_joint_prediction(frames[0])
         dj_dim = 0 if dj0 is None else int(dj0.size)
         print(f"Door joint prediction present ({dj_dim} dims) — printing per frame to this console.")
+    if has_contact_forces:
+        print("Per-environment finger/panel and gripper/handle contact forces present — printing per frame.")
     if has_compact_joint_state:
         _cnames = payload.get("compact_target_joint_names")
         _order = (
