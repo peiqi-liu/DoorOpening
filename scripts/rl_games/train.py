@@ -50,6 +50,12 @@ parser.add_argument("--video", action="store_true", default=False, help="Record 
 parser.add_argument("--video_length", type=int, default=600, help="Length of the recorded video (in steps).")
 parser.add_argument("--video_interval", type=int, default=10000, help="Interval between video recordings (in steps).")
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
+parser.add_argument(
+    "--door-panel-effort-max",
+    type=float,
+    default=None,
+    help="Override the upper bound (Nm) of the randomized door-panel effort limit.",
+)
 parser.add_argument("--task", type=str, default="DooropeningMulti", help="Name of the task.")
 parser.add_argument(
     "--agent", type=str, default="rl_games_cfg_entry_point", help="Name of the RL agent configuration entry point."
@@ -421,6 +427,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+    if args_cli.door_panel_effort_max is not None:
+        effort_min = float(env_cfg.door_panel_effort_limit_range_nm[0])
+        if args_cli.door_panel_effort_max < max(effort_min, env_cfg.door_panel_effort_limit_start_range_nm[1]):
+            raise ValueError("Door-panel effort maximum must cover the start range")
+        env_cfg.door_panel_effort_limit_range_nm = (effort_min, args_cli.door_panel_effort_max)
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     _configure_policy_arx_mode(env_cfg)
     # check for invalid combination of CPU device with distributed training
