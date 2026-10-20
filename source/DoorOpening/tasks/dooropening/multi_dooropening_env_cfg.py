@@ -59,11 +59,11 @@ def randomize_base_impedance_correlated(
     yaw_damping_range: tuple[float, float] = (15.0, 45.0),
     yaw_k_over_d_range: tuple[float, float] = (0.8, 1.2),
 ):
-    """Map the real 0.1-scale speed request to the reanchored position drive.
+    """Sample fixed position-drive gains independently of the policy action scale.
 
-    For q_target = q_measured + dt * scale * action, K/D near
-    0.1 / (dt * scale) gives the same free-space requested speed. This is an
-    equivalent simulation mapping, not an identified hardware position spring.
+    The K/D range is anchored to the equivalent real-base estimate at action
+    scale 1. Changing the action scale changes the requested target displacement,
+    not the sampled actuator physics.
     """
     asset = env.scene[asset_cfg.name]
     if env_ids is None:
@@ -79,15 +79,11 @@ def randomize_base_impedance_correlated(
         return low + (high - low) * torch.rand(n, device=asset.device)
 
     trans_d = uniform(translation_damping_range)
-    real_action_scale = 0.1
-    sim_action_step = env.dt * float(env.cfg.base_action_scale)
-    if sim_action_step <= 0.0:
-        raise ValueError("Position base_action_scale must be positive")
     trans_ratio = uniform(translation_k_over_d_range)
-    trans_k = trans_d * (real_action_scale / sim_action_step) * trans_ratio
+    trans_k = trans_d * 1.5 * trans_ratio
     yaw_d = uniform(yaw_damping_range)
     yaw_ratio = uniform(yaw_k_over_d_range)
-    yaw_k = yaw_d * (real_action_scale / sim_action_step) * yaw_ratio
+    yaw_k = yaw_d * 1.5 * yaw_ratio
     if getattr(env.cfg, "base_control_mode", "position") == "velocity":
         # A velocity servo actively resists velocity error, including a zero-speed
         # command. It has no base-coordinate position spring.
@@ -422,9 +418,9 @@ class EventCfg:
         },
     )
 
-    # The K/D ratio accounts for the actual branch action scale (1 on the
-    # laptop, 6 in the Vision5 experiment). The first-50-frame x gain is
-    # 217–396 Ns/m; yaw near 21 Nms/rad is weakly identified.
+    # K/D is sampled independently of base_action_scale. Only the position
+    # target displacement scales with the policy action. The first-50-frame x
+    # speed-error slope was 217–396 Ns/m; yaw near 21 Nms/rad is uncertain.
     base_impedance_correlated = EventTerm(
         func=randomize_base_impedance_correlated,
         mode="reset",
@@ -890,8 +886,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=False)
 
-    # Branch-specific training scale. The velocity target is subsequently limited
-    # by the deployed speed and acceleration envelopes.
+    # Branch-specific action scale; changing it does not change sampled PD gains.
     base_action_scale = 6.0
     base_control_mode = "position"
     base_velocity_limit_xy = 0.2
