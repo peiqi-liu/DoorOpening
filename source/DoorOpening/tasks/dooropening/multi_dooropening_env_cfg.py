@@ -54,18 +54,17 @@ def randomize_base_impedance_correlated(
     env,
     env_ids: torch.Tensor | None,
     asset_cfg: SceneEntityCfg,
-    translation_damping_range: tuple[float, float] = (100.0, 300.0),
+    translation_damping_range: tuple[float, float] = (200.0, 800.0),
     translation_k_over_d_range: tuple[float, float] = (1.1, 1.9),
     translation_stiffness_range: tuple[float, float] = (100.0, 500.0),
-    yaw_damping_range: tuple[float, float] = (5.0, 40.0),
+    yaw_damping_range: tuple[float, float] = (15.0, 80.0),
     yaw_k_over_d_range: tuple[float, float] = (1.3, 1.5),
     yaw_stiffness_range: tuple[float, float] = (5.0, 45.0),
 ):
-    """Sample base velocity-servo gains, or legacy correlated position-drive gains.
+    """Sample velocity-servo gains around the first-50-frame current-based fit.
 
-    The recorded real-base speed ratio does not identify position stiffness or
-    damping. Velocity mode uses zero position stiffness and randomizes only the
-    speed-error gain; legacy position mode retains the prior K/D experiment.
+    The x fit is 217–396 Ns/m across windows; the yaw fit is about 21 Nms/rad
+    but weakly identified. High tails cover uncertain stalled/contact behavior.
     """
     asset = env.scene[asset_cfg.name]
     if env_ids is None:
@@ -420,9 +419,9 @@ class EventCfg:
         },
     )
 
-    # Velocity mode samples its speed-error gain and sets base position stiffness
-    # to zero. Position mode retains the old correlated K/D experiment. The 130 N
-    # translation and 45 Nm yaw caps remain provisional values in glorbot_cfg.
+    # Velocity mode samples speed-error gains and has no base position spring.
+    # The 25 A drive-current ideal envelope is 318 N / 81 Nm (four wheels);
+    # 110–160 N / 35–55 Nm caps are conservative usable-chassis surrogates.
     base_impedance_correlated = EventTerm(
         func=randomize_base_impedance_correlated,
         mode="reset",
@@ -430,10 +429,10 @@ class EventCfg:
             "asset_cfg": SceneEntityCfg(
                 "robot", joint_names=["base_x_joint", "base_y_joint", "base_rotation_joint"]
             ),
-            "translation_damping_range": (100.0, 300.0),
+            "translation_damping_range": (200.0, 800.0),
             "translation_k_over_d_range": (1.1, 1.9),
             "translation_stiffness_range": (100.0, 500.0),
-            "yaw_damping_range": (5.0, 40.0),
+            "yaw_damping_range": (15.0, 80.0),
             "yaw_k_over_d_range": (1.3, 1.5),
             "yaw_stiffness_range": (5.0, 45.0),
         },
