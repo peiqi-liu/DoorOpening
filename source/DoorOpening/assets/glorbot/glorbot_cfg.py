@@ -181,18 +181,18 @@ GLORBOT_CONFIG = ArticulationCfg(
     ),
     actuators={
         # Reset randomization replaces these position-drive fallback gains.
-        # Translation caps are forces (N); yaw caps are torques (Nm).
+        # Caps are conservative below the ideal 25 A drive-current envelope.
         "base_translation": ImplicitActuatorCfg(
             joint_names_expr=["base_x_joint", "base_y_joint"],
             effort_limit_sim=130.0,
-            stiffness=250.0,
-            damping=175.0,
+            stiffness=87.5,
+            damping=350.0,
         ),
         "base_rotation": ImplicitActuatorCfg(
             joint_names_expr=["base_rotation_joint"],
             effort_limit_sim=45.0,
-            stiffness=25.0,
-            damping=18.0,
+            stiffness=6.25,
+            damping=25.0,
         ),
         # Per-joint Franka PD gains matched to the REAL-WORLD deploy controller (kp/kd used on
         # hardware), set per joint because the real values vary within each group. effort_limit_sim

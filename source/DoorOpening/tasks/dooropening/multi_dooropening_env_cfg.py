@@ -54,18 +54,16 @@ def randomize_base_impedance_correlated(
     env,
     env_ids: torch.Tensor | None,
     asset_cfg: SceneEntityCfg,
-    translation_damping_range: tuple[float, float] = (100.0, 300.0),
-    translation_k_over_d_range: tuple[float, float] = (1.1, 2.2),
-    translation_stiffness_range: tuple[float, float] = (100.0, 660.0),
-    yaw_damping_range: tuple[float, float] = (5.0, 40.0),
-    yaw_k_over_d_range: tuple[float, float] = (1.1, 2.2),
-    yaw_stiffness_range: tuple[float, float] = (5.0, 88.0),
+    translation_damping_range: tuple[float, float] = (200.0, 500.0),
+    translation_k_over_d_range: tuple[float, float] = (0.8, 1.2),
+    yaw_damping_range: tuple[float, float] = (15.0, 45.0),
+    yaw_k_over_d_range: tuple[float, float] = (0.8, 1.2),
 ):
-    """Sample base velocity-servo gains, or legacy correlated position-drive gains.
+    """Map the real 0.1-scale speed request to the reanchored position drive.
 
-    The recorded real-base speed ratio does not identify position stiffness or
-    damping. Velocity mode uses zero position stiffness and randomizes only the
-    speed-error gain; legacy position mode retains the prior K/D experiment.
+    For q_target = q_measured + dt * scale * action, K/D near
+    0.1 / (dt * scale) gives the same free-space requested speed. This is an
+    equivalent simulation mapping, not an identified hardware position spring.
     """
     asset = env.scene[asset_cfg.name]
     if env_ids is None:
@@ -81,11 +79,15 @@ def randomize_base_impedance_correlated(
         return low + (high - low) * torch.rand(n, device=asset.device)
 
     trans_d = uniform(translation_damping_range)
+    real_action_scale = 0.1
+    sim_action_step = env.dt * float(env.cfg.base_action_scale)
+    if sim_action_step <= 0.0:
+        raise ValueError("Position base_action_scale must be positive")
     trans_ratio = uniform(translation_k_over_d_range)
-    trans_k = (trans_d * trans_ratio).clamp(*translation_stiffness_range)
+    trans_k = trans_d * (real_action_scale / sim_action_step) * trans_ratio
     yaw_d = uniform(yaw_damping_range)
     yaw_ratio = uniform(yaw_k_over_d_range)
-    yaw_k = (yaw_d * yaw_ratio).clamp(*yaw_stiffness_range)
+    yaw_k = yaw_d * (real_action_scale / sim_action_step) * yaw_ratio
     if getattr(env.cfg, "base_control_mode", "position") == "velocity":
         # A velocity servo actively resists velocity error, including a zero-speed
         # command. It has no base-coordinate position spring.
@@ -420,9 +422,9 @@ class EventCfg:
         },
     )
 
-    # Position mode samples correlated K/D gains. The reanchored target yields
-    # roughly 7–13% of a scale-1 action as realized free-space velocity.
-    # This is a simulation mapping, not an identified physical position spring.
+    # The K/D ratio accounts for the actual branch action scale (1 on the
+    # laptop, 6 in the Vision5 experiment). The first-50-frame x gain is
+    # 217–396 Ns/m; yaw near 21 Nms/rad is weakly identified.
     base_impedance_correlated = EventTerm(
         func=randomize_base_impedance_correlated,
         mode="reset",
@@ -430,12 +432,10 @@ class EventCfg:
             "asset_cfg": SceneEntityCfg(
                 "robot", joint_names=["base_x_joint", "base_y_joint", "base_rotation_joint"]
             ),
-            "translation_damping_range": (100.0, 300.0),
-            "translation_k_over_d_range": (1.1, 2.2),
-            "translation_stiffness_range": (100.0, 660.0),
-            "yaw_damping_range": (5.0, 40.0),
-            "yaw_k_over_d_range": (1.1, 2.2),
-            "yaw_stiffness_range": (5.0, 88.0),
+            "translation_damping_range": (200.0, 500.0),
+            "translation_k_over_d_range": (0.8, 1.2),
+            "yaw_damping_range": (15.0, 45.0),
+            "yaw_k_over_d_range": (0.8, 1.2),
         },
     )
 
