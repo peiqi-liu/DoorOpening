@@ -3410,16 +3410,24 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
             )
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
-            points_base = self._sample_wall_pointcloud_local()
         else:
             env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
             if env_ids.numel() == 0:
                 return
-            points_base = self._sample_wall_pointcloud_local(env_ids=env_ids)
-        door_base_pos_w = self.ov_env.door.data.body_pos_w[env_ids, self.door_base_body_idx]
-        door_base_quat_w = self.ov_env.door.data.body_quat_w[env_ids, self.door_base_body_idx]
-        quat = door_base_quat_w.unsqueeze(1).expand(-1, points_base.shape[1], -1)
-        self._wall_distractor_world_points[env_ids] = quat_apply(quat, points_base) + door_base_pos_w.unsqueeze(1)
+
+        # Sampling the entire wall cloud at once creates several temporary (envs, points)
+        # tensors. At 2k environments this can exceed GPU memory even when the final cached
+        # cloud fits. Process modest env batches and write each transformed chunk directly
+        # into the persistent world-space cache.
+        chunk_size = 128
+        for env_chunk in env_ids.split(chunk_size):
+            points_base = self._sample_wall_pointcloud_local(env_ids=env_chunk)
+            door_base_pos_w = self.ov_env.door.data.body_pos_w[env_chunk, self.door_base_body_idx]
+            door_base_quat_w = self.ov_env.door.data.body_quat_w[env_chunk, self.door_base_body_idx]
+            quat = door_base_quat_w.unsqueeze(1).expand(-1, points_base.shape[1], -1)
+            self._wall_distractor_world_points[env_chunk] = (
+                quat_apply(quat, points_base) + door_base_pos_w.unsqueeze(1)
+            )
 
     def _resample_door_frame_visibility(self, env_ids=None):
         """Redraw the per-env boolean deciding whether the door frame (link_0) is rendered this episode."""
