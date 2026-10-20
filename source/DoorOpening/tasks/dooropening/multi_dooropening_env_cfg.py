@@ -892,7 +892,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
 
     # Branch-specific training scale. The velocity target is subsequently limited
     # by the deployed speed and acceleration envelopes.
-    base_action_scale = 1.0
+    base_action_scale = 6.0
     base_control_mode = "position"
     base_velocity_limit_xy = 0.2
     base_velocity_limit_yaw = 0.7
