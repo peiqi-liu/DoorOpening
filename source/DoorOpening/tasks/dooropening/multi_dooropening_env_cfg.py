@@ -586,7 +586,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # Floor 8 -> 3 Nm: below the start band's 10 Nm floor again, so ADR re-introduces lighter doors
     # as it widens (not just adds heavier ones -- see the start-band note above). Ceiling trimmed
     # back down 75 -> 70 Nm.
-    door_panel_effort_limit_range_nm = (3.0, 70.0)  # was (3.0, 75.0), temp update
+    door_panel_effort_limit_range_nm = (3.0, 60.0)  # distillation effort ceiling
 
     # Each door URDF supplies its own positive joint_2 hard stop. DooropeningEnv mirrors that stop
     # to negative travel; randomize the gap below the symmetric stop for an absolute-angle
