@@ -875,12 +875,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=False)
 
-    # Branch-specific training scale. The velocity target is subsequently limited
-    # by the deployed speed and acceleration envelopes.
+    # The velocity target is the bounded policy action times this scale.
+    # Acceleration is limited below; there is no additional speed cap.
     base_action_scale = 1.0
     base_control_mode = "velocity"
-    base_velocity_limit_xy = 0.2
-    base_velocity_limit_yaw = 0.7
     base_acceleration_limit_xy = 0.2
     base_acceleration_limit_yaw = 0.79
     arm_action_scale = 0.6

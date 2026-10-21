@@ -452,10 +452,6 @@ class DooropeningEnv(DirectRLEnv):
         )
         self._base_velocity_target = torch.zeros((self.num_envs, self.num_base_joints), device=self.device)
         # Base action and joint order are [yaw, x, y] in the environment frame.
-        self._base_velocity_limits = torch.tensor(
-            (self.cfg.base_velocity_limit_yaw, self.cfg.base_velocity_limit_xy, self.cfg.base_velocity_limit_xy),
-            device=self.device,
-        )
         self._base_acceleration_limits = torch.tensor(
             (self.cfg.base_acceleration_limit_yaw, self.cfg.base_acceleration_limit_xy,
              self.cfg.base_acceleration_limit_xy),
@@ -1362,9 +1358,9 @@ class DooropeningEnv(DirectRLEnv):
         self.applied_robot_dof_targets[:] = self._apply_action_latency(self.robot_dof_targets)
         self.applied_robot_dof_targets[:] = self._pin_arx_targets_to_fixed_pose(self.applied_robot_dof_targets)
         if self.base_control_mode == "velocity":
-            desired = self.scaled_actions[:, :base_stop].clamp(
-                -self._base_velocity_limits, self._base_velocity_limits
-            )
+            # The policy action is already bounded to [-1, 1] and multiplied by
+            # base_action_scale. Do not impose an additional base speed cap.
+            desired = self.scaled_actions[:, :base_stop]
             lag_idx = (self._action_latency_buf - 1).clamp(0, self._max_action_latency - 1)
             env_idx = torch.arange(self.num_envs, device=self.device)
             delayed = self._base_velocity_history[env_idx, lag_idx]
