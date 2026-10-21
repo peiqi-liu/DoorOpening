@@ -69,16 +69,21 @@ def resolve_converter_cache_dir(
     variant: str | None = None,
 ) -> str:
     """Build a stable absolute cache directory for a converted asset."""
-    asset_path = Path(asset_path).expanduser().resolve()
+    # Keep the caller-visible path when assets are linked into this repository.
+    # Resolving the symlink before relative_to(asset_root) collapses every
+    # mobility.urdf outside the root to the same cache directory.
+    asset_path = Path(os.path.abspath(os.fspath(Path(asset_path).expanduser())))
 
     if asset_root is not None:
-        asset_root = Path(asset_root).expanduser().resolve()
+        asset_root = Path(os.path.abspath(os.fspath(Path(asset_root).expanduser())))
         try:
             relative_asset_path = asset_path.relative_to(asset_root)
         except ValueError:
-            relative_asset_path = Path(asset_path.name)
+            path_hash = hashlib.sha256(os.fspath(asset_path).encode()).hexdigest()[:16]
+            relative_asset_path = Path("_external") / path_hash / asset_path.name
     else:
-        relative_asset_path = Path(asset_path.name)
+        path_hash = hashlib.sha256(os.fspath(asset_path).encode()).hexdigest()[:16]
+        relative_asset_path = Path("_external") / path_hash / asset_path.name
 
     cache_dir = get_converter_cache_root() / namespace
     if variant:
