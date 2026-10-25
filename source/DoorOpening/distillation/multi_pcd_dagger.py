@@ -2870,8 +2870,10 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.aux_buffer[env_ids] = seed[env_ids]
 
     def _init_pointcloud_assets(self):
+        # Recess assets can link traj.pkl to the source family's trajectory. Match the
+        # directory containing the link, rather than resolving it into that source family.
         asset_index_by_dir = {
-            Path(asset_path).resolve().parent: idx for idx, asset_path in enumerate(door_asset_paths)
+            Path(os.path.abspath(asset_path)).parent: idx for idx, asset_path in enumerate(door_asset_paths)
         }
         ref_motion_lib = getattr(self.ov_env, "ref_motion_lib", None)
         env_asset_indices = getattr(self.ov_env, "env_asset_indices", None)
@@ -2886,7 +2888,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         else:
             motion_to_asset_idx = []
             for motion_path in motion_traj_paths:
-                motion_dir = Path(motion_path).resolve().parent
+                motion_dir = Path(os.path.abspath(motion_path)).parent
                 if motion_dir not in asset_index_by_dir:
                     raise KeyError(f"Could not map motion file '{motion_path}' to a door asset path.")
                 motion_to_asset_idx.append(asset_index_by_dir[motion_dir])
@@ -3870,6 +3872,22 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
 
     def _render_depth_scene_single_pass(self, door_walls_pcd_world, robot_pcd_world, camera_pose, handle_pcd_world=None):
         """Render the scene depth; optionally keep semantic handle returns out of min pooling."""
+        # Rasterization creates several (envs, scene points) temporaries. Keep the
+        # training batch intact while bounding those temporaries on 24 GB GPUs.
+        render_batch_size = 64
+        if door_walls_pcd_world.shape[0] > render_batch_size:
+            return torch.cat(
+                [
+                    self._render_depth_scene_single_pass(
+                        door_walls_pcd_world[start : start + render_batch_size],
+                        robot_pcd_world[start : start + render_batch_size],
+                        camera_pose[start : start + render_batch_size],
+                        None if handle_pcd_world is None else handle_pcd_world[start : start + render_batch_size],
+                    )
+                    for start in range(0, door_walls_pcd_world.shape[0], render_batch_size)
+                ],
+                dim=0,
+            )
         render_pcd_world = torch.cat((door_walls_pcd_world, robot_pcd_world), dim=1)
         if self.depth_cam_handle_layer_enabled:
             if handle_pcd_world is None:

@@ -131,6 +131,12 @@ parser.add_argument(
     help="Which distributed ranks record videos. Use 'all' to record one rank-specific video folder per GPU.",
 )
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
+parser.add_argument(
+    "--door-panel-effort-max",
+    type=float,
+    default=None,
+    help="Upper bound in Nm for randomized door-panel effort during distillation.",
+)
 parser.add_argument("--task", type=str, default="DooropeningMulti", help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument(
@@ -149,6 +155,7 @@ parser.add_argument(
     help="Polling interval while nonzero ranks wait for shared URDF preconversion.",
 )
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
+parser.add_argument("--save-interval", type=int, default=None, help="Student checkpoint interval in iterations.")
 parser.add_argument("--teacher", type=str, default=None, help="Teacher checkpoint to use")
 parser.add_argument("--teacher-partnetv5", "--teacher_partnetv5", dest="teacher_partnetv5", type=str, default=None, help="Teacher checkpoint for PartNetv5.")
 parser.add_argument("--teacher-partnetv6", "--teacher_partnetv6", dest="teacher_partnetv6", type=str, default=None, help="Teacher checkpoint for PartNetv6.")
@@ -328,6 +335,13 @@ def main(env_cfg, agent_cfg: dict):
         )
 
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+    if args_cli.door_panel_effort_max is not None:
+        effort_min = float(env_cfg.door_panel_effort_limit_range_nm[0])
+        start_max = float(env_cfg.door_panel_effort_limit_start_range_nm[1])
+        if args_cli.door_panel_effort_max < max(effort_min, start_max):
+            raise ValueError("Door-panel effort maximum must cover the start range")
+        env_cfg.door_panel_effort_limit_range_nm = (effort_min, args_cli.door_panel_effort_max)
+        print(f"[INFO] Distillation door-panel effort range: {env_cfg.door_panel_effort_limit_range_nm} Nm")
 
     # parse configuration
     # env_cfg = parse_env_cfg(
@@ -435,6 +449,8 @@ def main(env_cfg, agent_cfg: dict):
         dagger_runtime_cfg["num_iters"] = args_cli.max_iterations
     else:
         dagger_runtime_cfg.setdefault("num_iters", 100_000)
+    if args_cli.save_interval is not None:
+        dagger_runtime_cfg["save_interval"] = max(1, args_cli.save_interval)
     if args_cli.pointcloud_source is not None:
         dagger_runtime_cfg["pointcloud_source"] = args_cli.pointcloud_source
     else:

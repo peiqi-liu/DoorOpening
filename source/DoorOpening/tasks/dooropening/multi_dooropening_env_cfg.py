@@ -58,6 +58,8 @@ def randomize_base_impedance_correlated(
     translation_k_over_d_range: tuple[float, float] = (0.8, 1.2),
     yaw_damping_range: tuple[float, float] = (15.0, 45.0),
     yaw_k_over_d_range: tuple[float, float] = (0.8, 1.2),
+    translation_damping_override: float | None = None,
+    yaw_damping_override: float | None = None,
 ):
     """Sample fixed position-drive gains independently of the policy action scale.
 
@@ -80,9 +82,14 @@ def randomize_base_impedance_correlated(
 
     trans_d = uniform(translation_damping_range)
     trans_ratio = uniform(translation_k_over_d_range)
-    trans_k = trans_d * 1.5 * trans_ratio
     yaw_d = uniform(yaw_damping_range)
     yaw_ratio = uniform(yaw_k_over_d_range)
+    # Keep position stiffness coupled to damping through the configured K/D ratio.
+    if translation_damping_override is not None:
+        trans_d.fill_(float(translation_damping_override))
+    if yaw_damping_override is not None:
+        yaw_d.fill_(float(yaw_damping_override))
+    trans_k = trans_d * 1.5 * trans_ratio
     yaw_k = yaw_d * 1.5 * yaw_ratio
     if getattr(env.cfg, "base_control_mode", "position") == "velocity":
         # A velocity servo actively resists velocity error, including a zero-speed
