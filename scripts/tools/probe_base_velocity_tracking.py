@@ -25,10 +25,18 @@ parser.add_argument("--seed", type=int, default=85000)
 parser.add_argument("--controller", choices=("position", "velocity", "native-velocity"), default="position")
 parser.add_argument("--limit-acceleration", action="store_true", help="Apply deployed 0.2 m/s² and 0.79 rad/s² limits")
 parser.add_argument("--trace-json", type=Path, help="Replay recorded robot-frame raw base actions at their physical scale")
+parser.add_argument("--door-families", default="ScratchDoors_left_pull_current_20261023")
+parser.add_argument("--translation-k", type=float, help="Fixed position-drive stiffness in N/m")
+parser.add_argument("--translation-d", type=float, help="Fixed position-drive damping in Ns/m")
+parser.add_argument("--yaw-k", type=float, help="Fixed position-drive stiffness in Nm/rad")
+parser.add_argument("--yaw-d", type=float, help="Fixed position-drive damping in Nms/rad")
+parser.add_argument("--action-latency-steps", type=int, help="Override sampled target latency for a controlled probe")
+parser.add_argument("--position-target-no-dt", action="store_true", help="Interpret scaled base action as a direct position displacement")
+parser.add_argument("--trace-raw-actions", action="store_true", help="Send recorded raw policy actions through the configured base_action_scale")
 parser.add_argument("--output-dir", type=Path, default=Path("runs/base_velocity_probe_20261019"))
 AppLauncher.add_app_launcher_args(parser)
 args, hydra_args = parser.parse_known_args()
-os.environ["DOOROPENING_MULTI_DOOR_FAMILIES"] = "PartNetv5_plus_hardstop_20261012"
+os.environ["DOOROPENING_MULTI_DOOR_FAMILIES"] = args.door_families
 os.environ["DOOROPENING_MULTI_DOOR_ASSET_LIMIT"] = str(args.num_envs)
 sys.argv = [sys.argv[0], *hydra_args]
 app = AppLauncher(args).app
@@ -50,12 +58,35 @@ def main(env_cfg, _agent_cfg):
     env_cfg.use_motion_ref = True
     env_cfg.base_action_scale = args.base_action_scale
     env_cfg.base_control_mode = "velocity" if args.controller == "native-velocity" else "position"
+    gains = (args.translation_k, args.translation_d, args.yaw_k, args.yaw_d)
+    if any(value is not None for value in gains):
+        if any(value is None or value <= 0 for value in gains):
+            raise ValueError("All four fixed position-drive gains must be positive and specified together")
+        params = env_cfg.events.base_impedance_correlated.params
+        params["translation_damping_range"] = (args.translation_d, args.translation_d)
+        params["translation_k_over_d_range"] = (args.translation_k / (1.5 * args.translation_d),) * 2
+        params["yaw_damping_range"] = (args.yaw_d, args.yaw_d)
+        params["yaw_k_over_d_range"] = (args.yaw_k / (1.5 * args.yaw_d),) * 2
     preconvert_shared_urdf_assets(door_configs=env_cfg.door_cfg, verbose=False)
     env = gym.make("DooropeningMulti", cfg=env_cfg)
     base_env = env.unwrapped
     base_env.early_stopping = False
     base_env.ref_motion_lib.reset_from_start = True
     device = base_env.device
+    if args.position_target_no_dt:
+        if args.controller != "position":
+            raise ValueError("--position-target-no-dt requires --controller position")
+
+        def base_target_without_dt(scaled_base_actions):
+            base_stop = base_env._target_base_xy_slice.stop
+            q_base = base_env.robot.data.joint_pos[:, base_env._robot_base_dof_idx]
+            return torch.clamp(
+                q_base + scaled_base_actions,
+                base_env.robot_dof_lower_limits[:base_stop],
+                base_env.robot_dof_upper_limits[:base_stop],
+            )
+
+        base_env.base_target_from_scaled_actions = base_target_without_dt
     joint_ids, joint_names = base_env.robot.find_joints(
         ["base_x_joint", "base_y_joint", "base_rotation_joint"], preserve_order=True
     )
@@ -108,6 +139,11 @@ def main(env_cfg, _agent_cfg):
         "controller": args.controller,
         "limit_acceleration": args.limit_acceleration,
         "trace_json": str(args.trace_json) if args.trace_json else None,
+        "door_families": args.door_families,
+        "fixed_gains": dict(zip(("translation_k", "translation_d", "yaw_k", "yaw_d"), gains)),
+        "action_latency_steps_override": args.action_latency_steps,
+        "position_target_no_dt": args.position_target_no_dt,
+        "trace_raw_actions": args.trace_raw_actions,
         "steps": args.steps,
         "settle_step": args.settle_step,
         "dt_s": float(base_env.dt),
@@ -116,6 +152,11 @@ def main(env_cfg, _agent_cfg):
     try:
         for name, action_idx, joint_name, request in trials:
             env.reset()
+            if args.action_latency_steps is not None:
+                if not 1 <= args.action_latency_steps <= base_env._max_action_latency:
+                    raise ValueError("action latency override is outside the environment range")
+                base_env._action_latency_buf.fill_(args.action_latency_steps)
+            sampled_latency = base_env._action_latency_buf.detach().cpu().tolist()
             if args.controller == "velocity":
                 velocity_history.zero_()
                 velocity_target.zero_()
@@ -142,9 +183,10 @@ def main(env_cfg, _agent_cfg):
                     raw_robot = torch.tensor(frame["raw_action"], device=device).clamp(-1.0, 1.0)
                     request_robot = raw_robot * torch.tensor(trace["scale"], device=device)
                     yaw = base_env.robot.data.joint_pos[:, joint_ids[indices["base_rotation_joint"]]]
-                    actions[:, 0] = request_robot[2] / args.base_action_scale
-                    actions[:, 1] = (yaw.cos() * request_robot[0] - yaw.sin() * request_robot[1]) / args.base_action_scale
-                    actions[:, 2] = (yaw.sin() * request_robot[0] + yaw.cos() * request_robot[1]) / args.base_action_scale
+                    policy_robot = raw_robot if args.trace_raw_actions else request_robot / args.base_action_scale
+                    actions[:, 0] = policy_robot[2]
+                    actions[:, 1] = yaw.cos() * policy_robot[0] - yaw.sin() * policy_robot[1]
+                    actions[:, 2] = yaw.sin() * policy_robot[0] + yaw.cos() * policy_robot[1]
                 _, _, terminated, truncated, _ = env.step(actions)
                 if bool((terminated | truncated).any()):
                     raise RuntimeError(f"Environment reset during {name} probe at step {step}")
@@ -194,6 +236,7 @@ def main(env_cfg, _agent_cfg):
                     "last_measured_by_env": velocity[-1].tolist(),
                     "stiffness_by_env": gains_k.tolist(),
                     "damping_by_env": gains_d.tolist(),
+                    "action_latency_by_env": sampled_latency,
                 }
                 print(f"[PROBE] {name} steady_ratio={ratio.tolist()}", flush=True)
             else:
@@ -211,6 +254,7 @@ def main(env_cfg, _agent_cfg):
                     ).abs().mean(0).tolist(),
                     "stiffness_by_env": gains_k.tolist(),
                     "damping_by_env": gains_d.tolist(),
+                    "action_latency_by_env": sampled_latency,
                 }
                 print(f"[PROBE] recorded mean sim steady={velocity[args.settle_step :].mean(0).tolist()}", flush=True)
     finally:

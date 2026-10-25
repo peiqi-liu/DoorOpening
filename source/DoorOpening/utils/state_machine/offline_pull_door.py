@@ -791,10 +791,9 @@ def state_machine_offline_left_pull_door(
     )
 
     base_target_rot = robot_initial_pose[:, 3:].to(device).clone()
-    # Pregrasp/grasp yaw kept at the tuned -0.60*pi; unlatch and the pull sweep remain at
-    # their own original, independent pre-session values below (the "unify to one yaw" experiment
-    # is reverted for everything except this one).
-    default_palm_rot = get_rotation_quat(math.pi / 2, 0, -0.65 * math.pi, device)
+    # Keep the top-down palm yaw unchanged from approach through unlatching and pulling.
+    pull_palm_yaw = -0.8 * math.pi
+    default_palm_rot = get_rotation_quat(math.pi / 2, 0, pull_palm_yaw, device)
 
     # Guarantee the very first keyframe starts from a fully open gripper, regardless of whatever
     # gripper value the caller's robot_initial_q happened to carry -- staged closing below should
@@ -814,19 +813,18 @@ def state_machine_offline_left_pull_door(
 
     # Unified with the push-left planner so pregrasp/grasp base + palm offsets match
     # (keeps the base off the side wall, like the push planner).
-    # Base standoff kept CONSTANT with the right-door planner (0.67) so left/right grasp the same
-    # distance out; palm offsets unchanged -> the arm just reaches slightly further forward.
+    # Base standoff kept at the same distance as the right-door planner.
     # Base stands 5 cm further BACK from the door (0.67 -> 0.72; +x is away from the panel, the
     # robot faces -x). Shared by pregrasp, grasp AND unlatch -- Steps 2 and 3 reuse this same
-    # base_target_pose -- so this one value backs the whole approach off. Palm offsets are
-    # unchanged and measured from the handle, so the arm simply reaches 5 cm further forward.
+    # base_target_pose -- so this one value backs the whole approach off. Palm offsets below
+    # are measured from the handle.
     pregrasp_base_x_offset = 0.72
     # Pulled 5cm back off the +y side so the left door pregrasp doesn't reach so far right.
     pregrasp_base_y_offset = 0.25
-    # Brought closer to the panel (0.25 -> 0.15) to match the new pregrasp/grasp yaw.
-    pregrasp_palm_x_offset = 0.3
+    # With the top-down yaw, approach closer to the panel and above the handle.
+    pregrasp_palm_x_offset = 0.2
     pregrasp_palm_y_offset = 0.15
-    pregrasp_palm_z_offset = 0.10
+    pregrasp_palm_z_offset = 0.20
 
     base_target_pos = handle_pos.clone()
     base_target_pos[:, 0] += pregrasp_base_x_offset
@@ -869,8 +867,8 @@ def state_machine_offline_left_pull_door(
     # (-x, toward the handle/door). Robot faces -x, so right=+y / left=-y / forward=-x.
     # Palm<->door x gap kept at 0.035, matching the right-door planner so left/right grasp the
     # same distance out from the panel.
-    # Back the grasp pose away from the handle by 1.5 cm to reduce panel-side slip/contact.
-    grasp_palm_x_offset = 0.075
+    # Move the grasp palm 1 cm farther forward toward the handle.
+    grasp_palm_x_offset = 0.065
     grasp_palm_y_offset = 0.015
     grasp_palm_z_offset = 0.02
 
@@ -904,6 +902,9 @@ def state_machine_offline_left_pull_door(
     # -------------------------
     # Step 3: Rotate hinge (unlatch)
     # -------------------------
+    # Finish the camera-facing approach at the grasp, then return the base to
+    # zero relative yaw before exerting force on the handle and panel.
+    base_target_pose = _make_pose(base_target_pos, base_target_rot)
     # Press this asset's own mechanical stop, not a shared angle: the unlatch threshold in sim is
     # sampled below this URDF limit by the configured stop-to-threshold gap.
     unlatch_hinge_angle = _read_handle_hard_stop_rad(door_urdf_path)
@@ -917,7 +918,6 @@ def state_machine_offline_left_pull_door(
     # handle_pitch_gain * handle_angle formula during its hinge-release stage, so the press and
     # the release are two continuous halves of the same motion instead of independently-tuned
     # endpoints with a pop between them.
-    unlatch_yaw = -0.7 * math.pi
     pull_rot_roll_base = math.pi / 2
     pull_rot_roll_per_theta = 0.9
     pull_theta_start = 0.30
@@ -937,7 +937,7 @@ def state_machine_offline_left_pull_door(
         palm_target_pose[:, 3:] = get_rotation_quat(
             unlatch_roll,
             handle_pitch_gain * handle_angle,
-            unlatch_yaw,
+            pull_palm_yaw,
             device,
         )
 
@@ -976,7 +976,6 @@ def state_machine_offline_left_pull_door(
     # panda_link3 was hitting arx link4.
     pull_base_y_offset = 0.08
     pull_base_y_gain = -0.1 / 1.45
-    pull_yaw = -0.8 * math.pi
 
     # Held flat while the panel is not yet confidently open (0.3 rad -- matches pull_theta_start, well
     # past the door_closed_range=0.05 rad relock boundary), then released QUICKLY rather than dragged
@@ -996,7 +995,7 @@ def state_machine_offline_left_pull_door(
     # 0.85 while the hinge hold keeps the handle pressed, then ramping back to 0 exactly as the
     # handle springs back (pull_hinge_hold_until_theta -> pull_hinge_release_by_theta below),
     # continuous with Step 3's ramp-up instead of holding pitch=0 through the whole sweep. Yaw
-    # fixed at unlatch_pull_yaw, shared with Step 3.
+    # fixed at pull_palm_yaw, shared with approach and Step 3.
 
     theta_values = torch.arange(
         pull_theta_start,
@@ -1025,10 +1024,7 @@ def state_machine_offline_left_pull_door(
         base_target_pos = handle_pos.clone()
         base_target_pos[:, 0] += pull_base_x_offset
         base_target_pos[:, 1] = pull_base_y_offset + theta.item() * pull_base_y_gain
-        pull_open_base_tilt_yaw = 0.3  # unified with pregrasp_base_tilt_yaw above
-        _, _, _base_yaw = euler_xyz_from_quat(base_target_rot)
-        pull_open_tilt_base_rot = get_rotation_quat(0.0, 0.0, _base_yaw.item() + pull_open_base_tilt_yaw, device)
-        base_target_pose = _make_pose(base_target_pos, pull_open_tilt_base_rot)
+        base_target_pose = _make_pose(base_target_pos, base_target_rot)
 
         palm_dx, palm_dy = _rotate_xy_counterclockwise(
             pull_palm_x_offset_closed,
@@ -1044,7 +1040,7 @@ def state_machine_offline_left_pull_door(
         palm_target_rot = get_rotation_quat(
             pull_rot_roll_base + pull_rot_roll_per_theta * theta.item(),
             handle_pitch_gain * handle_angle,
-            pull_yaw,
+            pull_palm_yaw,
             device,
         )
         palm_target_pose = _make_pose(palm_target_pos, palm_target_rot)
@@ -1085,17 +1081,17 @@ def state_machine_offline_left_pull_door(
     # -------------------------
     _, _, robot_initial_yaw = euler_xyz_from_quat(base_target_rot)
 
-    # Measured from the last pull pose. Compensate for its 5 cm smaller
-    # standoff to preserve the blocking pose's world x coordinate.
-    release_base_x_delta_1 = -0.17
+    # Advance 10 cm farther than the previous blocking approach, measured from
+    # the last pull pose. The second blocking waypoint inherits this shift.
+    release_base_x_delta_1 = -0.27
     # Blocking pose Y: +y approaches the open leaf, -y backs away. Kept a margin off the leaf.
-    release_base_y = -0.15  # 5 cm right (+world y) of the previous blocking pose
+    release_base_y = -0.10  # 5 cm farther right (+world y) than the previous blocking pose
     release_palm_x_delta = 0.25
     release_palm_y_delta = 0.0
     release_base_x_delta_2 = -0.18
     release_door_open_angle = 1.35
 
-    # Positive relative yaw turns the base toward the opened panel on -y.
+    # Once the panel is open, turn right to block it while the base advances.
     tilt_base_yaw = -0.8
     tilted_base_rot = get_rotation_quat(
         0.0,
@@ -1309,12 +1305,11 @@ def state_machine_offline_left_pull_door(
     )
 
     # -------------------------
-    # Step 8: Restore the base to normal yaw, traverse with a suitable arm pose,
+    # Step 8: Restore zero base yaw during traversal with a suitable arm pose,
     # then finish the traverse with default arm joints
     # -------------------------
     # Traverse forward THROUGH the doorway with a smooth, interpolated base sweep while the arm
     # keeps HOLDING the door panel (palm pinned), so the arm does not jerk away from the panel.
-    # The tilted blocking yaw is restored to normal over the same sweep.
     traverse_mid_x = 0.0
     traverse_mid_y = -0.05
     # Drive well past the doorway so the closing door panel can't smash the base from behind.

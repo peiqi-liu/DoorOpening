@@ -646,7 +646,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 name=experiment_name,
                 sync_tensorboard=False,
                 monitor_gym=True,
-                save_code=True,
+                save_code=os.getenv("DOOROPENING_WANDB_SAVE_CODE", "1") != "0",
             )
             if not wandb.run.resumed:
                 wandb.config.update({"env_cfg": env_cfg.to_dict()})

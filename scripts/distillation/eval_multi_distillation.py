@@ -282,6 +282,13 @@ parser.add_argument(
     help="Eval-only base actuator control mode; velocity uses the deployed speed and acceleration limits.",
 )
 parser.add_argument(
+    "--legacy-base-physics-20261017",
+    action="store_true",
+    help="Eval-only: reproduce the October 17 position-drive base gains and effort limits.",
+)
+parser.add_argument("--base-velocity-limit-xy", type=float, default=None, help="Eval-only x/y velocity target cap in m/s.")
+parser.add_argument("--base-velocity-limit-yaw", type=float, default=None, help="Eval-only yaw velocity target cap in rad/s.")
+parser.add_argument(
     "--aux-handle-gt-refresh-steps",
     type=int,
     default=0,
@@ -2221,6 +2228,33 @@ def main(env_cfg, agent_cfg: dict):
     if args_cli.base_control_mode is not None:
         env_cfg.base_control_mode = args_cli.base_control_mode
         print(f"[INFO] Eval-only base_control_mode override: {env_cfg.base_control_mode}")
+    if args_cli.legacy_base_physics_20261017:
+        if env_cfg.base_control_mode != "position":
+            raise ValueError("--legacy-base-physics-20261017 requires position control")
+        base_translation = env_cfg.robot_cfg.actuators["base_translation"]
+        base_rotation = env_cfg.robot_cfg.actuators["base_rotation"]
+        base_translation.stiffness = 80000.0
+        base_translation.damping = 12000.0
+        base_translation.effort_limit_sim = 1000.0
+        base_rotation.stiffness = 11000.0
+        base_rotation.damping = 1200.0
+        base_rotation.effort_limit_sim = 1000.0
+        env_cfg.events.base_impedance_correlated = None
+        env_cfg.events.base_translation_effort_limit = None
+        env_cfg.events.base_yaw_effort_limit = None
+        print("[INFO] Eval-only October 17 base physics: translation K=80000 D=12000 effort=1000; yaw K=11000 D=1200 effort=1000")
+    if args_cli.base_velocity_limit_xy is not None:
+        if args_cli.base_velocity_limit_xy <= 0.0:
+            raise ValueError("--base-velocity-limit-xy must be positive")
+        env_cfg.base_velocity_limit_xy = args_cli.base_velocity_limit_xy
+    if args_cli.base_velocity_limit_yaw is not None:
+        if args_cli.base_velocity_limit_yaw <= 0.0:
+            raise ValueError("--base-velocity-limit-yaw must be positive")
+        env_cfg.base_velocity_limit_yaw = args_cli.base_velocity_limit_yaw
+    print(
+        f"[INFO] Eval base velocity caps: x/y={env_cfg.base_velocity_limit_xy} m/s, "
+        f"yaw={env_cfg.base_velocity_limit_yaw} rad/s"
+    )
     if args_cli.arm_action_scale is not None:
         if args_cli.arm_action_scale <= 0.0:
             raise ValueError("--arm-action-scale must be positive")

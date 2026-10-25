@@ -39,6 +39,36 @@ parser.add_argument(
     "--agent", type=str, default="rl_games_cfg_entry_point", help="Name of the RL agent configuration entry point."
 )
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint.")
+parser.add_argument(
+    "--base-translation-damping",
+    type=float,
+    default=None,
+    help="Override position-control base x/y damping (N s/m), scaling stiffness with the sampled K/D ratio.",
+)
+parser.add_argument(
+    "--base-yaw-damping",
+    type=float,
+    default=None,
+    help="Override position-control base yaw damping (N m s/rad), scaling stiffness with the sampled K/D ratio.",
+)
+parser.add_argument(
+    "--door-panel-effort",
+    type=float,
+    default=None,
+    help="Fix the unlocked door-panel effort limit to this value (Nm) for playback.",
+)
+parser.add_argument(
+    "--door-panel-effort-max",
+    type=float,
+    default=None,
+    help="Set the maximum unlocked door-panel effort for randomized playback (Nm).",
+)
+parser.add_argument(
+    "--door-panel-stiffness-max",
+    type=float,
+    default=None,
+    help="Set the full-ADR door-panel stiffness ceiling for randomized playback (Nm/rad).",
+)
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument(
     "--adr-increments",
@@ -504,6 +534,42 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    if args_cli.base_translation_damping is not None or args_cli.base_yaw_damping is not None:
+        if getattr(env_cfg, "base_control_mode", "position") != "position":
+            raise ValueError("Base damping playback overrides require position control")
+        params = env_cfg.events.base_impedance_correlated.params
+        for value, key in (
+            (args_cli.base_translation_damping, "translation_damping_override"),
+            (args_cli.base_yaw_damping, "yaw_damping_override"),
+        ):
+            if value is not None:
+                if value <= 0.0:
+                    raise ValueError(f"{key} must be positive")
+                params[key] = value
+        print(
+            "[INFO] Fixed base damping for playback: "
+            f"translation={args_cli.base_translation_damping}, yaw={args_cli.base_yaw_damping}"
+        )
+    if args_cli.door_panel_effort is not None:
+        if args_cli.door_panel_effort <= 0.0:
+            raise ValueError("--door-panel-effort must be positive")
+        fixed_effort = (args_cli.door_panel_effort, args_cli.door_panel_effort)
+        env_cfg.door_panel_effort_limit_start_range_nm = fixed_effort
+        env_cfg.door_panel_effort_limit_range_nm = fixed_effort
+        print(f"[INFO] Fixed unlocked door-panel effort limit: {args_cli.door_panel_effort:g} Nm")
+    elif args_cli.door_panel_effort_max is not None:
+        lower, _ = env_cfg.door_panel_effort_limit_range_nm
+        if args_cli.door_panel_effort_max < lower:
+            raise ValueError("--door-panel-effort-max must be at least the range minimum")
+        env_cfg.door_panel_effort_limit_range_nm = (lower, args_cli.door_panel_effort_max)
+        print(f"[INFO] Randomized unlocked door-panel effort range: {lower:g}–{args_cli.door_panel_effort_max:g} Nm")
+    if args_cli.door_panel_stiffness_max is not None:
+        params = env_cfg.adr_cfg_dict["door_board_joint_stiffness_and_damping"]
+        lower, _ = params["stiffness_distribution_params"]
+        if args_cli.door_panel_stiffness_max < lower:
+            raise ValueError("--door-panel-stiffness-max must be at least the range minimum")
+        params["stiffness_distribution_params"] = (lower, args_cli.door_panel_stiffness_max)
+        print(f"[INFO] Full-ADR door-panel stiffness range: {lower:g}–{args_cli.door_panel_stiffness_max:g} Nm/rad")
     _configure_policy_arx_mode(env_cfg)
     if args_cli.adr_increments is not None:
         env_cfg.starting_adr_increments = args_cli.adr_increments
@@ -714,6 +780,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     door_audit_state = None
     if args_cli.door_audit_out is not None:
+        import pickle
+
         from DoorOpening.assets.door.multi_door_cfg import asset_paths as _audit_asset_paths
 
         _n_assets = len(_audit_asset_paths)
@@ -730,21 +798,30 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         #   hinge_max   : how far the door actually swung open (rad)
         #   latch_max   : how far the handle actually turned (rad)
         #   dist_past_max: how far the base traversed past the door plane (m)
-        # The env cfg declares success_far_push_dist / success_far_pull_dist for exactly this
-        # traversal test, but nothing in the codebase reads them -- we apply them here.
+        # Read the actual trajectory direction. Inferring push/pull from the reference's
+        # final base distance misclassifies long pull trajectories as push.
+        asset_is_push = []
+        for asset_path in _audit_asset_paths:
+            trajectory_path = os.path.join(os.path.dirname(asset_path), "traj.pkl")
+            with open(trajectory_path, "rb") as trajectory_file:
+                opening_direction = pickle.load(trajectory_file)["opening_direction"]
+            if opening_direction not in ("push", "pull"):
+                raise ValueError(f"Unexpected opening direction {opening_direction!r} in {trajectory_path}")
+            asset_is_push.append(opening_direction == "push")
+        env_asset_idx = play_env.env_asset_indices.detach().cpu().tolist()
         _base_x_local = list(play_env.cfg.base_joints).index("base_x_joint")
         door_audit_state = {
             "asset_paths": [str(p) for p in _audit_asset_paths],
             # env -> asset index is fixed for the whole run (rank-offset cycle), so a door's identity
             # never changes across resets and every episode row can be attributed to one door.
-            "env_asset_idx": play_env.env_asset_indices.detach().cpu().tolist(),
+            "env_asset_idx": env_asset_idx,
             "rows": [],
             "episodes_per_env": [0] * int(play_env.num_envs),
             "target_episodes": max(1, int(args_cli.door_audit_episodes)),
             "board_idx": int(play_env._door_board_joint_idx),
             "hinge_idx": int(play_env._door_hinge_joint_idx),
             "base_x_dof": int(play_env._robot_base_dof_idx[_base_x_local].item()),
-            "is_push": play_env._get_is_push_env().detach().cpu().clone(),
+            "is_push": torch.tensor([asset_is_push[i] for i in env_asset_idx], dtype=torch.float32),
             "push_thresh": float(play_env.cfg.success_far_push_dist),
             "pull_thresh": float(play_env.cfg.success_far_pull_dist),
             # Running per-episode maxima, reset when an env is done.
@@ -754,6 +831,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "prev": None,
             "done": False,
         }
+        print(
+            f"[AUDIT] Per-door audit enabled: {play_env.num_envs} envs over {_n_assets} assets, "
+            f"{door_audit_state['target_episodes']} episode(s) per env -> {os.path.abspath(args_cli.door_audit_out)}"
+        )
 
     def _accumulate_door_progress():
         """Track per-episode maxima of the physical task signals (call every step, pre-reset)."""
@@ -766,10 +847,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         torch.maximum(st["hinge_max"], hinge, out=st["hinge_max"])
         torch.maximum(st["latch_max"], latch, out=st["latch_max"])
         torch.maximum(st["dist_max"], dist, out=st["dist_max"])
-        print(
-            f"[AUDIT] Per-door audit enabled: {play_env.num_envs} envs over {_n_assets} assets, "
-            f"{door_audit_state['target_episodes']} episode(s) per env -> {os.path.abspath(args_cli.door_audit_out)}"
-        )
 
     def _snapshot_door_dynamics():
         """Per-env door joint gains for the CURRENTLY running episode.

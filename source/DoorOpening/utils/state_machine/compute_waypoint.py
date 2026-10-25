@@ -1083,7 +1083,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--asset-base-folder",
-        default="source/DoorOpening/assets/door/PartNetv6",
+        default="source/DoorOpening/assets/door/ScratchDoors_left_pull_current_20261023",
         help="Folder to scan recursively for door mobility.urdf files.",
     )
     parser.add_argument(

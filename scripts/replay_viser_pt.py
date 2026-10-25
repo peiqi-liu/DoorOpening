@@ -585,6 +585,7 @@ def main() -> None:
         for frame in frames
     )
     has_base_velocity = any("base_velocity_measured_robot" in frame for frame in frames)
+    has_saved_attention = any(isinstance(frame.get("proprio_attention"), dict) for frame in frames)
 
     joint_sources = [] if args.no_robot else _available_joint_sources(frames)
     robot_requested = bool(joint_sources) and isinstance(payload.get("compact_target_joint_names"), (list, tuple))
@@ -723,6 +724,20 @@ def main() -> None:
                 "base_velocity_policy_input_robot": server.gui.add_text("Base velocity policy input", initial_value="", disabled=True),
                 "base_velocity_commanded_robot": server.gui.add_text("Base velocity commanded", initial_value="", disabled=True),
             }
+
+    saved_attention_status = None
+    if has_saved_attention:
+        with server.gui.add_folder("Saved attention weights"):
+            server.gui.add_markdown(
+                "Per-frame input attention mass from the saved eval. This is separate from the "
+                "pointwise policy-importance heatmap in Pointclouds."
+            )
+            saved_attention_status = server.gui.add_text("Attention by input", initial_value="", disabled=True)
+            saved_action_tokens_status = server.gui.add_text(
+                "Action query top tokens", initial_value="", disabled=True
+            )
+    else:
+        saved_action_tokens_status = None
 
     show_clouds = {}
     with server.gui.add_folder("Pointclouds"):
@@ -870,6 +885,21 @@ def main() -> None:
                         f"{np.array2string(row, precision=3, suppress_small=True)}"
                     )
         history_status.value = " | ".join(history_rows) if history_rows else "not recorded in this replay"
+        if saved_attention_status is not None:
+            attention = frame.get("proprio_attention")
+            if isinstance(attention, dict):
+                groups = attention.get("input_groups", {})
+                saved_attention_status.value = " | ".join(
+                    f"{key}: {float(value):.3f}" for key, value in groups.items()
+                )
+                tokens = attention.get("action_top_tokens", ())
+                saved_action_tokens_status.value = " | ".join(
+                    f"#{int(token['index'])} {token['label']}: {float(token['attention']):.3f}"
+                    for token in tokens
+                )
+            else:
+                saved_attention_status.value = "not recorded for this frame"
+                saved_action_tokens_status.value = "not recorded for this frame"
         for stream in streams:
             points = _frame_cloud_points(frame, stream, static_pointclouds)
             importance_snapshot = aligned_importance_snapshots.get((stream["name"], frame_idx))
