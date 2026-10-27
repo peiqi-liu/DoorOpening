@@ -39,6 +39,15 @@ parser.add_argument(
     "--agent", type=str, default="rl_games_cfg_entry_point", help="Name of the RL agent configuration entry point."
 )
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint.")
+parser.add_argument("--base-action-scale", type=float, default=None, help="Override the base action scale for playback.")
+parser.add_argument("--base-translation-stiffness", type=float, default=None, help="Nominal base x/y stiffness (N/m).")
+parser.add_argument("--base-yaw-stiffness", type=float, default=None, help="Nominal base yaw stiffness (Nm/rad).")
+parser.add_argument("--base-translation-nominal-damping", type=float, default=None, help="Nominal base x/y damping (N s/m).")
+parser.add_argument("--base-yaw-nominal-damping", type=float, default=None, help="Nominal base yaw damping (Nms/rad).")
+parser.add_argument(
+    "--door-handle-limit-margin-range-rad", type=float, nargs=2, default=None, metavar=("MIN", "MAX"),
+    help="Gap between handle hard stop and unlatching threshold.",
+)
 parser.add_argument(
     "--base-translation-damping",
     type=float,
@@ -534,6 +543,24 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    if args_cli.base_action_scale is not None:
+        env_cfg.base_action_scale = args_cli.base_action_scale
+    for axis, stiffness, damping in (
+        ("translation", args_cli.base_translation_stiffness, args_cli.base_translation_nominal_damping),
+        ("yaw", args_cli.base_yaw_stiffness, args_cli.base_yaw_nominal_damping),
+    ):
+        if stiffness is None and damping is None:
+            continue
+        if stiffness is None or damping is None or stiffness <= 0.0 or damping <= 0.0:
+            raise ValueError(f"Base {axis} nominal stiffness and damping must both be positive")
+        params = env_cfg.events.base_impedance_correlated.params
+        params[f"{axis}_nominal_stiffness"] = stiffness
+        params[f"{axis}_nominal_damping"] = damping
+    if args_cli.door_handle_limit_margin_range_rad is not None:
+        low, high = map(float, args_cli.door_handle_limit_margin_range_rad)
+        if low < 0.0 or high < low:
+            raise ValueError("Door-handle stop margin must satisfy 0 <= MIN <= MAX")
+        env_cfg.door_handle_limit_margin_range_rad = (low, high)
     if args_cli.base_translation_damping is not None or args_cli.base_yaw_damping is not None:
         if getattr(env_cfg, "base_control_mode", "position") != "position":
             raise ValueError("Base damping playback overrides require position control")
