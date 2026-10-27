@@ -1,0 +1,15 @@
+Host: Vision9 (vision9.pc.cs.cmu.edu)
+Source commit at setup: beef430; run-specific CLI support added to scripts/rl_games/train.py in the working tree.
+Run name: vision9_base_position_teacher_scale1_highbase_panel50_margin004_20261026
+Task: DooropeningMulti; door family ScratchDoors_left_pull_current_20261023
+Base action scale: 1.0
+Base position gains: translation K=80000 N/m, D=12000 Ns/m; yaw K=11000 Nm/rad, D=1200 Nms/rad
+Base actuator effort limits: current source values, 130 N translation and 45 Nm yaw
+Unlocked door-panel effort range: current lower bound through 50 Nm
+Handle hard-stop to unlatching margin: 0.01-0.04 rad
+Compute: 2 x RTX 4090, 2048 environments per rank
+Video: enabled, 600 frames every 10000 training iterations
+Weights & Biases: enabled, entity peiqiliu, project dooropeningv22
+W&B source upload: disabled
+Seed: 42
+Max iterations: 30000

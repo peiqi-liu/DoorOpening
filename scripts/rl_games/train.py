@@ -51,6 +51,15 @@ parser.add_argument("--video_length", type=int, default=600, help="Length of the
 parser.add_argument("--video_interval", type=int, default=10000, help="Interval between video recordings (in steps).")
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--base-action-scale", type=float, default=None, help="Override the base action scale.")
+parser.add_argument("--base-translation-stiffness", type=float, default=None, help="Fix base x/y position-drive stiffness (N/m).")
+parser.add_argument("--base-translation-damping", type=float, default=None, help="Fix base x/y position-drive damping (N s/m).")
+parser.add_argument("--base-yaw-stiffness", type=float, default=None, help="Fix base yaw position-drive stiffness (Nm/rad).")
+parser.add_argument("--base-yaw-damping", type=float, default=None, help="Fix base yaw position-drive damping (Nms/rad).")
+parser.add_argument("--door-panel-effort-max", type=float, default=None, help="Maximum unlocked door-panel effort (Nm).")
+parser.add_argument(
+    "--door-handle-limit-margin-range-rad", type=float, nargs=2, default=None, metavar=("MIN", "MAX"),
+    help="Randomized gap in radians between the handle hard stop and unlatching threshold.",
+)
 parser.add_argument("--task", type=str, default="DooropeningMulti", help="Name of the task.")
 parser.add_argument(
     "--agent", type=str, default="rl_games_cfg_entry_point", help="Name of the RL agent configuration entry point."
@@ -424,6 +433,35 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     if args_cli.base_action_scale is not None:
         env_cfg.base_action_scale = args_cli.base_action_scale
+    base_gain_overrides = (
+        ("translation", args_cli.base_translation_stiffness, args_cli.base_translation_damping),
+        ("yaw", args_cli.base_yaw_stiffness, args_cli.base_yaw_damping),
+    )
+    for axis, stiffness, damping in base_gain_overrides:
+        if stiffness is None and damping is None:
+            continue
+        if stiffness is None or damping is None or stiffness <= 0.0 or damping <= 0.0:
+            raise ValueError(f"Base {axis} stiffness and damping overrides must both be positive")
+        params = env_cfg.events.base_impedance_correlated.params
+        params[f"{axis}_nominal_stiffness"] = stiffness
+        params[f"{axis}_nominal_damping"] = damping
+        print(
+            f"[INFO] Base {axis} nominal gains: stiffness={stiffness:g}, damping={damping:g}; "
+            "gain multipliers follow the Franka ADR schedule"
+        )
+    if args_cli.door_panel_effort_max is not None:
+        effort_min = float(env_cfg.door_panel_effort_limit_range_nm[0])
+        effort_start_max = float(env_cfg.door_panel_effort_limit_start_range_nm[1])
+        if args_cli.door_panel_effort_max < max(effort_min, effort_start_max):
+            raise ValueError("Door-panel effort maximum must cover the start range")
+        env_cfg.door_panel_effort_limit_range_nm = (effort_min, args_cli.door_panel_effort_max)
+        print(f"[INFO] RL door-panel effort range: {env_cfg.door_panel_effort_limit_range_nm} Nm")
+    if args_cli.door_handle_limit_margin_range_rad is not None:
+        margin_low, margin_high = map(float, args_cli.door_handle_limit_margin_range_rad)
+        if margin_low < 0.0 or margin_high < margin_low:
+            raise ValueError("Door-handle stop margin must satisfy 0 <= MIN <= MAX")
+        env_cfg.door_handle_limit_margin_range_rad = (margin_low, margin_high)
+        print(f"[INFO] RL handle hard-stop-to-unlatch margin range: {env_cfg.door_handle_limit_margin_range_rad} rad")
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     _configure_policy_arx_mode(env_cfg)
     # check for invalid combination of CPU device with distributed training
