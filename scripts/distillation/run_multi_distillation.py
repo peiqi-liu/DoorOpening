@@ -131,6 +131,16 @@ parser.add_argument(
     help="Which distributed ranks record videos. Use 'all' to record one rank-specific video folder per GPU.",
 )
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
+parser.add_argument("--base-action-scale", type=float, default=None, help="Override the teacher's base action scale.")
+parser.add_argument("--base-translation-stiffness", type=float, default=None, help="Nominal base x/y stiffness (N/m).")
+parser.add_argument("--base-translation-damping", type=float, default=None, help="Nominal base x/y damping (N s/m).")
+parser.add_argument("--base-yaw-stiffness", type=float, default=None, help="Nominal base yaw stiffness (Nm/rad).")
+parser.add_argument("--base-yaw-damping", type=float, default=None, help="Nominal base yaw damping (Nms/rad).")
+parser.add_argument(
+    "--door-handle-limit-margin-range-rad", type=float, nargs=2, default=None, metavar=("MIN", "MAX"),
+    help="Gap between handle hard stop and unlatching threshold, matching teacher training.",
+)
+parser.add_argument("--triton-depth", action="store_true", help="Use the opt-in Triton depth z-buffer projection.")
 parser.add_argument(
     "--door-panel-effort-max",
     type=float,
@@ -335,6 +345,26 @@ def main(env_cfg, agent_cfg: dict):
         )
 
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+    if args_cli.base_action_scale is not None:
+        env_cfg.base_action_scale = args_cli.base_action_scale
+    for axis, stiffness, damping in (
+        ("translation", args_cli.base_translation_stiffness, args_cli.base_translation_damping),
+        ("yaw", args_cli.base_yaw_stiffness, args_cli.base_yaw_damping),
+    ):
+        if stiffness is None and damping is None:
+            continue
+        if stiffness is None or damping is None or stiffness <= 0.0 or damping <= 0.0:
+            raise ValueError(f"Base {axis} stiffness and damping overrides must both be positive")
+        params = env_cfg.events.base_impedance_correlated.params
+        params[f"{axis}_nominal_stiffness"] = stiffness
+        params[f"{axis}_nominal_damping"] = damping
+        print(f"[INFO] Distillation base {axis} gains: stiffness={stiffness:g}, damping={damping:g}")
+    if args_cli.door_handle_limit_margin_range_rad is not None:
+        margin_low, margin_high = map(float, args_cli.door_handle_limit_margin_range_rad)
+        if margin_low < 0.0 or margin_high < margin_low:
+            raise ValueError("Door-handle stop margin must satisfy 0 <= MIN <= MAX")
+        env_cfg.door_handle_limit_margin_range_rad = (margin_low, margin_high)
+        print(f"[INFO] Distillation handle hard-stop-to-unlatch margin range: {env_cfg.door_handle_limit_margin_range_rad} rad")
     if args_cli.door_panel_effort_max is not None:
         effort_min = float(env_cfg.door_panel_effort_limit_range_nm[0])
         start_max = float(env_cfg.door_panel_effort_limit_start_range_nm[1])
@@ -441,6 +471,11 @@ def main(env_cfg, agent_cfg: dict):
     )
 
     dagger_runtime_cfg = dict(student_dagger_cfg)
+    if args_cli.triton_depth:
+        depth_cfg = dict(dagger_runtime_cfg.get("depth_cam_render", {}))
+        depth_cfg["use_triton"] = True
+        dagger_runtime_cfg["depth_cam_render"] = depth_cfg
+        print("[INFO] Triton depth projection enabled for distillation")
     wandb_cfg = {}
     runtime_wandb_cfg = dagger_runtime_cfg.pop("wandb", {})
     if isinstance(runtime_wandb_cfg, dict):
