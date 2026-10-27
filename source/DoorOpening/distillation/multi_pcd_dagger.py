@@ -209,6 +209,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
         self.depth_cam_render_height_px = int(self.depth_cam_render_cfg.get("height_px", 0))
         self.depth_cam_render_inflate_px = int(self.depth_cam_render_cfg.get("inflate_px", 0))
         self.depth_cam_render_clip_mode = str(self.depth_cam_render_cfg.get("clip_mode", "post"))
+        self.depth_cam_render_use_triton = bool(self.depth_cam_render_cfg.get("use_triton", False))
         # Always use nearest-return min pooling before back-projection.
         self.depth_cam_render_blur_kernel_px = int(self.depth_cam_render_cfg.get("blur_kernel_px", 0))
         self.depth_cam_render_edge_drop_m = float(self.depth_cam_render_cfg.get("edge_drop_m", 0.0))
@@ -3903,6 +3904,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 handle_occlusion_inflate_px=self.depth_cam_handle_occlusion_px,
                 edge_drop_m=self.depth_cam_render_edge_drop_m,
                 clip_mode=self.depth_cam_render_clip_mode,
+                use_triton=self.depth_cam_render_use_triton,
             )
         else:
             depth, intr = rasterize_depth_zbuffer_from_pose(
@@ -3911,6 +3913,7 @@ class Dagger(ViserDebugMixin, CheckpointMixin, LoggingMixin):
                 self.sampler_camera_spec,
                 inflate_px=self.depth_cam_render_inflate_px,
                 clip_mode=self.depth_cam_render_clip_mode,
+                use_triton=self.depth_cam_render_use_triton,
             )
             if self.depth_cam_render_blur_kernel_px > 1:
                 depth = _dilate_depth_min_pool(depth, self.depth_cam_render_blur_kernel_px // 2)

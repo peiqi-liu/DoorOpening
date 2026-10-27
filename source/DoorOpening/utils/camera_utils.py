@@ -504,6 +504,7 @@ def rasterize_depth_zbuffer_from_pose(
     occluder_pcd: Optional[torch.Tensor] = None,
     occluder_inflate_px: int = 0,
     source_split_idx: Optional[int] = None,
+    use_triton: bool = False,
 ):
     """
     occluder_pcd / occluder_inflate_px: an optional second point set (e.g. wall distractors)
@@ -519,9 +520,16 @@ def rasterize_depth_zbuffer_from_pose(
     device, dtype = pcd.device, pcd.dtype
     intr = _get_render_intrinsics(cam_spec_dict, device, dtype)
 
-    rasterized = _zbuffer_scatter_raw_depth(
-        pcd, camera_pose, cam_spec_dict, clip_mode, source_split_idx=source_split_idx
-    )
+    if use_triton:
+        from DoorOpening.utils.triton_depth_projection import project_depth_triton
+
+        rasterized = project_depth_triton(
+            pcd, camera_pose, cam_spec_dict, clip_mode, source_split_idx=source_split_idx
+        )
+    else:
+        rasterized = _zbuffer_scatter_raw_depth(
+            pcd, camera_pose, cam_spec_dict, clip_mode, source_split_idx=source_split_idx
+        )
     if source_split_idx is None:
         depth = rasterized
     else:
@@ -537,7 +545,10 @@ def rasterize_depth_zbuffer_from_pose(
     depth = _dilate_depth_min_pool(depth, inflate_px)
 
     if occluder_pcd is not None and occluder_inflate_px > 0 and occluder_pcd.shape[1] > 0:
-        occluder_depth = _zbuffer_scatter_raw_depth(occluder_pcd, camera_pose, cam_spec_dict, clip_mode)
+        if use_triton:
+            occluder_depth = project_depth_triton(occluder_pcd, camera_pose, cam_spec_dict, clip_mode)
+        else:
+            occluder_depth = _zbuffer_scatter_raw_depth(occluder_pcd, camera_pose, cam_spec_dict, clip_mode)
         occluder_depth = _dilate_depth_min_pool(occluder_depth, occluder_inflate_px)
         depth = torch.minimum(depth, occluder_depth)
 
@@ -560,6 +571,7 @@ def render_depth_with_handle_layer(
     handle_occlusion_inflate_px: int = 0,
     edge_drop_m: float = 0.0,
     clip_mode: str = "post",
+    use_triton: bool = False,
 ):
     """Render a thin handle independently of the scene's depth gap filling.
 
@@ -602,12 +614,14 @@ def render_depth_with_handle_layer(
         raise ValueError("inflate radii must be nonnegative")
 
     background_depth, intr = rasterize_depth_zbuffer_from_pose(
-        background_pcd, camera_pose, cam_spec_dict, inflate_px=int(inflate_px), clip_mode=clip_mode
+        background_pcd, camera_pose, cam_spec_dict, inflate_px=int(inflate_px), clip_mode=clip_mode,
+        use_triton=use_triton,
     )
     if int(blur_kernel_px) > 1:
         background_depth = _dilate_depth_min_pool(background_depth, int(blur_kernel_px) // 2)
     handle_depth, _ = rasterize_depth_zbuffer_from_pose(
-        handle_pcd, camera_pose, cam_spec_dict, inflate_px=int(handle_inflate_px), clip_mode=clip_mode
+        handle_pcd, camera_pose, cam_spec_dict, inflate_px=int(handle_inflate_px), clip_mode=clip_mode,
+        use_triton=use_triton,
     )
     handle_wins = torch.isfinite(handle_depth) & (handle_depth < background_depth)
     shadow_depth = torch.where(handle_wins, handle_depth, torch.full_like(handle_depth, float("inf")))

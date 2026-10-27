@@ -63,7 +63,7 @@ def build_gt_cloud(args, device):
     scene_door_num_points = int(cfg.get("scene_door_num_points", cfg.get("door_pcd_num_points", 30000)))
     board_num_points = int(args.board_num_points or scene_door_num_points)
 
-    board_bbox, _panel_bbox, _panel_bbox_link1, _link1_pose_base, panel_gt, frame_gt, _handle_center = load_door_asset(
+    board_bbox, _panel_bbox, _panel_bbox_link1, _link1_pose_base, panel_gt, _panel_only, _handle_only, frame_gt, _handle_center = load_door_asset(
         args.door, board_num_points, device
     )
     board_gt = torch.cat((panel_gt, frame_gt), dim=1)
