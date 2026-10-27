@@ -241,8 +241,8 @@ dagger:
     inflate_px: 0
     clip_mode: "post"
     use_compile: true
-    # Enable after the current training run; this replaces only depth z-buffer projection.
-    use_triton: false
+    # Triton accelerates depth z-buffer projection; other rendering stages are unchanged.
+    use_triton: true
     # Values shared with the Viser mock's depth_cfg processing path.
     blur_kernel_px: 5
     # Axial noise is applied to all finite pixels after the combined-depth blur and edge drop.

@@ -140,7 +140,7 @@ parser.add_argument(
     "--door-handle-limit-margin-range-rad", type=float, nargs=2, default=None, metavar=("MIN", "MAX"),
     help="Gap between handle hard stop and unlatching threshold, matching teacher training.",
 )
-parser.add_argument("--triton-depth", action="store_true", help="Use the opt-in Triton depth z-buffer projection.")
+parser.add_argument("--triton-depth", action="store_true", help="Enable Triton depth z-buffer projection (already enabled by the default student config).")
 parser.add_argument(
     "--door-panel-effort-max",
     type=float,
@@ -475,6 +475,7 @@ def main(env_cfg, agent_cfg: dict):
         depth_cfg = dict(dagger_runtime_cfg.get("depth_cam_render", {}))
         depth_cfg["use_triton"] = True
         dagger_runtime_cfg["depth_cam_render"] = depth_cfg
+    if dagger_runtime_cfg.get("depth_cam_render", {}).get("use_triton", False):
         print("[INFO] Triton depth projection enabled for distillation")
     wandb_cfg = {}
     runtime_wandb_cfg = dagger_runtime_cfg.pop("wandb", {})
