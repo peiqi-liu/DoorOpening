@@ -9,7 +9,7 @@ conda activate DoorOpening
 export PYTHONPATH="$repo/source${PYTHONPATH:+:$PYTHONPATH}"
 exec python scripts/rl_games/play.py \
   --headless --video --video_length 600 \
-  --task DooropeningMulti --num_envs 32 \
+  --task DooropeningMulti --num_envs 128 \
   --door-families ScratchDoors_left_pull_current_20261023 \
   --checkpoint "$checkpoint" --seed 42 \
   --base-action-scale 1.0 \
@@ -17,6 +17,6 @@ exec python scripts/rl_games/play.py \
   --base-yaw-stiffness 11000 --base-yaw-nominal-damping 1200 \
   --door-panel-effort-max 40 \
   --door-handle-limit-margin-range-rad 0.01 0.04 \
-  --door-audit-out "$out/teacher_audit_32env.json" --door-audit-episodes 1 \
+  --door-audit-out "$out/teacher_audit_128env.json" --door-audit-episodes 1 \
   --save-viser-pt "$out/teacher_env00_replay.pt" --viser-env-id 0 \
   --save-viser-num-rollouts 1
