@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -eo pipefail
 repo=/home/peiqiliu/DoorOpening
 out="$repo/analysis/vision9_teacher_to_distill_20261027"
 checkpoint="$out/teacher_ep3200.pth"
