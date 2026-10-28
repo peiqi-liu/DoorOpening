@@ -180,19 +180,19 @@ GLORBOT_CONFIG = ArticulationCfg(
         rot=ROBOT_INITIAL_ROT,
     ),
     actuators={
-        # Reset randomization replaces these position-drive fallback gains.
-        # Caps are conservative below the ideal 25 A drive-current envelope.
+        # Position-drive gains used by the Vision9 distillation run. Reset-time
+        # impedance configuration keeps these gains unless explicitly overridden.
         "base_translation": ImplicitActuatorCfg(
             joint_names_expr=["base_x_joint", "base_y_joint"],
             effort_limit_sim=130.0,
-            stiffness=525.0,
-            damping=350.0,
+            stiffness=80000.0,
+            damping=12000.0,
         ),
         "base_rotation": ImplicitActuatorCfg(
             joint_names_expr=["base_rotation_joint"],
             effort_limit_sim=45.0,
-            stiffness=37.5,
-            damping=25.0,
+            stiffness=11000.0,
+            damping=1200.0,
         ),
         # Per-joint Franka PD gains matched to the REAL-WORLD deploy controller (kp/kd used on
         # hardware), set per joint because the real values vary within each group. effort_limit_sim

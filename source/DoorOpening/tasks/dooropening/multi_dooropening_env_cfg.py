@@ -440,9 +440,8 @@ class EventCfg:
         },
     )
 
-    # K/D is sampled independently of base_action_scale. Only the position
-    # target displacement scales with the policy action. The first-50-frame x
-    # speed-error slope was 217–396 Ns/m; yaw near 21 Nms/rad is uncertain.
+    # Match the Vision9 position-drive gains by default. The target displacement
+    # still scales with the policy action; effort limits are randomized separately.
     base_impedance_correlated = EventTerm(
         func=randomize_base_impedance_correlated,
         mode="reset",
@@ -454,6 +453,10 @@ class EventCfg:
             "translation_k_over_d_range": (0.8, 1.2),
             "yaw_damping_range": (15.0, 45.0),
             "yaw_k_over_d_range": (0.8, 1.2),
+            "translation_nominal_stiffness": 80000.0,
+            "translation_nominal_damping": 12000.0,
+            "yaw_nominal_stiffness": 11000.0,
+            "yaw_nominal_damping": 1200.0,
             "translation_stiffness_multiplier_range": (1.0, 1.0),
             "translation_damping_multiplier_range": (1.0, 1.0),
             "yaw_stiffness_multiplier_range": (1.0, 1.0),
@@ -623,12 +626,12 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # Floor 8 -> 3 Nm: below the start band's 10 Nm floor again, so ADR re-introduces lighter doors
     # as it widens (not just adds heavier ones -- see the start-band note above). Ceiling trimmed
     # back down 75 -> 70 Nm.
-    door_panel_effort_limit_range_nm = (3.0, 70.0)  # was (3.0, 75.0), temp update
+    door_panel_effort_limit_range_nm = (3.0, 40.0)
 
     # Each door URDF supplies its own positive joint_2 hard stop. DooropeningEnv mirrors that stop
     # to negative travel; randomize the gap below the symmetric stop for an absolute-angle
     # unlatching threshold (about 0.6..6.9 degrees in either direction).
-    door_handle_limit_margin_range_rad: tuple[float, float] | None = (0.01, 0.12)
+    door_handle_limit_margin_range_rad: tuple[float, float] | None = (0.01, 0.04)
     # Optional eval-only door solver override, also applied before articulation conversion.
     door_eval_solver_position_iterations: int | None = None
 
@@ -913,7 +916,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=False)
 
     # Branch-specific action scale; changing it does not change sampled PD gains.
-    base_action_scale = 6.0
+    base_action_scale = 1.0
     base_control_mode = "position"
     base_velocity_limit_xy = 0.2
     base_velocity_limit_yaw = 0.7
