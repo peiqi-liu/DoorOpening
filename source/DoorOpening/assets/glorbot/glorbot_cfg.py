@@ -194,36 +194,19 @@ GLORBOT_CONFIG = ArticulationCfg(
             stiffness=11000.0,
             damping=1200.0,
         ),
-        # Per-joint Franka PD gains matched to the REAL-WORLD deploy controller (kp/kd used on
-        # hardware), set per joint because the real values vary within each group. effort_limit_sim
-        # is deliberately unset: when None on an IMPLICIT actuator, IsaacLab keeps the URDF-authored
-        # limit (87 N-m on joint1-4, 12 N-m on joint5-7) instead of a hand-picked cap.
-        # kp and kd both scaled 0.8x, so kp/kd (the pole) is unchanged and only the force
-        # authority drops -- same response shape, softer arm.
+        # Temporary eval setting: Isaac Lab FRANKA_PANDA_HIGH_PD_CFG gains.
+        # Keep the URDF effort limits (87 Nm on joints 1-4; 12 Nm on joints 5-7).
         "panda_shoulder": ImplicitActuatorCfg(
             joint_names_expr=["panda_joint[1-4]"],
             velocity_limit_sim=2.175,
-            stiffness=1280.0,  # was 1600.0
-            damping={
-                "panda_joint1": 19.2,  # was 24.0
-                "panda_joint2": 16.0,  # was 20.0
-                "panda_joint3": 19.2,  # was 24.0
-                "panda_joint4": 19.2,  # was 24.0
-            },
+            stiffness=400.0,
+            damping=80.0,
         ),
         "panda_forearm": ImplicitActuatorCfg(
             joint_names_expr=["panda_joint[5-7]"],
             velocity_limit_sim=2.61,
-            stiffness={
-                "panda_joint5": 328.0,  # was 410.0
-                "panda_joint6": 328.0,  # was 410.0
-                "panda_joint7": 104.0,  # was 130.0
-            },
-            damping={
-                "panda_joint5": 4.8,  # was 6.0
-                "panda_joint6": 4.8,  # was 6.0
-                "panda_joint7": 3.2,  # was 4.0
-            },
+            stiffness=400.0,
+            damping=80.0,
         ),
         "x5_arm": ImplicitActuatorCfg(
             joint_names_expr=["x5_joint[1-6]"],
