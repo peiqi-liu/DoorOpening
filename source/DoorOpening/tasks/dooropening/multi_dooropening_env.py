@@ -1252,7 +1252,7 @@ class DooropeningEnv(DirectRLEnv):
     def arm_target_windup_envelope(self) -> torch.Tensor:
         """Maximum allowed target error from measured arm position for each joint."""
         return torch.tensor(
-            [0.152930, 0.152930, 0.152930, 0.152930, 0.082317, 0.082317, 0.259616],
+            [0.175, 0.175, 0.175, 0.175, 0.06, 0.06, 0.06],
             device=self.device,
         )
 
