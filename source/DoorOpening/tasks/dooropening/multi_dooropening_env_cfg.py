@@ -429,11 +429,12 @@ class EventCfg:
         },
     )
 
+    # Franka-only multiplicative ADR around the nominal 400/80 gains.
     robot_joint_stiffness_and_damping = EventTerm(
         func=randomize_actuator_gains,
         mode="reset",
         params={
-            "asset_cfg": SceneEntityCfg("robot"),
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint1", "panda_joint2", "panda_joint3", "panda_joint4", "panda_joint5", "panda_joint6", "panda_joint7"]),
             "stiffness_distribution_params": (1.0, 1.0),
             "damping_distribution_params": (1.0, 1.0),
             "operation": "scale",
@@ -1063,8 +1064,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "mass_distribution_params": (60.0, 150.0),
         },
         "robot_joint_stiffness_and_damping": {
-            "stiffness_distribution_params": (0.8, 1.2),
-            "damping_distribution_params": (0.7, 1.3),
+            # Full-ADR multipliers: 0.5..2x nominal Franka stiffness and damping.
+            "stiffness_distribution_params": (0.5, 2.0),
+            "damping_distribution_params": (0.5, 2.0),
         },
         # Give the mobile base the same ADR progression and gain multipliers as the Franka.
         "base_impedance_correlated": {
