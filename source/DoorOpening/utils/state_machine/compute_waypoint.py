@@ -839,7 +839,6 @@ def play_and_save_traj(
     traj_dt=DEFAULT_TRAJ_DT,
     port=None,
     visualize=False,
-    traverse_yaw_offset_deg=None,
 ):
     dir_path = os.path.dirname(door_urdf_path)
     robot_initial_pose = torch.tensor([[ROBOT_INITIAL_POS[0], ROBOT_INITIAL_POS[1], ROBOT_INITIAL_POS[2], ROBOT_INITIAL_ROT[0], ROBOT_INITIAL_ROT[1], ROBOT_INITIAL_ROT[2], ROBOT_INITIAL_ROT[3]]], device="cpu")
@@ -899,14 +898,6 @@ def play_and_save_traj(
         f"Using {planner_opening_direction} planner "
         f"for {planner_handle_side}-side handle: {door_urdf_path}"
     )
-    if traverse_yaw_offset_deg is None:
-        metadata = _load_variant_metadata(door_urdf_path)
-        variant = metadata.get("trajectory_variant") if isinstance(metadata, dict) else None
-        if isinstance(variant, dict) and variant.get("base_traverse_yaw_offset_deg") is not None:
-            traverse_yaw_offset_deg = float(variant["base_traverse_yaw_offset_deg"])
-            print(f"Using traverse yaw offset from variant_meta.json: {traverse_yaw_offset_deg:g} deg")
-    if traverse_yaw_offset_deg is not None and planner_opening_direction != "pull":
-        raise ValueError("Traverse yaw offset is currently supported for pull references only")
     start_time = time.time()
     if planner_opening_direction == "pull":
         robot_traj, door_traj, key_idx_in_key_indices = state_machine_offline_pull_door(
@@ -918,7 +909,6 @@ def play_and_save_traj(
             door_initial_q,
             handle_side=planner_handle_side,
             device="cpu",
-            traverse_yaw_offset_deg=traverse_yaw_offset_deg,
         )
     else:
         robot_traj, door_traj, key_idx_in_key_indices = state_machine_offline_push_door(
@@ -1157,12 +1147,6 @@ if __name__ == "__main__":
         help="Optional Viser server port when --visualize is set.",
     )
     parser.add_argument(
-        "--traverse-yaw-offset-deg",
-        type=float,
-        default=None,
-        help="Override the base yaw offset from variant_meta.json during pull-door traversal.",
-    )
-    parser.add_argument(
         "--visualize",
         action="store_true",
         help="Play each trajectory in Viser before saving. Disabled by default for batch processing.",
@@ -1190,7 +1174,6 @@ if __name__ == "__main__":
             traj_dt=args.traj_dt,
             port=args.port,
             visualize=args.visualize,
-            traverse_yaw_offset_deg=args.traverse_yaw_offset_deg,
         )
         print("Finished processing ", door_urdf_path, ", index: ", i)
     

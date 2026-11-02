@@ -4,6 +4,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import redirect_stderr, redirect_stdout
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -15,10 +16,10 @@ SOURCE = ROOT / "source/DoorOpening/assets/door/PartNetv5_plus_hardstop_recess_t
 DEST = ROOT / "source/DoorOpening/assets/door/tilted_traverse"
 ROBOT = ROOT / "source/DoorOpening/assets/glorbot/glorbot.urdf"
 LOGS = ROOT / "analysis/tilted_traverse/reference_logs_back_base_tilt20"
-OFFSET_DEG = 20.0
-
-
 def prepare_batch() -> list[Path]:
+    from DoorOpening.utils.state_machine.offline_pull_door import TRAVERSE_YAW_OFFSET_RAD
+
+    offset_deg = math.degrees(TRAVERSE_YAW_OFFSET_RAD)
     if not DEST.exists():
         shutil.copytree(SOURCE, DEST)
     urdfs = sorted(DEST.glob("*/mobility.urdf"))
@@ -29,8 +30,8 @@ def prepare_batch() -> list[Path]:
         metadata = json.loads(meta_path.read_text())
         metadata["source_asset_family"] = SOURCE.name
         metadata["trajectory_variant"] = {
-            "base_traverse_yaw_offset_deg": OFFSET_DEG,
-            "description": "Base yaws left by 20 degrees while traversing the doorway.",
+            "base_traverse_yaw_offset_deg": offset_deg,
+            "description": f"Base yaws left by {offset_deg:g} degrees while traversing the doorway.",
             "generated_by": "teleop_ref compute_waypoint.py",
         }
         meta_path.write_text(json.dumps(metadata, indent=2) + "\n")
@@ -51,7 +52,6 @@ def generate(urdf_string: str) -> tuple[str, bool, str, str | None]:
                 str(ROBOT),
                 str(urdf),
                 visualize=False,
-                traverse_yaw_offset_deg=OFFSET_DEG,
             )
         digest = hashlib.sha256(traj_path.read_bytes()).hexdigest() if traj_path.is_file() else None
         return urdf.parent.name, traj_path.is_file(), "", digest
