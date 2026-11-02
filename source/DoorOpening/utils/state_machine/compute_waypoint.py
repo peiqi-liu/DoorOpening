@@ -899,8 +899,14 @@ def play_and_save_traj(
         f"Using {planner_opening_direction} planner "
         f"for {planner_handle_side}-side handle: {door_urdf_path}"
     )
+    if traverse_yaw_offset_deg is None:
+        metadata = _load_variant_metadata(door_urdf_path)
+        variant = metadata.get("trajectory_variant") if isinstance(metadata, dict) else None
+        if isinstance(variant, dict) and variant.get("base_traverse_yaw_offset_deg") is not None:
+            traverse_yaw_offset_deg = float(variant["base_traverse_yaw_offset_deg"])
+            print(f"Using traverse yaw offset from variant_meta.json: {traverse_yaw_offset_deg:g} deg")
     if traverse_yaw_offset_deg is not None and planner_opening_direction != "pull":
-        raise ValueError("--traverse-yaw-offset-deg is currently supported for pull references only")
+        raise ValueError("Traverse yaw offset is currently supported for pull references only")
     start_time = time.time()
     if planner_opening_direction == "pull":
         robot_traj, door_traj, key_idx_in_key_indices = state_machine_offline_pull_door(
@@ -1084,7 +1090,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--asset-base-folder",
-        default="source/DoorOpening/assets/door/ScratchDoors_left_pull_current_20261023",
+        default="source/DoorOpening/assets/door/tilted_traverse",
         help="Folder to scan recursively for door mobility.urdf files.",
     )
     parser.add_argument(
@@ -1154,7 +1160,7 @@ if __name__ == "__main__":
         "--traverse-yaw-offset-deg",
         type=float,
         default=None,
-        help="Hold this base yaw offset during door traversal for pull references; transitions over the first two steps.",
+        help="Override the base yaw offset from variant_meta.json during pull-door traversal.",
     )
     parser.add_argument(
         "--visualize",
