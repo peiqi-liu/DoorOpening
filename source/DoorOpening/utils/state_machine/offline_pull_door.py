@@ -192,6 +192,7 @@ def state_machine_offline_right_pull_door(
     robot_initial_q,      # (ndof,)
     door_initial_q,       # (2,) [board, hinge]
     device="cpu",
+    traverse_yaw_offset_deg: float | None = None,
 ):
     """
     Offline planner for a right-side handle, pull-type door.
@@ -717,7 +718,12 @@ def state_machine_offline_right_pull_door(
         base_target_pos = base_target_pos.clone()
         base_target_pos[:, 0] = start_base_x + frac * (traverse_mid_x - start_base_x)
         base_target_pos[:, 1] = start_base_y + frac * (traverse_mid_y - start_base_y)
-        step_yaw = blocking_yaw + frac * (robot_initial_yaw.item() - blocking_yaw)
+        if traverse_yaw_offset_deg is None:
+            step_yaw = blocking_yaw + frac * (robot_initial_yaw.item() - blocking_yaw)
+        else:
+            settle = min(frac * traverse_steps / 2.0, 1.0)
+            traverse_yaw = robot_initial_yaw.item() + math.radians(traverse_yaw_offset_deg)
+            step_yaw = blocking_yaw + settle * (traverse_yaw - blocking_yaw)
         base_target_pose = _make_pose(
             base_target_pos, get_rotation_quat(0.0, 0.0, step_yaw, device)
         )
@@ -774,6 +780,7 @@ def state_machine_offline_left_pull_door(
     robot_initial_q,      # (ndof,)
     door_initial_q,       # (2,) [board, hinge]
     device="cpu",
+    traverse_yaw_offset_deg: float | None = None,
 ):
     """
     Offline planner for a left-side handle, pull-type door.
@@ -1324,7 +1331,12 @@ def state_machine_offline_left_pull_door(
         base_target_pos = base_target_pos.clone()
         base_target_pos[:, 0] = start_base_x + frac * (traverse_mid_x - start_base_x)
         base_target_pos[:, 1] = start_base_y + frac * (traverse_mid_y - start_base_y)
-        step_yaw = blocking_yaw + frac * (robot_initial_yaw.item() - blocking_yaw)
+        if traverse_yaw_offset_deg is None:
+            step_yaw = blocking_yaw + frac * (robot_initial_yaw.item() - blocking_yaw)
+        else:
+            settle = min(frac * traverse_steps / 2.0, 1.0)
+            traverse_yaw = robot_initial_yaw.item() + math.radians(traverse_yaw_offset_deg)
+            step_yaw = blocking_yaw + settle * (traverse_yaw - blocking_yaw)
         base_target_pose = _make_pose(
             base_target_pos, get_rotation_quat(0.0, 0.0, step_yaw, device)
         )
@@ -1386,6 +1398,7 @@ def state_machine_offline_pull_door(
     *,
     handle_side: HandleSide = "right",
     device="cpu",
+    traverse_yaw_offset_deg: float | None = None,
 ):
     if handle_side == "right":
         return state_machine_offline_right_pull_door(
@@ -1396,6 +1409,7 @@ def state_machine_offline_pull_door(
             robot_initial_q,
             door_initial_q,
             device=device,
+            traverse_yaw_offset_deg=traverse_yaw_offset_deg,
         )
     if handle_side == "left":
         return state_machine_offline_left_pull_door(
@@ -1406,5 +1420,6 @@ def state_machine_offline_pull_door(
             robot_initial_q,
             door_initial_q,
             device=device,
+            traverse_yaw_offset_deg=traverse_yaw_offset_deg,
         )
     raise ValueError(f"Unsupported handle_side '{handle_side}'. Expected 'right' or 'left'.")

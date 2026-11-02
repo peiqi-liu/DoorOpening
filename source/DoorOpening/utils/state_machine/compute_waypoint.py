@@ -839,6 +839,7 @@ def play_and_save_traj(
     traj_dt=DEFAULT_TRAJ_DT,
     port=None,
     visualize=False,
+    traverse_yaw_offset_deg=None,
 ):
     dir_path = os.path.dirname(door_urdf_path)
     robot_initial_pose = torch.tensor([[ROBOT_INITIAL_POS[0], ROBOT_INITIAL_POS[1], ROBOT_INITIAL_POS[2], ROBOT_INITIAL_ROT[0], ROBOT_INITIAL_ROT[1], ROBOT_INITIAL_ROT[2], ROBOT_INITIAL_ROT[3]]], device="cpu")
@@ -898,6 +899,8 @@ def play_and_save_traj(
         f"Using {planner_opening_direction} planner "
         f"for {planner_handle_side}-side handle: {door_urdf_path}"
     )
+    if traverse_yaw_offset_deg is not None and planner_opening_direction != "pull":
+        raise ValueError("--traverse-yaw-offset-deg is currently supported for pull references only")
     start_time = time.time()
     if planner_opening_direction == "pull":
         robot_traj, door_traj, key_idx_in_key_indices = state_machine_offline_pull_door(
@@ -909,6 +912,7 @@ def play_and_save_traj(
             door_initial_q,
             handle_side=planner_handle_side,
             device="cpu",
+            traverse_yaw_offset_deg=traverse_yaw_offset_deg,
         )
     else:
         robot_traj, door_traj, key_idx_in_key_indices = state_machine_offline_push_door(
@@ -951,26 +955,6 @@ def play_and_save_traj(
     door_world_pos = door_initial_pose[:, :3].squeeze(0).numpy()
     robot_world_quat = robot_initial_pose[:, 3:].squeeze(0).numpy()
     door_world_quat = door_initial_pose[:, 3:].squeeze(0).numpy()
-
-    if visualize:
-        from yourdfpy import URDF
-
-        robot_urdf = URDF.load(robot_urdf_path)
-        door_urdf  = URDF.load(door_urdf_path)
-
-        play_trajectories_in_viser(
-            robot_urdf=robot_urdf,
-            door_urdf=door_urdf,
-            robot_traj=robot_traj,
-            door_traj=door_traj,
-            robot_world_pos=robot_world_pos,
-            door_world_pos=door_world_pos,
-            robot_world_quat=robot_world_quat,
-            door_world_quat=door_world_quat,
-            hz=60,
-            playback_speed=playback_speed,
-            port=port,
-        )
 
     robot_ik_solver = PinocchioIKSolver(
         urdf_path=robot_urdf_path, 
@@ -1073,6 +1057,23 @@ def play_and_save_traj(
         pkl.dump(data, f)
         print("Trajectory saved to " + traj_path)
 
+    if visualize:
+        from yourdfpy import URDF
+
+        play_trajectories_in_viser(
+            robot_urdf=URDF.load(robot_urdf_path),
+            door_urdf=URDF.load(door_urdf_path),
+            robot_traj=robot_traj,
+            door_traj=door_traj,
+            robot_world_pos=robot_world_pos,
+            door_world_pos=door_world_pos,
+            robot_world_quat=robot_world_quat,
+            door_world_quat=door_world_quat,
+            hz=60,
+            playback_speed=playback_speed,
+            port=port,
+        )
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Compute and save door waypoint trajectories.")
@@ -1150,6 +1151,12 @@ if __name__ == "__main__":
         help="Optional Viser server port when --visualize is set.",
     )
     parser.add_argument(
+        "--traverse-yaw-offset-deg",
+        type=float,
+        default=None,
+        help="Hold this base yaw offset during door traversal for pull references; transitions over the first two steps.",
+    )
+    parser.add_argument(
         "--visualize",
         action="store_true",
         help="Play each trajectory in Viser before saving. Disabled by default for batch processing.",
@@ -1177,6 +1184,7 @@ if __name__ == "__main__":
             traj_dt=args.traj_dt,
             port=args.port,
             visualize=args.visualize,
+            traverse_yaw_offset_deg=args.traverse_yaw_offset_deg,
         )
         print("Finished processing ", door_urdf_path, ", index: ", i)
     
