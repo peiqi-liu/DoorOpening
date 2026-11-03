@@ -15,7 +15,7 @@ from DoorOpening.constants.robot_constants import (
 )
 
 HandleSide = Literal["right", "left"]
-TRAVERSE_YAW_OFFSET_RAD = math.radians(20.0)
+TRAVERSE_YAW_OFFSET_RAD = math.radians(25.0)
 
 # Null-space posture anchor for the LEFT pull planner's IK (see api.solve_ik).
 #
@@ -696,22 +696,32 @@ def state_machine_offline_right_pull_door(
     )
 
     # -------------------------
-    # Step 8: Restore the base to normal yaw, traverse with a suitable arm pose,
+    # Step 8: Traverse through the doorway while holding a 25-degree yaw,
     # then finish the traverse with default arm joints
     # -------------------------
-    # Traverse forward THROUGH the doorway with a smooth, interpolated base sweep while the arm
-    # keeps HOLDING the door panel (palm pinned), so the arm does not jerk away from the panel.
-    # The tilted blocking yaw is restored to normal over the same sweep.
-    traverse_mid_x = 0.0
+    # Traverse forward THROUGH the doorway, letting the gripper slide forward before releasing
+    # the panel and returning the arm to its default posture.
+    # Transition from the blocking yaw to the 25-degree traverse yaw over the first
+    # part of the sweep, then keep that yaw through the final waypoint.
+    start_base_x = base_target_pos[:, 0].clone()
+    # The yaw reaches +25 deg after step 2 of 8. Leave 0.30 m of forward
+    # travel while the arm still holds the panel before the default-arm phase.
+    traverse_mid_x = start_base_x - 0.40
     # Keep the base a bit closer to the +y door panel during the traverse (was 0.0) so the arm
     # can still reach the panel it is holding instead of drifting out of reach.
     traverse_mid_y = 0.10
     # Drive well past the doorway so the closing door panel can't smash the base from behind.
-    traverse_far_x = -1.0
+    traverse_far_x = torch.minimum(torch.full_like(traverse_mid_x, -1.0), traverse_mid_x - 1.5)
     traverse_steps = 8
 
-    start_base_x = base_target_pos[:, 0].clone()
     start_base_y = base_target_pos[:, 1].clone()
+    traverse_start_palm_pos = palm_target_pose[:, :3].clone()
+    traverse_delta = torch.zeros_like(base_target_pos)
+    traverse_delta[:, 0] = traverse_mid_x - start_base_x
+    traverse_delta[:, 1] = traverse_mid_y - start_base_y
+    traverse_direction = traverse_delta / torch.linalg.norm(
+        traverse_delta[:, :2], dim=-1, keepdim=True
+    ).clamp_min(1e-6)
     blocking_yaw = robot_initial_yaw.item() + tilt_base_yaw
     for traverse_step in range(1, traverse_steps + 1):
         frac = traverse_step / traverse_steps
@@ -724,10 +734,14 @@ def state_machine_offline_right_pull_door(
         base_target_pose = _make_pose(
             base_target_pos, get_rotation_quat(0.0, 0.0, step_yaw, device)
         )
+        # Let the gripper slide forward by 20 cm over the full first traverse segment,
+        # instead of pinning it to one world point on the panel.
+        step_palm_pos = traverse_start_palm_pos + 0.20 * frac * traverse_direction
+        step_palm_pose = _make_pose(step_palm_pos, palm_target_pose[:, 3:])
         q_robot[:10] = solve_ik(
             robot_urdf_path,
             q_robot[:10],
-            palm_pose=palm_target_pose,
+            palm_pose=step_palm_pose,
             base_pose=base_target_pose,
             robot_initial_pose=robot_initial_pose,
             num_attempts=1,  # loop body: single seed for continuity (no random-restart branch jumps)
@@ -744,7 +758,10 @@ def state_machine_offline_right_pull_door(
 
     base_target_pos[:, 0] = traverse_far_x
     base_target_pos[:, 1] = 0.0
-    base_target_pose = _make_pose(base_target_pos, base_target_rot)
+    traverse_yaw = robot_initial_yaw.item() + TRAVERSE_YAW_OFFSET_RAD
+    base_target_pose = _make_pose(
+        base_target_pos, get_rotation_quat(0.0, 0.0, traverse_yaw, device)
+    )
 
     q_robot[:10] = solve_ik(
         robot_urdf_path,
@@ -1308,19 +1325,28 @@ def state_machine_offline_left_pull_door(
     )
 
     # -------------------------
-    # Step 8: Restore zero base yaw during traversal with a suitable arm pose,
+    # Step 8: Traverse through the doorway while holding a 25-degree yaw,
     # then finish the traverse with default arm joints
     # -------------------------
-    # Traverse forward THROUGH the doorway with a smooth, interpolated base sweep while the arm
-    # keeps HOLDING the door panel (palm pinned), so the arm does not jerk away from the panel.
-    traverse_mid_x = 0.0
+    # Traverse forward THROUGH the doorway, letting the gripper slide forward before releasing
+    # the panel and returning the arm to its default posture.
+    start_base_x = base_target_pos[:, 0].clone()
+    # The yaw reaches +25 deg after step 2 of 8. Leave 0.30 m of forward
+    # travel while the arm still holds the panel before the default-arm phase.
+    traverse_mid_x = start_base_x - 0.40
     traverse_mid_y = -0.05
     # Drive well past the doorway so the closing door panel can't smash the base from behind.
-    traverse_far_x = -1.0
+    traverse_far_x = torch.minimum(torch.full_like(traverse_mid_x, -1.0), traverse_mid_x - 1.5)
     traverse_steps = 8
 
-    start_base_x = base_target_pos[:, 0].clone()
     start_base_y = base_target_pos[:, 1].clone()
+    traverse_start_palm_pos = palm_target_pose[:, :3].clone()
+    traverse_delta = torch.zeros_like(base_target_pos)
+    traverse_delta[:, 0] = traverse_mid_x - start_base_x
+    traverse_delta[:, 1] = traverse_mid_y - start_base_y
+    traverse_direction = traverse_delta / torch.linalg.norm(
+        traverse_delta[:, :2], dim=-1, keepdim=True
+    ).clamp_min(1e-6)
     blocking_yaw = robot_initial_yaw.item() + tilt_base_yaw
     for traverse_step in range(1, traverse_steps + 1):
         frac = traverse_step / traverse_steps
@@ -1333,10 +1359,14 @@ def state_machine_offline_left_pull_door(
         base_target_pose = _make_pose(
             base_target_pos, get_rotation_quat(0.0, 0.0, step_yaw, device)
         )
+        # Let the gripper slide forward by 20 cm over the full first traverse segment,
+        # instead of pinning it to one world point on the panel.
+        step_palm_pos = traverse_start_palm_pos + 0.20 * frac * traverse_direction
+        step_palm_pose = _make_pose(step_palm_pos, palm_target_pose[:, 3:])
         q_robot[:10] = solve_ik(
             robot_urdf_path,
             q_robot[:10],
-            palm_pose=palm_target_pose,
+            palm_pose=step_palm_pose,
             base_pose=base_target_pose,
             robot_initial_pose=robot_initial_pose,
             reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
@@ -1354,8 +1384,11 @@ def state_machine_offline_left_pull_door(
 
     base_target_pos[:, 0] = traverse_far_x
     base_target_pos[:, 1] = 0.0
-    # Finish the traverse at normal (zero) yaw -- no end tilt.
-    base_target_pose = _make_pose(base_target_pos, base_target_rot)
+    # Hold the 25-degree traverse yaw through the final waypoint.
+    traverse_yaw = robot_initial_yaw.item() + TRAVERSE_YAW_OFFSET_RAD
+    base_target_pose = _make_pose(
+        base_target_pos, get_rotation_quat(0.0, 0.0, traverse_yaw, device)
+    )
 
     q_robot[:10] = solve_ik(
         robot_urdf_path,

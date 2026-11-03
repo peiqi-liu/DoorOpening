@@ -652,6 +652,7 @@ def play_trajectories_in_viser(
     hz: float = 60.0,
     playback_speed: float = 10.0,
     port: int | None = None,
+    sim_steps_total: int | None = None,
 ):
     """
     robot_traj: (T, Ndof) torch.Tensor or list of tensors
@@ -709,6 +710,15 @@ def play_trajectories_in_viser(
         play_btn = server.gui.add_button("Play")
         pause_btn = server.gui.add_button("Pause")
         reset_btn = server.gui.add_button("Reset")
+        frame_indicator = server.gui.add_text("Ref frame", f"1 / {T}", disabled=True)
+        frame_slider = server.gui.add_slider(
+            "Frame index", min=0, max=max(T - 1, 0), step=1, initial_value=0
+        )
+        sim_step_indicator = (
+            server.gui.add_text("Sim step", f"0 / {sim_steps_total}", disabled=True)
+            if sim_steps_total is not None
+            else None
+        )
         speed_slider = server.gui.add_slider(
             "Speed",
             min=0.5,
@@ -731,11 +741,35 @@ def play_trajectories_in_viser(
     def _(_):
         nonlocal t_idx
         t_idx = 0
+        frame_indicator.value = f"1 / {T}"
+        _set_frame_slider(0)
+        if sim_step_indicator is not None:
+            sim_step_indicator.value = f"0 / {sim_steps_total}"
 
     # -------------------------
     # Playback loop
     # -------------------------
     t_idx = 0
+    updating_frame_slider = False
+
+    def _set_frame_slider(value: int) -> None:
+        nonlocal updating_frame_slider
+        updating_frame_slider = True
+        frame_slider.value = float(value)
+        updating_frame_slider = False
+
+    @frame_slider.on_update
+    def _(_):
+        nonlocal t_idx
+        if not updating_frame_slider:
+            t_idx = max(0, min(int(round(frame_slider.value)), T - 1))
+            frame_indicator.value = f"{t_idx + 1} / {T}"
+            if sim_step_indicator is not None:
+                sim_step = round(t_idx * sim_steps_total / max(T - 1, 1))
+                sim_step_indicator.value = f"{sim_step} / {sim_steps_total}"
+            viser_robot.update_cfg(robot_traj[t_idx].detach().cpu().numpy())
+            viser_door.update_cfg(door_traj[t_idx].detach().cpu().numpy())
+
     hold_seconds = max(0.0, float(os.environ.get("DOOROPENING_VISER_HOLD_SECONDS", "0")))
     hold_deadline = time.monotonic() + hold_seconds if hold_seconds > 0.0 else None
 
@@ -772,14 +806,142 @@ def play_trajectories_in_viser(
 
             # t_idx = (t_idx + 1) % T
             t_idx += 1
+            # Keep the indicator readable without sending a GUI update at every render frame.
+            display_stride = max(1, int(round(hz * speed_slider.value / 20.0)))
+            if t_idx % display_stride == 0 or t_idx >= T:
+                frame_number = min(t_idx, T)
+                frame_indicator.value = f"{frame_number} / {T}"
+                _set_frame_slider(min(t_idx - 1, T - 1))
+                if sim_step_indicator is not None:
+                    sim_step = round((frame_number - 1) * sim_steps_total / max(T - 1, 1))
+                    sim_step_indicator.value = f"{sim_step} / {sim_steps_total}"
             if t_idx == T:
                 if hold_deadline is not None and time.monotonic() < hold_deadline:
                     t_idx = 0
+                    frame_indicator.value = f"1 / {T}"
+                    _set_frame_slider(0)
+                    if sim_step_indicator is not None:
+                        sim_step_indicator.value = f"0 / {sim_steps_total}"
                 else:
                     break
 
         time.sleep(1.0 / (hz * speed_slider.value))
     server.stop()
+
+
+def play_saved_trajectory_playlist_in_viser(
+    robot_urdf_path: str,
+    door_urdf_paths: list[str],
+    port: int | None = None,
+    playback_speed: float = 10.0,
+    hz: float = 60.0,
+    sim_steps_total: int = 540,
+):
+    """Continuously replay existing per-door traj.pkl files in one Viser session."""
+    import viser
+    from viser.extras import ViserUrdf
+    from yourdfpy import URDF
+
+    entries = []
+    for door_path in door_urdf_paths:
+        traj_path = os.path.join(os.path.dirname(door_path), "traj.pkl")
+        if not os.path.isfile(traj_path):
+            raise FileNotFoundError(f"Missing saved trajectory: {traj_path}")
+        with open(traj_path, "rb") as traj_file:
+            data = pkl.load(traj_file)
+        robot_traj = data["robot_joint_pos_traj"]
+        door_traj = data["door_traj"]
+        if len(robot_traj) != 1440 or len(door_traj) != 1440:
+            raise ValueError(f"Expected 1440 frames in {traj_path}")
+        initial_state = _load_initial_state_metadata(door_path) or {}
+        robot_pose = initial_state.get("robot_world_pose", {})
+        door_pose = initial_state.get("door_world_pose", {})
+        robot_pos = np.asarray(robot_pose.get("pos", ROBOT_INITIAL_POS), dtype=float)
+        robot_quat = np.asarray(robot_pose.get("rot", ROBOT_INITIAL_ROT), dtype=float)
+        door_pos = np.asarray(door_pose.get("pos", DOOR_INITIAL_POS), dtype=float)
+        door_quat = np.asarray(door_pose.get("rot", DOOR_INITIAL_ROT), dtype=float)
+        entries.append((door_path, robot_traj, door_traj, robot_pos, robot_quat, door_pos, door_quat))
+
+    if not entries:
+        raise ValueError("No door URDFs were found for replay.")
+
+    server_kwargs = {"port": port} if port is not None else {}
+    server = viser.ViserServer(**server_kwargs)
+    robot_root = server.scene.add_frame("/robot_root", show_axes=False)
+    door_root = server.scene.add_frame("/door_root", show_axes=False)
+    robot = ViserUrdf(server, urdf_or_path=URDF.load(robot_urdf_path), root_node_name="/robot_root", load_meshes=True)
+    door = None
+    playing = True
+    door_number = server.gui.add_text("Door", f"1 / {len(entries)}", disabled=True)
+    frame_indicator = server.gui.add_text("Ref frame", "1 / 1440", disabled=True)
+    sim_step_indicator = server.gui.add_text("Sim step", f"0 / {sim_steps_total}", disabled=True)
+    frame_slider = server.gui.add_slider("Frame index", min=0, max=1439, step=1, initial_value=0)
+    speed_slider = server.gui.add_slider("Speed", min=0.5, max=playback_speed, step=0.1, initial_value=playback_speed)
+    play_button = server.gui.add_button("Play")
+    pause_button = server.gui.add_button("Pause")
+    current_frame = 0
+    changing_slider = False
+    active_robot_traj = None
+    active_door_traj = None
+    active_door = None
+
+    @play_button.on_click
+    def _(_):
+        nonlocal playing
+        playing = True
+
+    @pause_button.on_click
+    def _(_):
+        nonlocal playing
+        playing = False
+
+    @frame_slider.on_update
+    def _(_):
+        nonlocal current_frame
+        if not changing_slider:
+            current_frame = max(0, min(int(round(frame_slider.value)), 1439))
+            if active_robot_traj is not None and active_door_traj is not None and active_door is not None:
+                active_robot = active_robot_traj[current_frame].detach().cpu().numpy()
+                active_door_cfg = active_door_traj[current_frame].detach().cpu().numpy()
+                robot.update_cfg(active_robot)
+                active_door.update_cfg(active_door_cfg)
+                frame_indicator.value = f"{current_frame + 1} / 1440"
+                sim_step = round(current_frame * sim_steps_total / 1439)
+                sim_step_indicator.value = f"{sim_step} / {sim_steps_total}"
+
+    try:
+        for door_idx, entry in enumerate(entries):
+            door_path, robot_traj, door_traj, robot_pos, robot_quat, door_pos, door_quat = entry
+            active_robot_traj = robot_traj
+            active_door_traj = door_traj
+            robot_root.position = robot_pos
+            robot_root.wxyz = robot_quat
+            door_root.position = door_pos
+            door_root.wxyz = door_quat
+            if door is not None:
+                door.remove()
+            door = ViserUrdf(server, urdf_or_path=URDF.load(door_path), root_node_name="/door_root", load_meshes=True)
+            active_door = door
+            door_number.value = f"{door_idx + 1} / {len(entries)} — {os.path.basename(os.path.dirname(door_path))}"
+            current_frame = 0
+            while current_frame < 1440 or len(entries) == 1:
+                if not playing:
+                    time.sleep(0.05)
+                    continue
+                robot.update_cfg(robot_traj[current_frame].detach().cpu().numpy())
+                door.update_cfg(door_traj[current_frame].detach().cpu().numpy())
+                frame_indicator.value = f"{current_frame + 1} / 1440"
+                sim_step = round(current_frame * sim_steps_total / 1439)
+                sim_step_indicator.value = f"{sim_step} / {sim_steps_total}"
+                changing_slider = True
+                frame_slider.value = float(current_frame)
+                changing_slider = False
+                current_frame += 1
+                if len(entries) == 1 and current_frame >= 1440:
+                    current_frame = 0
+                time.sleep(1.0 / (hz * speed_slider.value))
+    finally:
+        server.stop()
 
 def compute_link_twist(pos_traj: torch.Tensor,
                        quat_traj: torch.Tensor) -> torch.Tensor:
@@ -1068,6 +1230,7 @@ def play_and_save_traj(
             hz=60,
             playback_speed=playback_speed,
             port=port,
+            sim_steps_total=round(traj_length * traj_dt * 15.0),
         )
 
 
@@ -1151,6 +1314,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Play each trajectory in Viser before saving. Disabled by default for batch processing.",
     )
+    parser.add_argument(
+        "--replay-existing-trajectories",
+        action="store_true",
+        help="Replay saved 1440-frame traj.pkl files sequentially in one Viser session, without regenerating them.",
+    )
     args = parser.parse_args()
 
     robot_urdf_path = args.robot_urdf_path
@@ -1159,6 +1327,16 @@ if __name__ == "__main__":
     else:
         asset_base_folder = args.asset_base_folder
         asset_paths = sorted(glob.glob(os.path.join(asset_base_folder, "**/mobility.urdf"), recursive=True), reverse=False)
+
+    if args.replay_existing_trajectories:
+        play_saved_trajectory_playlist_in_viser(
+            robot_urdf_path=robot_urdf_path,
+            door_urdf_paths=asset_paths,
+            port=args.port,
+            playback_speed=args.playback_speed,
+            sim_steps_total=540,
+        )
+        raise SystemExit(0)
 
     for i, door_urdf_path in enumerate(asset_paths):
         play_and_save_traj(

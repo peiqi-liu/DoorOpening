@@ -78,6 +78,12 @@ parser.add_argument(
     default=None,
     help="Set the full-ADR door-panel stiffness ceiling for randomized playback (Nm/rad).",
 )
+parser.add_argument(
+    "--door-panel-damping-max",
+    type=float,
+    default=None,
+    help="Set the full-ADR door-panel damping ceiling for randomized playback (Nms/rad).",
+)
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument(
     "--adr-increments",
@@ -139,6 +145,14 @@ parser.add_argument(
     type=int,
     default=0,
     help="Env index to record for --save-viser-pt.",
+)
+parser.add_argument(
+    "--viser-env-ids",
+    "--viser_env_ids",
+    dest="viser_env_ids",
+    type=str,
+    default=None,
+    help="Comma-separated env indices to record together; writes one .pt per env.",
 )
 parser.add_argument(
     "--save-viser-num-rollouts",
@@ -597,6 +611,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             raise ValueError("--door-panel-stiffness-max must be at least the range minimum")
         params["stiffness_distribution_params"] = (lower, args_cli.door_panel_stiffness_max)
         print(f"[INFO] Full-ADR door-panel stiffness range: {lower:g}–{args_cli.door_panel_stiffness_max:g} Nm/rad")
+    if args_cli.door_panel_damping_max is not None:
+        params = env_cfg.adr_cfg_dict["door_board_joint_stiffness_and_damping"]
+        lower, _ = params["damping_distribution_params"]
+        if args_cli.door_panel_damping_max < lower:
+            raise ValueError("--door-panel-damping-max must be at least the range minimum")
+        params["damping_distribution_params"] = (lower, args_cli.door_panel_damping_max)
+        print(f"[INFO] Full-ADR door-panel damping range: {lower:g}–{args_cli.door_panel_damping_max:g} Nms/rad")
     _configure_policy_arx_mode(env_cfg)
     if args_cli.adr_increments is not None:
         env_cfg.starting_adr_increments = args_cli.adr_increments
@@ -695,7 +716,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     play_env.early_stopping = args_cli.enable_early_stopping
     print(f"[INFO] Play early stopping enabled: {play_env.early_stopping}")
 
-    viser_pt_state = None
+    viser_pt_states = []
     if args_cli.save_viser_pt is not None:
         from DoorOpening.assets.door.multi_door_cfg import asset_paths as _door_asset_paths
 
@@ -705,40 +726,52 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # position within _robot_dof_idx for the target lookup.
         _dof_to_target_pos = {int(d): k for k, d in enumerate(play_env._robot_dof_idx.detach().cpu().tolist())}
         _target_pos = [int(_dof_to_target_pos.get(int(j), -1)) for j in _compact_idx]
-        _env_id = max(0, min(int(args_cli.viser_env_id), int(play_env.num_envs) - 1))
-        _env_origin = play_env.scene.env_origins[_env_id].detach().clone()  # (3,) on device
-        _door_asset_idx = int(play_env.env_asset_indices[_env_id].item())
-        _door_urdf = str(_door_asset_paths[_door_asset_idx])
-        _door_root = play_env.door.data.root_state_w[_env_id, :7].detach().clone()  # on device
-        # Build the door pointcloud sampler ONCE (loads the URDF); sample_link_set() is then cheap
-        # per frame (FK + resample from precomputed link meshes).
-        _door_sampler = None
-        try:
-            from DoorOpening.utils.extract_pointcloud_from_articulation import FrankaGripperSampler
+        if args_cli.viser_env_ids:
+            _requested_env_ids = [int(value.strip()) for value in args_cli.viser_env_ids.split(",") if value.strip()]
+        else:
+            _requested_env_ids = [int(args_cli.viser_env_id)]
+        _requested_env_ids = list(dict.fromkeys(max(0, min(value, int(play_env.num_envs) - 1)) for value in _requested_env_ids))
+        _compact_idx_tensor = torch.as_tensor(_compact_idx, device=play_env.device, dtype=torch.long)
+        _target_idx_tensor = torch.as_tensor([max(p, 0) for p in _target_pos], device=play_env.device, dtype=torch.long)
+        _target_valid_tensor = torch.as_tensor([p >= 0 for p in _target_pos], device=play_env.device, dtype=torch.bool)
+        _base_path, _base_ext = os.path.splitext(args_cli.save_viser_pt)
+        for _env_id in _requested_env_ids:
+            _env_origin = play_env.scene.env_origins[_env_id].detach().clone()  # (3,) on device
+            _door_asset_idx = int(play_env.env_asset_indices[_env_id].item())
+            _door_urdf = str(_door_asset_paths[_door_asset_idx])
+            _door_root = play_env.door.data.root_state_w[_env_id, :7].detach().clone()  # on device
+            # Build one door pointcloud sampler per recorded door; sampling is cheap per frame.
+            _door_sampler = None
+            try:
+                from DoorOpening.utils.extract_pointcloud_from_articulation import FrankaGripperSampler
 
-            _door_sampler = FrankaGripperSampler(_door_urdf, device=str(play_env.device), num_points=2048)
-        except Exception as _exc:  # noqa: BLE001
-            print(f"[WARN] --save-viser-pt: could not build door pointcloud sampler ({_exc}); robot-only frames.")
-        viser_pt_state = {
-            "env_id": _env_id,
-            "compact_names": _compact_names,
-            "compact_idx": torch.as_tensor(_compact_idx, device=play_env.device, dtype=torch.long),
-            "target_idx": torch.as_tensor([max(p, 0) for p in _target_pos], device=play_env.device, dtype=torch.long),
-            "target_valid": torch.as_tensor([p >= 0 for p in _target_pos], device=play_env.device, dtype=torch.bool),
-            "env_origin": _env_origin,
-            "door_sampler": _door_sampler,
-            "door_link_names": ["base", "link_0", "link_1", "link_2"],
-            "door_root_pos_w": _door_root[:3],
-            "door_root_quat_w": _door_root[3:7],
-            "frames": [],
-            "frame_dt": float(play_env.step_dt),
-            "num_rollouts": max(1, int(args_cli.save_viser_num_rollouts)),
-            "rollouts": 0,
-        }
-        print(
-            f"[INFO] Saving viser .pt (robot joints/targets + door pointcloud, env {_env_id}) to "
-            f"{os.path.abspath(args_cli.save_viser_pt)}; door={_door_urdf}"
-        )
+                _door_sampler = FrankaGripperSampler(_door_urdf, device=str(play_env.device), num_points=2048)
+            except Exception as _exc:  # noqa: BLE001
+                print(f"[WARN] --save-viser-pt: could not build door pointcloud sampler ({_exc}); robot-only frames.")
+            _viser_path = args_cli.save_viser_pt
+            if len(_requested_env_ids) > 1:
+                _viser_path = f"{_base_path}_env{_env_id}{_base_ext or '.pt'}"
+            viser_pt_states.append({
+                "env_id": _env_id,
+                "output_path": _viser_path,
+                "compact_names": _compact_names,
+                "compact_idx": _compact_idx_tensor,
+                "target_idx": _target_idx_tensor,
+                "target_valid": _target_valid_tensor,
+                "env_origin": _env_origin,
+                "door_sampler": _door_sampler,
+                "door_link_names": ["base", "link_0", "link_1", "link_2"],
+                "door_root_pos_w": _door_root[:3],
+                "door_root_quat_w": _door_root[3:7],
+                "frames": [],
+                "frame_dt": float(play_env.step_dt),
+                "num_rollouts": max(1, int(args_cli.save_viser_num_rollouts)),
+                "rollouts": 0,
+            })
+            print(
+                f"[INFO] Saving viser .pt (robot joints/targets + door pointcloud, env {_env_id}) to "
+                f"{os.path.abspath(_viser_path)}; door={_door_urdf}"
+            )
 
     pointcloud_camera_state = None
     if track_pointcloud_camera:
@@ -1238,7 +1271,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         probe_state["done"] = True
                         print("[PROBE] Capture complete; continuing policy playback.")
 
-                if viser_pt_state is not None and not viser_pt_state.get("done"):
+                for viser_pt_state in viser_pt_states:
+                    if viser_pt_state.get("done"):
+                        continue
                     _e = viser_pt_state["env_id"]
                     _org = viser_pt_state["env_origin"]  # device (3,)
                     _q = play_env.robot.data.joint_pos[_e, viser_pt_state["compact_idx"]].detach().cpu().clone()
@@ -1271,7 +1306,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     if int(_e) < len(dones) and bool(dones[int(_e)].item()):
                         viser_pt_state["rollouts"] += 1
                         print(
-                            f"[INFO] --save-viser-pt: rollout "
+                            f"[INFO] --save-viser-pt: env {_e} rollout "
                             f"{viser_pt_state['rollouts']}/{viser_pt_state['num_rollouts']} captured "
                             f"({len(viser_pt_state['frames'])} frames)."
                         )
@@ -1368,10 +1403,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 break
 
             # Enough rollouts captured -> stop the play loop so the .pt is written by the finally block.
-            if viser_pt_state is not None and viser_pt_state.get("done"):
+            if viser_pt_states and all(state.get("done") for state in viser_pt_states):
                 print(
-                    f"[INFO] Captured {viser_pt_state['rollouts']} rollout(s) for --save-viser-pt; "
-                    "stopping playback."
+                    "[INFO] Captured requested --save-viser-pt rollout(s) for all selected envs; stopping playback."
                 )
                 break
 
@@ -1381,7 +1415,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 # --save-viser-pt capture: keep stepping until the requested viser rollouts are done
                 # (the viser-done break above handles stopping then). Use >= so the break still fires
                 # once viser finishes even though we skipped the exact video_length step.
-                viser_capturing = viser_pt_state is not None and not viser_pt_state.get("done")
+                viser_capturing = any(not state.get("done") for state in viser_pt_states)
                 if timestep >= args_cli.video_length and not viser_capturing:
                     break
 
@@ -1394,18 +1428,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if door_audit_state is not None and door_audit_state["rows"]:
             _write_door_audit()
 
-        if viser_pt_state is not None and viser_pt_state["frames"]:
-            _viser_path = os.path.abspath(args_cli.save_viser_pt)
-            os.makedirs(os.path.dirname(_viser_path) or ".", exist_ok=True)
-            torch.save(
-                {
-                    "frames": viser_pt_state["frames"],
-                    "compact_target_joint_names": viser_pt_state["compact_names"],
-                    "frame_dt": viser_pt_state["frame_dt"],
-                },
-                _viser_path,
-            )
-            print(f"[INFO] Saved {len(viser_pt_state['frames'])} viser frames (robot + door pointcloud) to {_viser_path}")
+        for viser_pt_state in viser_pt_states:
+            if viser_pt_state["frames"]:
+                _viser_path = os.path.abspath(viser_pt_state["output_path"])
+                os.makedirs(os.path.dirname(_viser_path) or ".", exist_ok=True)
+                torch.save(
+                    {
+                        "frames": viser_pt_state["frames"],
+                        "compact_target_joint_names": viser_pt_state["compact_names"],
+                        "frame_dt": viser_pt_state["frame_dt"],
+                    },
+                    _viser_path,
+                )
+                print(f"[INFO] Saved {len(viser_pt_state['frames'])} viser frames (robot + door pointcloud) to {_viser_path}")
 
         # If we were interrupted before the frame target (so no save happened yet), save what we have.
         if probe_state is not None and probe_state["frames"] and not probe_state["saved"]:

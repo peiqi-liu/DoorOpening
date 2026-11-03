@@ -147,6 +147,18 @@ parser.add_argument(
     default=None,
     help="Upper bound in Nm for randomized door-panel effort during distillation.",
 )
+parser.add_argument(
+    "--door-panel-stiffness-max",
+    type=float,
+    default=None,
+    help="Upper bound in Nm/rad for randomized door-panel stiffness during distillation.",
+)
+parser.add_argument(
+    "--door-panel-damping-max",
+    type=float,
+    default=None,
+    help="Upper bound in Nms/rad for randomized door-panel damping during distillation.",
+)
 parser.add_argument("--task", type=str, default="DooropeningMulti", help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument(
@@ -372,6 +384,17 @@ def main(env_cfg, agent_cfg: dict):
             raise ValueError("Door-panel effort maximum must cover the start range")
         env_cfg.door_panel_effort_limit_range_nm = (effort_min, args_cli.door_panel_effort_max)
         print(f"[INFO] Distillation door-panel effort range: {env_cfg.door_panel_effort_limit_range_nm} Nm")
+    for _flag, _label, _event_name, _param_name, _units in (
+        (args_cli.door_panel_stiffness_max, "stiffness", "door_board_joint_stiffness_and_damping", "stiffness_distribution_params", "Nm/rad"),
+        (args_cli.door_panel_damping_max, "damping", "door_board_joint_stiffness_and_damping", "damping_distribution_params", "Nms/rad"),
+    ):
+        if _flag is None:
+            continue
+        _params = env_cfg.adr_cfg_dict[_event_name][_param_name]
+        if _flag < float(_params[0]):
+            raise ValueError(f"Door-panel {_label} maximum must be >= minimum {_params[0]}")
+        env_cfg.adr_cfg_dict[_event_name][_param_name] = (float(_params[0]), float(_flag))
+        print(f"[INFO] Distillation door-panel {_label} range: {env_cfg.adr_cfg_dict[_event_name][_param_name]} {_units}")
 
     # parse configuration
     # env_cfg = parse_env_cfg(
