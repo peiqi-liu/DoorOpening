@@ -2075,8 +2075,8 @@ class DooropeningEnv(DirectRLEnv):
         )
 
         # Franka control-box <-> door contact: no longer episode-ending (the box is sturdy). A
-        # graded penalty ramps linearly from 0 at min_force (25 N -- light taps are free) to the
-        # full weight at max_force (75 N and above). Replaces the old hard-termination check.
+        # graded penalty ramps linearly from 0 at min_force (10 N) to the full weight at
+        # max_force (40 N and above). Replaces the old hard-termination check.
         franka_box_force_norm = self._get_franka_box_contact_force_norm()
         # Latch: this episode had at least one franka-box door collision (> min_force).
         self.episode_franka_box_collided |= franka_box_force_norm > self.cfg.franka_box_contact_penalty_min_force

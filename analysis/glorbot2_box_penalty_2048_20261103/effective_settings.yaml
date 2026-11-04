@@ -1,0 +1,30 @@
+host: glorbot2-laptop
+branch: codex/glorbot2-box-penalty-2048
+base_commit: 481f35e79d1595dcffec767039b979eae08ef14e
+training:
+  task: DooropeningMulti
+  algorithm: PPO
+  gpu_count: 1
+  gpu: NVIDIA GeForce RTX 5090 Laptop GPU
+  total_environments: 2048
+  device: cuda:0
+  seed: 42
+  max_iterations: 30000
+  resume_from_checkpoint: false
+  wandb:
+    enabled: true
+    project: dooropeningv22
+    entity: peiqiliu
+reference:
+  asset_family: PartNetv5_plus_hardstop_recess_tipoffset_back_base_teleop_ref_20261101
+  door_count: 1024
+  frames_per_trajectory: 1440
+franka_control_box_door_contact_penalty:
+  min_force_n: 10.0
+  max_force_n: 40.0
+  max_penalty_points_per_step: 5.0
+  force_threshold_episode_metric_n: 10.0
+notes:
+  - Only the Franka control-box collision penalty differs from the shared teleop_ref commit.
+  - Asset family and trajectories were copied from Vision5 and checksum-verified.
+  - Experiment branch is local to glorbot2-laptop and is not pushed.

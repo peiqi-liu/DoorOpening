@@ -974,11 +974,11 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     x5_door_contact_penalty_w = 20.0
     # Franka control-box <-> door contact is NO LONGER episode-ending (the box is sturdy). Instead
     # a graded penalty ramps linearly from 0 penalty at min_force to the full weight at max_force
-    # (clamped): <25 N is free, 25-75 N ramps up, >=75 N is the max penalty.
-    # NOTE: franka_box_contact_penalty_w (the magnitude at >=75 N) is a starting guess -- tune it.
-    franka_box_contact_penalty_w = 10.0
-    franka_box_contact_penalty_min_force = 25.0
-    franka_box_contact_penalty_max_force = 75.0
+    # (clamped): <10 N is free, 10-40 N ramps up, >=40 N is the max penalty.
+    # NOTE: franka_box_contact_penalty_w is the maximum per-step cost at >=40 N.
+    franka_box_contact_penalty_w = 5.0
+    franka_box_contact_penalty_min_force = 10.0
+    franka_box_contact_penalty_max_force = 40.0
 
     # Jerk penalty: sum((a_t - 2*a_t-1 + a_t-2)^2) over the whole policy action vector (base rot +
     # base xy + arm + finger), each component in [-1, 1]. Targets the SHAPE of the policy's own
