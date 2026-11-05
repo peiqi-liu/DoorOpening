@@ -205,8 +205,8 @@ GLORBOT_CONFIG = ArticulationCfg(
         "panda_forearm": ImplicitActuatorCfg(
             joint_names_expr=["panda_joint[5-7]"],
             velocity_limit_sim=2.61,
-            stiffness=80.0,
-            damping=4.0,
+            stiffness=400.0,
+            damping=80.0,
         ),
         "x5_arm": ImplicitActuatorCfg(
             joint_names_expr=["x5_joint[1-6]"],

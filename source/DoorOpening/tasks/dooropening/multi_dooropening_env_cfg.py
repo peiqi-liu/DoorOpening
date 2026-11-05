@@ -1064,9 +1064,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
             "mass_distribution_params": (60.0, 150.0),
         },
         "robot_joint_stiffness_and_damping": {
-            # Full-ADR multipliers: 0.55..1.8x nominal Franka stiffness and damping.
-            "stiffness_distribution_params": (0.55, 1.8),
-            "damping_distribution_params": (0.55, 1.8),
+            # Full-ADR multipliers: 0.5..2x nominal Franka stiffness and damping.
+            "stiffness_distribution_params": (0.5, 2.0),
+            "damping_distribution_params": (0.5, 2.0),
         },
         # Give the mobile base the same ADR progression and gain multipliers as the Franka.
         "base_impedance_correlated": {
