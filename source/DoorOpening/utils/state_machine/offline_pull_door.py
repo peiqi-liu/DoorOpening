@@ -1040,7 +1040,9 @@ def state_machine_offline_left_pull_door(
 
     # Handle-relative base standoff during the pull sweep; reduced by 5 cm
     # so the base retreats less as the panel opens toward the robot.
-    pull_base_x_offset = 0.70
+    # Keep the extra 5 cm of backward standoff on this pull sweep to give the
+    # arm a little more reach margin as the base shifts left.
+    pull_base_x_offset = 0.75
     # Constant lateral shift of the base held through the pull, in WORLD y (+y = the robot's right,
     # per this file's robot-faces--x convention). The base y was previously a pure function of theta
     # with no standing offset, so the chassis -- and the arx bolted to it -- tracked straight up the
