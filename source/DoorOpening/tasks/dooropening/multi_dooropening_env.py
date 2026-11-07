@@ -505,6 +505,8 @@ class DooropeningEnv(DirectRLEnv):
 
     def _get_x5_body_contact_force_norm(self, filter_indices=None, include_franka_box=True) -> torch.Tensor:
         sensor_names = [
+            "contact_forces_door_x5_base",
+            "contact_forces_door_x5_link1",
             "contact_forces_door_x5_link2",
             "contact_forces_door_x5_link3",
             "contact_forces_door_x5_link4",
@@ -640,7 +642,10 @@ class DooropeningEnv(DirectRLEnv):
         if self.sim.has_gui():
             disable_collision_scope_instancing(self.cfg.door_cfg.prim_path)
         # add ground plane
-        spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
+        ground_plane_usd = Path(__file__).resolve().parents[2] / "assets" / "ground_plane" / "default_environment.usda"
+        spawn_ground_plane(
+            prim_path="/World/ground", cfg=GroundPlaneCfg(usd_path=str(ground_plane_usd), color=None)
+        )
         # Do not clone env_0 over the other envs for heterogeneous multi-door
         # scenes. The MultiAssetSpawner has already populated each env.
         if self.cfg.scene.replicate_physics:
@@ -671,6 +676,8 @@ class DooropeningEnv(DirectRLEnv):
         for _name in BASE_DOOR_SENSOR_NAMES:
             self.scene.sensors[_name] = ContactSensor(getattr(self.cfg, _name))
         self.scene.sensors["contact_forces_door_franka_box"] = ContactSensor(self.cfg.contact_forces_door_franka_box)
+        self.scene.sensors["contact_forces_door_x5_base"] = ContactSensor(self.cfg.contact_forces_door_x5_base)
+        self.scene.sensors["contact_forces_door_x5_link1"] = ContactSensor(self.cfg.contact_forces_door_x5_link1)
         self.scene.sensors["contact_forces_door_x5_link2"] = ContactSensor(self.cfg.contact_forces_door_x5_link2)
         self.scene.sensors["contact_forces_door_x5_link3"] = ContactSensor(self.cfg.contact_forces_door_x5_link3)
         self.scene.sensors["contact_forces_door_x5_link4"] = ContactSensor(self.cfg.contact_forces_door_x5_link4)
@@ -2063,9 +2070,8 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["error/self_collision_penalty"] = weighted_self_collision_penalty.mean().item()
         self.extras["stats/self_collision_body_count_mean"] = self_collision_body_count.mean().item()
 
-        # Base<->door contact penalty: no base face should touch the door. Count the four
-        # vertical faces (front/back/left/right) whose contact force with any door body exceeds
-        # the threshold and penalize per face in contact.
+        # Base side panels/chassis against any door body (frame, panel, or handle); count
+        # robot bodies whose combined filtered contact force exceeds the threshold.
         base_door_force_norm = self._stacked_self_contact_force_norm(BASE_DOOR_SENSOR_NAMES)
         base_door_contact_count = (base_door_force_norm > self.cfg.base_door_contact_force_threshold).sum(dim=-1)
         weighted_base_door_contact_penalty = self.base_door_contact_penalty_w * base_door_contact_count.to(dtype=base_door_force_norm.dtype)

@@ -185,14 +185,14 @@ GLORBOT_CONFIG = ArticulationCfg(
         "base_translation": ImplicitActuatorCfg(
             joint_names_expr=["base_x_joint", "base_y_joint"],
             effort_limit_sim=130.0,
-            stiffness=80000.0,
-            damping=12000.0,
+            stiffness=60000.0,
+            damping=9000.0,
         ),
         "base_rotation": ImplicitActuatorCfg(
             joint_names_expr=["base_rotation_joint"],
             effort_limit_sim=45.0,
-            stiffness=11000.0,
-            damping=1200.0,
+            stiffness=8250.0,
+            damping=900.0,
         ),
         # High PD on J1-J4 and Isaac Lab's low-PD gains on J5-J7.
         # Keep the URDF effort limits (87 Nm on joints 1-4; 12 Nm on joints 5-7).

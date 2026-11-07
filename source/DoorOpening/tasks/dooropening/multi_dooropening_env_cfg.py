@@ -23,6 +23,7 @@ from DoorOpening.constants.robot_constants import (
 from DoorOpening.tasks.dooropening.contact_force_utils import (
     BASE_DOOR_CONTACT_BODY_NAMES,
     DOOR_BODY_CONTACT_FILTER_PRIM_PATHS,
+    DOOR_FRAME_FILTER_PRIM_PATH,
     FRANKA_BOX_DOOR_CONTACT_PRIM_PATH,
     HANDLE_CONTACT_FILTER_PRIM_PATHS,
     PALM_ONLY_HANDLE_CONTACT_FILTER_PRIM_PATHS,
@@ -64,10 +65,7 @@ def randomize_base_impedance_correlated(
     translation_nominal_damping: float | None = None,
     yaw_nominal_stiffness: float | None = None,
     yaw_nominal_damping: float | None = None,
-    translation_stiffness_multiplier_range: tuple[float, float] = (1.0, 1.0),
-    translation_damping_multiplier_range: tuple[float, float] = (1.0, 1.0),
-    yaw_stiffness_multiplier_range: tuple[float, float] = (1.0, 1.0),
-    yaw_damping_multiplier_range: tuple[float, float] = (1.0, 1.0),
+    base_impedance_multiplier_range: tuple[float, float] = (0.5, 2.0),
 ):
     """Sample fixed position-drive gains independently of the policy action scale.
 
@@ -88,9 +86,11 @@ def randomize_base_impedance_correlated(
         low, high = (float(bounds[0]), float(bounds[1]))
         return low + (high - low) * torch.rand(n, device=asset.device)
 
+    base_multiplier = uniform(base_impedance_multiplier_range)
     if translation_nominal_stiffness is not None and translation_nominal_damping is not None:
-        trans_k = float(translation_nominal_stiffness) * uniform(translation_stiffness_multiplier_range)
-        trans_d = float(translation_nominal_damping) * uniform(translation_damping_multiplier_range)
+        # One shared per-env multiplier keeps base stiffness and damping correlated.
+        trans_k = float(translation_nominal_stiffness) * base_multiplier
+        trans_d = float(translation_nominal_damping) * base_multiplier
     else:
         trans_d = uniform(translation_damping_range)
         trans_ratio = uniform(translation_k_over_d_range)
@@ -98,8 +98,8 @@ def randomize_base_impedance_correlated(
             trans_d.fill_(float(translation_damping_override))
         trans_k = trans_d * 1.5 * trans_ratio
     if yaw_nominal_stiffness is not None and yaw_nominal_damping is not None:
-        yaw_k = float(yaw_nominal_stiffness) * uniform(yaw_stiffness_multiplier_range)
-        yaw_d = float(yaw_nominal_damping) * uniform(yaw_damping_multiplier_range)
+        yaw_k = float(yaw_nominal_stiffness) * base_multiplier
+        yaw_d = float(yaw_nominal_damping) * base_multiplier
     else:
         yaw_d = uniform(yaw_damping_range)
         yaw_ratio = uniform(yaw_k_over_d_range)
@@ -454,14 +454,11 @@ class EventCfg:
             "translation_k_over_d_range": (0.8, 1.2),
             "yaw_damping_range": (15.0, 45.0),
             "yaw_k_over_d_range": (0.8, 1.2),
-            "translation_nominal_stiffness": 80000.0,
-            "translation_nominal_damping": 12000.0,
-            "yaw_nominal_stiffness": 11000.0,
-            "yaw_nominal_damping": 1200.0,
-            "translation_stiffness_multiplier_range": (1.0, 1.0),
-            "translation_damping_multiplier_range": (1.0, 1.0),
-            "yaw_stiffness_multiplier_range": (1.0, 1.0),
-            "yaw_damping_multiplier_range": (1.0, 1.0),
+            "translation_nominal_stiffness": 60000.0,
+            "translation_nominal_damping": 9000.0,
+            "yaw_nominal_stiffness": 8250.0,
+            "yaw_nominal_damping": 900.0,
+            "base_impedance_multiplier_range": (1.0, 1.0),
         },
     )
 
@@ -470,6 +467,7 @@ class EventCfg:
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=["base_x_joint", "base_y_joint"]),
+            # Match Vision9's reset-time randomized base translation effort limit.
             "effort_limit_distribution_params": (110.0, 160.0),
             "shared_across_joints": True,
         },
@@ -479,6 +477,7 @@ class EventCfg:
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=["base_rotation_joint"]),
+            # Match Vision9's reset-time randomized base yaw effort limit.
             "effort_limit_distribution_params": (35.0, 55.0),
         },
     )
@@ -705,16 +704,31 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         debug_vis=False,
         filter_prim_paths_expr=list(PANEL_CONTACT_FILTER_PRIM_PATHS),
     )
-    # Base<->door contact: every vertical base face + chassis against all door bodies. Any
-    # contact here is penalized. Split one-sensor-per-body (see _robot_body_contact_sensor):
-    # a multi-body sensor cannot report filtered contacts. The env aggregates these back into
-    # a per-body [N, 5] tensor via BASE_DOOR_CONTACT_BODY_NAMES.
-    contact_forces_base_door_left_panel = _robot_body_contact_sensor("left_panel", DOOR_BODY_CONTACT_FILTER_PRIM_PATHS)
-    contact_forces_base_door_right_panel = _robot_body_contact_sensor("right_panel", DOOR_BODY_CONTACT_FILTER_PRIM_PATHS)
-    contact_forces_base_door_tidybot2_base_link = _robot_body_contact_sensor("tidybot2_base_link", DOOR_BODY_CONTACT_FILTER_PRIM_PATHS)
+    # Base side panels + chassis against the fixed door frame only. Contact with the moving
+    # panel/handle is not part of this frame-clearance penalty. Split one sensor per robot body
+    # because filtered contacts require a single-body prim_path; the env aggregates these sensors.
+    # Base side panels/chassis contact against every door body: frame, panel, and handle.
+    BASE_DOOR_CONTACT_FILTER_PRIM_PATHS = DOOR_BODY_CONTACT_FILTER_PRIM_PATHS
+    contact_forces_base_door_left_panel = _robot_body_contact_sensor("left_panel", BASE_DOOR_CONTACT_FILTER_PRIM_PATHS)
+    contact_forces_base_door_right_panel = _robot_body_contact_sensor("right_panel", BASE_DOOR_CONTACT_FILTER_PRIM_PATHS)
+    contact_forces_base_door_tidybot2_base_link = _robot_body_contact_sensor("tidybot2_base_link", BASE_DOOR_CONTACT_FILTER_PRIM_PATHS)
     # Franka control box <-> door: folded into the harsh x5<->door penalty + termination.
     contact_forces_door_franka_box = ContactSensorCfg(
         prim_path=FRANKA_BOX_DOOR_CONTACT_PRIM_PATH,
+        update_period=0.0,
+        history_length=0,
+        debug_vis=False,
+        filter_prim_paths_expr=list(DOOR_BODY_CONTACT_FILTER_PRIM_PATHS),
+    )
+    contact_forces_door_x5_base = ContactSensorCfg(
+        prim_path=f"/World/envs/env_.*/Robot/{X5_BODY_NAMES[0]}",
+        update_period=0.0,
+        history_length=0,
+        debug_vis=False,
+        filter_prim_paths_expr=list(DOOR_BODY_CONTACT_FILTER_PRIM_PATHS),
+    )
+    contact_forces_door_x5_link1 = ContactSensorCfg(
+        prim_path=f"/World/envs/env_.*/Robot/{X5_BODY_NAMES[1]}",
         update_period=0.0,
         history_length=0,
         debug_vis=False,
@@ -782,8 +796,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         filter_prim_paths_expr=list(SELF_COLLISION_HAND_FILTER_PRIM_PATHS),
     )
     handle_contact_force_threshold = 1.0
-    # Contact between a non-front base face and any door body above this (N) is penalized.
-    base_door_contact_force_threshold = 5.0
+    # Base side panel/chassis contact with the fixed door frame is penalized above this force.
+    base_door_contact_force_threshold = 2.5
     x5_body_contact_force_threshold = 1.5
     # (Removed franka_box_contact_force_threshold: the franka control box no longer terminates the
     # episode. It is handled by the graded franka_box_contact_penalty_* params above instead.)
@@ -914,7 +928,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     num_states = state_space
     
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=False)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=False)  # Glorbot2 laptop long-schedule run
 
     # Branch-specific action scale; changing it does not change sampled PD gains.
     base_action_scale = 1.0
@@ -966,12 +980,12 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     joint_limit_penalty_joints = list(arm_joints)
     # lambda_c in r = r_target - lambda_l*r_limit - lambda_c*r_contact
     self_collision_penalty_w = 5.0
-    # Penalty weight (per non-front base face in contact with the door). High on purpose: a
-    # base panel hitting the door in the real world means a securely-mounted robot is injured.
-    base_door_contact_penalty_w = 10.0
+    # Per-step penalty per base side panel/chassis body contacting the fixed door frame.
+    # Strongly discourage frame impacts to protect the base and door frame.
+    base_door_contact_penalty_w = 40.0
     # Penalty weight for the x5/arx camera arm contacting any door body (frame/panel/handle).
     # Harsh: the slender camera arm hitting the door is a serious real-world failure.
-    x5_door_contact_penalty_w = 20.0
+    x5_door_contact_penalty_w = 40.0
     # Franka control-box <-> door contact is NO LONGER episode-ending (the box is sturdy). Instead
     # a graded penalty ramps linearly from 0 penalty at min_force to the full weight at max_force
     # (clamped): <10 N is free, 10-40 N ramps up, >=40 N is the max penalty.
@@ -1037,10 +1051,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     success_far_push_ref_dist = 0.75
     # We are slowly increasing our tolerance on base position drift and slowly only resettting the env from the first key frame
     # This variable is used to indicate when we stop increasing the tolerance and reset the env from the first key frame for the greatest probability
-    reset_progress_total = 2.5e5
+    reset_progress_total = 2.5e5  # Long reset curriculum
     use_motion_ref = True
     # ADR should ramp faster than the reference-motion reset curriculum so physics randomization is not lagging behind.
-    adr_reset_progress_total = 1e5
+    adr_reset_progress_total = 1e5  # Long active ADR ramp
 
     alive_base = 10.0
     alive_bonus = 20.0
@@ -1070,15 +1084,13 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         },
         # Give the mobile base the same ADR progression and gain multipliers as the Franka.
         "base_impedance_correlated": {
-            "translation_stiffness_multiplier_range": (0.8, 1.2),
-            "translation_damping_multiplier_range": (0.7, 1.3),
-            "yaw_stiffness_multiplier_range": (0.8, 1.2),
-            "yaw_damping_multiplier_range": (0.7, 1.3),
+            # One shared ADR-ramped multiplier for all base K/D gains (X/Y and yaw).
+            "base_impedance_multiplier_range": (0.5, 2.0),
         },
         "door_board_joint_stiffness_and_damping": {
             # FINAL (full-ADR) stiffness band, UNIFORM (not log-uniform -- see the "distribution"
             # field on the EventCfg term itself, which ADR never touches) over 5..500 Nm/rad.
-            "stiffness_distribution_params": (5.0, 500.0),  # was (8.0, 800.0), temp update
+            "stiffness_distribution_params": (5.0, 200.0),  # final full-ADR panel stiffness cap
             # Nm*s/rad. zeta = c/(2*sqrt(k*I)), I ~= 24 kg*m^2. Rescaled with the stiffness band to
             # hold the same damping ratios as before: zeta ~= 0.11 at the floor (free-swinging soft
             # doors), ~= 0.32 at the ceiling (real drag on stiff doors).

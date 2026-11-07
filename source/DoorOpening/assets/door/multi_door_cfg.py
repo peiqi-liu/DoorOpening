@@ -168,7 +168,7 @@ def create_door_cfg(
 
 root_path = os.path.dirname(os.path.dirname(__file__))
 asset_base_folder = os.path.join(root_path, "door")
-DEFAULT_MULTI_DOOR_FAMILY_NAMES = ["tilted_traverse"]
+DEFAULT_MULTI_DOOR_FAMILY_NAMES = ["PartNetv5_plus_hardstop_recess_tipoffset_back_base_teleop_ref_20261101"]
 
 
 def _resolve_multi_door_family_names():
