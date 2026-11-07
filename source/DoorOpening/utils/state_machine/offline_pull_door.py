@@ -142,8 +142,10 @@ def _traverse_after_panel_push(
     # Favor a lateral disengagement over retracing straight away from the door.
     # World +x is backward and -y is left for the nominal -x-facing base.
     backup_distance = 0.10
-    backup_left_distance = 0.20
-    palm_slide_distance = 0.25
+    backup_left_distance = 0.15
+    # Move the base 30 cm while the hand slides 20 cm along the panel,
+    # preserving a 10 cm relative advance with less base travel.
+    palm_slide_distance = 0.20
     backup_steps = 3
     turn_steps = 4
     forward_steps = 8
@@ -188,10 +190,10 @@ def _traverse_after_panel_push(
         _append_state(robot_traj, door_traj, key_indices, q_robot, q_door,
                       mark_keyframe=(step == turn_steps))
 
-    # Cross to the inner side. The wrist slides 25 cm along the open panel,
+    # Cross to the inner side. The wrist slides 20 cm along the open panel,
     # while its height, lateral contact offset, and orientation stay fixed.
     mid_base_pos = start_base_pos.clone()
-    mid_base_pos[:, 0] -= 0.40
+    mid_base_pos[:, 0] -= 0.30
     mid_base_pos[:, 1] = mid_y
     backed_up_pos = base_target_pos.clone()
     for step in range(1, forward_steps + 1):
@@ -1045,7 +1047,7 @@ def state_machine_offline_left_pull_door(
     # line the arm was working along. Measured: this is what clears the END of the pull sweep, where
     # panda_link3 was hitting arx link4.
     pull_base_y_offset = 0.08
-    pull_base_y_gain = -0.1 / 1.45
+    pull_base_y_gain = -0.15 / 1.45
 
     # Held flat while the panel is not yet confidently open (0.3 rad -- matches pull_theta_start, well
     # past the door_closed_range=0.05 rad relock boundary), then released QUICKLY rather than dragged
