@@ -1174,7 +1174,8 @@ def play_and_save_traj(
     # ---- Contact masks (time-gated reward shaping) ----
     # Keyframe layout (both planners): 0=start, 1=pregrasp, 2=grasp, 3=rotate-hinge,
     # 4=open/pull-end, 5=base-forward (push) / blocking-pose (pull). Pull additionally
-    # has 6=retract-arm, 7-8=push-panel-open, 9-10=traverse.
+    # has 6=retract-arm, 7-8=push-panel-open, 9=base-backup, 10=turn,
+    # 11=forward-with-contact, 12=arm-default, 13=final traverse.
     #
     # hinge_contact_mask: ENCOURAGE palm<->handle contact while the hand actually works
     # the handle, i.e. keyframes 2..5 for both directions:

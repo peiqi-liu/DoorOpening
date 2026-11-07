@@ -1078,7 +1078,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         "door_board_joint_stiffness_and_damping": {
             # FINAL (full-ADR) stiffness band, UNIFORM (not log-uniform -- see the "distribution"
             # field on the EventCfg term itself, which ADR never touches) over 5..500 Nm/rad.
-            "stiffness_distribution_params": (5.0, 500.0),  # was (8.0, 800.0), temp update
+            "stiffness_distribution_params": (5.0, 200.0),  # was (8.0, 800.0), temp update
             # Nm*s/rad. zeta = c/(2*sqrt(k*I)), I ~= 24 kg*m^2. Rescaled with the stiffness band to
             # hold the same damping ratios as before: zeta ~= 0.11 at the floor (free-swinging soft
             # doors), ~= 0.32 at the ceiling (real drag on stiff doors).

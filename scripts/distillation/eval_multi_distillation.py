@@ -282,6 +282,22 @@ parser.add_argument(
     help="Eval-only base actuator control mode; velocity uses the deployed speed and acceleration limits.",
 )
 parser.add_argument(
+    "--base-position-gains",
+    type=float,
+    nargs=4,
+    metavar=("XY_K", "XY_D", "YAW_K", "YAW_D"),
+    default=None,
+    help="Eval-only fixed position-drive gains for x/y and yaw, in N/m, Ns/m, Nm/rad, Nms/rad.",
+)
+parser.add_argument(
+    "--base-position-effort-limits",
+    type=float,
+    nargs=2,
+    metavar=("XY_N", "YAW_NM"),
+    default=None,
+    help="Eval-only fixed x/y and yaw actuator effort limits.",
+)
+parser.add_argument(
     "--legacy-base-physics-20261017",
     action="store_true",
     help="Eval-only: reproduce the October 17 position-drive base gains and effort limits.",
@@ -2228,6 +2244,41 @@ def main(env_cfg, agent_cfg: dict):
     if args_cli.base_control_mode is not None:
         env_cfg.base_control_mode = args_cli.base_control_mode
         print(f"[INFO] Eval-only base_control_mode override: {env_cfg.base_control_mode}")
+    if args_cli.base_position_gains is not None:
+        if env_cfg.base_control_mode != "position":
+            raise ValueError("--base-position-gains requires position control")
+        xy_k, xy_d, yaw_k, yaw_d = map(float, args_cli.base_position_gains)
+        if min(xy_k, xy_d, yaw_k, yaw_d) <= 0.0:
+            raise ValueError("--base-position-gains requires positive values")
+        base_xy = env_cfg.robot_cfg.actuators["base_translation"]
+        base_yaw = env_cfg.robot_cfg.actuators["base_rotation"]
+        base_xy.stiffness, base_xy.damping = xy_k, xy_d
+        base_yaw.stiffness, base_yaw.damping = yaw_k, yaw_d
+        impedance = env_cfg.events.base_impedance_correlated.params
+        impedance.update(
+            translation_nominal_stiffness=xy_k,
+            translation_nominal_damping=xy_d,
+            yaw_nominal_stiffness=yaw_k,
+            yaw_nominal_damping=yaw_d,
+        )
+        for gain in ("translation_stiffness", "translation_damping", "yaw_stiffness", "yaw_damping"):
+            key = f"{gain}_multiplier_range"
+            impedance[key] = (1.0, 1.0)
+            env_cfg.adr_cfg_dict["base_impedance_correlated"][key] = (1.0, 1.0)
+        print(f"[INFO] Eval-only fixed base gains: x/y K={xy_k} D={xy_d}; yaw K={yaw_k} D={yaw_d}")
+    if args_cli.base_position_effort_limits is not None:
+        xy_effort, yaw_effort = map(float, args_cli.base_position_effort_limits)
+        if min(xy_effort, yaw_effort) <= 0.0:
+            raise ValueError("--base-position-effort-limits requires positive values")
+        env_cfg.robot_cfg.actuators["base_translation"].effort_limit_sim = xy_effort
+        env_cfg.robot_cfg.actuators["base_rotation"].effort_limit_sim = yaw_effort
+        env_cfg.events.base_translation_effort_limit.params["effort_limit_distribution_params"] = (
+            xy_effort, xy_effort
+        )
+        env_cfg.events.base_yaw_effort_limit.params["effort_limit_distribution_params"] = (
+            yaw_effort, yaw_effort
+        )
+        print(f"[INFO] Eval-only fixed base effort limits: x/y={xy_effort} N; yaw={yaw_effort} Nm")
     if args_cli.legacy_base_physics_20261017:
         if env_cfg.base_control_mode != "position":
             raise ValueError("--legacy-base-physics-20261017 requires position control")
