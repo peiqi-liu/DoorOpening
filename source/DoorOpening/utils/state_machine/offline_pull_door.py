@@ -15,7 +15,7 @@ from DoorOpening.constants.robot_constants import (
 )
 
 HandleSide = Literal["right", "left"]
-TRAVERSE_YAW_OFFSET_RAD = math.radians(25.0)
+TRAVERSE_YAW_OFFSET_RAD = math.radians(20.0)
 
 # Null-space posture anchor for the LEFT pull planner's IK (see api.solve_ik).
 #
@@ -119,6 +119,126 @@ def _append_state(
     door_traj.append(q_door.clone())
     if mark_keyframe:
         key_indices.append(len(robot_traj) - 1)
+
+
+def _traverse_after_panel_push(
+    robot_urdf_path,
+    robot_initial_pose,
+    robot_traj,
+    door_traj,
+    key_indices,
+    q_robot,
+    q_door,
+    base_target_pos,
+    palm_target_pose,
+    blocking_yaw,
+    initial_yaw,
+    mid_y,
+    franka_default_q,
+    device,
+    reference_joint_pos=None,
+):
+    """Clear the panel, turn, cross while sliding the hand, then release it."""
+    backup_distance = 0.20
+    backup_left_distance = 0.10
+    palm_slide_distance = 0.25
+    backup_steps = 3
+    turn_steps = 4
+    forward_steps = 8
+    start_base_pos = base_target_pos.clone()
+    fixed_palm_pose = palm_target_pose.clone()
+    traverse_yaw = initial_yaw + TRAVERSE_YAW_OFFSET_RAD
+    ik_kwargs = {"num_attempts": 1}
+    if reference_joint_pos is not None:
+        ik_kwargs["reference_joint_pos"] = reference_joint_pos
+
+    # Back away and move left to disengage, without moving the hand target in
+    # world coordinates. For the nominal -x facing direction, left is -y.
+    for step in range(1, backup_steps + 1):
+        base_target_pos = start_base_pos.clone()
+        frac = step / backup_steps
+        base_target_pos[:, 0] += backup_distance * frac
+        base_target_pos[:, 1] -= backup_left_distance * frac
+        base_target_pose = _make_pose(
+            base_target_pos, get_rotation_quat(0.0, 0.0, blocking_yaw, device)
+        )
+        q_robot[:10] = solve_ik(
+            robot_urdf_path, q_robot[:10], palm_pose=fixed_palm_pose,
+            base_pose=base_target_pose, robot_initial_pose=robot_initial_pose,
+            **ik_kwargs,
+        )[0]
+        _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
+        _append_state(robot_traj, door_traj, key_indices, q_robot, q_door,
+                      mark_keyframe=(step == backup_steps))
+
+    # Turn at the backed-up position, still holding the same world hand pose.
+    for step in range(1, turn_steps + 1):
+        yaw = blocking_yaw + (traverse_yaw - blocking_yaw) * step / turn_steps
+        base_target_pose = _make_pose(
+            base_target_pos, get_rotation_quat(0.0, 0.0, yaw, device)
+        )
+        q_robot[:10] = solve_ik(
+            robot_urdf_path, q_robot[:10], palm_pose=fixed_palm_pose,
+            base_pose=base_target_pose, robot_initial_pose=robot_initial_pose,
+            **ik_kwargs,
+        )[0]
+        _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
+        _append_state(robot_traj, door_traj, key_indices, q_robot, q_door,
+                      mark_keyframe=(step == turn_steps))
+
+    # Cross to the inner side. The wrist slides 25 cm along the open panel,
+    # while its height, lateral contact offset, and orientation stay fixed.
+    mid_base_pos = start_base_pos.clone()
+    mid_base_pos[:, 0] -= 0.40
+    mid_base_pos[:, 1] = mid_y
+    backed_up_pos = base_target_pos.clone()
+    for step in range(1, forward_steps + 1):
+        frac = step / forward_steps
+        base_target_pos = backed_up_pos + frac * (mid_base_pos - backed_up_pos)
+        # Start forward before moving right. The first two forward waypoints
+        # retain the left clearance, then recover it over the remaining six.
+        lateral_recovery_frac = max(0.0, (step - 2) / (forward_steps - 2))
+        base_target_pos[:, 1] = backed_up_pos[:, 1] + lateral_recovery_frac * (
+            mid_base_pos[:, 1] - backed_up_pos[:, 1]
+        )
+        base_target_pose = _make_pose(
+            base_target_pos, get_rotation_quat(0.0, 0.0, traverse_yaw, device)
+        )
+        step_palm_pose = fixed_palm_pose.clone()
+        step_palm_pose[:, 0] -= palm_slide_distance * frac
+        q_robot[:10] = solve_ik(
+            robot_urdf_path, q_robot[:10], palm_pose=step_palm_pose,
+            base_pose=base_target_pose, robot_initial_pose=robot_initial_pose,
+            **ik_kwargs,
+        )[0]
+        _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
+        _append_state(robot_traj, door_traj, key_indices, q_robot, q_door,
+                      mark_keyframe=(step == forward_steps))
+
+    # Return Franka to default only after reaching the inner-side base pose.
+    q_robot[3:10] = franka_default_q
+    _append_state(robot_traj, door_traj, key_indices, q_robot, q_door,
+                  mark_keyframe=True)
+
+    # Finish crossing with the arm stowed and the 20-degree yaw maintained.
+    far_base_pos = mid_base_pos.clone()
+    far_base_pos[:, 0] = torch.minimum(
+        torch.full_like(mid_base_pos[:, 0], -1.0), mid_base_pos[:, 0] - 1.5
+    )
+    far_base_pos[:, 1] = 0.0
+    far_base_pose = _make_pose(
+        far_base_pos, get_rotation_quat(0.0, 0.0, traverse_yaw, device)
+    )
+    q_robot[:10] = solve_ik(
+        robot_urdf_path, q_robot[:10], palm_pose=None,
+        base_pose=far_base_pose, robot_initial_pose=robot_initial_pose,
+        **ik_kwargs,
+    )[0]
+    q_robot[3:10] = franka_default_q
+    _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
+    q_door = torch.tensor([0.0, 0.0], device=device)
+    _append_state(robot_traj, door_traj, key_indices, q_robot, q_door,
+                  mark_keyframe=True)
 
 
 def _pull_hinge_angle(
@@ -599,7 +719,7 @@ def state_machine_offline_right_pull_door(
     # edge for a longer lever arm (lighter push force). At the contact door angle the panel has
     # swung toward the robot, so its outer edge is at +x from the center -- a POSITIVE x offset
     # moves ALONG the panel toward that edge. (The old -0.1 pushed toward the hinge/inner edge.)
-    push_contact_x_offset = 0.13
+    push_contact_x_offset = 0.33
     push_contact_y_offset = 0.25
     # Contact height on the panel: raised back up so the hand holds/pushes the panel HIGHER (the
     # low contact made the arm swing down toward the arx on the way in).
@@ -696,91 +816,13 @@ def state_machine_offline_right_pull_door(
     )
 
     # -------------------------
-    # Step 8: Traverse through the doorway while holding a 25-degree yaw,
-    # then finish the traverse with default arm joints
+    # Step 8: Back up, turn, cross, and release the panel
     # -------------------------
-    # Traverse forward THROUGH the doorway, letting the gripper slide forward before releasing
-    # the panel and returning the arm to its default posture.
-    # Transition from the blocking yaw to the 25-degree traverse yaw over the first
-    # part of the sweep, then keep that yaw through the final waypoint.
-    start_base_x = base_target_pos[:, 0].clone()
-    # The yaw reaches +25 deg after step 2 of 8. Leave 0.30 m of forward
-    # travel while the arm still holds the panel before the default-arm phase.
-    traverse_mid_x = start_base_x - 0.40
-    # Keep the base a bit closer to the +y door panel during the traverse (was 0.0) so the arm
-    # can still reach the panel it is holding instead of drifting out of reach.
-    traverse_mid_y = 0.10
-    # Drive well past the doorway so the closing door panel can't smash the base from behind.
-    traverse_far_x = torch.minimum(torch.full_like(traverse_mid_x, -1.0), traverse_mid_x - 1.5)
-    traverse_steps = 8
-
-    start_base_y = base_target_pos[:, 1].clone()
-    traverse_start_palm_pos = palm_target_pose[:, :3].clone()
-    traverse_delta = torch.zeros_like(base_target_pos)
-    traverse_delta[:, 0] = traverse_mid_x - start_base_x
-    traverse_delta[:, 1] = traverse_mid_y - start_base_y
-    traverse_direction = traverse_delta / torch.linalg.norm(
-        traverse_delta[:, :2], dim=-1, keepdim=True
-    ).clamp_min(1e-6)
-    blocking_yaw = robot_initial_yaw.item() + tilt_base_yaw
-    for traverse_step in range(1, traverse_steps + 1):
-        frac = traverse_step / traverse_steps
-        base_target_pos = base_target_pos.clone()
-        base_target_pos[:, 0] = start_base_x + frac * (traverse_mid_x - start_base_x)
-        base_target_pos[:, 1] = start_base_y + frac * (traverse_mid_y - start_base_y)
-        settle = min(frac * traverse_steps / 2.0, 1.0)
-        traverse_yaw = robot_initial_yaw.item() + TRAVERSE_YAW_OFFSET_RAD
-        step_yaw = blocking_yaw + settle * (traverse_yaw - blocking_yaw)
-        base_target_pose = _make_pose(
-            base_target_pos, get_rotation_quat(0.0, 0.0, step_yaw, device)
-        )
-        # Let the gripper slide forward by 20 cm over the full first traverse segment,
-        # instead of pinning it to one world point on the panel.
-        step_palm_pos = traverse_start_palm_pos + 0.20 * frac * traverse_direction
-        step_palm_pose = _make_pose(step_palm_pos, palm_target_pose[:, 3:])
-        q_robot[:10] = solve_ik(
-            robot_urdf_path,
-            q_robot[:10],
-            palm_pose=step_palm_pose,
-            base_pose=base_target_pose,
-            robot_initial_pose=robot_initial_pose,
-            num_attempts=1,  # loop body: single seed for continuity (no random-restart branch jumps)
-        )[0]
-        _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
-        _append_state(
-            robot_traj,
-            door_traj,
-            key_idx_in_key_indices,
-            q_robot,
-            q_door,
-            mark_keyframe=(traverse_step == traverse_steps),
-        )
-
-    base_target_pos[:, 0] = traverse_far_x
-    base_target_pos[:, 1] = 0.0
-    traverse_yaw = robot_initial_yaw.item() + TRAVERSE_YAW_OFFSET_RAD
-    base_target_pose = _make_pose(
-        base_target_pos, get_rotation_quat(0.0, 0.0, traverse_yaw, device)
-    )
-
-    q_robot[:10] = solve_ik(
-        robot_urdf_path,
-        q_robot[:10],
-        palm_pose=None,
-        base_pose=base_target_pose,
-        robot_initial_pose=robot_initial_pose,
-    )[0]
-    q_robot[3:10] = franka_default_q
-    _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
-    q_door = torch.tensor([0.0, 0.0], device=device)
-
-    _append_state(
-        robot_traj,
-        door_traj,
-        key_idx_in_key_indices,
-        q_robot,
-        q_door,
-        mark_keyframe=True,
+    _traverse_after_panel_push(
+        robot_urdf_path, robot_initial_pose, robot_traj, door_traj,
+        key_idx_in_key_indices, q_robot, q_door, base_target_pos,
+        palm_target_pose, robot_initial_yaw.item() + tilt_base_yaw,
+        robot_initial_yaw.item(), 0.10, franka_default_q, device,
     )
 
     return robot_traj, door_traj, key_idx_in_key_indices
@@ -889,7 +931,10 @@ def state_machine_offline_left_pull_door(
     # same distance out from the panel.
     # Move the grasp palm 1 cm farther forward toward the handle.
     grasp_palm_x_offset = 0.065
-    grasp_palm_y_offset = 0.015
+    # World -y is the robot's left. Keep this shift through unlatching and
+    # the pull sweep so the fingers stay farther inside the handle.
+    handle_grasp_left_shift = 0.019
+    grasp_palm_y_offset = 0.015 - handle_grasp_left_shift
     grasp_palm_z_offset = 0.02
 
     palm_target_pos = handle_pos.clone()
@@ -928,8 +973,11 @@ def state_machine_offline_left_pull_door(
     # Press this asset's own mechanical stop, not a shared angle: the unlatch threshold in sim is
     # sampled below this URDF limit by the configured stop-to-threshold gap.
     unlatch_hinge_angle = _read_handle_hard_stop_rad(door_urdf_path)
+    # The base straightens during unlatching, which otherwise makes the solved
+    # hand drift about 5 mm left. Offset the target right to hold the actual
+    # lateral hand position from grasp through the handle press.
     unlatch_palm_y_delta = 0.005
-    unlatch_palm_z_delta = -0.08
+    unlatch_palm_z_delta = -0.06
 
     # Orientation shared with the pull sweep below: yaw fixed, roll held at the pull sweep's own
     # starting value (so this step ends exactly where Step 4 begins), and pitch tracks the HANDLE
@@ -1008,6 +1056,10 @@ def state_machine_offline_left_pull_door(
     pull_palm_x_offset_closed = 0.055
     pull_palm_y_offset_closed = 0.03
     pull_palm_z_offset = 0.05
+    # The rotated handle-relative offset otherwise puts the first pull target
+    # about 2.5 cm right of the unlatch target. Carry the hand farther left
+    # through the sweep without changing its position at grasp.
+    pull_palm_world_left_shift = handle_grasp_left_shift + 0.025
 
     # Roll tracks theta (restored from pre-session baseline, pull_rot_roll_base/per_theta defined
     # above near Step 3) so the wrist keeps rotating WITH the handle/panel as the sweep progresses.
@@ -1054,7 +1106,7 @@ def state_machine_offline_left_pull_door(
 
         palm_target_pos = handle_pos.clone()
         palm_target_pos[:, 0] += palm_dx
-        palm_target_pos[:, 1] += palm_dy
+        palm_target_pos[:, 1] += palm_dy - pull_palm_world_left_shift
         palm_target_pos[:, 2] += pull_palm_z_offset
 
         palm_target_rot = get_rotation_quat(
@@ -1120,26 +1172,21 @@ def state_machine_offline_left_pull_door(
         device,
     )
     push_palm_rot = get_rotation_quat(0, 0, math.pi, device)
-    # Retract target: anchored on the PALM in world axes with an ABSOLUTE height, not on the base
-    # with a base-yaw-rotated offset and a handle-relative lift. The old form aimed the hand 0.3 m
-    # from the base axis, which IS the arx camera arm's volume (its links sit within |xy| = 0.282 at
-    # z = 0.65..0.75), and the relative lift meant the height that separated them varied with handle
-    # height. Raise the retreat target to 1.30 m; the following forward-left
-    # waypoint inherits this height. Reachability needs checking at this height.
-    # World +x is backward and -y is left in the nominal approach frame.
-    retreat_world_x = 0.15
-    retreat_world_y = -0.30
-    retreat_palm_z = 1.30
-    # A separate waypoint turns the motion forward while continuing left.
-    forward_left_world_x = -0.15
-    forward_left_world_y = -0.18  # 3 cm farther left (world -y)
+    # Clear the opened panel with a small lateral arc and an early backward
+    # lift. A wider sweep made an unnecessary circle and approached joint limits.
+    # World +x is backward and -y is left in this frame.
+    retreat_world_x = 0.12
+    retreat_world_y = -0.23
+    back_clearance_palm_z = 1.24
+    retreat_palm_z = 1.28
+    forward_left_world_x = -0.12
+    forward_left_world_y = -0.10
     # Larger x offset magnitude (was -0.3) so the arm reaches a bit further forward into the panel.
     # Contact point is now the panel CENTER (get_board_pos); only a small x offset so we push
     # near the center, not toward the hinge axis (short lever -> strong forces on the franka).
-    # Push contact shifted toward the panel FREE/OUTER edge for a longer lever arm (+x moves along
-    # the panel toward that edge, since it swings toward the robot as it opens). Pulled back a bit
-    # toward the CENTER (0.18 -> 0.10) so the contact isn't so far out on the panel.
-    push_contact_x_offset = 0.10
+    # At full open, +x moves along the panel toward its free outer edge. Start
+    # the hold farther out so the hand has room to slide during the crossing.
+    push_contact_x_offset = 0.30
     push_contact_y_offset = -0.2
     push_contact_z_offset = 0.1
     contact_virtual_door_angle = 1.0
@@ -1198,8 +1245,28 @@ def state_machine_offline_left_pull_door(
     )
 
     # -------------------------
-    # Step 6: Move back and left, then forward and farther left
+    # Step 6: Clear the free edge, move to the panel's front side, then advance
     # -------------------------
+    back_clearance_pos = palm_target_pose[:, :3].clone()
+    back_clearance_pos[:, 0] += retreat_world_x
+    back_clearance_pos[:, 2] = back_clearance_palm_z
+    back_clearance_pose = _make_pose(back_clearance_pos, default_palm_rot)
+    q_robot[:10] = solve_ik(
+        robot_urdf_path,
+        q_robot[:10],
+        palm_pose=back_clearance_pose,
+        base_pose=None,
+        robot_initial_pose=robot_initial_pose,
+        reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
+        num_attempts=1,
+    )[0]
+    _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
+    _append_state(
+        robot_traj, door_traj, key_idx_in_key_indices, q_robot, q_door,
+        mark_keyframe=False,
+    )
+
+    # Cross laterally only after the hand has cleared the panel's free edge.
     retreat_palm_pos = palm_target_pose[:, :3].clone()
     retreat_palm_pos[:, 0] += retreat_world_x
     retreat_palm_pos[:, 1] += retreat_world_y
@@ -1325,90 +1392,14 @@ def state_machine_offline_left_pull_door(
     )
 
     # -------------------------
-    # Step 8: Traverse through the doorway while holding a 25-degree yaw,
-    # then finish the traverse with default arm joints
+    # Step 8: Back up, turn, cross, and release the panel
     # -------------------------
-    # Traverse forward THROUGH the doorway, letting the gripper slide forward before releasing
-    # the panel and returning the arm to its default posture.
-    start_base_x = base_target_pos[:, 0].clone()
-    # The yaw reaches +25 deg after step 2 of 8. Leave 0.30 m of forward
-    # travel while the arm still holds the panel before the default-arm phase.
-    traverse_mid_x = start_base_x - 0.40
-    traverse_mid_y = -0.05
-    # Drive well past the doorway so the closing door panel can't smash the base from behind.
-    traverse_far_x = torch.minimum(torch.full_like(traverse_mid_x, -1.0), traverse_mid_x - 1.5)
-    traverse_steps = 8
-
-    start_base_y = base_target_pos[:, 1].clone()
-    traverse_start_palm_pos = palm_target_pose[:, :3].clone()
-    traverse_delta = torch.zeros_like(base_target_pos)
-    traverse_delta[:, 0] = traverse_mid_x - start_base_x
-    traverse_delta[:, 1] = traverse_mid_y - start_base_y
-    traverse_direction = traverse_delta / torch.linalg.norm(
-        traverse_delta[:, :2], dim=-1, keepdim=True
-    ).clamp_min(1e-6)
-    blocking_yaw = robot_initial_yaw.item() + tilt_base_yaw
-    for traverse_step in range(1, traverse_steps + 1):
-        frac = traverse_step / traverse_steps
-        base_target_pos = base_target_pos.clone()
-        base_target_pos[:, 0] = start_base_x + frac * (traverse_mid_x - start_base_x)
-        base_target_pos[:, 1] = start_base_y + frac * (traverse_mid_y - start_base_y)
-        settle = min(frac * traverse_steps / 2.0, 1.0)
-        traverse_yaw = robot_initial_yaw.item() + TRAVERSE_YAW_OFFSET_RAD
-        step_yaw = blocking_yaw + settle * (traverse_yaw - blocking_yaw)
-        base_target_pose = _make_pose(
-            base_target_pos, get_rotation_quat(0.0, 0.0, step_yaw, device)
-        )
-        # Let the gripper slide forward by 20 cm over the full first traverse segment,
-        # instead of pinning it to one world point on the panel.
-        step_palm_pos = traverse_start_palm_pos + 0.20 * frac * traverse_direction
-        step_palm_pose = _make_pose(step_palm_pos, palm_target_pose[:, 3:])
-        q_robot[:10] = solve_ik(
-            robot_urdf_path,
-            q_robot[:10],
-            palm_pose=step_palm_pose,
-            base_pose=base_target_pose,
-            robot_initial_pose=robot_initial_pose,
-            reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
-            num_attempts=1,  # loop body: single seed for continuity (no random-restart branch jumps)
-        )[0]
-        _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
-        _append_state(
-            robot_traj,
-            door_traj,
-            key_idx_in_key_indices,
-            q_robot,
-            q_door,
-            mark_keyframe=(traverse_step == traverse_steps),
-        )
-
-    base_target_pos[:, 0] = traverse_far_x
-    base_target_pos[:, 1] = 0.0
-    # Hold the 25-degree traverse yaw through the final waypoint.
-    traverse_yaw = robot_initial_yaw.item() + TRAVERSE_YAW_OFFSET_RAD
-    base_target_pose = _make_pose(
-        base_target_pos, get_rotation_quat(0.0, 0.0, traverse_yaw, device)
-    )
-
-    q_robot[:10] = solve_ik(
-        robot_urdf_path,
-        q_robot[:10],
-        palm_pose=None,
-        base_pose=base_target_pose,
-        robot_initial_pose=robot_initial_pose,
+    _traverse_after_panel_push(
+        robot_urdf_path, robot_initial_pose, robot_traj, door_traj,
+        key_idx_in_key_indices, q_robot, q_door, base_target_pos,
+        palm_target_pose, robot_initial_yaw.item() + tilt_base_yaw,
+        robot_initial_yaw.item(), -0.05, franka_default_q, device,
         reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
-    )[0]
-    q_robot[3:10] = franka_default_q
-    _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
-    q_door = torch.tensor([0.0, 0.0], device=device)
-
-    _append_state(
-        robot_traj,
-        door_traj,
-        key_idx_in_key_indices,
-        q_robot,
-        q_door,
-        mark_keyframe=True,
     )
 
     return robot_traj, door_traj, key_idx_in_key_indices
