@@ -139,8 +139,10 @@ def _traverse_after_panel_push(
     reference_joint_pos=None,
 ):
     """Clear the panel, turn, cross while sliding the hand, then release it."""
-    backup_distance = 0.20
-    backup_left_distance = 0.10
+    # Favor a lateral disengagement over retracing straight away from the door.
+    # World +x is backward and -y is left for the nominal -x-facing base.
+    backup_distance = 0.10
+    backup_left_distance = 0.20
     palm_slide_distance = 0.25
     backup_steps = 3
     turn_steps = 4
@@ -1176,11 +1178,10 @@ def state_machine_offline_left_pull_door(
     # lift. A wider sweep made an unnecessary circle and approached joint limits.
     # World +x is backward and -y is left in this frame.
     retreat_world_x = 0.12
-    retreat_world_y = -0.23
+    retreat_world_y = 0.14
     back_clearance_palm_z = 1.24
-    retreat_palm_z = 1.28
-    forward_left_world_x = -0.12
-    forward_left_world_y = -0.10
+    front_side_world_y = -0.33
+    front_side_palm_z = 1.28
     # Larger x offset magnitude (was -0.3) so the arm reaches a bit further forward into the panel.
     # Contact point is now the panel CENTER (get_board_pos); only a small x offset so we push
     # near the center, not toward the hinge axis (short lever -> strong forces on the franka).
@@ -1245,10 +1246,11 @@ def state_machine_offline_left_pull_door(
     )
 
     # -------------------------
-    # Step 6: Clear the free edge, move to the panel's front side, then advance
+    # Step 6: Retract right/back first, then arc around to the panel front
     # -------------------------
     back_clearance_pos = palm_target_pose[:, :3].clone()
     back_clearance_pos[:, 0] += retreat_world_x
+    back_clearance_pos[:, 1] += retreat_world_y
     back_clearance_pos[:, 2] = back_clearance_palm_z
     back_clearance_pose = _make_pose(back_clearance_pos, default_palm_rot)
     q_robot[:10] = solve_ik(
@@ -1266,59 +1268,44 @@ def state_machine_offline_left_pull_door(
         mark_keyframe=False,
     )
 
-    # Cross laterally only after the hand has cleared the panel's free edge.
-    retreat_palm_pos = palm_target_pose[:, :3].clone()
-    retreat_palm_pos[:, 0] += retreat_world_x
-    retreat_palm_pos[:, 1] += retreat_world_y
-    retreat_palm_pos[:, 2] = retreat_palm_z
-    retreat_palm_pose = _make_pose(retreat_palm_pos, default_palm_rot)
-
-    q_robot[:10] = solve_ik(
-        robot_urdf_path,
-        q_robot[:10],
-        palm_pose=retreat_palm_pose,
-        base_pose=None,
-        robot_initial_pose=robot_initial_pose,
-        reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
-        num_attempts=1,  # retract must continue smoothly from the blocking pose; the random-
-        # restart fallback would otherwise flip the arm ~180 deg to a different IK branch.
-    )[0]
-    _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
-    # retreat_arm_q = q_robot[3:10].clone()
-
-    _append_state(
-        robot_traj,
-        door_traj,
-        key_idx_in_key_indices,
-        q_robot,
-        q_door,
-        mark_keyframe=True,
-    )
-
-    # Continue from the retreat with the base fixed and the same wrist orientation.
-    forward_left_palm_pos = retreat_palm_pos.clone()
-    forward_left_palm_pos[:, 0] += forward_left_world_x
-    forward_left_palm_pos[:, 1] += forward_left_world_y
-    forward_left_palm_pose = _make_pose(forward_left_palm_pos, default_palm_rot)
-    q_robot[:10] = solve_ik(
-        robot_urdf_path,
-        q_robot[:10],
-        palm_pose=forward_left_palm_pose,
-        base_pose=None,
-        robot_initial_pose=robot_initial_pose,
-        reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
-        num_attempts=1,
-    )[0]
-    _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
-    _append_state(
-        robot_traj,
-        door_traj,
-        key_idx_in_key_indices,
-        q_robot,
-        q_door,
-        # Intermediate waypoint: preserve the semantic keyframe layout.
-        mark_keyframe=False,
-    )
+    # Sweep a compact semicircular arc from the right/back clearance point to
+    # the panel's front side. Keeping the wrist high during the arc clears the
+    # panel and base-mounted camera arm; the endpoint remains the retract
+    # keyframe so the pull/push keyframe layout is unchanged.
+    front_side_pos = palm_target_pose[:, :3].clone()
+    front_side_pos[:, 1] += front_side_world_y
+    front_side_pos[:, 2] = front_side_palm_z
+    arc_center = 0.5 * (back_clearance_pos[:, :2] + front_side_pos[:, :2])
+    arc_radius_vec = back_clearance_pos[:, :2] - arc_center
+    arc_radius = torch.linalg.norm(arc_radius_vec, dim=-1, keepdim=True).clamp_min(1e-6)
+    arc_start_angle = torch.atan2(arc_radius_vec[:, 1], arc_radius_vec[:, 0])
+    arc_steps = 6
+    for arc_step in range(1, arc_steps + 1):
+        frac = arc_step / arc_steps
+        angle = arc_start_angle - math.pi * frac
+        arc_pos = torch.cat(
+            (
+                arc_center[:, 0:1] + arc_radius * torch.cos(angle).unsqueeze(-1),
+                arc_center[:, 1:2] + arc_radius * torch.sin(angle).unsqueeze(-1),
+                back_clearance_pos[:, 2:3] + frac * (front_side_pos[:, 2:3] - back_clearance_pos[:, 2:3]),
+            ),
+            dim=-1,
+        )
+        arc_pose = _make_pose(arc_pos, default_palm_rot)
+        q_robot[:10] = solve_ik(
+            robot_urdf_path,
+            q_robot[:10],
+            palm_pose=arc_pose,
+            base_pose=None,
+            robot_initial_pose=robot_initial_pose,
+            reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
+            num_attempts=1,
+        )[0]
+        _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
+        _append_state(
+            robot_traj, door_traj, key_idx_in_key_indices, q_robot, q_door,
+            mark_keyframe=(arc_step == arc_steps),
+        )
 
     # -------------------------
     # Step 7: Push the panel open with the arm while keeping the base still
