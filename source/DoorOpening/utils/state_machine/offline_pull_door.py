@@ -611,7 +611,7 @@ def state_machine_offline_right_pull_door(
     # (0.20 -> 0.10), toward the leaf, for better blocking -- the arm now retracts to the right, so
     # the base no longer needs to stay clear of it on that side.
     release_base_y = 0.15
-    release_palm_x_delta = 0.25
+    release_palm_x_delta = 0.20
     release_palm_y_delta = -0.1
     # Backed the blocking base off the door (-0.18 -> -0.10, i.e. +0.08 behind in x) so the arm has
     # reach headroom to retract further. This is the door-blocking pose held through the push, so
@@ -1168,10 +1168,10 @@ def state_machine_offline_left_pull_door(
 
     # Advance 10 cm farther than the previous blocking approach, measured from
     # the last pull pose. The second blocking waypoint inherits this shift.
-    release_base_x_delta_1 = -0.27
+    release_base_x_delta_1 = -0.22
     # Blocking pose Y: +y approaches the open leaf, -y backs away. Kept a margin off the leaf.
     release_base_y = -0.05  # 5 cm farther right (+world y) than the previous blocking pose
-    release_palm_x_delta = 0.25
+    release_palm_x_delta = 0.20
     release_palm_y_delta = 0.0
     release_base_x_delta_2 = -0.18
     release_door_open_angle = 1.35
@@ -1188,11 +1188,11 @@ def state_machine_offline_left_pull_door(
     # Clear the opened panel with a small lateral arc and an early backward
     # lift. A wider sweep made an unnecessary circle and approached joint limits.
     # World +x is backward and -y is left in this frame.
-    retreat_world_x = 0.12
-    retreat_world_y = 0.14
-    back_clearance_palm_z = 1.24
+    retreat_world_x = 0.17  # 5 cm farther backward for ARX clearance
+    retreat_world_y = 0.10  # rightward shift to clear the door panel
+    back_clearance_palm_z = 1.34
     front_side_world_y = -0.33
-    front_side_palm_z = 1.28
+    front_side_palm_z = 1.38
     # Larger x offset magnitude (was -0.3) so the arm reaches a bit further forward into the panel.
     # Contact point is now the panel CENTER (get_board_pos); only a small x offset so we push
     # near the center, not toward the hinge axis (short lever -> strong forces on the franka).
