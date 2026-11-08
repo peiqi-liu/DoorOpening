@@ -142,7 +142,7 @@ def _traverse_after_panel_push(
     # Favor a lateral disengagement over retracing straight away from the door.
     # World +x is backward and -y is left for the nominal -x-facing base.
     backup_distance = 0.10
-    backup_left_distance = 0.15
+    backup_left_distance = 0.10
     # Move the base 30 cm while the hand slides 20 cm along the panel,
     # preserving a 10 cm relative advance with less base travel.
     palm_slide_distance = 0.20
@@ -175,9 +175,10 @@ def _traverse_after_panel_push(
         _append_state(robot_traj, door_traj, key_indices, q_robot, q_door,
                       mark_keyframe=(step == backup_steps))
 
-    # Turn at the backed-up position, still holding the same world hand pose.
+    # Turn at the backed-up position to neutral yaw, still holding the same
+    # world hand pose. Forward motion starts from this zero-relative-yaw pose.
     for step in range(1, turn_steps + 1):
-        yaw = blocking_yaw + (traverse_yaw - blocking_yaw) * step / turn_steps
+        yaw = blocking_yaw + (initial_yaw - blocking_yaw) * step / turn_steps
         base_target_pose = _make_pose(
             base_target_pos, get_rotation_quat(0.0, 0.0, yaw, device)
         )
@@ -196,6 +197,8 @@ def _traverse_after_panel_push(
     mid_base_pos[:, 0] -= 0.30
     mid_base_pos[:, 1] = mid_y
     backed_up_pos = base_target_pos.clone()
+    forward_yaw_start_step = 2
+    forward_yaw_ramp_steps = 4
     for step in range(1, forward_steps + 1):
         frac = step / forward_steps
         base_target_pos = backed_up_pos + frac * (mid_base_pos - backed_up_pos)
@@ -205,8 +208,12 @@ def _traverse_after_panel_push(
         base_target_pos[:, 1] = backed_up_pos[:, 1] + lateral_recovery_frac * (
             mid_base_pos[:, 1] - backed_up_pos[:, 1]
         )
+        # First move 7.5 cm forward at neutral yaw, then tilt toward 20 degrees
+        # while the base is already advancing through the opening.
+        yaw_frac = min(max((step - forward_yaw_start_step) / forward_yaw_ramp_steps, 0.0), 1.0)
+        step_yaw = initial_yaw + yaw_frac * (traverse_yaw - initial_yaw)
         base_target_pose = _make_pose(
-            base_target_pos, get_rotation_quat(0.0, 0.0, traverse_yaw, device)
+            base_target_pos, get_rotation_quat(0.0, 0.0, step_yaw, device)
         )
         step_palm_pose = fixed_palm_pose.clone()
         step_palm_pose[:, 0] -= palm_slide_distance * frac
@@ -603,7 +610,7 @@ def state_machine_offline_right_pull_door(
     # Blocking pose Y: -y approaches the open leaf (left), +y backs away (right). Moved a bit LEFT
     # (0.20 -> 0.10), toward the leaf, for better blocking -- the arm now retracts to the right, so
     # the base no longer needs to stay clear of it on that side.
-    release_base_y = 0.10
+    release_base_y = 0.15
     release_palm_x_delta = 0.25
     release_palm_y_delta = -0.1
     # Backed the blocking base off the door (-0.18 -> -0.10, i.e. +0.08 behind in x) so the arm has
@@ -1163,7 +1170,7 @@ def state_machine_offline_left_pull_door(
     # the last pull pose. The second blocking waypoint inherits this shift.
     release_base_x_delta_1 = -0.27
     # Blocking pose Y: +y approaches the open leaf, -y backs away. Kept a margin off the leaf.
-    release_base_y = -0.10  # 5 cm farther right (+world y) than the previous blocking pose
+    release_base_y = -0.05  # 5 cm farther right (+world y) than the previous blocking pose
     release_palm_x_delta = 0.25
     release_palm_y_delta = 0.0
     release_base_x_delta_2 = -0.18
