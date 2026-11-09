@@ -1256,18 +1256,15 @@ class DooropeningEnv(DirectRLEnv):
             self.robot_dof_upper_limits[:base_stop],
         )
 
-    def arm_target_windup_envelope(self) -> torch.Tensor:
-        """Maximum allowed target error from measured arm position for each joint."""
-        return torch.tensor(
-            [0.152930, 0.152930, 0.152930, 0.152930, 0.082317, 0.082317, 0.259616],
-            device=self.device,
-        )
-
-    def clamp_arm_target_to_effort_envelope(self, arm_targets: torch.Tensor) -> torch.Tensor:
-        """Keep the integrated PD target within the arm effort envelope around measured q."""
-        envelope = self.arm_target_windup_envelope()
+    def arm_target_from_scaled_actions(self, scaled_arm_actions: torch.Tensor) -> torch.Tensor:
+        """Set arm PD targets from measured joint positions and scaled per-step deltas."""
         arm_q = self.robot.data.joint_pos[:, self._robot_arm_dof_idx]
-        return torch.clamp(arm_targets, arm_q - envelope, arm_q + envelope)
+        targets = arm_q + self.dt * scaled_arm_actions
+        return torch.clamp(
+            targets,
+            self.robot_dof_lower_limits[self._target_arm_slice],
+            self.robot_dof_upper_limits[self._target_arm_slice],
+        )
 
     def _pin_gripper_target_open(self, target_tensor: torch.Tensor) -> torch.Tensor:
         if not self.fixed_open_gripper or self.num_finger_joints <= 0:
@@ -1347,12 +1344,11 @@ class DooropeningEnv(DirectRLEnv):
         # delta actions
         self.scaled_actions = self._scale_actions(actions)
         targets = self.robot_dof_targets + self.dt * self.scaled_actions
-        # Base is re-anchored on clean measured q; arm delta accumulates on the previous PD target,
-        # matching the pd_target + delta checkpoint semantics, with an effort/windup envelope.
+        # Base and arm targets are re-anchored on clean measured joint positions each step.
         base_stop = self._target_base_xy_slice.stop
         targets[:, :base_stop] = self.base_target_from_scaled_actions(self.scaled_actions[:, :base_stop])
-        targets[:, self._target_arm_slice] = self.clamp_arm_target_to_effort_envelope(
-            targets[:, self._target_arm_slice]
+        targets[:, self._target_arm_slice] = self.arm_target_from_scaled_actions(
+            self.scaled_actions[:, self._target_arm_slice]
         )
         targets = self._pin_arx_targets_to_fixed_pose(targets)
         targets = self._pin_gripper_target_open(targets)
