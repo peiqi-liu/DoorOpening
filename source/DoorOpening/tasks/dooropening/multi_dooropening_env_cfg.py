@@ -930,9 +930,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=False)  # Glorbot2 laptop long-schedule run
 
-    # Default Franka action mode: measured-joint delta, q_target = q_measured + dt * 0.6 * action.
-    # `absolute_action` instead uses the raw policy output as the absolute joint target.
-    franka_arm_control = "measured_delta"
+    # Reference-centered arm target; nominal offset is sampled once per episode.
+    arm_nominal_randomization_rad = 0.05
     # This scale does not change sampled PD gains.
     base_action_scale = 1.0
     base_control_mode = "position"

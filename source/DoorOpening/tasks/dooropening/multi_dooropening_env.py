@@ -182,6 +182,7 @@ class DooropeningEnv(DirectRLEnv):
         # create auxiliary variables for computing applied action, observations and rewards
         self.robot_dof_lower_limits = self.robot.data.soft_joint_pos_limits[0, self._robot_dof_idx, 0].to(device=self.device)
         self.robot_dof_upper_limits = self.robot.data.soft_joint_pos_limits[0, self._robot_dof_idx, 1].to(device=self.device)
+        self._arm_nominal_offset = torch.zeros((self.num_envs, self.num_arm_joints), device=self.device)
 
         # DOFs scored by the joint-limit penalty (the franka arm only -- see the cfg field for why
         # the base, arx and gripper DOFs are excluded). Indices are LOCAL to the actuated-joint
@@ -1232,13 +1233,9 @@ class DooropeningEnv(DirectRLEnv):
             clamped_actions[:, self._policy_base_rot_slice.start : self._policy_base_xy_slice.stop]
             * self.cfg.base_action_scale
         )
-        arm_actions = clamped_actions[:, self._policy_arm_slice]
-        if self.cfg.franka_arm_control == "absolute_action":
-            scaled_actions[:, self._target_arm_slice] = arm_actions
-        elif self.cfg.franka_arm_control == "measured_delta":
-            scaled_actions[:, self._target_arm_slice] = arm_actions * self.cfg.arm_action_scale
-        else:
-            raise ValueError(f"Unsupported Franka arm control mode: {self.cfg.franka_arm_control!r}")
+        scaled_actions[:, self._target_arm_slice] = (
+            clamped_actions[:, self._policy_arm_slice] * self.cfg.arm_action_scale
+        )
         scaled_actions[:, self._target_finger_slice] = (
             clamped_actions[:, self._policy_finger_slice] * self.cfg.finger_action_scale
         )
@@ -1261,14 +1258,13 @@ class DooropeningEnv(DirectRLEnv):
         )
 
     def arm_target_from_scaled_actions(self, scaled_arm_actions: torch.Tensor) -> torch.Tensor:
-        """Build either a measured-joint delta target or a raw absolute-action target."""
-        if self.cfg.franka_arm_control == "absolute_action":
-            targets = scaled_arm_actions
-        elif self.cfg.franka_arm_control == "measured_delta":
-            arm_q = self.robot.data.joint_pos[:, self._robot_arm_dof_idx]
-            targets = arm_q + self.dt * scaled_arm_actions
-        else:
-            raise ValueError(f"Unsupported Franka arm control mode: {self.cfg.franka_arm_control!r}")
+        """Target the current reference pose plus an episode bias and a half-range residual."""
+        arm_half_range = 0.5 * (
+            self.robot_dof_upper_limits[self._target_arm_slice]
+            - self.robot_dof_lower_limits[self._target_arm_slice]
+        )
+        q_nominal = self.ref_robot_arm_joint_pos + self._arm_nominal_offset
+        targets = q_nominal + scaled_arm_actions * arm_half_range
         return torch.clamp(
             targets,
             self.robot_dof_lower_limits[self._target_arm_slice],
@@ -2452,6 +2448,10 @@ class DooropeningEnv(DirectRLEnv):
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
+        nominal_width = float(self.cfg.arm_nominal_randomization_rad)
+        self._arm_nominal_offset[env_ids] = nominal_width * (
+            2.0 * torch.rand((len(env_ids), self.num_arm_joints), device=self.device) - 1.0
+        )
 
         # Each asset owns its positive mechanical hard stop; the shared environment mirrors it
         # below zero. Randomize the gap from the symmetric stop to the magnitude threshold.

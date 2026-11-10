@@ -51,12 +51,6 @@ parser.add_argument("--video_length", type=int, default=600, help="Length of the
 parser.add_argument("--video_interval", type=int, default=10000, help="Interval between video recordings (in steps).")
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--base-action-scale", type=float, default=None, help="Override the base action scale.")
-parser.add_argument(
-    "--franka-arm-control",
-    choices=("measured_delta", "absolute_action"),
-    default=None,
-    help="Franka arm target mode: measured-joint delta or raw policy action as absolute joint target.",
-)
 parser.add_argument("--base-translation-stiffness", type=float, default=None, help="Fix base x/y position-drive stiffness (N/m).")
 parser.add_argument("--base-translation-damping", type=float, default=None, help="Fix base x/y position-drive damping (N s/m).")
 parser.add_argument("--base-yaw-stiffness", type=float, default=None, help="Fix base yaw position-drive stiffness (Nm/rad).")
@@ -442,9 +436,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
-    if args_cli.franka_arm_control is not None:
-        env_cfg.franka_arm_control = args_cli.franka_arm_control
-        print(f"[INFO] Franka arm control mode: {env_cfg.franka_arm_control}")
     if args_cli.base_action_scale is not None:
         env_cfg.base_action_scale = args_cli.base_action_scale
     base_gain_overrides = (
