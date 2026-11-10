@@ -939,7 +939,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     base_velocity_limit_yaw = 0.7
     base_acceleration_limit_xy = 0.2
     base_acceleration_limit_yaw = 0.79
-    arm_action_scale = 0.6
+    arm_action_scale = 1.0
     gripper_action_speed_headroom = 2.0
     finger_action_scale = gripper_action_speed_headroom * GRIPPER_VELOCITY_LIMIT
     arx_action_scale = 0.6

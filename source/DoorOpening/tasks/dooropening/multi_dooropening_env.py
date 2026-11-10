@@ -1258,13 +1258,12 @@ class DooropeningEnv(DirectRLEnv):
         )
 
     def arm_target_from_scaled_actions(self, scaled_arm_actions: torch.Tensor) -> torch.Tensor:
-        """Target the current reference pose plus an episode bias and a half-range residual."""
-        arm_half_range = 0.5 * (
-            self.robot_dof_upper_limits[self._target_arm_slice]
-            - self.robot_dof_lower_limits[self._target_arm_slice]
-        )
+        """Target the reference pose with a residual that can reach either joint limit."""
         q_nominal = self.ref_robot_arm_joint_pos + self._arm_nominal_offset
-        targets = q_nominal + scaled_arm_actions * arm_half_range
+        lower = self.robot_dof_lower_limits[self._target_arm_slice]
+        upper = self.robot_dof_upper_limits[self._target_arm_slice]
+        arm_reach = torch.maximum(q_nominal - lower, upper - q_nominal)
+        targets = q_nominal + scaled_arm_actions * arm_reach
         return torch.clamp(
             targets,
             self.robot_dof_lower_limits[self._target_arm_slice],
