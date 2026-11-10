@@ -1262,7 +1262,11 @@ class DooropeningEnv(DirectRLEnv):
         q_nominal = self.ref_robot_arm_joint_pos + self._arm_nominal_offset
         lower = self.robot_dof_lower_limits[self._target_arm_slice]
         upper = self.robot_dof_upper_limits[self._target_arm_slice]
-        arm_reach = torch.maximum(q_nominal - lower, upper - q_nominal)
+        full_range = upper - lower
+        arm_reach = torch.maximum(
+            0.6 * full_range,
+            torch.maximum(q_nominal - lower, upper - q_nominal),
+        )
         targets = q_nominal + scaled_arm_actions * arm_reach
         return torch.clamp(
             targets,
