@@ -4,7 +4,7 @@ set -euo pipefail
 repo=/home/peiqiliu/DoorOpening
 python=/home/peiqiliu/miniforge3/envs/DoorOpening/bin/python
 asset=PartNetv5_plus_hardstop_recess_tipoffset_back_base_teleop_ref_20261107_updated_laptop_exact_20261109
-run=v9_qnom_full_1110
+run=v9_qnom_06full_1110
 
 cd "$repo"
 test "$(git branch --show-current)" = 11_10/q_nomial
