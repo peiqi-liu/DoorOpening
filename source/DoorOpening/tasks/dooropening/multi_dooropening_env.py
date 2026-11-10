@@ -99,6 +99,10 @@ class DooropeningEnv(DirectRLEnv):
         self._episode_arm_target_bias = torch.zeros(
             (self.num_envs, self.num_arm_joints), device=self.device, dtype=torch.float32
         )
+        self._arm_target_step_noise_max = (
+            float(self.cfg.franka_arm_target_step_noise_max_torque_nm) / nominal_arm_stiffness
+        )
+        self._arm_target_step_noise = torch.zeros_like(self._episode_arm_target_bias)
 
         actuated_joints = self.cfg.base_joints + self.cfg.arm_joints + self.cfg.finger_joints + self.cfg.arx_joints
         self._robot_dof_idx, joint_names = self.robot.find_joints(actuated_joints, preserve_order=True)
@@ -1223,7 +1227,9 @@ class DooropeningEnv(DirectRLEnv):
         target_noise[:, self._target_base_rot_slice] = base_rot_target_noise * (
             2.0 * torch.rand_like(target_noise[:, self._target_base_rot_slice]) - 1.0
         )
-        target_noise[:, self._target_arm_slice] = self._episode_arm_target_bias
+        target_noise[:, self._target_arm_slice] = (
+            self._episode_arm_target_bias + self._arm_target_step_noise
+        )
         # No gripper-target noise: the commanded opening is a single actuator setpoint and the old
         # per-substep perturbation was ~12% of the whole 0.04 m stroke.
         return target_noise
@@ -1340,6 +1346,13 @@ class DooropeningEnv(DirectRLEnv):
         return applied
 
     def _pre_physics_step(self, actions: torch.Tensor):
+        arm_step_noise_scale = float(
+            self._current_custom_param("pd_targets", "arm_target_step_noise_scale")
+        )
+        self._arm_target_step_noise = arm_step_noise_scale * self._arm_target_step_noise_max * (
+            2.0 * torch.rand_like(self._arm_target_step_noise) - 1.0
+        )
+
         # Jerk penalty: the SECOND difference of the CLAMPED action, a_t - 2*a_(t-1) + a_(t-2), in
         # the same bounded [-1, 1] units the policy actually commands in. Zero for a constant action
         # OR a constant rate of change (a steady ramp is NOT penalized, unlike a first-difference
@@ -2463,6 +2476,7 @@ class DooropeningEnv(DirectRLEnv):
         self._episode_arm_target_bias[env_ids] = arm_target_bias_scale * self._arm_target_bias_max * (
             2.0 * torch.rand((len(env_ids), self.num_arm_joints), device=self.device) - 1.0
         )
+        self._arm_target_step_noise[env_ids] = 0.0
 
         # Each asset owns its positive mechanical hard stop; the shared environment mirrors it
         # below zero. Randomize the gap from the symmetric stop to the magnitude threshold.

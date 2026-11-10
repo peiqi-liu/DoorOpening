@@ -4,7 +4,7 @@ set -euo pipefail
 repo=/home/peiqiliu/DoorOpening
 python=/home/peiqiliu/miniforge3/envs/DoorOpening/bin/python
 asset=PartNetv5_plus_hardstop_recess_tipoffset_back_base_teleop_ref_20261107_updated
-run=v9_range_bias
+run=v9_bias_noise
 
 cd "$repo"
 test "$(git branch --show-current)" = 11_10/measured_range_bias
@@ -14,7 +14,7 @@ export PYTHONPATH="$repo/source${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONUNBUFFERED=1
 export DOOROPENING_WANDB_SAVE_CODE=0
 export DOOROPENING_DISTRIBUTED_RUN_TAG="$run"
-export SIM_INIT_DIR=/tmp/DoorOpening/.sim_init/v9_range_bias
+export SIM_INIT_DIR=/tmp/DoorOpening/.sim_init/v9_bias_noise
 
 exec "$python" scripts/rl_games/train.py --headless \
   --video --video_length 600 --video_interval 10000 \
