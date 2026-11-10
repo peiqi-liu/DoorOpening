@@ -1257,9 +1257,12 @@ class DooropeningEnv(DirectRLEnv):
         )
 
     def arm_target_from_scaled_actions(self, scaled_arm_actions: torch.Tensor) -> torch.Tensor:
-        """Set arm PD targets from measured joint positions and scaled per-step deltas."""
-        arm_q = self.robot.data.joint_pos[:, self._robot_arm_dof_idx]
-        targets = arm_q + self.dt * scaled_arm_actions
+        """Set absolute arm PD targets around the current reference pose.
+
+        The policy action is a direct joint-position offset in radians from the reference
+        trajectory. It is not integrated over time and is not multiplied by a joint-range factor.
+        """
+        targets = self.ref_robot_arm_joint_pos + scaled_arm_actions
         return torch.clamp(
             targets,
             self.robot_dof_lower_limits[self._target_arm_slice],
@@ -1341,10 +1344,11 @@ class DooropeningEnv(DirectRLEnv):
         self._prev_prev_action = self._prev_action
         self._prev_action = clamped_actions.detach().clone()
 
-        # delta actions
+        # Convert policy outputs to physical base/finger commands and reference-relative arm offsets.
         self.scaled_actions = self._scale_actions(actions)
         targets = self.robot_dof_targets + self.dt * self.scaled_actions
-        # Base and arm targets are re-anchored on clean measured joint positions each step.
+        # The base velocity target is re-anchored on clean measured joint positions. The arm
+        # target is an absolute setpoint around the current reference pose.
         base_stop = self._target_base_xy_slice.stop
         targets[:, :base_stop] = self.base_target_from_scaled_actions(self.scaled_actions[:, :base_stop])
         targets[:, self._target_arm_slice] = self.arm_target_from_scaled_actions(

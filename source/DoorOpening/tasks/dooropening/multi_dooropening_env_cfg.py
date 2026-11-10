@@ -930,7 +930,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=False)  # Glorbot2 laptop long-schedule run
 
-    # Branch-specific action scale; changing it does not change sampled PD gains.
+    # Policy arm actions are direct radian offsets from the current reference joint positions.
+    # This scale does not change sampled PD gains.
     base_action_scale = 1.0
     base_control_mode = "position"
     base_velocity_limit_xy = 0.2
