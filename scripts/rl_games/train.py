@@ -593,6 +593,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             _time.sleep(2.0)
         else:
             print(f"[INFO][rank {global_rank}] Local rank {local_rank - 1} finished sim-init; proceeding to gym.make().")
+        _stagger_seconds = float(os.environ.get("SIM_INIT_RANK_DELAY_SECONDS", "0"))
+        if _stagger_seconds > 0:
+            print(
+                f"[INFO][rank {global_rank}] Delaying simulator init by {_stagger_seconds:.0f}s "
+                "to let the previous Isaac Sim process settle."
+            )
+            sys.stderr.flush()
+            _time.sleep(_stagger_seconds)
 
     # Arm the hang watchdog: if Isaac Sim init below does not finish within HANG_DUMP_SECONDS,
     # faulthandler dumps the stack of every thread to stderr (repeating) so a stuck rank shows
