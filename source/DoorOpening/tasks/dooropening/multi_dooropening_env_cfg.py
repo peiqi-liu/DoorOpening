@@ -940,7 +940,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     arm_action_scale = 0.6
     # Some real Franka joints need a smooth angle-dependent 1-2 Nm compensation at zero command.
     franka_torque_bias_probability = 0.5
-    franka_torque_bias_magnitude_nm = (1.0, 2.0)
+    franka_torque_bias_magnitude_nm = (0.0, 1.5)
     gripper_action_speed_headroom = 2.0
     finger_action_scale = gripper_action_speed_headroom * GRIPPER_VELOCITY_LIMIT
     arx_action_scale = 0.6

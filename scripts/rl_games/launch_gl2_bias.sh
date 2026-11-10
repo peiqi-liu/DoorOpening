@@ -4,7 +4,7 @@ set -euo pipefail
 repo=/home/laptop/peiqi/DoorOpening
 python=/home/laptop/anaconda3/envs/dooropening/bin/python
 asset=PartNetv5_plus_hardstop_recess_tipoffset_back_base_teleop_ref_20261107_updated
-run=gl2_bias_angle_1110
+run=gl2_bias_015
 
 cd "$repo"
 test "$(git branch --show-current)" = 11_10/laptop_torque_bias
