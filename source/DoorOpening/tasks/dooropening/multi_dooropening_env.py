@@ -1232,13 +1232,9 @@ class DooropeningEnv(DirectRLEnv):
             clamped_actions[:, self._policy_base_rot_slice.start : self._policy_base_xy_slice.stop]
             * self.cfg.base_action_scale
         )
-        arm_actions = clamped_actions[:, self._policy_arm_slice]
-        if self.cfg.franka_arm_control == "absolute_action":
-            scaled_actions[:, self._target_arm_slice] = arm_actions
-        elif self.cfg.franka_arm_control == "measured_delta":
-            scaled_actions[:, self._target_arm_slice] = arm_actions * self.cfg.arm_action_scale
-        else:
-            raise ValueError(f"Unsupported Franka arm control mode: {self.cfg.franka_arm_control!r}")
+        scaled_actions[:, self._target_arm_slice] = (
+            clamped_actions[:, self._policy_arm_slice] * self.cfg.arm_action_scale
+        )
         scaled_actions[:, self._target_finger_slice] = (
             clamped_actions[:, self._policy_finger_slice] * self.cfg.finger_action_scale
         )
@@ -1261,14 +1257,9 @@ class DooropeningEnv(DirectRLEnv):
         )
 
     def arm_target_from_scaled_actions(self, scaled_arm_actions: torch.Tensor) -> torch.Tensor:
-        """Build either a measured-joint delta target or a raw absolute-action target."""
-        if self.cfg.franka_arm_control == "absolute_action":
-            targets = scaled_arm_actions
-        elif self.cfg.franka_arm_control == "measured_delta":
-            arm_q = self.robot.data.joint_pos[:, self._robot_arm_dof_idx]
-            targets = arm_q + self.dt * scaled_arm_actions
-        else:
-            raise ValueError(f"Unsupported Franka arm control mode: {self.cfg.franka_arm_control!r}")
+        """Build the arm target from the clean measured joint position."""
+        arm_q = self.robot.data.joint_pos[:, self._robot_arm_dof_idx]
+        targets = arm_q + self.dt * scaled_arm_actions
         return torch.clamp(
             targets,
             self.robot_dof_lower_limits[self._target_arm_slice],
