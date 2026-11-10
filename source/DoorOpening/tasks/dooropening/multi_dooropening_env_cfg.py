@@ -938,7 +938,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     base_acceleration_limit_xy = 0.2
     base_acceleration_limit_yaw = 0.79
     arm_action_scale = 0.6
-    # Some real Franka joints need a smooth angle-dependent 1-2 Nm compensation at zero command.
+    # Some real Franka joints need a smooth angle-dependent 0-1.5 Nm compensation at zero command.
     franka_torque_bias_probability = 0.5
     franka_torque_bias_magnitude_nm = (0.0, 1.5)
     gripper_action_speed_headroom = 2.0
