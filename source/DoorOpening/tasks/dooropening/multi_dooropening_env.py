@@ -1232,9 +1232,13 @@ class DooropeningEnv(DirectRLEnv):
             clamped_actions[:, self._policy_base_rot_slice.start : self._policy_base_xy_slice.stop]
             * self.cfg.base_action_scale
         )
-        scaled_actions[:, self._target_arm_slice] = (
-            clamped_actions[:, self._policy_arm_slice] * self.cfg.arm_action_scale
-        )
+        arm_actions = clamped_actions[:, self._policy_arm_slice]
+        if self.cfg.franka_arm_control == "absolute_action":
+            scaled_actions[:, self._target_arm_slice] = arm_actions
+        elif self.cfg.franka_arm_control == "measured_delta":
+            scaled_actions[:, self._target_arm_slice] = arm_actions * self.cfg.arm_action_scale
+        else:
+            raise ValueError(f"Unsupported Franka arm control mode: {self.cfg.franka_arm_control!r}")
         scaled_actions[:, self._target_finger_slice] = (
             clamped_actions[:, self._policy_finger_slice] * self.cfg.finger_action_scale
         )
@@ -1257,12 +1261,14 @@ class DooropeningEnv(DirectRLEnv):
         )
 
     def arm_target_from_scaled_actions(self, scaled_arm_actions: torch.Tensor) -> torch.Tensor:
-        """Set absolute arm PD targets around the current reference pose.
-
-        The policy action is a direct joint-position offset in radians from the reference
-        trajectory. It is not integrated over time and is not multiplied by a joint-range factor.
-        """
-        targets = self.ref_robot_arm_joint_pos + scaled_arm_actions
+        """Build either a measured-joint delta target or a raw absolute-action target."""
+        if self.cfg.franka_arm_control == "absolute_action":
+            targets = scaled_arm_actions
+        elif self.cfg.franka_arm_control == "measured_delta":
+            arm_q = self.robot.data.joint_pos[:, self._robot_arm_dof_idx]
+            targets = arm_q + self.dt * scaled_arm_actions
+        else:
+            raise ValueError(f"Unsupported Franka arm control mode: {self.cfg.franka_arm_control!r}")
         return torch.clamp(
             targets,
             self.robot_dof_lower_limits[self._target_arm_slice],
@@ -1344,11 +1350,11 @@ class DooropeningEnv(DirectRLEnv):
         self._prev_prev_action = self._prev_action
         self._prev_action = clamped_actions.detach().clone()
 
-        # Convert policy outputs to physical base/finger commands and reference-relative arm offsets.
+        # Convert policy outputs to physical base/finger commands and the configured arm action.
         self.scaled_actions = self._scale_actions(actions)
         targets = self.robot_dof_targets + self.dt * self.scaled_actions
         # The base velocity target is re-anchored on clean measured joint positions. The arm
-        # target is an absolute setpoint around the current reference pose.
+        # target follows the configured control mode.
         base_stop = self._target_base_xy_slice.stop
         targets[:, :base_stop] = self.base_target_from_scaled_actions(self.scaled_actions[:, :base_stop])
         targets[:, self._target_arm_slice] = self.arm_target_from_scaled_actions(
