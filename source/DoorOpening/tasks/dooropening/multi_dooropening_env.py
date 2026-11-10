@@ -82,7 +82,10 @@ class DooropeningEnv(DirectRLEnv):
 
         self.num_base_joints = len(self.cfg.base_joints)
         self.num_arm_joints = len(self.cfg.arm_joints)
-        self._franka_torque_bias = torch.zeros((self.num_envs, self.num_arm_joints), device=self.device)
+        self._franka_bias_active = torch.zeros((self.num_envs, self.num_arm_joints), device=self.device)
+        self._franka_bias_sign = torch.ones((self.num_envs, self.num_arm_joints), device=self.device)
+        self._franka_bias_phase = torch.zeros((self.num_envs, self.num_arm_joints), device=self.device)
+        self._franka_bias_frequency = torch.ones((self.num_envs, self.num_arm_joints), device=self.device)
         self.num_finger_joints = len(self.cfg.finger_joints)
         self.num_arx_joints = len(self.cfg.arx_joints)
 
@@ -1414,8 +1417,16 @@ class DooropeningEnv(DirectRLEnv):
         self._enforce_fixed_arx_joint_state()
         self._enforce_fixed_camera_joint_state()
         self.robot.set_joint_position_target(applied_targets, joint_ids=self._robot_dof_idx)
-        # PhysX adds this effort to the implicit PD drive; sample once per episode.
-        self.robot.set_joint_effort_target(self._franka_torque_bias, joint_ids=self._robot_arm_dof_idx)
+        # A smooth, episode-fixed function of the measured joint angle models calibration drift.
+        # Nearby joint positions have nearby torque offsets; there is no stepwise white noise.
+        arm_q = self.robot.data.joint_pos[:, self._robot_arm_dof_idx]
+        bias_min, bias_max = map(float, self.cfg.franka_torque_bias_magnitude_nm)
+        bias_mid = 0.5 * (bias_min + bias_max)
+        bias_half_width = 0.5 * (bias_max - bias_min)
+        torque_bias = self._franka_bias_active * self._franka_bias_sign * (
+            bias_mid + bias_half_width * torch.sin(self._franka_bias_frequency * arm_q + self._franka_bias_phase)
+        )
+        self.robot.set_joint_effort_target(torque_bias, joint_ids=self._robot_arm_dof_idx)
         if self.base_control_mode == "velocity":
             self.robot.set_joint_velocity_target(
                 self._base_velocity_target, joint_ids=self._robot_base_dof_idx
@@ -2450,12 +2461,13 @@ class DooropeningEnv(DirectRLEnv):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
         bias_probability = float(self.cfg.franka_torque_bias_probability)
-        bias_min, bias_max = map(float, self.cfg.franka_torque_bias_magnitude_nm)
         bias_shape = (len(env_ids), self.num_arm_joints)
-        active = torch.rand(bias_shape, device=self.device) < bias_probability
-        magnitude = bias_min + (bias_max - bias_min) * torch.rand(bias_shape, device=self.device)
-        sign = torch.where(torch.rand(bias_shape, device=self.device) < 0.5, -1.0, 1.0)
-        self._franka_torque_bias[env_ids] = torch.where(active, sign * magnitude, 0.0)
+        self._franka_bias_active[env_ids] = (torch.rand(bias_shape, device=self.device) < bias_probability).float()
+        self._franka_bias_sign[env_ids] = torch.where(
+            torch.rand(bias_shape, device=self.device) < 0.5, -1.0, 1.0
+        )
+        self._franka_bias_phase[env_ids] = 2.0 * torch.pi * torch.rand(bias_shape, device=self.device)
+        self._franka_bias_frequency[env_ids] = 0.5 + torch.rand(bias_shape, device=self.device)
 
         # Each asset owns its positive mechanical hard stop; the shared environment mirrors it
         # below zero. Randomize the gap from the symmetric stop to the magnitude threshold.
