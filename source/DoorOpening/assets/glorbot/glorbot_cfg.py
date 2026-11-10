@@ -194,19 +194,34 @@ GLORBOT_CONFIG = ArticulationCfg(
             stiffness=8250.0,
             damping=900.0,
         ),
-        # High PD on J1-J4 and Isaac Lab's low-PD gains on J5-J7.
+        # Per-joint nominal gains approximating the real-torque/error slopes:
+        # joints 1-4: 324 -> 400, joints 5-6: 84 -> 80, joint 7: 26 -> 25 Nm/rad.
+        # Franka libfranka reference damping scaled by sqrt(K_new/K_ref), then reduced 20%
+        # to favor responsiveness while retaining the existing 0.5x-2x gain randomization.
         # Keep the URDF effort limits (87 Nm on joints 1-4; 12 Nm on joints 5-7).
         "panda_shoulder": ImplicitActuatorCfg(
             joint_names_expr=["panda_joint[1-4]"],
             velocity_limit_sim=2.175,
             stiffness=400.0,
-            damping=80.0,
+            damping=33.0,
         ),
         "panda_forearm": ImplicitActuatorCfg(
-            joint_names_expr=["panda_joint[5-7]"],
+            joint_names_expr=["panda_joint5"],
             velocity_limit_sim=2.61,
-            stiffness=400.0,
-            damping=80.0,
+            stiffness=80.0,
+            damping=14.0,
+        ),
+        "panda_wrist": ImplicitActuatorCfg(
+            joint_names_expr=["panda_joint6"],
+            velocity_limit_sim=2.61,
+            stiffness=80.0,
+            damping=15.0,
+        ),
+        "panda_tip": ImplicitActuatorCfg(
+            joint_names_expr=["panda_joint7"],
+            velocity_limit_sim=2.61,
+            stiffness=25.0,
+            damping=9.0,
         ),
         "x5_arm": ImplicitActuatorCfg(
             joint_names_expr=["x5_joint[1-6]"],

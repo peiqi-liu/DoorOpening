@@ -82,6 +82,7 @@ class DooropeningEnv(DirectRLEnv):
 
         self.num_base_joints = len(self.cfg.base_joints)
         self.num_arm_joints = len(self.cfg.arm_joints)
+        self._franka_torque_bias = torch.zeros((self.num_envs, self.num_arm_joints), device=self.device)
         self.num_finger_joints = len(self.cfg.finger_joints)
         self.num_arx_joints = len(self.cfg.arx_joints)
 
@@ -1256,18 +1257,19 @@ class DooropeningEnv(DirectRLEnv):
             self.robot_dof_upper_limits[:base_stop],
         )
 
-    def arm_target_windup_envelope(self) -> torch.Tensor:
-        """Maximum allowed target error from measured arm position for each joint."""
-        return torch.tensor(
-            [0.152930, 0.152930, 0.152930, 0.152930, 0.082317, 0.082317, 0.259616],
-            device=self.device,
-        )
-
-    def clamp_arm_target_to_effort_envelope(self, arm_targets: torch.Tensor) -> torch.Tensor:
-        """Keep the integrated PD target within the arm effort envelope around measured q."""
-        envelope = self.arm_target_windup_envelope()
+    def arm_target_from_scaled_actions(self, scaled_arm_actions: torch.Tensor) -> torch.Tensor:
+        """Set arm PD targets from measured joint positions and the current action."""
         arm_q = self.robot.data.joint_pos[:, self._robot_arm_dof_idx]
-        return torch.clamp(arm_targets, arm_q - envelope, arm_q + envelope)
+        arm_range = (
+            self.robot_dof_upper_limits[self._target_arm_slice]
+            - self.robot_dof_lower_limits[self._target_arm_slice]
+        )
+        targets = arm_q + scaled_arm_actions * arm_range
+        return torch.clamp(
+            targets,
+            self.robot_dof_lower_limits[self._target_arm_slice],
+            self.robot_dof_upper_limits[self._target_arm_slice],
+        )
 
     def _pin_gripper_target_open(self, target_tensor: torch.Tensor) -> torch.Tensor:
         if not self.fixed_open_gripper or self.num_finger_joints <= 0:
@@ -1347,12 +1349,11 @@ class DooropeningEnv(DirectRLEnv):
         # delta actions
         self.scaled_actions = self._scale_actions(actions)
         targets = self.robot_dof_targets + self.dt * self.scaled_actions
-        # Base is re-anchored on clean measured q; arm delta accumulates on the previous PD target,
-        # matching the pd_target + delta checkpoint semantics, with an effort/windup envelope.
+        # Base and arm targets are re-anchored on clean measured joint positions each step.
         base_stop = self._target_base_xy_slice.stop
         targets[:, :base_stop] = self.base_target_from_scaled_actions(self.scaled_actions[:, :base_stop])
-        targets[:, self._target_arm_slice] = self.clamp_arm_target_to_effort_envelope(
-            targets[:, self._target_arm_slice]
+        targets[:, self._target_arm_slice] = self.arm_target_from_scaled_actions(
+            self.scaled_actions[:, self._target_arm_slice]
         )
         targets = self._pin_arx_targets_to_fixed_pose(targets)
         targets = self._pin_gripper_target_open(targets)
@@ -1413,6 +1414,8 @@ class DooropeningEnv(DirectRLEnv):
         self._enforce_fixed_arx_joint_state()
         self._enforce_fixed_camera_joint_state()
         self.robot.set_joint_position_target(applied_targets, joint_ids=self._robot_dof_idx)
+        # PhysX adds this effort to the implicit PD drive; sample once per episode.
+        self.robot.set_joint_effort_target(self._franka_torque_bias, joint_ids=self._robot_arm_dof_idx)
         if self.base_control_mode == "velocity":
             self.robot.set_joint_velocity_target(
                 self._base_velocity_target, joint_ids=self._robot_base_dof_idx
@@ -2446,6 +2449,13 @@ class DooropeningEnv(DirectRLEnv):
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
+        bias_probability = float(self.cfg.franka_torque_bias_probability)
+        bias_min, bias_max = map(float, self.cfg.franka_torque_bias_magnitude_nm)
+        bias_shape = (len(env_ids), self.num_arm_joints)
+        active = torch.rand(bias_shape, device=self.device) < bias_probability
+        magnitude = bias_min + (bias_max - bias_min) * torch.rand(bias_shape, device=self.device)
+        sign = torch.where(torch.rand(bias_shape, device=self.device) < 0.5, -1.0, 1.0)
+        self._franka_torque_bias[env_ids] = torch.where(active, sign * magnitude, 0.0)
 
         # Each asset owns its positive mechanical hard stop; the shared environment mirrors it
         # below zero. Randomize the gap from the symmetric stop to the magnitude threshold.

@@ -74,6 +74,11 @@ parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy 
 parser.add_argument("--wandb-project-name", type=str, default=None, help="the wandb's project name")
 parser.add_argument("--wandb-entity", type=str, default=None, help="the entity (team) of wandb's project")
 parser.add_argument("--wandb-name", type=str, default=None, help="the name of wandb's run")
+parser.add_argument(
+    "--wandb-no-config-upload",
+    action="store_true",
+    help="log metrics to W&B without uploading environment or agent configs",
+)
 parser.add_argument("--exp-name", type=str, default=None, help="experiment folder name (overrides full_experiment_name in agent config)")
 parser.add_argument(
     "--door-families",
@@ -686,7 +691,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 monitor_gym=True,
                 save_code=os.getenv("DOOROPENING_WANDB_SAVE_CODE", "1") != "0",
             )
-            if not wandb.run.resumed:
+            if not wandb.run.resumed and not args_cli.wandb_no_config_upload:
                 wandb.config.update({"env_cfg": env_cfg.to_dict()})
                 wandb.config.update({"agent_cfg": agent_cfg})
         except Exception as e:
