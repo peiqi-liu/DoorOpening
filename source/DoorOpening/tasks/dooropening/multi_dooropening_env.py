@@ -82,10 +82,15 @@ class DooropeningEnv(DirectRLEnv):
 
         self.num_base_joints = len(self.cfg.base_joints)
         self.num_arm_joints = len(self.cfg.arm_joints)
-        self._franka_bias_active = torch.zeros((self.num_envs, self.num_arm_joints), device=self.device)
-        self._franka_bias_sign = torch.ones((self.num_envs, self.num_arm_joints), device=self.device)
-        self._franka_bias_phase = torch.zeros((self.num_envs, self.num_arm_joints), device=self.device)
-        self._franka_bias_frequency = torch.ones((self.num_envs, self.num_arm_joints), device=self.device)
+        nominal_arm_stiffness = torch.tensor(
+            self.cfg.franka_arm_nominal_stiffness, device=self.device, dtype=torch.float32
+        )
+        if nominal_arm_stiffness.numel() != self.num_arm_joints:
+            raise ValueError(
+                "franka_arm_nominal_stiffness must have one value per arm joint; "
+                f"got {nominal_arm_stiffness.numel()} gains for {self.num_arm_joints} joints."
+            )
+        self._arm_target_noise_max = float(self.cfg.franka_arm_target_noise_max_torque_nm) / nominal_arm_stiffness
         self.num_finger_joints = len(self.cfg.finger_joints)
         self.num_arx_joints = len(self.cfg.arx_joints)
 
@@ -1206,7 +1211,7 @@ class DooropeningEnv(DirectRLEnv):
         target_noise = torch.zeros_like(self.robot_dof_targets)
         base_xy_target_noise = self._current_custom_param("pd_targets", "base_xy_target_noise")
         base_rot_target_noise = self._current_custom_param("pd_targets", "base_rot_target_noise")
-        arm_target_noise = self._current_custom_param("pd_targets", "arm_target_noise")
+        arm_target_noise_scale = self._current_custom_param("pd_targets", "arm_target_noise_scale")
 
         target_noise[:, self._target_base_xy_slice] = base_xy_target_noise * (
             2.0 * torch.rand_like(target_noise[:, self._target_base_xy_slice]) - 1.0
@@ -1214,7 +1219,7 @@ class DooropeningEnv(DirectRLEnv):
         target_noise[:, self._target_base_rot_slice] = base_rot_target_noise * (
             2.0 * torch.rand_like(target_noise[:, self._target_base_rot_slice]) - 1.0
         )
-        target_noise[:, self._target_arm_slice] = arm_target_noise * (
+        target_noise[:, self._target_arm_slice] = arm_target_noise_scale * self._arm_target_noise_max * (
             2.0 * torch.rand_like(target_noise[:, self._target_arm_slice]) - 1.0
         )
         # No gripper-target noise: the commanded opening is a single actuator setpoint and the old
@@ -1417,16 +1422,6 @@ class DooropeningEnv(DirectRLEnv):
         self._enforce_fixed_arx_joint_state()
         self._enforce_fixed_camera_joint_state()
         self.robot.set_joint_position_target(applied_targets, joint_ids=self._robot_dof_idx)
-        # A smooth, episode-fixed function of the measured joint angle models calibration drift.
-        # Nearby joint positions have nearby torque offsets; there is no stepwise white noise.
-        arm_q = self.robot.data.joint_pos[:, self._robot_arm_dof_idx]
-        bias_min, bias_max = map(float, self.cfg.franka_torque_bias_magnitude_nm)
-        bias_mid = 0.5 * (bias_min + bias_max)
-        bias_half_width = 0.5 * (bias_max - bias_min)
-        torque_bias = self._franka_bias_active * self._franka_bias_sign * (
-            bias_mid + bias_half_width * torch.sin(self._franka_bias_frequency * arm_q + self._franka_bias_phase)
-        )
-        self.robot.set_joint_effort_target(torque_bias, joint_ids=self._robot_arm_dof_idx)
         if self.base_control_mode == "velocity":
             self.robot.set_joint_velocity_target(
                 self._base_velocity_target, joint_ids=self._robot_base_dof_idx
@@ -2460,15 +2455,6 @@ class DooropeningEnv(DirectRLEnv):
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
-        bias_probability = float(self.cfg.franka_torque_bias_probability)
-        bias_shape = (len(env_ids), self.num_arm_joints)
-        self._franka_bias_active[env_ids] = (torch.rand(bias_shape, device=self.device) < bias_probability).float()
-        self._franka_bias_sign[env_ids] = torch.where(
-            torch.rand(bias_shape, device=self.device) < 0.5, -1.0, 1.0
-        )
-        self._franka_bias_phase[env_ids] = 2.0 * torch.pi * torch.rand(bias_shape, device=self.device)
-        self._franka_bias_frequency[env_ids] = 0.5 + torch.rand(bias_shape, device=self.device)
-
         # Each asset owns its positive mechanical hard stop; the shared environment mirrors it
         # below zero. Randomize the gap from the symmetric stop to the magnitude threshold.
         if not hasattr(self, "_door_latch_hinge_threshold_rad"):
