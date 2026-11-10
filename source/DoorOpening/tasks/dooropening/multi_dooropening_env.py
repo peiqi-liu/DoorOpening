@@ -91,6 +91,10 @@ class DooropeningEnv(DirectRLEnv):
                 f"got {nominal_arm_stiffness.numel()} gains for {self.num_arm_joints} joints."
             )
         self._arm_target_noise_max = float(self.cfg.franka_arm_target_noise_max_torque_nm) / nominal_arm_stiffness
+        # Sample one calibration offset per arm joint at reset and hold it for the whole episode.
+        self._episode_arm_target_noise = torch.zeros(
+            (self.num_envs, self.num_arm_joints), device=self.device, dtype=torch.float32
+        )
         self.num_finger_joints = len(self.cfg.finger_joints)
         self.num_arx_joints = len(self.cfg.arx_joints)
 
@@ -1211,7 +1215,6 @@ class DooropeningEnv(DirectRLEnv):
         target_noise = torch.zeros_like(self.robot_dof_targets)
         base_xy_target_noise = self._current_custom_param("pd_targets", "base_xy_target_noise")
         base_rot_target_noise = self._current_custom_param("pd_targets", "base_rot_target_noise")
-        arm_target_noise_scale = self._current_custom_param("pd_targets", "arm_target_noise_scale")
 
         target_noise[:, self._target_base_xy_slice] = base_xy_target_noise * (
             2.0 * torch.rand_like(target_noise[:, self._target_base_xy_slice]) - 1.0
@@ -1219,9 +1222,7 @@ class DooropeningEnv(DirectRLEnv):
         target_noise[:, self._target_base_rot_slice] = base_rot_target_noise * (
             2.0 * torch.rand_like(target_noise[:, self._target_base_rot_slice]) - 1.0
         )
-        target_noise[:, self._target_arm_slice] = arm_target_noise_scale * self._arm_target_noise_max * (
-            2.0 * torch.rand_like(target_noise[:, self._target_arm_slice]) - 1.0
-        )
+        target_noise[:, self._target_arm_slice] = self._episode_arm_target_noise
         # No gripper-target noise: the commanded opening is a single actuator setpoint and the old
         # per-substep perturbation was ~12% of the whole 0.04 m stroke.
         return target_noise
@@ -2455,6 +2456,10 @@ class DooropeningEnv(DirectRLEnv):
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
+        arm_target_noise_scale = float(self._current_custom_param("pd_targets", "arm_target_noise_scale"))
+        self._episode_arm_target_noise[env_ids] = arm_target_noise_scale * self._arm_target_noise_max * (
+            2.0 * torch.rand((len(env_ids), self.num_arm_joints), device=self.device) - 1.0
+        )
         # Each asset owns its positive mechanical hard stop; the shared environment mirrors it
         # below zero. Randomize the gap from the symmetric stop to the magnitude threshold.
         if not hasattr(self, "_door_latch_hinge_threshold_rad"):
