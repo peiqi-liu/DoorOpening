@@ -147,7 +147,7 @@ def _traverse_after_panel_push(
     forward_steps = 8
     start_base_pos = base_target_pos.clone()
     fixed_palm_pose = palm_target_pose.clone()
-    traverse_yaw = initial_yaw + math.radians(25.0)
+    traverse_yaw = initial_yaw + math.radians(20.0)
     ik_kwargs = {"num_attempts": 1}
     if reference_joint_pos is not None:
         ik_kwargs["reference_joint_pos"] = reference_joint_pos
