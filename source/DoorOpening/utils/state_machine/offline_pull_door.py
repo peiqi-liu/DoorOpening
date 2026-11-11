@@ -139,15 +139,15 @@ def _traverse_after_panel_push(
     reference_joint_pos=None,
 ):
     """Clear the panel, turn, cross while sliding the hand, then release it."""
-    backup_distance = 0.20
-    backup_left_distance = 0.10
+    backup_distance = 0.10
+    backup_left_distance = 0.15
     palm_slide_distance = 0.25
     backup_steps = 3
     turn_steps = 4
     forward_steps = 8
     start_base_pos = base_target_pos.clone()
     fixed_palm_pose = palm_target_pose.clone()
-    traverse_yaw = initial_yaw + TRAVERSE_YAW_OFFSET_RAD
+    traverse_yaw = initial_yaw + math.radians(25.0)
     ik_kwargs = {"num_attempts": 1}
     if reference_joint_pos is not None:
         ik_kwargs["reference_joint_pos"] = reference_joint_pos
@@ -171,9 +171,9 @@ def _traverse_after_panel_push(
         _append_state(robot_traj, door_traj, key_indices, q_robot, q_door,
                       mark_keyframe=(step == backup_steps))
 
-    # Turn at the backed-up position, still holding the same world hand pose.
+    # Face the neutral initial yaw before crossing, holding the hand in place.
     for step in range(1, turn_steps + 1):
-        yaw = blocking_yaw + (traverse_yaw - blocking_yaw) * step / turn_steps
+        yaw = blocking_yaw + (initial_yaw - blocking_yaw) * step / turn_steps
         base_target_pose = _make_pose(
             base_target_pos, get_rotation_quat(0.0, 0.0, yaw, device)
         )
@@ -186,7 +186,7 @@ def _traverse_after_panel_push(
         _append_state(robot_traj, door_traj, key_indices, q_robot, q_door,
                       mark_keyframe=(step == turn_steps))
 
-    # Cross to the inner side. The wrist slides 25 cm along the open panel,
+    # Cross 40 cm to the inner side before releasing the arm. The wrist slides 25 cm along the open panel,
     # while its height, lateral contact offset, and orientation stay fixed.
     mid_base_pos = start_base_pos.clone()
     mid_base_pos[:, 0] -= 0.40
@@ -202,7 +202,7 @@ def _traverse_after_panel_push(
             mid_base_pos[:, 1] - backed_up_pos[:, 1]
         )
         base_target_pose = _make_pose(
-            base_target_pos, get_rotation_quat(0.0, 0.0, traverse_yaw, device)
+            base_target_pos, get_rotation_quat(0.0, 0.0, initial_yaw, device)
         )
         step_palm_pose = fixed_palm_pose.clone()
         step_palm_pose[:, 0] -= palm_slide_distance * frac
@@ -213,14 +213,31 @@ def _traverse_after_panel_push(
         )[0]
         _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
         _append_state(robot_traj, door_traj, key_indices, q_robot, q_door,
-                      mark_keyframe=(step == forward_steps))
+                      mark_keyframe=False)
+
+    # Turn to +25 degrees only after crossing, holding the hand at slide end.
+    crossed_palm_pose = fixed_palm_pose.clone()
+    crossed_palm_pose[:, 0] -= palm_slide_distance
+    for step in range(1, turn_steps + 1):
+        yaw = initial_yaw + (traverse_yaw - initial_yaw) * step / turn_steps
+        base_target_pose = _make_pose(
+            base_target_pos, get_rotation_quat(0.0, 0.0, yaw, device)
+        )
+        q_robot[:10] = solve_ik(
+            robot_urdf_path, q_robot[:10], palm_pose=crossed_palm_pose,
+            base_pose=base_target_pose, robot_initial_pose=robot_initial_pose,
+            **ik_kwargs,
+        )[0]
+        _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
+        _append_state(robot_traj, door_traj, key_indices, q_robot, q_door,
+                      mark_keyframe=(step == turn_steps))
 
     # Return Franka to default only after reaching the inner-side base pose.
     q_robot[3:10] = franka_default_q
     _append_state(robot_traj, door_traj, key_indices, q_robot, q_door,
                   mark_keyframe=True)
 
-    # Finish crossing with the arm stowed and the 20-degree yaw maintained.
+    # Finish crossing with the arm stowed and the +25-degree yaw maintained.
     far_base_pos = mid_base_pos.clone()
     far_base_pos[:, 0] = torch.minimum(
         torch.full_like(mid_base_pos[:, 0], -1.0), mid_base_pos[:, 0] - 1.5
@@ -967,9 +984,9 @@ def state_machine_offline_left_pull_door(
     # -------------------------
     # Step 3: Rotate hinge (unlatch)
     # -------------------------
-    # Finish the camera-facing approach at the grasp, then return the base to
-    # zero relative yaw before exerting force on the handle and panel.
-    base_target_pose = _make_pose(base_target_pos, base_target_rot)
+    # Keep the pregrasp yaw through handle rotation. Restore neutral yaw only
+    # after the door has begun rotating in Step 4.
+    base_target_pose = _make_pose(base_target_pos, pregrasp_tilt_base_rot)
     # Press this asset's own mechanical stop, not a shared angle: the unlatch threshold in sim is
     # sampled below this URDF limit by the configured stop-to-threshold gap.
     unlatch_hinge_angle = _read_handle_hard_stop_rad(door_urdf_path)
@@ -1037,13 +1054,11 @@ def state_machine_offline_left_pull_door(
     # Handle-relative base standoff during the pull sweep; reduced by 5 cm
     # so the base retreats less as the panel opens toward the robot.
     pull_base_x_offset = 0.70
-    # Constant lateral shift of the base held through the pull, in WORLD y (+y = the robot's right,
-    # per this file's robot-faces--x convention). The base y was previously a pure function of theta
-    # with no standing offset, so the chassis -- and the arx bolted to it -- tracked straight up the
-    # line the arm was working along. Measured: this is what clears the END of the pull sweep, where
-    # panda_link3 was hitting arx link4.
-    pull_base_y_offset = 0.08
-    pull_base_y_gain = -0.1 / 1.45
+    # Keep the base at its current lateral position during the pull. The former
+    # handle-relative offset shifted the base right and could pull the gripper
+    # off the handle.
+    pull_base_y_offset = base_target_pos[:, 1].clone()
+    pull_base_y_gain = 0.0
 
     # Held flat while the panel is not yet confidently open (0.3 rad -- matches pull_theta_start, well
     # past the door_closed_range=0.05 rad relock boundary), then released QUICKLY rather than dragged
@@ -1096,7 +1111,14 @@ def state_machine_offline_left_pull_door(
         base_target_pos = handle_pos.clone()
         base_target_pos[:, 0] += pull_base_x_offset
         base_target_pos[:, 1] = pull_base_y_offset + theta.item() * pull_base_y_gain
-        base_target_pose = _make_pose(base_target_pos, base_target_rot)
+        # Let the door begin rotating with the pregrasp yaw still held. After
+        # the panel turns 0.30 rad, smoothly restore the base to neutral.
+        yaw_restore = max(0.0, min(1.0, (theta.item() - pull_theta_start) / 0.30))
+        pull_base_yaw = _base_yaw.item() + pregrasp_base_tilt_yaw * (1.0 - yaw_restore)
+        base_target_pose = _make_pose(
+            base_target_pos,
+            get_rotation_quat(0.0, 0.0, pull_base_yaw, device),
+        )
 
         palm_dx, palm_dy = _rotate_xy_counterclockwise(
             pull_palm_x_offset_closed,

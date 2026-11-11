@@ -85,6 +85,25 @@ class DooropeningEnv(DirectRLEnv):
         self.num_finger_joints = len(self.cfg.finger_joints)
         self.num_arx_joints = len(self.cfg.arx_joints)
 
+        nominal_arm_stiffness = torch.as_tensor(
+            self.cfg.franka_arm_nominal_stiffness, device=self.device, dtype=torch.float32
+        )
+        if nominal_arm_stiffness.numel() != self.num_arm_joints:
+            raise ValueError(
+                "franka_arm_nominal_stiffness must have one value per arm joint; "
+                f"got {nominal_arm_stiffness.numel()} values for {self.num_arm_joints} joints."
+            )
+        self._arm_target_bias_max = (
+            float(self.cfg.franka_arm_target_bias_max_torque_nm) / nominal_arm_stiffness
+        )
+        self._episode_arm_target_bias = torch.zeros(
+            (self.num_envs, self.num_arm_joints), device=self.device, dtype=torch.float32
+        )
+        self._arm_target_step_noise_max = (
+            float(self.cfg.franka_arm_target_step_noise_max_torque_nm) / nominal_arm_stiffness
+        )
+        self._arm_target_step_noise = torch.zeros_like(self._episode_arm_target_bias)
+
         actuated_joints = self.cfg.base_joints + self.cfg.arm_joints + self.cfg.finger_joints + self.cfg.arx_joints
         self._robot_dof_idx, joint_names = self.robot.find_joints(actuated_joints, preserve_order=True)
         self._robot_dof_idx = torch.tensor(self._robot_dof_idx, device=self.device)
@@ -1202,16 +1221,14 @@ class DooropeningEnv(DirectRLEnv):
         target_noise = torch.zeros_like(self.robot_dof_targets)
         base_xy_target_noise = self._current_custom_param("pd_targets", "base_xy_target_noise")
         base_rot_target_noise = self._current_custom_param("pd_targets", "base_rot_target_noise")
-        arm_target_noise = self._current_custom_param("pd_targets", "arm_target_noise")
-
         target_noise[:, self._target_base_xy_slice] = base_xy_target_noise * (
             2.0 * torch.rand_like(target_noise[:, self._target_base_xy_slice]) - 1.0
         )
         target_noise[:, self._target_base_rot_slice] = base_rot_target_noise * (
             2.0 * torch.rand_like(target_noise[:, self._target_base_rot_slice]) - 1.0
         )
-        target_noise[:, self._target_arm_slice] = arm_target_noise * (
-            2.0 * torch.rand_like(target_noise[:, self._target_arm_slice]) - 1.0
+        target_noise[:, self._target_arm_slice] = (
+            self._episode_arm_target_bias + self._arm_target_step_noise
         )
         # No gripper-target noise: the commanded opening is a single actuator setpoint and the old
         # per-substep perturbation was ~12% of the whole 0.04 m stroke.
@@ -1257,9 +1274,13 @@ class DooropeningEnv(DirectRLEnv):
         )
 
     def arm_target_from_scaled_actions(self, scaled_arm_actions: torch.Tensor) -> torch.Tensor:
-        """Build the arm target from the clean measured joint position."""
+        """Apply a range-scaled, dt-integrated action around the measured arm position."""
         arm_q = self.robot.data.joint_pos[:, self._robot_arm_dof_idx]
-        targets = arm_q + self.dt * scaled_arm_actions
+        arm_range = (
+            self.robot_dof_upper_limits[self._target_arm_slice]
+            - self.robot_dof_lower_limits[self._target_arm_slice]
+        )
+        targets = arm_q + self.dt * scaled_arm_actions * arm_range
         return torch.clamp(
             targets,
             self.robot_dof_lower_limits[self._target_arm_slice],
@@ -1325,6 +1346,13 @@ class DooropeningEnv(DirectRLEnv):
         return applied
 
     def _pre_physics_step(self, actions: torch.Tensor):
+        arm_step_noise_scale = float(
+            self._current_custom_param("pd_targets", "arm_target_step_noise_scale")
+        )
+        self._arm_target_step_noise = arm_step_noise_scale * self._arm_target_step_noise_max * (
+            2.0 * torch.rand_like(self._arm_target_step_noise) - 1.0
+        )
+
         # Jerk penalty: the SECOND difference of the CLAMPED action, a_t - 2*a_(t-1) + a_(t-2), in
         # the same bounded [-1, 1] units the policy actually commands in. Zero for a constant action
         # OR a constant rate of change (a steady ramp is NOT penalized, unlike a first-difference
@@ -1399,8 +1427,8 @@ class DooropeningEnv(DirectRLEnv):
         # self.door.write_joint_position_to_sim(door_pos)
 
         self._update_door_latch()
-        # applied_robot_dof_targets already carries the lag-filtered target from _pre_physics_step.
-        # Add per-substep controller noise on top without polluting the lag history.
+        # applied_robot_dof_targets already carries the lagged target from _pre_physics_step.
+        # Base target noise is resampled per substep; each arm target bias is fixed for its episode.
         applied_targets = self.applied_robot_dof_targets.clone()
         applied_targets += self._get_policy_target_noise()
         applied_targets = self._pin_arx_targets_to_fixed_pose(applied_targets)
@@ -2443,6 +2471,12 @@ class DooropeningEnv(DirectRLEnv):
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
+
+        arm_target_bias_scale = float(self._current_custom_param("pd_targets", "arm_target_bias_scale"))
+        self._episode_arm_target_bias[env_ids] = arm_target_bias_scale * self._arm_target_bias_max * (
+            2.0 * torch.rand((len(env_ids), self.num_arm_joints), device=self.device) - 1.0
+        )
+        self._arm_target_step_noise[env_ids] = 0.0
 
         # Each asset owns its positive mechanical hard stop; the shared environment mirrors it
         # below zero. Randomize the gap from the symmetric stop to the magnitude threshold.

@@ -930,8 +930,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=False)  # Glorbot2 laptop long-schedule run
 
-    # Franka target: clean measured joint position + dt * arm_action_scale * action.
-    # This scale does not change sampled PD gains.
+    # Franka target: measured q + dt * scale * full joint range * normalized action.
+    # Bias magnitude is set in target radians from the requested nominal torque and Kp.
     base_action_scale = 1.0
     base_control_mode = "position"
     base_velocity_limit_xy = 0.2
@@ -939,6 +939,10 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     base_acceleration_limit_xy = 0.2
     base_acceleration_limit_yaw = 0.79
     arm_action_scale = 0.6
+    franka_arm_nominal_stiffness = (400.0, 400.0, 400.0, 400.0, 80.0, 80.0, 25.0)
+    franka_arm_target_bias_max_torque_nm = 1.5
+    # Small zero-mean per-control-step target perturbation, in nominal torque-equivalent units.
+    franka_arm_target_step_noise_max_torque_nm = 0.15
     gripper_action_speed_headroom = 2.0
     finger_action_scale = gripper_action_speed_headroom * GRIPPER_VELOCITY_LIMIT
     arx_action_scale = 0.6
@@ -1165,7 +1169,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         "pd_targets": {
             "base_xy_target_noise": (0.0, 0.0015),
             "base_rot_target_noise": (0.0, 0.005),
-            "arm_target_noise": (0.0, 0.003),
+            "arm_target_bias_scale": (0.0, 1.0),
+            "arm_target_step_noise_scale": (0.0, 1.0),
         },
         # Action latency (in env/control steps; env dt = sim_dt * decimation = 1/15 s).
         # The PD target applied on a given step is the one the policy produced `latency` steps
