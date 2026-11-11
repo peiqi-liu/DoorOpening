@@ -18,7 +18,8 @@ OUT = Path(__file__).resolve().parent
 
 def generate(urdf: Path):
     env = os.environ.copy()
-    env["PYTHONPATH"] = os.pathsep.join((str(ROOT / "source"), env.get("PYTHONPATH", "")))
+    isaaclab_source = Path(sys.executable).resolve().parents[1] / "lib/python3.11/site-packages/isaaclab/source/isaaclab"
+    env["PYTHONPATH"] = os.pathsep.join((str(isaaclab_source), str(ROOT / "source"), env.get("PYTHONPATH", "")))
     env.update(OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1")
     result = subprocess.run(
         [sys.executable, str(PLANNER), "--door-urdf-path", str(urdf)],
