@@ -441,6 +441,33 @@ class EventCfg:
         },
     )
 
+    # Randomize total simulated Franka effort caps per joint and episode around the URDF
+    # limits (87 Nm on joints 1-4, 12 Nm on joints 5-7). The lower side covers
+    # gravity consuming actuator headroom; the upper side covers uncertainty in the
+    # effective command-side limit when gravity compensation is applied separately.
+    franka_effort_limit_1_4 = EventTerm(
+        func=randomize_joint_effort_limits,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg(
+                "robot", joint_names=["panda_joint1", "panda_joint2", "panda_joint3", "panda_joint4"]
+            ),
+            "effort_limit_distribution_params": (60.9, 113.1),
+            "shared_across_joints": False,
+        },
+    )
+    franka_effort_limit_5_7 = EventTerm(
+        func=randomize_joint_effort_limits,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg(
+                "robot", joint_names=["panda_joint5", "panda_joint6", "panda_joint7"]
+            ),
+            "effort_limit_distribution_params": (8.4, 15.6),
+            "shared_across_joints": False,
+        },
+    )
+
     # Match the Vision9 position-drive gains by default. The target displacement
     # still scales with the policy action; effort limits are randomized separately.
     base_impedance_correlated = EventTerm(
