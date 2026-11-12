@@ -71,6 +71,12 @@ parser.add_argument(
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint.")
 parser.add_argument("--sigma", type=str, default=None, help="The policy's initial standard deviation.")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
+parser.add_argument(
+    "--minibatch-size",
+    type=int,
+    default=None,
+    help="Override PPO (and central critic) minibatch size; must divide the per-rank rollout batch.",
+)
 parser.add_argument("--wandb-project-name", type=str, default=None, help="the wandb's project name")
 parser.add_argument("--wandb-entity", type=str, default=None, help="the entity (team) of wandb's project")
 parser.add_argument("--wandb-name", type=str, default=None, help="the name of wandb's run")
@@ -489,6 +495,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     agent_cfg["params"]["config"]["max_epochs"] = (
         args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg["params"]["config"]["max_epochs"]
     )
+    if args_cli.minibatch_size is not None:
+        if args_cli.minibatch_size <= 0:
+            raise ValueError("--minibatch-size must be positive")
+        agent_cfg["params"]["config"]["minibatch_size"] = args_cli.minibatch_size
+        central_cfg = agent_cfg["params"]["config"].get("central_value_config")
+        if isinstance(central_cfg, dict):
+            central_cfg["minibatch_size"] = args_cli.minibatch_size
+        print(f"[INFO] PPO minibatch size set to {args_cli.minibatch_size}")
     if args_cli.checkpoint is not None:
         resume_path = retrieve_file_path(args_cli.checkpoint)
         print("resume_path: ", resume_path)

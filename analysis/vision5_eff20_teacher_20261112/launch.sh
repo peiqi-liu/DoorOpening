@@ -25,10 +25,11 @@ export PYTHONUNBUFFERED=1
 export DOOROPENING_WANDB_SAVE_CODE=0
 export DOOROPENING_DISTRIBUTED_RUN_TAG="$run"
 export SIM_INIT_DIR=/tmp/DoorOpening/.sim_init/v5_eff20_teacher
-exec "$python" -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=2 \
+exec "$python" -m torch.distributed.run --nnodes=1 --nproc_per_node=2 --master_addr=127.0.0.1 --master_port=29579 \
   scripts/rl_games/train.py \
   --distributed --headless --video --video_length 900 --video_interval 10000 \
   --task DooropeningMulti --num_envs 300 --door-families "$asset" \
   --checkpoint "$teacher" --track --wandb-project-name dooropeningv22 --wandb-entity peiqiliu \
   --wandb-no-config-upload --wandb-name "$run" --exp-name "$run" --seed 42 --max_iterations 30000 \
+  --minibatch-size 7200 \
   > analysis/vision5_eff20_teacher_20261112/train.log 2>&1
