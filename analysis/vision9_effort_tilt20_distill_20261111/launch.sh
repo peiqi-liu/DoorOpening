@@ -9,7 +9,7 @@ cd "$repo"
 test "$(git branch --show-current)" = 11_11/vision9_effort_distill
 git merge-base --is-ancestor dceee01e HEAD
 test "$(find "source/DoorOpening/assets/door/$asset" -name traj.pkl | wc -l | tr -d ' ')" -eq 1024
-test "$(python - "$asset" <<'PY'
+test "$("$python" - "$asset" <<'PY'
 from pathlib import Path
 import hashlib,sys
 family=Path('source/DoorOpening/assets/door')/sys.argv[1]
