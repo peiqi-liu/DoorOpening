@@ -620,6 +620,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         except Exception as _exc:
             print(f"[WARNING][rank {global_rank}] could not write sim-init sentinel: {_exc}")
 
+    # Keep early ranks out of CUDA/NCCL while a later rank is still inside
+    # Isaac Sim initialization.  The GPU barrier itself can run concurrently with
+    # sim.reset() and trigger a native carb mutex assertion on this host.
+    if use_distributed and int(os.environ.get("LOCAL_WORLD_SIZE", "1")) > 1:
+        _last_local_rank = int(os.environ["LOCAL_WORLD_SIZE"]) - 1
+        _last = _siminit_sentinel(_last_local_rank)
+        _wait_timeout = int(os.environ.get("SIM_INIT_WAIT_TIMEOUT", "1800"))
+        print(f"[INFO][rank {global_rank}] Waiting on CPU for final local sim-init sentinel ({_last})...")
+        _t0 = _time.time()
+        while not os.path.exists(_last):
+            if _time.time() - _t0 > _wait_timeout:
+                raise TimeoutError(f"Timed out waiting for final local sim-init sentinel: {_last}")
+            _time.sleep(2.0)
+        print(f"[INFO][rank {global_rank}] All local simulators initialized; entering distributed barrier.")
+
     # Barrier: wait for all ranks to finish Isaac Sim initialization before proceeding to
     # rl-games setup. Without this, a fast rank reaches the NCCL broadcast inside
     # "broadcasting parameters" while the slow rank is still in sim.reset(), causing an

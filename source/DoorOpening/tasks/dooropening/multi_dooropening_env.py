@@ -1022,6 +1022,11 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["dr_sample/door_handle_effort_limit_mean"] = self._door_handle_effort_limits.mean().item()
         self.extras["dr_sample/door_handle_effort_limit_min"] = self._door_handle_effort_limits.min().item()
         self.extras["dr_sample/door_handle_effort_limit_max"] = self._door_handle_effort_limits.max().item()
+        franka_effort_limits = self.robot.data.joint_effort_limits[:, self._robot_arm_dof_idx]
+        for group, limits in (("1_4", franka_effort_limits[:, :4]), ("5_7", franka_effort_limits[:, 4:])):
+            self.extras[f"dr_sample/franka_effort_limit_{group}_mean"] = limits.mean().item()
+            self.extras[f"dr_sample/franka_effort_limit_{group}_min"] = limits.min().item()
+            self.extras[f"dr_sample/franka_effort_limit_{group}_max"] = limits.max().item()
         # Actually-applied panel (joint_1) Coulomb friction coefficient in the sim -- proves the
         # door_board_joint_friction EventTerm is taking effect (nonzero once ADR ramps in).
         board_applied_friction = self.door.data.joint_friction_coeff[:, self._door_board_joint_idx]
