@@ -690,23 +690,40 @@ def state_machine_offline_right_pull_door(
     # -------------------------
     # Step 6: Retract the arm to the left side of the tilted base
     # -------------------------
-    # Retract offset applied DIRECTLY in world frame -- no base-yaw rotation (that rotation was
-    # mixing the axes: "dx too small, dy too large"). Now these map straight to world directions:
-    # +x pulls the hand BACKWARD off the door; +y nudges it to the RIGHT to clear the panel.
-    retreat_local_x = 0.3
-    retreat_local_y = 0.3
-    # LIFT the retract target up: the arm swings a wide arc from here around to the panel-hold
-    # pose, and doing that low sweeps it through the arx camera arm on the base. Keeping the hand
-    # high makes the swing pass OVER the arx instead of colliding with it.
-    # retreat_z_lift = 0.05
-    # No base move at the retract stage: the base stays at the door-blocking pose set in step 5.
-    # Append the retract offset to the LAST palm location (step 5's palm pose), NOT the base pose,
-    # so dx/dy/dz are all deltas from where the hand currently is.
+    # First move the open hand backward (+world x), right (+world y), and up
+    # before sweeping farther around the panel's free edge at the elevated pose.
+    # Tunable retreat offsets (metres, world axes from the released palm pose).
+    back_clearance_world_x_offset_m = 0.10
+    back_clearance_world_y_offset_m = 0.08
+    back_clearance_world_z_m = 1.20
+    back_clearance_pos = palm_target_pose[:, :3].clone()
+    back_clearance_pos[:, 0] += back_clearance_world_x_offset_m
+    back_clearance_pos[:, 1] += back_clearance_world_y_offset_m
+    back_clearance_pos[:, 2] = back_clearance_world_z_m
+    back_clearance_pose = _make_pose(back_clearance_pos, default_palm_rot)
+    q_robot[:10] = solve_ik(
+        robot_urdf_path,
+        q_robot[:10],
+        palm_pose=back_clearance_pose,
+        base_pose=None,
+        robot_initial_pose=robot_initial_pose,
+        num_attempts=1,
+    )[0]
+    _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
+    _append_state(
+        robot_traj, door_traj, key_idx_in_key_indices, q_robot, q_door,
+        mark_keyframe=False,
+    )
+
+    # No base move at retract: it stays at the door-blocking pose. This wider
+    # backward/right/up sweep clears the panel before the arm approaches it to push.
+    retreat_world_x_offset_m = 0.14
+    retreat_world_y_offset_m = 0.10
+    retreat_world_z_m = 1.20
     retreat_palm_pos = palm_target_pose[:, :3].clone()
-    retreat_palm_pos[:, 0] += retreat_local_x
-    retreat_palm_pos[:, 1] += retreat_local_y
-    # retreat_palm_pos[:, 2] += retreat_z_lift
-    retreat_palm_pos[:, 2] = 1.2
+    retreat_palm_pos[:, 0] += retreat_world_x_offset_m
+    retreat_palm_pos[:, 1] += retreat_world_y_offset_m
+    retreat_palm_pos[:, 2] = retreat_world_z_m
     retreat_palm_pose = _make_pose(retreat_palm_pos, default_palm_rot)
 
     q_robot[:10] = solve_ik(
@@ -1194,15 +1211,17 @@ def state_machine_offline_left_pull_door(
         device,
     )
     push_palm_rot = get_rotation_quat(0, 0, math.pi, device)
-    # Clear the opened panel with a small lateral arc and an early backward
-    # lift. A wider sweep made an unnecessary circle and approached joint limits.
-    # World +x is backward and -y is left in this frame.
-    retreat_world_x = 0.12
-    retreat_world_y = -0.23
-    back_clearance_palm_z = 1.24
-    retreat_palm_z = 1.28
-    forward_left_world_x = -0.12
-    forward_left_world_y = -0.10
+    # Tunable retreat offsets (metres, world axes from the released palm pose).
+    # Zero x delta holds the release x through clearance; the retreat x offset
+    # sets the requested handle-relative retreat coordinate. The next stage keeps it.
+    release_to_clearance_x_offset_m = 0.0
+    release_to_clearance_y_offset_m = 0.10
+    clearance_world_z_m = 1.20
+    release_to_retreat_x_offset_m = 0.157
+    release_to_retreat_y_offset_m = 0.12
+    retreat_world_z_m = 1.20
+    retreat_to_forward_left_x_offset_m = 0.0
+    retreat_to_forward_left_y_offset_m = -0.08
     # Larger x offset magnitude (was -0.3) so the arm reaches a bit further forward into the panel.
     # Contact point is now the panel CENTER (get_board_pos); only a small x offset so we push
     # near the center, not toward the hinge axis (short lever -> strong forces on the franka).
@@ -1270,8 +1289,9 @@ def state_machine_offline_left_pull_door(
     # Step 6: Clear the free edge, move to the panel's front side, then advance
     # -------------------------
     back_clearance_pos = palm_target_pose[:, :3].clone()
-    back_clearance_pos[:, 0] += retreat_world_x
-    back_clearance_pos[:, 2] = back_clearance_palm_z
+    back_clearance_pos[:, 0] += release_to_clearance_x_offset_m
+    back_clearance_pos[:, 1] += release_to_clearance_y_offset_m
+    back_clearance_pos[:, 2] = clearance_world_z_m
     back_clearance_pose = _make_pose(back_clearance_pos, default_palm_rot)
     q_robot[:10] = solve_ik(
         robot_urdf_path,
@@ -1290,9 +1310,9 @@ def state_machine_offline_left_pull_door(
 
     # Cross laterally only after the hand has cleared the panel's free edge.
     retreat_palm_pos = palm_target_pose[:, :3].clone()
-    retreat_palm_pos[:, 0] += retreat_world_x
-    retreat_palm_pos[:, 1] += retreat_world_y
-    retreat_palm_pos[:, 2] = retreat_palm_z
+    retreat_palm_pos[:, 0] += release_to_retreat_x_offset_m
+    retreat_palm_pos[:, 1] += release_to_retreat_y_offset_m
+    retreat_palm_pos[:, 2] = retreat_world_z_m
     retreat_palm_pose = _make_pose(retreat_palm_pos, default_palm_rot)
 
     q_robot[:10] = solve_ik(
@@ -1319,8 +1339,8 @@ def state_machine_offline_left_pull_door(
 
     # Continue from the retreat with the base fixed and the same wrist orientation.
     forward_left_palm_pos = retreat_palm_pos.clone()
-    forward_left_palm_pos[:, 0] += forward_left_world_x
-    forward_left_palm_pos[:, 1] += forward_left_world_y
+    forward_left_palm_pos[:, 0] += retreat_to_forward_left_x_offset_m
+    forward_left_palm_pos[:, 1] += retreat_to_forward_left_y_offset_m
     forward_left_palm_pose = _make_pose(forward_left_palm_pos, default_palm_rot)
     q_robot[:10] = solve_ik(
         robot_urdf_path,

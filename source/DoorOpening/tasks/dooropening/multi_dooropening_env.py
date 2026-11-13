@@ -93,9 +93,17 @@ class DooropeningEnv(DirectRLEnv):
                 "franka_arm_nominal_stiffness must have one value per arm joint; "
                 f"got {nominal_arm_stiffness.numel()} values for {self.num_arm_joints} joints."
             )
-        self._arm_target_bias_max = (
-            float(self.cfg.franka_arm_target_bias_max_torque_nm) / nominal_arm_stiffness
-        )
+        bias_torque_nm = torch.as_tensor(
+            self.cfg.franka_arm_target_bias_max_torque_nm, device=self.device, dtype=torch.float32
+        ).flatten()
+        if bias_torque_nm.numel() == 1:
+            bias_torque_nm = bias_torque_nm.expand(self.num_arm_joints)
+        if bias_torque_nm.numel() != self.num_arm_joints:
+            raise ValueError(
+                "franka_arm_target_bias_max_torque_nm must be scalar or have one value per arm joint; "
+                f"got {bias_torque_nm.numel()} values for {self.num_arm_joints} joints."
+            )
+        self._arm_target_bias_max = bias_torque_nm / nominal_arm_stiffness
         self._episode_arm_target_bias = torch.zeros(
             (self.num_envs, self.num_arm_joints), device=self.device, dtype=torch.float32
         )

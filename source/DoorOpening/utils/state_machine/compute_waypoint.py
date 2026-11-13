@@ -838,6 +838,7 @@ def play_saved_trajectory_playlist_in_viser(
     sim_steps_total: int = 540,
 ):
     """Continuously replay existing per-door traj.pkl files in one Viser session."""
+    from itertools import cycle
     import viser
     from viser.extras import ViserUrdf
     from yourdfpy import URDF
@@ -910,7 +911,7 @@ def play_saved_trajectory_playlist_in_viser(
                 sim_step_indicator.value = f"{sim_step} / {sim_steps_total}"
 
     try:
-        for door_idx, entry in enumerate(entries):
+        for door_idx, entry in cycle(enumerate(entries)):
             door_path, robot_traj, door_traj, robot_pos, robot_quat, door_pos, door_quat = entry
             active_robot_traj = robot_traj
             active_door_traj = door_traj

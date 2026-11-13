@@ -967,7 +967,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     base_acceleration_limit_yaw = 0.79
     arm_action_scale = 0.6
     franka_arm_nominal_stiffness = (400.0, 400.0, 400.0, 400.0, 80.0, 80.0, 25.0)
-    franka_arm_target_bias_max_torque_nm = 1.5
+    # Per-joint episode-fixed PD-target bias magnitudes in torque-equivalent Nm:
+    # panda_joint1..7; joints 2 and 6 are drift-prone, so retain a larger offset.
+    franka_arm_target_bias_max_torque_nm = (0.9, 1.25, 0.9, 0.9, 0.9, 1.25, 0.9)
     # Small zero-mean per-control-step target perturbation, in nominal torque-equivalent units.
     franka_arm_target_step_noise_max_torque_nm = 0.15
     gripper_action_speed_headroom = 2.0
