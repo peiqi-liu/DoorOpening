@@ -959,6 +959,14 @@ class DooropeningEnv(DirectRLEnv):
         panel_effort_min, panel_effort_max = self._current_door_panel_effort_limit_range()
 
         self.extras["dr/increment"] = float(self.dooropening_adr.increment_counter)
+        # Log the two PD-target ADR schedules directly. These scales are distinct
+        # from the sampled bias/noise values and make the ramp visible in W&B.
+        self.extras["dr/pd_target_arm_bias_scale"] = float(
+            self._current_custom_param("pd_targets", "arm_target_bias_scale")
+        )
+        self.extras["dr/pd_target_arm_step_noise_scale"] = float(
+            self._current_custom_param("pd_targets", "arm_target_step_noise_scale")
+        )
         self.extras["dr/robot_stiffness_min"] = float(robot_stiffness[0])
         self.extras["dr/robot_stiffness_max"] = float(robot_stiffness[1])
         self.extras["dr/robot_damping_min"] = float(robot_damping[0])
@@ -991,6 +999,19 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["dr_limit/action_latency_steps_min"] = float(action_latency_min)
         self.extras["dr_limit/action_latency_steps_max"] = float(action_latency_max)
         self.extras["dr_limit/action_latency_steps_mean"] = self._action_latency_buf.float().mean().item()
+
+        # The Franka effort-limit events use fixed uniform bounds (not the ADR
+        # increment schedule). Log both those bounds and, below, the limits
+        # actually sampled/applied across environments.
+        for group, event_name in (
+            ("1_4", "franka_effort_limit_1_4"),
+            ("5_7", "franka_effort_limit_5_7"),
+        ):
+            effort_min, effort_max = self._current_event_param(
+                event_name, "effort_limit_distribution_params"
+            )
+            self.extras[f"dr_limit/franka_effort_limit_{group}_min"] = float(effort_min)
+            self.extras[f"dr_limit/franka_effort_limit_{group}_max"] = float(effort_max)
 
         if not self._log_verbose_dr_metrics:
             return

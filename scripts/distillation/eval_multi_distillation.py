@@ -199,6 +199,22 @@ parser.add_argument(
     default=None,
     help="Eval-only PhysX position-solver iteration count for door articulation assets.",
 )
+parser.add_argument(
+    "--robot-gripper-static-friction-range",
+    type=float,
+    nargs=2,
+    default=None,
+    metavar=("MIN", "MAX"),
+    help="Eval-only static contact-friction range for the Franka hand and fingers.",
+)
+parser.add_argument(
+    "--robot-gripper-dynamic-friction-range",
+    type=float,
+    nargs=2,
+    default=None,
+    metavar=("MIN", "MAX"),
+    help="Eval-only dynamic contact-friction range for the Franka hand and fingers.",
+)
 parser.add_argument("--student_ckpt", type=str, default=None, help="Student checkpoint to evaluate.")
 parser.add_argument(
     "--student_cfg",
@@ -2190,6 +2206,18 @@ def main(env_cfg, agent_cfg: dict):
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     env_cfg.use_motion_ref = True
+    if args_cli.robot_gripper_static_friction_range is not None:
+        low, high = map(float, args_cli.robot_gripper_static_friction_range)
+        if low < 0.0 or high < low:
+            raise ValueError("--robot-gripper-static-friction-range requires 0 <= MIN <= MAX.")
+        env_cfg.events.robot_gripper_physics_material.params["static_friction_range"] = (low, high)
+        print(f"[INFO] Eval-only Franka gripper static contact friction: Uniform({low}, {high})")
+    if args_cli.robot_gripper_dynamic_friction_range is not None:
+        low, high = map(float, args_cli.robot_gripper_dynamic_friction_range)
+        if low < 0.0 or high < low:
+            raise ValueError("--robot-gripper-dynamic-friction-range requires 0 <= MIN <= MAX.")
+        env_cfg.events.robot_gripper_physics_material.params["dynamic_friction_range"] = (low, high)
+        print(f"[INFO] Eval-only Franka gripper dynamic contact friction: Uniform({low}, {high})")
     if args_cli.door_solver_position_iterations is not None:
         iterations = int(args_cli.door_solver_position_iterations)
         if iterations < 1:
