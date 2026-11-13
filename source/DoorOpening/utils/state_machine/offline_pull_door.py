@@ -1472,7 +1472,7 @@ def state_machine_offline_left_pull_door(
         palm_target_pose, robot_initial_yaw.item() + tilt_base_yaw,
         robot_initial_yaw.item(), -0.05, franka_default_q, device,
         reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
-        palm_slide_distance=0.0,
+        palm_slide_distance=0.25,
     )
 
     return robot_traj, door_traj, key_idx_in_key_indices
