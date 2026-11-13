@@ -149,6 +149,38 @@ def get_board_pos(door_urdf_path, door_initial_pose, joint_angles):
     return P.mean(dim = 0).unsqueeze(0)
 
 
+def get_board_interior_contact_pos(
+    door_urdf_path,
+    door_initial_pose,
+    joint_angles,
+    offset,
+    edge_margin_m: float = 0.15,
+    normal_clearance_m: float = 0.0,
+):
+    """Keep an approach target inside the panel width and off its near face."""
+    door_initial_pos = door_initial_pose[..., :3]
+    door_initial_quat = door_initial_pose[..., 3:]
+    pointcloud = sample_pointcloud_from_link_name(
+        door_urdf_path, joint_angles, "link_1", device="cpu"
+    )
+    panel = (quat_apply(door_initial_quat, pointcloud) + door_initial_pos).squeeze()
+    center = panel.mean(dim=0)
+    centered = panel - center
+    _, eigenvectors = torch.linalg.eigh(torch.matmul(centered.T, centered) / panel.shape[0])
+    panel_normal = eigenvectors[:, 0]
+    width_axis = eigenvectors[:, 1]
+    width_coords = centered @ width_axis
+    target = center + torch.as_tensor(offset, dtype=center.dtype, device=center.device)
+    target_width = torch.dot(target - center, width_axis)
+    safe_width = target_width.clamp(
+        min=width_coords.min() + edge_margin_m,
+        max=width_coords.max() - edge_margin_m,
+    )
+    target = target + (safe_width - target_width) * width_axis
+    normal_side = torch.sign(torch.dot(target - center, panel_normal))
+    return (target + normal_clearance_m * normal_side * panel_normal).unsqueeze(0)
+
+
 def get_board_edge(
     door_urdf_path,
     door_initial_pose,
