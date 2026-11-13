@@ -1,0 +1,3 @@
+# Keep the robot's OBJ geometry and MTL materials in ordinary Git blobs.
+*.obj -filter -diff -merge text
+*.mtl -filter -diff -merge text
