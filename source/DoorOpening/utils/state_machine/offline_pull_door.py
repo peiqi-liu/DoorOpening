@@ -140,7 +140,7 @@ def _traverse_after_panel_push(
     palm_slide_distance=0.25,
 ):
     """Clear the panel, turn, cross while sliding the hand, then release it."""
-    backup_distance = 0.10
+    backup_distance = 0.15
     backup_left_distance = 0.15
     backup_steps = 3
     turn_steps = 4

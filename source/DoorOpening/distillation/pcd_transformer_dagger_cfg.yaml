@@ -149,6 +149,12 @@ state_encoders_cfg:
     hidden_dims: [128, 256]
     dropout: 0.0
     use_state: true
+  target_err_arm:
+    # Current-step Franka PD-target tracking error, seven joints.
+    input_dim: 7
+    hidden_dims: [128, 256]
+    dropout: 0.0
+    use_state: true
   # target_err_hand:
   #   input_dim: 1  # gripper opening error (one DOF)
   #   hidden_dims: [128, 256]
