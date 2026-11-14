@@ -186,6 +186,12 @@ parser.add_argument("--teacher-partnetv8", "--teacher_partnetv8", dest="teacher_
 # parser.add_argument("--data_aug", action="store_true", default=False, help="Whether to use data augmentation for student")
 parser.add_argument("--student_ckpt", type=str, default=None, help="Student checkpoint to resume from.")
 parser.add_argument("--teacher_cfg", type=str, default=None, help="Teacher RL-Games config YAML to use.")
+parser.add_argument("--distill-reset-key-body-pos-m", type=float, default=None,
+                    help="Override the key-body position drift reset tolerance for distillation (m).")
+parser.add_argument("--distill-reset-key-body-quat-rad", type=float, default=None,
+                    help="Override the key-body orientation drift reset tolerance for distillation (rad).")
+parser.add_argument("--distill-reset-door-joint-rad", type=float, default=None,
+                    help="Override the door-joint drift reset tolerance for distillation (rad).")
 parser.add_argument("--wandb-project-name", type=str, default=None, help="the wandb's project name")
 parser.add_argument("--wandb-entity", type=str, default=None, help="the entity (team) of wandb's project")
 parser.add_argument("--wandb-name", type=str, default=None, help="the name of wandb's run")
@@ -357,6 +363,16 @@ def main(env_cfg, agent_cfg: dict):
         )
 
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+    for value, minimum_name, maximum_name in (
+        (args_cli.distill_reset_key_body_pos_m, "reset_key_body_pos_delta_min", "reset_key_body_pos_delta_max"),
+        (args_cli.distill_reset_key_body_quat_rad, "reset_key_body_quat_delta_min", "reset_key_body_quat_delta_max"),
+        (args_cli.distill_reset_door_joint_rad, "reset_door_joint_pos_delta_min", "reset_door_joint_pos_delta_max"),
+    ):
+        if value is not None:
+            if value <= 0:
+                raise ValueError(f"{maximum_name} override must be positive, got {value}.")
+            setattr(env_cfg, minimum_name, value)
+            setattr(env_cfg, maximum_name, value)
     if args_cli.base_action_scale is not None:
         env_cfg.base_action_scale = args_cli.base_action_scale
     for axis, stiffness, damping in (
