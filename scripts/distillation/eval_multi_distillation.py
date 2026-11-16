@@ -138,6 +138,17 @@ def _resolve_multi_teacher_checkpoints():
 parser = argparse.ArgumentParser(description="Evaluate a distilled DooropeningMulti point-cloud policy.")
 parser.add_argument("--video", action="store_true", default=False, help="Record a video during evaluation.")
 parser.add_argument(
+    "--fail-on-joint-limit-crossing",
+    action="store_true",
+    help="Stop and mark each rollout failed as soon as a measured Franka joint leaves the configured soft-limit band.",
+)
+parser.add_argument(
+    "--joint-limit-failure-margin-ratio",
+    type=float,
+    default=0.10,
+    help="Fraction of each simulated soft joint range excluded at either end for measured-position failure checks.",
+)
+parser.add_argument(
     "--viser",
     action="store_true",
     default=False,
@@ -2090,6 +2101,21 @@ def _append_viser_frame(recorder, viser_meta, base_env, dagger, student_output):
     recorder["frames"].append(frame)
 
 
+def _measured_arm_joint_limit_crossing(base_env, margin_ratio):
+    """Return per-env failure mask and worst joint/range fraction for measured Franka q."""
+    arm_idx = base_env._robot_arm_dof_idx
+    q = base_env.robot.data.joint_pos[:, arm_idx]
+    limits = base_env.robot.data.soft_joint_pos_limits[:, arm_idx, :]
+    lower, upper = limits[..., 0], limits[..., 1]
+    fractions = (q - lower) / (upper - lower).clamp_min(1e-8)
+    crossed = (fractions <= margin_ratio) | (fractions >= (1.0 - margin_ratio))
+    # Report the first crossed joint in the configured Franka joint order for each env.
+    first_idx = crossed.to(torch.int64).argmax(dim=-1)
+    worst_fraction = fractions.gather(1, first_idx.unsqueeze(-1)).squeeze(-1)
+    names = [str(base_env.robot.data.joint_names[int(i)]) for i in arm_idx.detach().cpu().tolist()]
+    return crossed.any(dim=-1), first_idx, worst_fraction, names
+
+
 def _save_viser_recorders(recorders, viser_meta, base_env, out_dir, run_index):
     """Write one replay_viser_pt.py-compatible .pt per env into out_dir (called after each run)."""
     os.makedirs(out_dir, exist_ok=True)
@@ -2117,6 +2143,7 @@ def _save_viser_recorders(recorders, viser_meta, base_env, out_dir, run_index):
                 "door_joint_names": recorder["door_joint_names"],
                 "door_root_pos": recorder["door_root_pos"],  # env-relative
                 "door_root_quat": recorder["door_root_quat"],
+                "rollout_failure": recorder.get("rollout_failure"),
                 "pointcloud_streams": [
                     {
                         "name": "policy_input",
@@ -2663,6 +2690,7 @@ def main(env_cfg, agent_cfg: dict):
     total_steps = 0
     total_timeout_count = 0
     total_drift_count = 0
+    total_joint_limit_failure_count = 0
     total_active_count = 0
     completed_runs = 0
     num_eval_runs = max(1, int(args_cli.num_eval_runs))
@@ -2708,6 +2736,10 @@ def main(env_cfg, agent_cfg: dict):
         active = torch.ones(base_env.num_envs, dtype=torch.bool, device=base_env.device)
         timed_out = torch.zeros_like(active)
         drifted = torch.zeros_like(active)
+        joint_limit_failed = torch.zeros_like(active)
+        joint_limit_failure_step = torch.full(
+            (base_env.num_envs,), -1, dtype=torch.int32, device=base_env.device
+        )
         last_metrics = {
             "key_body_pos": torch.zeros(base_env.num_envs, dtype=torch.float32, device=base_env.device),
             "key_body_quat": torch.zeros(base_env.num_envs, dtype=torch.float32, device=base_env.device),
@@ -2995,7 +3027,43 @@ def main(env_cfg, agent_cfg: dict):
                 last_metrics = _compute_tracking_metrics(base_env)
                 new_timeouts = timeout_mask & active
                 new_drifts = drift_mask & active & ~new_timeouts
-                newly_finished = new_timeouts | new_drifts
+                new_joint_limit_failures = torch.zeros_like(active)
+                if args_cli.fail_on_joint_limit_crossing:
+                    crossed, first_joint_idx, crossed_fraction, arm_joint_names = (
+                        _measured_arm_joint_limit_crossing(
+                            base_env, float(args_cli.joint_limit_failure_margin_ratio)
+                        )
+                    )
+                    new_joint_limit_failures = crossed & active
+                    if torch.any(new_joint_limit_failures):
+                        joint_limit_failed |= new_joint_limit_failures
+                        joint_limit_failure_step[new_joint_limit_failures] = int(step + 1)
+                        for _recorder in viser_recorders or []:
+                            _env_id = int(_recorder["env_id"])
+                            if bool(new_joint_limit_failures[_env_id].item()):
+                                _joint_idx = int(first_joint_idx[_env_id].item())
+                                _fraction = float(crossed_fraction[_env_id].item())
+                                _failure = {
+                                    "reason": "measured_joint_limit_crossing",
+                                    "step": int(step + 1),
+                                    "joint": arm_joint_names[_joint_idx],
+                                    "range_fraction": _fraction,
+                                    "allowed_range_fraction": [
+                                        float(args_cli.joint_limit_failure_margin_ratio),
+                                        1.0 - float(args_cli.joint_limit_failure_margin_ratio),
+                                    ],
+                                }
+                                _recorder["rollout_failure"] = _failure
+                                # Include the actual crossed pose as the final Viser frame.
+                                _append_viser_frame(
+                                    _recorder, viser_meta, base_env, dagger, student_output
+                                )
+                                print(
+                                    f"[JOINT-LIMIT-FAIL] run={run_index} env={_env_id} "
+                                    f"step={step + 1} joint={arm_joint_names[_joint_idx]} "
+                                    f"range_fraction={_fraction:.5f}"
+                                )
+                newly_finished = new_timeouts | new_drifts | new_joint_limit_failures
                 if torch.any(newly_finished):
                     timed_out |= new_timeouts
                     drifted |= new_drifts
@@ -3054,6 +3122,8 @@ def main(env_cfg, agent_cfg: dict):
                 "applied_targets": torch.stack(_run_applied_targets),  # [T, num_envs, num_dof]
                 "actual_pd_targets": torch.stack(_run_actual_pd_targets),  # includes hidden bias/noise
                 "active_mask": torch.stack(_run_active),        # [T, num_envs] bool
+                "joint_limit_failed": joint_limit_failed.detach().cpu().clone(),
+                "joint_limit_failure_step": joint_limit_failure_step.detach().cpu().clone(),
                 "base_velocity_measured_robot": torch.stack(_run_base_velocity_measured_robot),
                 "base_velocity_policy_input_robot": torch.stack(_run_base_velocity_policy_input_robot),
                 "base_velocity_commanded_robot": torch.stack(_run_base_velocity_commanded_robot),
@@ -3064,15 +3134,18 @@ def main(env_cfg, agent_cfg: dict):
         active_count = int(active.sum().detach().cpu().item())
         timeout_count = int(timed_out.sum().detach().cpu().item())
         drift_count = int(drifted.sum().detach().cpu().item())
+        joint_limit_failure_count = int(joint_limit_failed.sum().detach().cpu().item())
         total_steps += step
         total_timeout_count += timeout_count
         total_drift_count += drift_count
+        total_joint_limit_failure_count += joint_limit_failure_count
         total_active_count += active_count
         completed_runs += 1
         print(
             "[RESULT] "
             f"run={run_index} steps={step} num_envs={base_env.num_envs} "
-            f"timed_out_envs={timeout_count} drifted_envs={drift_count} active_envs={active_count}"
+            f"timed_out_envs={timeout_count} drifted_envs={drift_count} "
+            f"joint_limit_failed_envs={joint_limit_failure_count} active_envs={active_count}"
         )
         if mode_tracker is not None:
             print(
@@ -3105,6 +3178,7 @@ def main(env_cfg, agent_cfg: dict):
         f"runs={completed_runs} requested_runs={num_eval_runs} "
         f"total_rollouts={total_rollouts} total_steps={total_steps} "
         f"timed_out_envs={total_timeout_count} drifted_envs={total_drift_count} "
+        f"joint_limit_failed_envs={total_joint_limit_failure_count} "
         f"active_envs={total_active_count} "
         f"timeout_rate={total_timeout_count / max(1, total_rollouts):.4f} "
         f"drift_rate={total_drift_count / max(1, total_rollouts):.4f}"
