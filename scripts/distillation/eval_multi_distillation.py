@@ -149,6 +149,14 @@ parser.add_argument(
     help="Fraction of each simulated soft joint range excluded at either end for measured-position failure checks.",
 )
 parser.add_argument(
+    "--franka-arm-target-offset-nm",
+    type=float,
+    nargs=7,
+    default=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+    metavar=("J1", "J2", "J3", "J4", "J5", "J6", "J7"),
+    help="Fixed per-joint PD-target offsets in torque-equivalent Nm; converted by nominal stiffness.",
+)
+parser.add_argument(
     "--viser",
     action="store_true",
     default=False,
@@ -1549,6 +1557,7 @@ def _save_replay_pt(replay_runs, joint_names, base_env, save_replay_arg):
         {
             "runs": replay_runs,
             "joint_names": joint_names,
+            "franka_arm_target_offset_torque_nm": list(base_env.cfg.franka_arm_target_offset_torque_nm),
             "joint_pos_limits": base_env.robot.data.joint_pos_limits.detach().cpu().clone(),
             "soft_joint_pos_limits": base_env.robot.data.soft_joint_pos_limits.detach().cpu().clone(),
             "num_envs": int(base_env.num_envs),
@@ -2144,6 +2153,7 @@ def _save_viser_recorders(recorders, viser_meta, base_env, out_dir, run_index):
                 "door_root_pos": recorder["door_root_pos"],  # env-relative
                 "door_root_quat": recorder["door_root_quat"],
                 "rollout_failure": recorder.get("rollout_failure"),
+                "franka_arm_target_offset_torque_nm": list(base_env.cfg.franka_arm_target_offset_torque_nm),
                 "pointcloud_streams": [
                     {
                         "name": "policy_input",
@@ -2234,7 +2244,12 @@ def _print_mode_progress(run_index, step, tracker, step_summary):
 def main(env_cfg, agent_cfg: dict):
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.distillation_arm_pd_target_limit_margin_ratio = 0.10
+    env_cfg.franka_arm_target_offset_torque_nm = tuple(args_cli.franka_arm_target_offset_nm)
     print("[INFO] Distillation Franka PD targets restricted to 10%-90% of soft joint range")
+    print(
+        "[INFO] Fixed Franka PD-target offsets (torque-equivalent Nm, J1-J7): "
+        f"{env_cfg.franka_arm_target_offset_torque_nm}"
+    )
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     env_cfg.use_motion_ref = True
     if args_cli.robot_gripper_static_friction_range is not None:
