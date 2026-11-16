@@ -966,15 +966,13 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     base_acceleration_limit_xy = 0.2
     base_acceleration_limit_yaw = 0.79
     arm_action_scale = 0.6
-    # Set by distillation entrypoints. 0.10 keeps PD targets inside the middle 80% of
-    # each Franka joint's simulated soft range (at most 90% travel toward either limit).
+    # Optional fraction of each Franka soft joint range excluded at either end for PD targets.
+    # Zero disables the clamp by default; distillation/eval CLIs can opt in explicitly.
     distillation_arm_pd_target_limit_margin_ratio = 0.0
     franka_arm_nominal_stiffness = (400.0, 400.0, 400.0, 400.0, 80.0, 80.0, 25.0)
     # Per-joint episode-fixed PD-target bias magnitudes in torque-equivalent Nm:
     # panda_joint1..7; joints 2 and 6 are drift-prone, so retain a larger offset.
     franka_arm_target_bias_max_torque_nm = (0.9, 1.25, 0.9, 0.9, 0.9, 1.25, 0.9)
-    # Optional fixed PD-target offsets used for controlled evaluation sweeps; zero for training.
-    franka_arm_target_offset_torque_nm = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     # Small zero-mean per-control-step target perturbation, in nominal torque-equivalent units.
     franka_arm_target_step_noise_max_torque_nm = 0.15
     gripper_action_speed_headroom = 2.0

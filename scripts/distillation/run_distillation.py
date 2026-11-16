@@ -102,6 +102,15 @@ parser.add_argument("--play_policy", action="store_true", default=False, help="P
 parser.add_argument("--student_cfg", type=str, default=None, help="Student config YAML to use.")
 parser.add_argument("--student_ckpt", type=str, default=None, help="Student checkpoint to resume or evaluate.")
 parser.add_argument("--teacher_cfg", type=str, default=None, help="Teacher RL-Games config YAML to use.")
+parser.add_argument(
+    "--distillation-arm-pd-target-limit-margin-ratio",
+    type=float,
+    default=None,
+    help=(
+        "Optional fraction of the Franka soft joint range excluded at each end for PD targets. "
+        "0 disables the target clamp; defaults to the environment config (0)."
+    ),
+)
 parser.add_argument("--wandb-project-name", type=str, default=None, help="the wandb's project name")
 parser.add_argument("--wandb-entity", type=str, default=None, help="the entity (team) of wandb's project")
 parser.add_argument("--wandb-name", type=str, default=None, help="the name of wandb's run")
@@ -246,8 +255,20 @@ def main(env_cfg, agent_cfg: dict):
         )
 
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
-    env_cfg.distillation_arm_pd_target_limit_margin_ratio = 0.10
-    print("[INFO] Distillation Franka PD targets restricted to 10%-90% of soft joint range")
+    if args_cli.distillation_arm_pd_target_limit_margin_ratio is not None:
+        env_cfg.distillation_arm_pd_target_limit_margin_ratio = (
+            args_cli.distillation_arm_pd_target_limit_margin_ratio
+        )
+    arm_target_margin = float(env_cfg.distillation_arm_pd_target_limit_margin_ratio)
+    if not 0.0 <= arm_target_margin < 0.5:
+        raise ValueError("distillation-arm-pd-target-limit-margin-ratio must be in [0, 0.5).")
+    if arm_target_margin > 0.0:
+        print(
+            "[INFO] Distillation Franka PD target margin: "
+            f"{arm_target_margin:.0%} at each soft joint limit"
+        )
+    else:
+        print("[INFO] Distillation Franka PD target clamp disabled")
 
     # parse configuration
     # env_cfg = parse_env_cfg(

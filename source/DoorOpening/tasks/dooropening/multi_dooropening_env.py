@@ -104,17 +104,6 @@ class DooropeningEnv(DirectRLEnv):
                 f"got {bias_torque_nm.numel()} values for {self.num_arm_joints} joints."
             )
         self._arm_target_bias_max = bias_torque_nm / nominal_arm_stiffness
-        target_offset_torque_nm = torch.as_tensor(
-            self.cfg.franka_arm_target_offset_torque_nm, device=self.device, dtype=torch.float32
-        ).flatten()
-        if target_offset_torque_nm.numel() == 1:
-            target_offset_torque_nm = target_offset_torque_nm.expand(self.num_arm_joints)
-        if target_offset_torque_nm.numel() != self.num_arm_joints:
-            raise ValueError(
-                "franka_arm_target_offset_torque_nm must be scalar or have one value per arm joint; "
-                f"got {target_offset_torque_nm.numel()} values for {self.num_arm_joints} joints."
-            )
-        self._arm_target_offset = target_offset_torque_nm / nominal_arm_stiffness
         self._episode_arm_target_bias = torch.zeros(
             (self.num_envs, self.num_arm_joints), device=self.device, dtype=torch.float32
         )
@@ -1285,7 +1274,7 @@ class DooropeningEnv(DirectRLEnv):
             2.0 * torch.rand_like(target_noise[:, self._target_base_rot_slice]) - 1.0
         )
         target_noise[:, self._target_arm_slice] = (
-            self._episode_arm_target_bias + self._arm_target_step_noise + self._arm_target_offset
+            self._episode_arm_target_bias + self._arm_target_step_noise
         )
         # No gripper-target noise: the commanded opening is a single actuator setpoint and the old
         # per-substep perturbation was ~12% of the whole 0.04 m stroke.
