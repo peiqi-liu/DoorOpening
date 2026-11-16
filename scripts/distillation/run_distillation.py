@@ -246,6 +246,8 @@ def main(env_cfg, agent_cfg: dict):
         )
 
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+    env_cfg.distillation_arm_pd_target_limit_margin_ratio = 0.10
+    print("[INFO] Distillation Franka PD targets restricted to 10%-90% of soft joint range")
 
     # parse configuration
     # env_cfg = parse_env_cfg(

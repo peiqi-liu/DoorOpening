@@ -209,6 +209,17 @@ class DooropeningEnv(DirectRLEnv):
         # create auxiliary variables for computing applied action, observations and rewards
         self.robot_dof_lower_limits = self.robot.data.soft_joint_pos_limits[0, self._robot_dof_idx, 0].to(device=self.device)
         self.robot_dof_upper_limits = self.robot.data.soft_joint_pos_limits[0, self._robot_dof_idx, 1].to(device=self.device)
+        arm_margin = float(self.cfg.distillation_arm_pd_target_limit_margin_ratio)
+        if not 0.0 <= arm_margin < 0.5:
+            raise ValueError("distillation_arm_pd_target_limit_margin_ratio must be in [0, 0.5).")
+        arm_start = self.num_base_joints
+        arm_stop = arm_start + self.num_arm_joints
+        arm_lower = self.robot_dof_lower_limits[arm_start:arm_stop]
+        arm_upper = self.robot_dof_upper_limits[arm_start:arm_stop]
+        self._distillation_arm_pd_target_lower = arm_lower + arm_margin * (arm_upper - arm_lower)
+        self._distillation_arm_pd_target_upper = arm_upper - arm_margin * (arm_upper - arm_lower)
+        if arm_margin:
+            print(f"[INFO] Distillation Franka PD target margin: {arm_margin:.0%} of soft range at each limit")
 
         # DOFs scored by the joint-limit penalty (the franka arm only -- see the cfg field for why
         # the base, arx and gripper DOFs are excluded). Indices are LOCAL to the actuated-joint
@@ -257,6 +268,7 @@ class DooropeningEnv(DirectRLEnv):
         # We are going to update this variables to control the robot
         self.robot_dof_targets = torch.zeros((self.num_envs, len(self._robot_dof_idx)), device=self.device)
         self.applied_robot_dof_targets = torch.zeros_like(self.robot_dof_targets)
+        self._last_actual_robot_pd_targets = torch.zeros_like(self.robot_dof_targets)
         self._target_base_rot_slice = slice(0, 1)
         self._target_base_xy_slice = slice(1, self.num_base_joints)
         self._target_arm_slice = slice(self.num_base_joints, self.num_base_joints + self.num_arm_joints)
@@ -1320,6 +1332,16 @@ class DooropeningEnv(DirectRLEnv):
         arm_q = self.robot.data.joint_pos[:, self._robot_arm_dof_idx]
         return torch.clamp(arm_targets, arm_q - envelope, arm_q + envelope)
 
+    def clamp_arm_target_to_distillation_limits(self, arm_targets: torch.Tensor) -> torch.Tensor:
+        """Keep every Franka PD command within the configured soft-limit margin."""
+        if float(self.cfg.distillation_arm_pd_target_limit_margin_ratio) <= 0.0:
+            return arm_targets
+        return torch.clamp(
+            arm_targets,
+            self._distillation_arm_pd_target_lower,
+            self._distillation_arm_pd_target_upper,
+        )
+
     def _pin_gripper_target_open(self, target_tensor: torch.Tensor) -> torch.Tensor:
         if not self.fixed_open_gripper or self.num_finger_joints <= 0:
             return target_tensor
@@ -1410,6 +1432,9 @@ class DooropeningEnv(DirectRLEnv):
         targets[:, self._target_arm_slice] = self.clamp_arm_target_to_effort_envelope(
             targets[:, self._target_arm_slice]
         )
+        targets[:, self._target_arm_slice] = self.clamp_arm_target_to_distillation_limits(
+            targets[:, self._target_arm_slice]
+        )
         targets = self._pin_arx_targets_to_fixed_pose(targets)
         targets = self._pin_gripper_target_open(targets)
         # NOTE: no explicit contact-sensor update() here. This runs BEFORE the physics step, so it
@@ -1462,10 +1487,14 @@ class DooropeningEnv(DirectRLEnv):
         # Base target noise is resampled per substep; each arm target bias is fixed for its episode.
         applied_targets = self.applied_robot_dof_targets.clone()
         applied_targets += self._get_policy_target_noise()
+        applied_targets[:, self._target_arm_slice] = self.clamp_arm_target_to_distillation_limits(
+            applied_targets[:, self._target_arm_slice]
+        )
         applied_targets = self._pin_arx_targets_to_fixed_pose(applied_targets)
         applied_targets = self._pin_gripper_target_open(applied_targets)
         applied_targets = torch.clamp(applied_targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
         applied_targets = self._pin_arx_targets_to_fixed_pose(applied_targets)
+        self._last_actual_robot_pd_targets[:] = applied_targets
         self._enforce_fixed_arx_joint_state()
         self._enforce_fixed_camera_joint_state()
         self.robot.set_joint_position_target(applied_targets, joint_ids=self._robot_dof_idx)
@@ -2571,13 +2600,17 @@ class DooropeningEnv(DirectRLEnv):
             self.robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
             self.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
             self.robot.write_joint_state_to_sim(self.joint_pos[env_ids], self.joint_vel[env_ids], None, env_ids)
-            self.robot.set_joint_position_target(self.joint_pos[env_ids], env_ids=env_ids)
+            reset_pd_targets = self.joint_pos[env_ids].clone()
+            reset_pd_targets[:, self._robot_arm_dof_idx] = self.clamp_arm_target_to_distillation_limits(
+                reset_pd_targets[:, self._robot_arm_dof_idx]
+            )
+            self.robot.set_joint_position_target(reset_pd_targets, env_ids=env_ids)
 
             door_joint_pos = self.door.data.default_joint_pos[env_ids].clone()
             door_joint_vel = self.door.data.default_joint_vel[env_ids].clone()
             self.door.write_joint_state_to_sim(door_joint_pos, door_joint_vel, None, env_ids)
 
-            self.robot_dof_targets[env_ids, :] = self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]]
+            self.robot_dof_targets[env_ids, :] = reset_pd_targets[:, self._robot_dof_idx]
             self.applied_robot_dof_targets[env_ids, :] = self.robot_dof_targets[env_ids, :]
             self._action_target_history[env_ids] = self.robot_dof_targets[env_ids].unsqueeze(1)
             self._base_velocity_history[env_ids] = 0.0
@@ -2637,7 +2670,11 @@ class DooropeningEnv(DirectRLEnv):
         self.robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self.robot.write_joint_state_to_sim(self.joint_pos[env_ids], self.joint_vel[env_ids], None, env_ids)
-        self.robot.set_joint_position_target(self.joint_pos[env_ids], env_ids=env_ids)
+        reset_pd_targets = self.joint_pos[env_ids].clone()
+        reset_pd_targets[:, self._robot_arm_dof_idx] = self.clamp_arm_target_to_distillation_limits(
+            reset_pd_targets[:, self._robot_arm_dof_idx]
+        )
+        self.robot.set_joint_position_target(reset_pd_targets, env_ids=env_ids)
 
         door_joint_pos = self.ref_motion_lib.get_door_joint_pos(env_ids).to(self.door.data.joint_pos)
         door_joint_vel = self.door.data.default_joint_vel[env_ids].clone()
@@ -2647,7 +2684,7 @@ class DooropeningEnv(DirectRLEnv):
 
         self._prev_action[env_ids] = 0.0
         self._prev_prev_action[env_ids] = 0.0
-        self.robot_dof_targets[env_ids, :] = self.joint_pos[env_ids[:, None], self._robot_dof_idx[None, :]]
+        self.robot_dof_targets[env_ids, :] = reset_pd_targets[:, self._robot_dof_idx]
         self.applied_robot_dof_targets[env_ids, :] = self.robot_dof_targets[env_ids, :]
         self._action_target_history[env_ids] = self.robot_dof_targets[env_ids].unsqueeze(1)
         self._base_velocity_history[env_ids] = 0.0

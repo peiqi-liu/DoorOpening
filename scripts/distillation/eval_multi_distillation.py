@@ -1538,6 +1538,8 @@ def _save_replay_pt(replay_runs, joint_names, base_env, save_replay_arg):
         {
             "runs": replay_runs,
             "joint_names": joint_names,
+            "joint_pos_limits": base_env.robot.data.joint_pos_limits.detach().cpu().clone(),
+            "soft_joint_pos_limits": base_env.robot.data.soft_joint_pos_limits.detach().cpu().clone(),
             "num_envs": int(base_env.num_envs),
             "base_impedance_randomization_samples": getattr(
                 base_env, "base_impedance_randomization_samples", {}
@@ -2204,6 +2206,8 @@ def _print_mode_progress(run_index, step, tracker, step_summary):
 @hydra_task_config(args_cli.task, "rl_games_cfg_entry_point")
 def main(env_cfg, agent_cfg: dict):
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+    env_cfg.distillation_arm_pd_target_limit_margin_ratio = 0.10
+    print("[INFO] Distillation Franka PD targets restricted to 10%-90% of soft joint range")
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     env_cfg.use_motion_ref = True
     if args_cli.robot_gripper_static_friction_range is not None:
@@ -2693,6 +2697,7 @@ def main(env_cfg, agent_cfg: dict):
             _run_joint_vel: list = []
             _run_actions: list = []
             _run_applied_targets: list = []
+            _run_actual_pd_targets: list = []
             _run_active: list = []
             _run_base_velocity_measured_robot: list = []
             _run_base_velocity_policy_input_robot: list = []
@@ -2969,6 +2974,7 @@ def main(env_cfg, agent_cfg: dict):
                 frozen_state.restore()
                 if replay_runs is not None:
                     _run_applied_targets.append(base_env.applied_robot_dof_targets.detach().cpu().clone())
+                    _run_actual_pd_targets.append(base_env._last_actual_robot_pd_targets.detach().cpu().clone())
                 if mode_tracker is not None:
                     current_contact = _get_measured_mode_contact_mask(dagger)
 
@@ -3046,6 +3052,7 @@ def main(env_cfg, agent_cfg: dict):
                 "joint_vel": torch.stack(_run_joint_vel),       # [T, num_envs, num_joints]
                 "actions": torch.stack(_run_actions),           # [T, num_envs, action_dim]
                 "applied_targets": torch.stack(_run_applied_targets),  # [T, num_envs, num_dof]
+                "actual_pd_targets": torch.stack(_run_actual_pd_targets),  # includes hidden bias/noise
                 "active_mask": torch.stack(_run_active),        # [T, num_envs] bool
                 "base_velocity_measured_robot": torch.stack(_run_base_velocity_measured_robot),
                 "base_velocity_policy_input_robot": torch.stack(_run_base_velocity_policy_input_robot),

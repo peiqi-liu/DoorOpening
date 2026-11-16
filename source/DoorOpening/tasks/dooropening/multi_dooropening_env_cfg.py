@@ -966,6 +966,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     base_acceleration_limit_xy = 0.2
     base_acceleration_limit_yaw = 0.79
     arm_action_scale = 0.6
+    # Set by distillation entrypoints. 0.10 keeps PD targets inside the middle 80% of
+    # each Franka joint's simulated soft range (at most 90% travel toward either limit).
+    distillation_arm_pd_target_limit_margin_ratio = 0.0
     franka_arm_nominal_stiffness = (400.0, 400.0, 400.0, 400.0, 80.0, 80.0, 25.0)
     # Per-joint episode-fixed PD-target bias magnitudes in torque-equivalent Nm:
     # panda_joint1..7; joints 2 and 6 are drift-prone, so retain a larger offset.
