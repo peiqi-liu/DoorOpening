@@ -236,25 +236,66 @@ def _traverse_after_panel_push(
     _append_state(robot_traj, door_traj, key_indices, q_robot, q_door,
                   mark_keyframe=True)
 
-    # Finish crossing with the arm stowed and the +25-degree yaw maintained.
+    # Continue the final traverse at the tilted yaw until the base is halfway through
+    # this doorway-crossing segment. Then straighten the chassis at that position before
+    # completing the remaining half of the traverse.
     far_base_pos = mid_base_pos.clone()
     far_base_pos[:, 0] = torch.minimum(
         torch.full_like(mid_base_pos[:, 0], -1.0), mid_base_pos[:, 0] - 1.5
     )
     far_base_pos[:, 1] = 0.0
-    far_base_pose = _make_pose(
-        far_base_pos, get_rotation_quat(0.0, 0.0, traverse_yaw, device)
-    )
-    q_robot[:10] = solve_ik(
-        robot_urdf_path, q_robot[:10], palm_pose=None,
-        base_pose=far_base_pose, robot_initial_pose=robot_initial_pose,
-        **ik_kwargs,
-    )[0]
-    q_robot[3:10] = franka_default_q
-    _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
-    q_door = torch.tensor([0.0, 0.0], device=device)
-    _append_state(robot_traj, door_traj, key_indices, q_robot, q_door,
-                  mark_keyframe=True)
+    halfway_base_pos = mid_base_pos + 0.5 * (far_base_pos - mid_base_pos)
+
+    for step in range(1, forward_steps // 2 + 1):
+        frac = step / (forward_steps // 2)
+        step_base_pos = mid_base_pos + frac * (halfway_base_pos - mid_base_pos)
+        step_base_pose = _make_pose(
+            step_base_pos, get_rotation_quat(0.0, 0.0, traverse_yaw, device)
+        )
+        q_robot[:10] = solve_ik(
+            robot_urdf_path, q_robot[:10], palm_pose=None,
+            base_pose=step_base_pose, robot_initial_pose=robot_initial_pose,
+            **ik_kwargs,
+        )[0]
+        q_robot[3:10] = franka_default_q
+        _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
+        _append_state(robot_traj, door_traj, key_indices, q_robot, q_door,
+                      mark_keyframe=(step == forward_steps // 2))
+
+    # Return the base to its initial (zero-relative) yaw halfway through the doorway.
+    for step in range(1, turn_steps + 1):
+        yaw = traverse_yaw + (initial_yaw - traverse_yaw) * step / turn_steps
+        halfway_base_pose = _make_pose(
+            halfway_base_pos, get_rotation_quat(0.0, 0.0, yaw, device)
+        )
+        q_robot[:10] = solve_ik(
+            robot_urdf_path, q_robot[:10], palm_pose=None,
+            base_pose=halfway_base_pose, robot_initial_pose=robot_initial_pose,
+            **ik_kwargs,
+        )[0]
+        q_robot[3:10] = franka_default_q
+        _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
+        _append_state(robot_traj, door_traj, key_indices, q_robot, q_door,
+                      mark_keyframe=(step == turn_steps))
+
+    # Finish the remaining half of the crossing with the base held at its initial yaw.
+    for step in range(1, forward_steps // 2 + 1):
+        frac = step / (forward_steps // 2)
+        step_base_pos = halfway_base_pos + frac * (far_base_pos - halfway_base_pos)
+        step_base_pose = _make_pose(
+            step_base_pos, get_rotation_quat(0.0, 0.0, initial_yaw, device)
+        )
+        q_robot[:10] = solve_ik(
+            robot_urdf_path, q_robot[:10], palm_pose=None,
+            base_pose=step_base_pose, robot_initial_pose=robot_initial_pose,
+            **ik_kwargs,
+        )[0]
+        q_robot[3:10] = franka_default_q
+        _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
+        q_door = torch.tensor([0.0, 0.0], device=device)
+        _append_state(robot_traj, door_traj, key_indices, q_robot, q_door,
+                      mark_keyframe=(step == forward_steps // 2))
+
 
 
 def _pull_hinge_angle(
