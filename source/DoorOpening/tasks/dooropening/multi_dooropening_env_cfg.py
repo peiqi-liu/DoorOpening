@@ -1007,7 +1007,9 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     robot_body_ang_vel_w = 0.5
     # Joint-limit penalty, applied to the FRANKA ARM JOINTS ONLY (see joint_limit_penalty_joints).
     joint_limit_penalty_w = 40.0
-    joint_limit_penalty_margin_ratio = 0.05
+    joint_limit_penalty_margin_ratio = 0.12
+    # Fail if a measured Franka arm joint enters the outer 5% of its range.
+    joint_limit_failure_margin_ratio = 0.05
     # Which DOFs the joint-limit penalty is scored over. Everything else is excluded on purpose:
     #  - base x/y/rotation are virtual chassis DOFs whose limits are the arena, not the hardware;
     #  - the arx/x5 joints are pinned to a fixed tuck pose and never driven by the policy;

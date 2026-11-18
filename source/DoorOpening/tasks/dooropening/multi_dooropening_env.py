@@ -330,6 +330,7 @@ class DooropeningEnv(DirectRLEnv):
         self.robot_body_ang_vel_w = self.cfg.robot_body_ang_vel_w
         self.joint_limit_penalty_w = self.cfg.joint_limit_penalty_w
         self.joint_limit_penalty_margin_ratio = self.cfg.joint_limit_penalty_margin_ratio
+        self.joint_limit_failure_margin_ratio = self.cfg.joint_limit_failure_margin_ratio
         self.self_collision_penalty_w = self.cfg.self_collision_penalty_w
         self.franka_box_contact_penalty_w = self.cfg.franka_box_contact_penalty_w
         self.action_jerk_penalty_w = self.cfg.action_jerk_penalty_w
@@ -2439,8 +2440,16 @@ class DooropeningEnv(DirectRLEnv):
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         reached_last_frame = self._get_reached_last_frame_mask()
         time_out = (self.episode_length_buf >= self.max_trial_steps - 1) | reached_last_frame
+        arm_q = self.robot.data.joint_pos[:, self._joint_limit_penalty_dof_idx]
+        arm_lower = self.robot_dof_lower_limits[self._joint_limit_penalty_local_idx]
+        arm_upper = self.robot_dof_upper_limits[self._joint_limit_penalty_local_idx]
+        margin = self.joint_limit_failure_margin_ratio * (arm_upper - arm_lower)
+        joint_limit_failure_per_joint = (arm_q <= arm_lower + margin) | (arm_q >= arm_upper - margin)
+        joint_limit_failure = joint_limit_failure_per_joint.any(dim=-1)
+        self.extras["fail/joint_limit_frac"] = joint_limit_failure.float().mean().item()
+        self.extras["fail/joint_limit_per_joint"] = joint_limit_failure_per_joint.detach()
         if not self.early_stopping:
-            return torch.zeros_like(time_out), time_out
+            return joint_limit_failure, time_out
         self._get_intermediate_values()
         progress = min(self._get_curriculum_step_count() / self.reset_progress_total, 1.0)
         # Diagnostic override: force the drift-threshold curriculum to a fixed progress in [0, 1]
@@ -2526,7 +2535,7 @@ class DooropeningEnv(DirectRLEnv):
         self.extras["diag/door_joint_err_per_joint"] = (door_diff * door_diff).detach()       # [B, D]
         self.extras["diag/reset_key_body_names"] = list(self._robot_reset_key_body_names)
         self.extras["diag/key_body_names"] = list(self._robot_key_body_names)
-        return fail_robot_drift | fail_door_drift, time_out
+        return fail_robot_drift | fail_door_drift | joint_limit_failure, time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
