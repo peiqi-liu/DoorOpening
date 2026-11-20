@@ -15,7 +15,7 @@ from DoorOpening.constants.robot_constants import (
 )
 
 HandleSide = Literal["right", "left"]
-TRAVERSE_YAW_OFFSET_RAD = math.radians(20.0)
+TRAVERSE_YAW_OFFSET_RAD = math.radians(18.0)
 
 # Null-space posture anchor for the LEFT pull planner's IK (see api.solve_ik).
 #
@@ -138,6 +138,8 @@ def _traverse_after_panel_push(
     device,
     reference_joint_pos=None,
     palm_slide_distance=0.25,
+    moving_yaw_reset=False,
+    crossing_distance=0.40,
 ):
     """Clear the panel, turn, cross while sliding the hand, then release it."""
     backup_distance = 0.15
@@ -147,7 +149,7 @@ def _traverse_after_panel_push(
     forward_steps = 8
     start_base_pos = base_target_pos.clone()
     fixed_palm_pose = palm_target_pose.clone()
-    traverse_yaw = initial_yaw + math.radians(20.0)
+    traverse_yaw = initial_yaw + TRAVERSE_YAW_OFFSET_RAD
     ik_kwargs = {"num_attempts": 1}
     if reference_joint_pos is not None:
         ik_kwargs["reference_joint_pos"] = reference_joint_pos
@@ -188,7 +190,7 @@ def _traverse_after_panel_push(
 
     # Cross to the inner side before releasing the arm.
     mid_base_pos = start_base_pos.clone()
-    mid_base_pos[:, 0] -= 0.40
+    mid_base_pos[:, 0] -= crossing_distance
     mid_base_pos[:, 1] = mid_y
     backed_up_pos = base_target_pos.clone()
     for step in range(1, forward_steps + 1):
@@ -236,14 +238,15 @@ def _traverse_after_panel_push(
     _append_state(robot_traj, door_traj, key_indices, q_robot, q_door,
                   mark_keyframe=True)
 
+
     # Continue the final traverse at the tilted yaw until the base is halfway through
     # this doorway-crossing segment. Then straighten the chassis at that position before
     # completing the remaining half of the traverse.
+
     far_base_pos = mid_base_pos.clone()
-    far_base_pos[:, 0] = torch.minimum(
-        torch.full_like(mid_base_pos[:, 0], -1.0), mid_base_pos[:, 0] - 1.5
-    )
+    far_base_pos[:, 0] = -0.75
     far_base_pos[:, 1] = 0.0
+
     halfway_base_pos = mid_base_pos + 0.5 * (far_base_pos - mid_base_pos)
 
     for step in range(1, forward_steps // 2 + 1):
@@ -295,6 +298,7 @@ def _traverse_after_panel_push(
         q_door = torch.tensor([0.0, 0.0], device=device)
         _append_state(robot_traj, door_traj, key_indices, q_robot, q_door,
                       mark_keyframe=(step == forward_steps // 2))
+
 
 
 
@@ -910,6 +914,7 @@ def state_machine_offline_left_pull_door(
     robot_initial_q,      # (ndof,)
     door_initial_q,       # (2,) [board, hinge]
     device="cpu",
+    moving_yaw_reset=True,
 ):
     """
     Offline planner for a left-side handle, pull-type door.
@@ -1025,9 +1030,8 @@ def state_machine_offline_left_pull_door(
         robot_initial_pose=robot_initial_pose,
         reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
     )[0]
-    # Keep the gripper open for the complete left-pull reference. The handle is followed by the
-    # planned palm pose; no closed-gripper command should appear in the Viser trajectory.
-    _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
+    # Grip the handle through the pull and the move into the blocking base pose.
+    _set_gripper(q_robot, GRIPPER_CLOSED_WIDTH)
 
     _append_state(
         robot_traj,
@@ -1105,8 +1109,8 @@ def state_machine_offline_left_pull_door(
     # -------------------------
     # Step 4: Pull door open
     # -------------------------
-    pull_theta_stop = 1.25
-    pull_theta_step = 0.10
+    pull_theta_stop = 1.26
+    pull_theta_step = 0.08
 
     # Handle-relative base standoff during the pull sweep; reduced by 5 cm
     # so the base retreats less as the panel opens toward the robot.
@@ -1232,11 +1236,9 @@ def state_machine_offline_left_pull_door(
     # -------------------------
     _, _, robot_initial_yaw = euler_xyz_from_quat(base_target_rot)
 
-    # Keep the blocking base farther back so the arm has room to arc around the
-    # panel before approaching the contact point.
-    release_base_x_delta_1 = -0.27
-    # Shift the base right to extend the reachable lateral sweep.
-    release_base_y = 0.10
+    # Move the blocking base 2 cm farther forward and 4 cm farther left.
+    release_base_x_delta_1 = -0.33
+    release_base_y = 0.02
     release_palm_clearance_x_offset_m = 0.12
     release_palm_clearance_y_offset_m = 0.08
     release_palm_clearance_z_m = 1.10
@@ -1244,7 +1246,7 @@ def state_machine_offline_left_pull_door(
     release_palm_x_delta_after_turn_m = 0.13
     release_palm_y_delta_after_turn_m = 0.05
     release_base_x_delta_2 = 0.0
-    release_door_open_angle = 1.35
+    release_door_open_angle = 1.26
 
     # Once the panel is open, turn right to block it while the base advances.
     tilt_base_yaw = -0.8
@@ -1259,13 +1261,15 @@ def state_machine_offline_left_pull_door(
     # After the base blocks the door, arc well behind and to the right of the
     # panel before returning left. Keep x fixed on the leftward return.
     release_to_clearance_x_offset_m = 0.06
-    release_to_clearance_y_offset_m = 0.10
+    release_to_clearance_y_offset_m = 0.04
     clearance_world_z_m = 1.20
     release_to_retreat_x_offset_m = 0.25
-    release_to_retreat_y_offset_m = 0.20
+    # Follow the tilted base's backward axis from the clearance waypoint,
+    # avoiding a robot-relative rightward drift during the retreat.
+    release_to_retreat_y_offset_m = -0.156
     retreat_world_z_m = 1.20
     retreat_to_forward_left_x_offset_m = 0.04
-    retreat_to_forward_left_y_offset_m = -0.68
+    retreat_to_forward_left_y_offset_m = -0.424
     # Desired contact offset is clamped to an interior strip of the panel below.
     push_contact_x_offset = 0.60
     push_contact_y_offset = -0.20
@@ -1273,28 +1277,7 @@ def state_machine_offline_left_pull_door(
     contact_virtual_door_angle = release_door_open_angle
     push_door_open_angle = 1.5
 
-    # Clear the hand to the robot's right before the base rotates toward the
-    # panel. At this point the base is still parked at the final pull pose.
-    _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
-    palm_target_pose = palm_target_pose.clone()
-    palm_target_pose[:, 0] += release_palm_clearance_x_offset_m
-    palm_target_pose[:, 1] += release_palm_clearance_y_offset_m
-    palm_target_pose[:, 2] = release_palm_clearance_z_m
-    q_robot[:10] = solve_ik(
-        robot_urdf_path,
-        q_robot[:10],
-        palm_pose=palm_target_pose,
-        base_pose=None,
-        robot_initial_pose=robot_initial_pose,
-        reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
-        num_attempts=1,
-    )[0]
-    _append_state(
-        robot_traj, door_traj, key_idx_in_key_indices, q_robot, q_door,
-        mark_keyframe=True,
-    )
-
-    palm_target_pose[:, 1] += release_palm_y_delta_during_turn_m
+    # Keep holding the handle as the base moves into the blocking pose.
     base_target_pos[:, 0] += release_base_x_delta_1
     base_target_pos[:, 1] = release_base_y
     base_target_pose = _make_pose(base_target_pos, tilted_base_rot)
@@ -1314,10 +1297,25 @@ def state_machine_offline_left_pull_door(
         key_idx_in_key_indices,
         q_robot,
         q_door,
-        mark_keyframe=False,
+        mark_keyframe=True,
     )
 
+    # The base now supports the open panel; release and clear the hand.
+    _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
+    _append_state(robot_traj, door_traj, key_idx_in_key_indices, q_robot, q_door,
+                  mark_keyframe=True)
     palm_target_pose = palm_target_pose.clone()
+    palm_target_pose[:, 0] += release_palm_clearance_x_offset_m
+    palm_target_pose[:, 1] += release_palm_clearance_y_offset_m + release_palm_y_delta_during_turn_m
+    palm_target_pose[:, 2] = release_palm_clearance_z_m
+    q_robot[:10] = solve_ik(
+        robot_urdf_path, q_robot[:10], palm_pose=palm_target_pose,
+        base_pose=None, robot_initial_pose=robot_initial_pose,
+        reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS, num_attempts=1,
+    )[0]
+    _append_state(robot_traj, door_traj, key_idx_in_key_indices, q_robot, q_door,
+                  mark_keyframe=True)
+
     palm_target_pose[:, 0] += release_palm_x_delta_after_turn_m
     palm_target_pose[:, 1] += release_palm_y_delta_after_turn_m
     palm_target_pose[:, 3:] = default_palm_rot
@@ -1514,6 +1512,8 @@ def state_machine_offline_left_pull_door(
         robot_initial_yaw.item(), -0.05, franka_default_q, device,
         reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
         palm_slide_distance=0.25,
+        moving_yaw_reset=moving_yaw_reset,
+        crossing_distance=0.50,
     )
 
     return robot_traj, door_traj, key_idx_in_key_indices
@@ -1529,6 +1529,7 @@ def state_machine_offline_pull_door(
     *,
     handle_side: HandleSide = "right",
     device="cpu",
+    moving_yaw_reset=True,
 ):
     if handle_side == "right":
         return state_machine_offline_right_pull_door(
@@ -1549,5 +1550,6 @@ def state_machine_offline_pull_door(
             robot_initial_q,
             door_initial_q,
             device=device,
+            moving_yaw_reset=moving_yaw_reset,
         )
     raise ValueError(f"Unsupported handle_side '{handle_side}'. Expected 'right' or 'left'.")
