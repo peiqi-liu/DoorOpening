@@ -522,7 +522,7 @@ def state_machine_offline(
 
     return robot_traj, door_traj, key_idx_in_key_indices
 
-def collocate_and_playback(robot_traj, door_traj, key_idx_in_key_indices, length=1000):
+def collocate_and_playback(robot_traj, door_traj, key_idx_in_key_indices, length=1000, slow_swing=False):
     """
     Interpolate trajectory between keyframes using cubic splines
     with segment-wise time allocation proportional to geometric length.
@@ -536,7 +536,7 @@ def collocate_and_playback(robot_traj, door_traj, key_idx_in_key_indices, length
     N = len(key_idx_in_key_indices)
 
     # ---- Compute geometric length of each keyframe segment ----
-    def weighted_dist(x1, x2, base_weight=2.5):
+    def weighted_dist(x1, x2, base_weight=2.25):
         diff = x1 - x2
         diff = diff.copy()
 
@@ -560,6 +560,9 @@ def collocate_and_playback(robot_traj, door_traj, key_idx_in_key_indices, length
         seg_lengths.append(max(dists.sum(), 1e-6))
 
     seg_lengths = np.array(seg_lengths)
+    if slow_swing:
+        # Clearance, retreat, lateral sweep, and approach after the base blocks.
+        seg_lengths[6:10] *= 1.3
     seg_ratios = seg_lengths / seg_lengths.sum()
 
     # ---- Interpolation ----
@@ -852,8 +855,8 @@ def play_saved_trajectory_playlist_in_viser(
             data = pkl.load(traj_file)
         robot_traj = data["robot_joint_pos_traj"]
         door_traj = data["door_traj"]
-        if len(robot_traj) != 1440 or len(door_traj) != 1440:
-            raise ValueError(f"Expected 1440 frames in {traj_path}")
+        if len(robot_traj) != len(door_traj):
+            raise ValueError(f"Robot and door frame counts differ in {traj_path}")
         initial_state = _load_initial_state_metadata(door_path) or {}
         robot_pose = initial_state.get("robot_world_pose", {})
         door_pose = initial_state.get("door_world_pose", {})
@@ -865,6 +868,8 @@ def play_saved_trajectory_playlist_in_viser(
 
     if not entries:
         raise ValueError("No door URDFs were found for replay.")
+    frame_count = len(entries[0][1])
+    sim_steps_total = round(frame_count * sim_steps_total / 1440)
 
     server_kwargs = {"port": port} if port is not None else {}
     server = viser.ViserServer(**server_kwargs)
@@ -874,9 +879,9 @@ def play_saved_trajectory_playlist_in_viser(
     door = None
     playing = True
     door_number = server.gui.add_text("Door", f"1 / {len(entries)}", disabled=True)
-    frame_indicator = server.gui.add_text("Ref frame", "1 / 1440", disabled=True)
+    frame_indicator = server.gui.add_text("Ref frame", f"1 / {frame_count}", disabled=True)
     sim_step_indicator = server.gui.add_text("Sim step", f"0 / {sim_steps_total}", disabled=True)
-    frame_slider = server.gui.add_slider("Frame index", min=0, max=1439, step=1, initial_value=0)
+    frame_slider = server.gui.add_slider("Frame index", min=0, max=frame_count - 1, step=1, initial_value=0)
     speed_slider = server.gui.add_slider("Speed", min=0.5, max=playback_speed, step=0.1, initial_value=playback_speed)
     play_button = server.gui.add_button("Play")
     pause_button = server.gui.add_button("Pause")
@@ -900,14 +905,14 @@ def play_saved_trajectory_playlist_in_viser(
     def _(_):
         nonlocal current_frame
         if not changing_slider:
-            current_frame = max(0, min(int(round(frame_slider.value)), 1439))
+            current_frame = max(0, min(int(round(frame_slider.value)), frame_count - 1))
             if active_robot_traj is not None and active_door_traj is not None and active_door is not None:
                 active_robot = active_robot_traj[current_frame].detach().cpu().numpy()
                 active_door_cfg = active_door_traj[current_frame].detach().cpu().numpy()
                 robot.update_cfg(active_robot)
                 active_door.update_cfg(active_door_cfg)
-                frame_indicator.value = f"{current_frame + 1} / 1440"
-                sim_step = round(current_frame * sim_steps_total / 1439)
+                frame_indicator.value = f"{current_frame + 1} / {frame_count}"
+                sim_step = round(current_frame * sim_steps_total / (frame_count - 1))
                 sim_step_indicator.value = f"{sim_step} / {sim_steps_total}"
 
     try:
@@ -925,20 +930,20 @@ def play_saved_trajectory_playlist_in_viser(
             active_door = door
             door_number.value = f"{door_idx + 1} / {len(entries)} — {os.path.basename(os.path.dirname(door_path))}"
             current_frame = 0
-            while current_frame < 1440 or len(entries) == 1:
+            while current_frame < frame_count or len(entries) == 1:
                 if not playing:
                     time.sleep(0.05)
                     continue
                 robot.update_cfg(robot_traj[current_frame].detach().cpu().numpy())
                 door.update_cfg(door_traj[current_frame].detach().cpu().numpy())
-                frame_indicator.value = f"{current_frame + 1} / 1440"
-                sim_step = round(current_frame * sim_steps_total / 1439)
+                frame_indicator.value = f"{current_frame + 1} / {frame_count}"
+                sim_step = round(current_frame * sim_steps_total / (frame_count - 1))
                 sim_step_indicator.value = f"{sim_step} / {sim_steps_total}"
                 changing_slider = True
                 frame_slider.value = float(current_frame)
                 changing_slider = False
                 current_frame += 1
-                if len(entries) == 1 and current_frame >= 1440:
+                if len(entries) == 1 and current_frame >= frame_count:
                     current_frame = 0
                 time.sleep(1.0 / (hz * speed_slider.value))
     finally:
@@ -1098,12 +1103,13 @@ def play_and_save_traj(
     # Pull motions get a longer horizon (1440 frames = 36 s at the 1/40 s traj dt) than push (1200);
     # pull has more phases (retract + push-panel + traverse). The multi-motion lib pads the shorter
     # (push) motions up to the longest on load, so mixing lengths is safe.
-    traj_length = 1440 if planner_opening_direction == "pull" else 1200
+    traj_length = 1630 if planner_opening_direction == "pull" else 1200
     robot_traj, door_traj, robot_traj_d, door_traj_d, key_indices = collocate_and_playback(
         robot_traj,
         door_traj,
         key_idx_in_key_indices,
         length=traj_length,
+        slow_swing=planner_opening_direction == "pull" and planner_handle_side == "left",
     )
     print(robot_traj.shape)
     print(door_traj.shape)
