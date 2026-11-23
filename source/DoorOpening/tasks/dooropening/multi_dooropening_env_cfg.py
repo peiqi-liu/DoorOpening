@@ -739,7 +739,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     contact_forces_base_door_left_panel = _robot_body_contact_sensor("left_panel", BASE_DOOR_CONTACT_FILTER_PRIM_PATHS)
     contact_forces_base_door_right_panel = _robot_body_contact_sensor("right_panel", BASE_DOOR_CONTACT_FILTER_PRIM_PATHS)
     contact_forces_base_door_tidybot2_base_link = _robot_body_contact_sensor("tidybot2_base_link", BASE_DOOR_CONTACT_FILTER_PRIM_PATHS)
-    # Franka control box <-> door: folded into the harsh x5<->door penalty + termination.
+    # Franka control box <-> door: diagnostic sensing only.
     contact_forces_door_franka_box = ContactSensorCfg(
         prim_path=FRANKA_BOX_DOOR_CONTACT_PRIM_PATH,
         update_period=0.0,
@@ -1025,11 +1025,8 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # Penalty weight for the x5/arx camera arm contacting any door body (frame/panel/handle).
     # Harsh: the slender camera arm hitting the door is a serious real-world failure.
     x5_door_contact_penalty_w = 40.0
-    # Franka control-box <-> door contact is NO LONGER episode-ending (the box is sturdy). Instead
-    # a graded penalty ramps linearly from 0 penalty at min_force to the full weight at max_force
-    # (clamped): <10 N is free, 10-40 N ramps up, >=40 N is the max penalty.
-    # NOTE: franka_box_contact_penalty_w is the maximum per-step cost at >=40 N.
-    franka_box_contact_penalty_w = 5.0
+    # Keep control-box <-> door contact sensing for diagnostics, with no reward penalty.
+    franka_box_contact_penalty_w = 0.0
     franka_box_contact_penalty_min_force = 10.0
     franka_box_contact_penalty_max_force = 40.0
 

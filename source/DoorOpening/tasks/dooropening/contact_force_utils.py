@@ -58,9 +58,7 @@ BASE_DOOR_CONTACT_PRIM_PATH = (
     "/World/envs/env_.*/Robot/(" + "|".join(BASE_DOOR_CONTACT_BODY_NAMES) + ")"
 )
 
-# The franka control box houses the arm controller and is critical -- protect it like the x5
-# camera arm: contact with any door body feeds the harsh x5<->door penalty AND early
-# termination (rollout counted as a failure), rather than the milder base<->door penalty.
+# Keep a dedicated sensor for Franka control-box <-> door contact diagnostics.
 FRANKA_BOX_DOOR_CONTACT_PRIM_PATH = "/World/envs/env_.*/Robot/franka_control_box"
 
 # Self-collision penalty (r_contact) sensing. Only the MOVING franka arm needs self-collision
@@ -96,10 +94,10 @@ SELF_COLLISION_FRANKA_BODIES = (
 # a franka body striking the camera arm's mount or first link went unpenalized. This tuple must stay
 # FIRST in SELF_COLLISION_FRANKA_FILTER_PRIM_PATHS: the env's franka<->arx force helper selects slot 0.
 SELF_COLLISION_X5_BODIES = ("x5_base_link", "link1", "link2", "link3", "link4", "link5", "x5_camera_link")
-SELF_COLLISION_BASE_BODIES = ("tidybot2_base_link", "franka_control_box")
+SELF_COLLISION_BASE_BODIES = ("tidybot2_base_link", "top_panel")
 SELF_COLLISION_BASE_FILTER_BODIES = (
     "tidybot2_base_link",
-    "franka_control_box",
+    "top_panel",
     "left_panel",
     "right_panel",
     "front_panel",
