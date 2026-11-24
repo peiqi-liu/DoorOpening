@@ -1018,7 +1018,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     #    reference gripper pose and punished every real grasp squeeze.
     joint_limit_penalty_joints = list(arm_joints)
     # lambda_c in r = r_target - lambda_l*r_limit - lambda_c*r_contact
-    self_collision_penalty_w = 5.0
+    self_collision_penalty_w = 15.0
     # Per-step penalty per base side panel/chassis body contacting the fixed door frame.
     # Strongly discourage frame impacts to protect the base and door frame.
     base_door_contact_penalty_w = 40.0
