@@ -1087,7 +1087,7 @@ def state_machine_offline_left_pull_door(
     # -------------------------
     # Step 4: Pull door open
     # -------------------------
-    pull_theta_stop = 1.20
+    pull_theta_stop = 1.05
     pull_theta_step = 0.08
 
     # Handle-relative base standoff during the pull sweep; reduced by 5 cm
@@ -1096,7 +1096,7 @@ def state_machine_offline_left_pull_door(
     # Move the base 5 cm left across the pull so the door edge stays visible.
     # World -y is left for the robot's nominal -x-facing heading.
     pull_base_y_offset = base_target_pos[:, 1].clone()
-    pull_base_left_shift_m = 0.05
+    pull_base_left_shift_m = 0.10
 
     # Held flat while the panel is not yet confidently open (0.3 rad -- matches pull_theta_start, well
     # past the door_closed_range=0.05 rad relock boundary), then released QUICKLY rather than dragged
@@ -1216,8 +1216,8 @@ def state_machine_offline_left_pull_door(
 
     # Move the blocking waypoint 7 cm farther forward; IK may leave a small
     # residual difference in the achieved pose.
-    release_base_x_delta_1 = -0.40
-    release_base_y = -0.03
+    release_base_x_delta_1 = -0.42
+    release_base_y = -0.12
     release_palm_clearance_x_offset_m = 0.12
     release_palm_clearance_y_offset_m = 0.08
     release_palm_clearance_z_m = 1.10
@@ -1225,7 +1225,7 @@ def state_machine_offline_left_pull_door(
     release_palm_x_delta_after_turn_m = 0.13
     release_palm_y_delta_after_turn_m = 0.05
     release_base_x_delta_2 = 0.0
-    release_door_open_angle = 1.20
+    release_door_open_angle = 1.05
 
     # Once the panel is open, turn right to block it while the base advances.
     tilt_base_yaw = -0.8
@@ -1406,7 +1406,7 @@ def state_machine_offline_left_pull_door(
         door_initial_pose,
         torch.tensor([contact_virtual_door_angle, 0.0], device=device).unsqueeze(0),
     ).to(device)
-    contact_board_pos[:, 2] += 0.19
+    contact_board_pos[:, 2] += 0.18
     # The palm must sit outside the panel while the fingers reach its face.
     # Keep the handle-anchored height and lateral location, but move the palm
     # outward along the near-face normal if it is less than 12 cm off the panel.
@@ -1516,8 +1516,8 @@ def state_machine_offline_left_pull_door(
         moving_yaw_reset=moving_yaw_reset,
         crossing_distance=0.50,
         door_angle_at_yaw_reset=0.75,
-        backup_distance=0.225,
-        backup_left_distance=0.16,
+        backup_distance=0.320,
+        backup_left_distance=0.04,
         arm_reset_during_crossing=True,
     )
 
