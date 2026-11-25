@@ -1653,9 +1653,9 @@ class DooropeningEnv(DirectRLEnv):
 
         policy_obs = torch.cat(
             (
-                policy_joint_pos.unsqueeze(dim=1),
-                policy_joint_vel.unsqueeze(dim=1),
-                self.robot_dof_targets.unsqueeze(dim = 1),
+                policy_joint_pos[:, :self._target_arm_slice.stop].unsqueeze(dim=1),
+                policy_joint_vel[:, :self._target_arm_slice.stop].unsqueeze(dim=1),
+                self.robot_dof_targets[:, :self._target_arm_slice.stop].unsqueeze(dim=1),
                 policy_joint_ref_err,
                 policy_key_pos_err,
                 policy_robot_key_body_pos_local.reshape(self.num_envs, 1, -1),
@@ -1665,7 +1665,6 @@ class DooropeningEnv(DirectRLEnv):
                 policy_door_to_base_link_pos,
                 policy_door_joint_pos,
                 self.ref_door_joint_pos[:, self._door_joint_idx].to(self.door_joint_pos).unsqueeze(dim = 1),
-                self.ref_robot_arx_joint_pos.to(self.robot_arx_joint_pos).unsqueeze(dim=1),
                 # twist_obs,
             ),
             dim=-1,
@@ -1683,9 +1682,9 @@ class DooropeningEnv(DirectRLEnv):
 
         critic_obs = torch.cat(
             (
-                clean_joint_pos.unsqueeze(dim=1),
-                clean_joint_vel.unsqueeze(dim=1),
-                self.robot_dof_targets.unsqueeze(dim=1),
+                clean_joint_pos[:, :self._target_arm_slice.stop].unsqueeze(dim=1),
+                clean_joint_vel[:, :self._target_arm_slice.stop].unsqueeze(dim=1),
+                self.robot_dof_targets[:, :self._target_arm_slice.stop].unsqueeze(dim=1),
                 clean_joint_ref_err,
                 key_pos_err,
                 robot_key_body_pos.reshape(self.num_envs, 1, -1),
@@ -1695,7 +1694,6 @@ class DooropeningEnv(DirectRLEnv):
                 door_to_base_link_pos,
                 self.door_joint_pos[:, self._door_joint_idx].unsqueeze(dim = 1),
                 self.ref_door_joint_pos[:, self._door_joint_idx].to(self.door_joint_pos).unsqueeze(dim = 1),
-                self.ref_robot_arx_joint_pos.to(self.robot_arx_joint_pos).unsqueeze(dim=1),
                 # twist_obs,
             ),
             dim=-1,

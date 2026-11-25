@@ -929,7 +929,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     #   => `len(arx_joints)`
     # - future reference motion summary at twist indices
     #   => currently disabled in _build_observations(), so not counted in observation_space
-    proprioception_observation_space = actuated_joints_num * 3
+    proprioception_observation_space = (len(base_joints) + len(arm_joints)) * 3
     joint_reference_error_observation_space = len(base_joints) + len(arm_joints) + len(finger_joints)
     key_body_error_observation_space = len(robot_key_bodies) * 3
     robot_pose_observation_space = (len(robot_key_bodies) - 1) * (3 + 6)
@@ -945,7 +945,6 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
         + base_velocity_observation_space
         + door_body_observation_space
         + door_joint_observation_space
-        + arx_joint_reference_observation_space
         # base + arm reference joint-angle error (policy_joint_ref_err / clean_joint_ref_err).
         + len(base_joints)
         + len(arm_joints)
@@ -988,21 +987,21 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     # VELOCITY term: the gripper is a 1-DOF open/close command whose speed is already capped at the
     # hardware limit, so tracking the reference's finger velocity added a term that was numerically
     # constant and shaped nothing.
-    robot_gripper_joint_pos_w = 1.5
-    robot_arx_joint_pos_w = 5.0
-    robot_arx_tuck_joint_pos_w = 2.0
+    robot_gripper_joint_pos_w = 0.0
+    robot_arx_joint_pos_w = 0.0
+    robot_arx_tuck_joint_pos_w = 0.0
     robot_base_joint_vel_w = 1.0
     robot_arm_joint_vel_w = 2.0
     door_joint_pos_w = 4.0
     # PULL-only binary bonus for the GRIPPER (panda_hand + the two fingers, see
     # HANDLE_CONTACT_FILTER_PRIM_PATHS) touching the handle during the grasp/pull window.
-    hinge_gripper_contact_reward_w = 1.5
+    hinge_gripper_contact_reward_w = 0.0
     # PUSH-only palm-handle contact reward: +palm_handle_reward_w per step whenever palm_center/
     # panda_hand presses the handle (> handle_contact_force_threshold) during the grasp->push-open window
     # (hinge_contact_mask, keyframes 2..5). Binary. For PULL this is inactive (is_push gate = 0), and
     # for PUSH the finger-inclusive hinge_gripper_contact reward is disabled -- fingers on the handle
     # are no longer rewarded on push.
-    palm_handle_reward_w = 5.0
+    palm_handle_reward_w = 0.0
     robot_body_lin_vel_w = 1.0
     robot_body_ang_vel_w = 0.5
     # Joint-limit penalty, applied to the FRANKA ARM JOINTS ONLY (see joint_limit_penalty_joints).
@@ -1019,7 +1018,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     self_collision_penalty_w = 10.0
     # Per-step penalty per base side panel/chassis body contacting the fixed door frame.
     # Strongly discourage frame impacts to protect the base and door frame.
-    base_door_contact_penalty_w = 40.0
+    base_door_contact_penalty_w = 0.0
     # Penalty weight for the x5/arx camera arm contacting any door body (frame/panel/handle).
     # Harsh: the slender camera arm hitting the door is a serious real-world failure.
     x5_door_contact_penalty_w = 40.0
@@ -1091,7 +1090,7 @@ class DooropeningEnvCfg(DirectRLEnvCfg):
     adr_reset_progress_total = 1e5  # Long active ADR ramp
 
     alive_base = 10.0
-    alive_bonus = 20.0
+    alive_bonus = 0.0
     termination_penalty = -100.0
 
     # Keep DR opt-in so the default task is the clean baseline.
