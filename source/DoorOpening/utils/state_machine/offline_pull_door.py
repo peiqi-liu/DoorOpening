@@ -3,7 +3,7 @@ import xml.etree.ElementTree as ET
 from typing import Literal
 
 import torch
-from isaaclab.utils.math import euler_xyz_from_quat, quat_apply, quat_from_euler_xyz
+from isaaclab.utils.math import euler_xyz_from_quat, quat_apply, quat_from_euler_xyz, quat_mul, quat_inv
 
 from DoorOpening.constants.robot_constants import FRANKA_DEFAULT_JOINT_POS, FRANKA_JOINT_NAMES
 from DoorOpening.utils.state_machine.api import get_board_interior_contact_pos, get_board_pos, get_hinge_pos, solve_ik
@@ -884,6 +884,33 @@ def state_machine_offline_right_pull_door(
     return robot_traj, door_traj, key_idx_in_key_indices
 
 
+def _grasp_orientation_from_baseline(door_initial_pose, robot_initial_pose, sample_wxyz, device):
+    # Measured panda_hand orientation in the door frame, successful baseline env 7.
+    relative = torch.tensor([sample_wxyz], dtype=door_initial_pose.dtype, device=device)
+    relative = relative / torch.linalg.vector_norm(relative, dim=-1, keepdim=True)
+    world = quat_mul(door_initial_pose[:, 3:].to(device), relative)
+    root = robot_initial_pose[:, 3:].to(device)
+    desired_base = quat_mul(quat_inv(root), world)
+    # solve_ik passes its wxyz base-frame tensor directly to scipy, which reads xyzw.
+    # Encode the physical target accordingly without changing other planner stages.
+    encoded_base = desired_base[:, [1, 2, 3, 0]]
+    return quat_mul(root, encoded_base)
+
+
+def _grasp_slerp(a, b, fraction):
+    a = a / torch.linalg.vector_norm(a, dim=-1, keepdim=True)
+    b = b / torch.linalg.vector_norm(b, dim=-1, keepdim=True)
+    dot = (a * b).sum(dim=-1, keepdim=True)
+    b = torch.where(dot < 0, -b, b)
+    dot = dot.abs().clamp(max=1.0)
+    angle = torch.acos(dot)
+    denom = torch.sin(angle)
+    linear = (1.0 - fraction) * a + fraction * b
+    spherical = (torch.sin((1.0 - fraction) * angle) * a + torch.sin(fraction * angle) * b) / denom.clamp(min=1e-7)
+    result = torch.where(denom < 1e-6, linear, spherical)
+    return result / torch.linalg.vector_norm(result, dim=-1, keepdim=True)
+
+
 def state_machine_offline_left_pull_door(
     robot_urdf_path,
     door_urdf_path,
@@ -912,7 +939,10 @@ def state_machine_offline_left_pull_door(
     base_target_rot = robot_initial_pose[:, 3:].to(device).clone()
     # Keep the top-down palm yaw unchanged from approach through unlatching and pulling.
     pull_palm_yaw = -0.8 * math.pi
-    default_palm_rot = get_rotation_quat(math.pi / 2, 0, pull_palm_yaw, device)
+    pregrasp_palm_rot = _grasp_orientation_from_baseline(door_initial_pose, robot_initial_pose, [-0.01728306, 0.58168034, 0.80792346, 0.09278449], device)
+    grasp_palm_rot = _grasp_orientation_from_baseline(door_initial_pose, robot_initial_pose, [0.00362654, 0.38897116, 0.91640263, 0.09431073], device)
+    unlatch_palm_rot = _grasp_orientation_from_baseline(door_initial_pose, robot_initial_pose, [-0.00255299, 0.44810732, 0.88898378, 0.09434590], device)
+    default_palm_rot = pregrasp_palm_rot
 
     # Guarantee the very first keyframe starts from a fully open gripper, regardless of whatever
     # gripper value the caller's robot_initial_q happened to carry -- staged closing below should
@@ -998,7 +1028,7 @@ def state_machine_offline_left_pull_door(
     palm_target_pos[:, 0] += grasp_palm_x_offset
     palm_target_pos[:, 1] += grasp_palm_y_offset
     palm_target_pos[:, 2] += grasp_palm_z_offset
-    palm_target_pose = _make_pose(palm_target_pos, default_palm_rot)
+    palm_target_pose = _make_pose(palm_target_pos, grasp_palm_rot)
 
     q_robot[:10] = solve_ik(
         robot_urdf_path,
@@ -1058,12 +1088,7 @@ def state_machine_offline_left_pull_door(
         palm_target_pose = unlatch_base_pose.clone()
         palm_target_pose[:, 1] += frac * unlatch_palm_y_delta
         palm_target_pose[:, 2] += frac * unlatch_palm_z_delta
-        palm_target_pose[:, 3:] = get_rotation_quat(
-            unlatch_roll,
-            handle_pitch_gain * handle_angle,
-            pull_palm_yaw,
-            device,
-        )
+        palm_target_pose[:, 3:] = _grasp_slerp(grasp_palm_rot, unlatch_palm_rot, frac)
 
         q_robot[:10] = solve_ik(
             robot_urdf_path,
@@ -1176,6 +1201,8 @@ def state_machine_offline_left_pull_door(
             pull_palm_yaw,
             device,
         )
+        # Blend from the measured unlatch pose into the existing pull orientation.
+        palm_target_rot = _grasp_slerp(unlatch_palm_rot, palm_target_rot, max(0.0, min(1.0, (theta.item() - pull_theta_start) / 0.20)))
         palm_target_pose = _make_pose(palm_target_pos, palm_target_rot)
 
         ik_seed = q_robot[:10]
