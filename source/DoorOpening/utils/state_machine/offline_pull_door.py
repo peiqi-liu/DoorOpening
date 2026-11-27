@@ -889,6 +889,8 @@ def _grasp_orientation_from_baseline(door_initial_pose, robot_initial_pose, samp
     relative = torch.tensor([sample_wxyz], dtype=door_initial_pose.dtype, device=device)
     relative = relative / torch.linalg.vector_norm(relative, dim=-1, keepdim=True)
     world = quat_mul(door_initial_pose[:, 3:].to(device), relative)
+    # Tilt the downward-pointing fingertips 10 degrees farther toward world -y (robot left).
+    world = quat_mul(get_rotation_quat(-math.radians(10.0), 0.0, 0.0, device), world)
     root = robot_initial_pose[:, 3:].to(device)
     desired_base = quat_mul(quat_inv(root), world)
     # solve_ik passes its wxyz base-frame tensor directly to scipy, which reads xyzw.
@@ -971,9 +973,9 @@ def state_machine_offline_left_pull_door(
     # Pulled 5cm back off the +y side so the left door pregrasp doesn't reach so far right.
     pregrasp_base_y_offset = 0.25
     # With the top-down yaw, approach closer to the panel and above the handle.
-    pregrasp_palm_x_offset = 0.2
-    pregrasp_palm_y_offset = 0.15
-    pregrasp_palm_z_offset = 0.20
+    pregrasp_palm_x_offset = 0.145
+    pregrasp_palm_y_offset = 0.175
+    pregrasp_palm_z_offset = 0.21
 
     base_target_pos = handle_pos.clone()
     base_target_pos[:, 0] += pregrasp_base_x_offset
@@ -1017,12 +1019,12 @@ def state_machine_offline_left_pull_door(
     # Palm<->door x gap kept at 0.035, matching the right-door planner so left/right grasp the
     # same distance out from the panel.
     # Move the grasp palm 1 cm farther forward toward the handle.
-    grasp_palm_x_offset = 0.065
+    grasp_palm_x_offset = 0.010
     # World -y is the robot's left. Keep this shift through unlatching and
     # the pull sweep so the fingers stay farther inside the handle.
     handle_grasp_left_shift = 0.019
-    grasp_palm_y_offset = 0.015 - handle_grasp_left_shift
-    grasp_palm_z_offset = 0.02
+    grasp_palm_y_offset = 0.040 - handle_grasp_left_shift
+    grasp_palm_z_offset = 0.03
 
     palm_target_pos = handle_pos.clone()
     palm_target_pos[:, 0] += grasp_palm_x_offset
@@ -1038,8 +1040,8 @@ def state_machine_offline_left_pull_door(
         robot_initial_pose=robot_initial_pose,
         reference_joint_pos=LEFT_PULL_IK_ANCHOR_JOINT_POS,
     )[0]
-    # Grip the handle through the pull and the move into the blocking base pose.
-    _set_gripper(q_robot, GRIPPER_CLOSED_WIDTH)
+    # Keep the fingers fully open throughout this pull reference.
+    _set_gripper(q_robot, GRIPPER_OPEN_WIDTH)
 
     _append_state(
         robot_traj,
